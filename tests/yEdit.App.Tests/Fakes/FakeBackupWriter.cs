@@ -24,7 +24,22 @@ public sealed class FakeBackupWriter : IBackupWriter
     /// <summary>Dispose 呼び出し回数(冪等性検証に使う)。</summary>
     public int DisposeCount;
 
+    /// <summary>hot exit 統合(Task 3): WriteLayout されたレイアウトの履歴(順序保持)。</summary>
+    public List<yEdit.Core.Session.SessionLayout> LayoutWrites { get; } = new();
+
+    /// <summary>WriteLayout に渡された path の履歴(LayoutWrites と同順)。</summary>
+    public List<string> LayoutWritePaths { get; } = new();
+
+    /// <summary>DeleteLayout 呼び出し回数。</summary>
+    public int LayoutDeletes;
+
+    /// <summary>true なら次の WriteLayout を「失敗」させる: 書込を記録せず
+    /// OnLayoutWriteFailed を同期発火し、false へ戻す(1 回限りの失敗注入)。</summary>
+    public bool FailNextLayoutWrite;
+
     public Action<string>? OnWriteFailed { get; set; }
+
+    public Action? OnLayoutWriteFailed { get; set; }
 
     public void Write(BackupRecord record)
     {
@@ -43,6 +58,20 @@ public sealed class FakeBackupWriter : IBackupWriter
         DeleteAllCount++;
         Store.Clear();
     }
+
+    public void WriteLayout(string path, yEdit.Core.Session.SessionLayout layout)
+    {
+        if (FailNextLayoutWrite)
+        {
+            FailNextLayoutWrite = false;
+            OnLayoutWriteFailed?.Invoke();
+            return;
+        }
+        LayoutWrites.Add(layout);
+        LayoutWritePaths.Add(path);
+    }
+
+    public void DeleteLayout(string path) => LayoutDeletes++;
 
     public void Dispose() => DisposeCount++;
 }

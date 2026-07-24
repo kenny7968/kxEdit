@@ -78,8 +78,15 @@ private sealed class Host : IDisposable
 
 `tests/yEdit.App.Tests/MainFormSmokeTests.cs` を参照。ポイントは 2 点:
 
-- **`settingsPath` の内部 seam**: MainForm は `public MainForm(AppSettings)` → `internal MainForm(AppSettings, string settingsPath)` にチェーン。テストは internal ctor を呼び、TempDir の `settings.json` を指定して実 %APPDATA% を汚さない。
-- **`BackupEnabled = false` で隔離**: OnShown の `OfferRestoreOnStartup` は先頭ガードで no-op になり、実バックアップディレクトリを触らない。
+- **internal ctor の 4 引数 seam**: MainForm は `public MainForm(AppSettings)` →
+  `internal MainForm(AppSettings, string settingsPath, string? backupDirectory = null, string? sessionLayoutPath = null)`
+  にチェーン。テストは **必ず 4 引数すべてを TempDir 配下で指定**し、さらに
+  `SetLastSessionBuffersPathForTest` も併用する(`ShowMainForm` ヘルパが一括で行う)。
+- **`BackupEnabled = false` だけでは隔離にならない**(hot exit 統合以降): close 時の
+  `Shutdown(keepForRestore:false)` は writer 未生成でも `SessionLayoutStore.Delete` を既定パスへ
+  直接実行するため、`sessionLayoutPath` を渡さないテストは開発機の実
+  `%APPDATA%\yEdit\session-state.json` を削除してしまう。MainForm を直生成するテストは
+  必ず `ShowMainForm` ヘルパ経由で構築すること。
 
 ### ミューテーション検証(執筆時セルフチェック・必須)
 

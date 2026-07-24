@@ -26,6 +26,9 @@ public sealed class SerialBackupWriter : IBackupWriter
     /// <inheritdoc/>
     public Action<string>? OnWriteFailed { get; set; }
 
+    /// <inheritdoc/>
+    public Action? OnLayoutWriteFailed { get; set; }
+
     /// <summary>BK-M-2: <paramref name="sessionDirectory"/> は自セッション専用の subdirectory
     /// (<c>%APPDATA%\yEdit\backups\session-{Guid.N}\</c>)。base dir を渡すと flat 配置に戻り
     /// 別インスタンス影響を再導入するため、呼び出し側 (BackupCoordinator) 責務で必ず session dir
@@ -72,6 +75,32 @@ public sealed class SerialBackupWriter : IBackupWriter
             }
             catch
             { /* 一括削除失敗は致命でない・無音 */
+            }
+        });
+
+    public void WriteLayout(string path, yEdit.Core.Session.SessionLayout layout) =>
+        Enqueue(() =>
+        {
+            try
+            {
+                yEdit.Core.Session.SessionLayoutStore.Save(path, layout);
+            }
+            catch
+            {
+                // 失敗は Write と同型で UI スレッド側へ通知 → 次 Reconcile で強制再書込(設計 E13)。
+                OnLayoutWriteFailed?.Invoke();
+            }
+        });
+
+    public void DeleteLayout(string path) =>
+        Enqueue(() =>
+        {
+            try
+            {
+                yEdit.Core.Session.SessionLayoutStore.Delete(path);
+            }
+            catch
+            { /* 削除失敗は致命でない・無音 */
             }
         });
 

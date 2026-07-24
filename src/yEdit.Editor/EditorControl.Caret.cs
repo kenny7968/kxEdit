@@ -35,7 +35,7 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
-    /// 0-based の行/桁を指定してキャレットを移動する。復元経路(FileController.RestoreLastSession)で
+    /// 0-based の行/桁を指定してキャレットを移動する。復元経路(FileController.RestoreSession)で
     /// 前回終了時のカーソル位置を再現するために追加。line/col とも実バッファ範囲へクランプ、
     /// col は行末(改行手前)を上限とする=次行に食み出さない。設計書 2026-07-23 §3.4。
     /// </summary>

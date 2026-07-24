@@ -4,28 +4,25 @@ using System.Text.Json;
 namespace yEdit.Core.Session;
 
 /// <summary>
-/// 無題タブの本文を BufferKey→本文 のマップとして単一 JSON ファイルへ保存する。
-/// 破損時は空 Dict を返し呼び出し側が grace degradation で continue する(空タブは復元せず skip する
-/// 契約は FileController.RestoreLastSession 側にある)。設計書 §2.4。
+/// レガシー移行(PR #22 形式からの一回限り読み替え)の Load/Delete 専用。
+/// 旧形式=タブ本文を BufferKey→本文 のマップとして保存した単一 JSON ファイル。
+/// 破損時は空 Dict を返し呼び出し側が graceful degradation で continue する。
+/// 次リリースで完全削除予定(設計 2026-07-23 統合 §8/§9)。
 /// </summary>
 public static class LastSessionBuffersStore
 {
     private static readonly JsonSerializerOptions Options = new()
     {
-        WriteIndented = true,
-        // I-1: 非 ASCII を \uXXXX に展開せず生 UTF-8 で書き出す。書込側 cap
-        // (MaxSessionUntitledContentChars=1M chars/tab / MaxSessionTotalUntitledChars=15M chars 累積)と
-        // Load 側 pre-cap (32 MB) の算数を成立させる=日本語 6 タブで silent loss を防ぐ。
-        // JSON ファイル(HTML/JS 埋め込みではない)なので UnsafeRelaxedJsonEscaping の XSS 意味論は
-        // 該当せず、Deserialize は生 UTF-8 と \uXXXX の両方を等しく読める(下位互換性あり)。
+        // 歴史的経緯(旧 I-1): 旧書込側は非 ASCII を \uXXXX に展開せず生 UTF-8 で書き出していた。
+        // Save 退役後(Task 7)の本クラスは Load/Delete 専用だが、Deserialize は生 UTF-8 と
+        // \uXXXX の両方を等しく読めるためレガシーファイルの読取互換に影響しない。
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
     /// <summary>
-    /// Load 時のファイルサイズ上限(bytes)。書込側は 1M chars/tab(=UTF-16 で 2 MB/tab)を上限とし
-    /// 最大 10 タブ級の想定でも 20 MB 前後だが、余裕を持って 32 MB。この上限を超える入力は
-    /// stale/攻撃 JSON と見なし、Load は empty を返して Trace.TraceWarning する。書込側キャップ
-    /// (§設計 §4.3 の 1M chars/tab)と併せた二重防御=BackupCoordinator BK-M-3 と対称。
+    /// Load 時のファイルサイズ上限(bytes)。旧書込側 cap(1M chars/tab・最大 10 タブ級で
+    /// 20 MB 前後の想定)を引き継いだ 32 MB。この上限を超える入力は stale/攻撃 JSON と見なし、
+    /// Load は empty を返して Trace.TraceWarning する(BackupCoordinator BK-M-3 と対称の防御)。
     /// </summary>
     internal const long MaxLoadFileSizeBytes = 32L * 1024 * 1024;
 
@@ -72,18 +69,6 @@ public static class LastSessionBuffersStore
         }
     }
 
-    public static void Save(string path, IReadOnlyDictionary<string, string> map)
-    {
-        // path 由来の親ディレクトリ。pathological input(ルート "C:\\" や 純ファイル名)では
-        // GetDirectoryName が null/空文字を返して例外になり得るが、本 static は失敗を握らない=
-        // 呼び出し側(MainForm.SaveLastSessionBuffersSafe)が try/catch でラップする契約
-        // (SettingsStore.Save と対称)。
-        string dir = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(dir);
-        string json = JsonSerializer.Serialize(map, Options);
-        File.WriteAllText(path, json);
-    }
-
     public static void Delete(string path)
     {
         try
@@ -93,8 +78,8 @@ public static class LastSessionBuffersStore
         }
         catch
         {
-            // 削除失敗は致命でない ― 次回 Save で BufferKey は Guid.N で再発行されるため、
-            // 残骸に含まれる旧本文はどの SessionTabRecord からも参照されない。
+            // 削除失敗は致命でない ― 本ストアは移行読取専用(書込なし)であり、残骸の掃除は
+            // 次回の移行パス(ON 起動時)または OFF 終了時のクリーンアップで再試行される。
         }
     }
 }

@@ -38,4 +38,17 @@ public class BackupIdValidatorTests
     [InlineData("aBcDeF0123456789abcdef0123456789")] // BK-L-8: mixed case (先頭のみ大文字混在)
     public void IsValid_ReturnsFalse_ForInvalidId(string? id) =>
         Assert.False(BackupIdValidator.IsValid(id));
+
+    /// <summary>
+    /// Task 1 レビュー (2026-07-23): Guid.TryParseExact は Unicode 空白を Trim してから
+    /// パースするため、空白パディング付き Id が素通りしていた。Length=32 固定で拒否する
+    /// (「検証通過 Id = canonical GUID N」の不変条件・重複 demote の同一性判定を守る)。
+    /// </summary>
+    [Theory]
+    [InlineData(" abcdef0123456789abcdef0123456789")] // 先頭半角空白
+    [InlineData("abcdef0123456789abcdef0123456789\n")] // 末尾 LF
+    [InlineData("abcdef0123456789abcdef0123456789 ")] // 末尾半角空白
+    [InlineData("　abcdef0123456789abcdef0123456789")] // 先頭全角空白 (U+3000)
+    public void IsValid_ReturnsFalse_ForWhitespacePaddedGuidN(string id) =>
+        Assert.False(BackupIdValidator.IsValid(id));
 }

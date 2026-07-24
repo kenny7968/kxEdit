@@ -14,7 +14,16 @@ public interface IBackupWriter : IDisposable
     /// Coordinator が ctor で失敗回復用の Enqueue を登録する(null なら握り潰す)。</summary>
     Action<string>? OnWriteFailed { get; set; }
 
+    /// <summary>レイアウト書込失敗の通知(次 Reconcile で強制再書込)。</summary>
+    Action? OnLayoutWriteFailed { get; set; }
+
     void Write(BackupRecord record);
     void Delete(string id);
     void DeleteAll();
+
+    /// <summary>セッションレイアウトを path へ書き込むジョブを投入する(SessionLayoutStore.Save)。</summary>
+    void WriteLayout(string path, yEdit.Core.Session.SessionLayout layout);
+
+    /// <summary>セッションレイアウトを削除するジョブを投入する(OFF 終了時の stale 掃除)。</summary>
+    void DeleteLayout(string path);
 }

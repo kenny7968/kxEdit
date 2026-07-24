@@ -72,7 +72,9 @@ public sealed class AppSettings
     /// <summary>起動時に前回開いていたタブ列を復元するか(既定 false=既存挙動維持)。設計書 2026-07-23。</summary>
     public bool RestoreOpenFilesOnStartup { get; set; }
 
-    /// <summary>通常終了時のタブ列スナップショット。null=保存なし(設定 OFF or 未終了)。設計書 2026-07-23。</summary>
+    /// <summary>旧形式(PR #22)のタブ列スナップショット・移行読取専用(設計 2026-07-23 統合 §8)。
+    /// hot exit 統合後は書き込まない(終了時に常に null 化)。次リリースで SessionTabRecord /
+    /// LastSessionSnapshot / LastSessionBuffersStore と共に削除予定。</summary>
     public yEdit.Core.Session.LastSessionSnapshot? LastSession { get; set; }
 
     /// <summary>独立したコピーを返す（RecentFiles も複製）。設定ダイアログの編集用スナップショット。</summary>
