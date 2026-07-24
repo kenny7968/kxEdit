@@ -439,7 +439,9 @@ public class BackupCoordinatorTests
                 confirm: true
             );
 
-            Assert.Equal(0, returned); // Restore 分岐は 0 を返す(件数は呼び側で通知しない)
+            // 設計 2026-07-24-restore-no-initial-untitled §1: 確認 ON+Restore 分岐も
+            // 実復元件数を返す(旧: 常に 0)。checked=1 件で lambda 1 回=戻り値 1。
+            Assert.Equal(1, returned);
             Assert.Equal(1, host.Prompt.PromptCount);
             Assert.Equal(2, host.Prompt.LastRecords?.Count); // ダイアログには全件を渡す
             // 元 Id の引き継ぎ検証: 復元 doc の内容を変更 → Reconcile が「keep」Id で Write。
@@ -494,6 +496,105 @@ public class BackupCoordinatorTests
             restored.Editor.ClearSavePoint();
             host.Backup.Reconcile();
             Assert.Contains(host.Writer.Writes, w => w.Id == HashId("good"));
+        });
+
+    // ===== 設計 2026-07-24-restore-no-initial-untitled §1: 確認 ON+Restore の返り値対称化 =====
+
+    [Fact]
+    public void OfferRestoreOnStartup_ConfirmTrue_Restore_ReturnsCountOfRestored() =>
+        Sta.Run(() =>
+        {
+            // 設計 §1: 確認 ON+Restore 分岐の返り値が「常に 0」ではなく実復元件数になることを pin する。
+            // 呼び出し側(MainForm)はこの値で _startupEmptyDoc の TryClose を判断する。
+            // OfferRestore_ConfirmTrue_Restore_UsesCheckedRecords_AndInheritsId(1 件のケース)の
+            // 2 件対称版=カウンタが lambda 呼び出しごとにインクリメントされるミューテーションを固定する。
+            using var host = new Host();
+            PlantBackup(host.TempDir, Rec("keep-a", "aaa"));
+            PlantBackup(host.TempDir, Rec("keep-b", "bbb"));
+
+            var recA = Rec("keep-a", "aaa");
+            var recB = Rec("keep-b", "bbb");
+            host.Prompt.NextOutcome = new RestoreOutcome(
+                RestoreAction.Restore,
+                new[] { recA, recB }
+            );
+
+            int calls = 0;
+            int restored = host.Backup.OfferRestoreOnStartup(
+                host.Form,
+                r =>
+                {
+                    calls++;
+                    var d = host.Docs.CreateNew();
+                    d.Editor.Text = r.Content ?? "";
+                    d.Editor.ClearSavePoint();
+                    return d;
+                },
+                confirm: true
+            );
+
+            Assert.Equal(2, calls);
+            Assert.Equal(2, restored);
+        });
+
+    [Fact]
+    public void OfferRestoreOnStartup_ConfirmTrue_Restore_OneThrows_ReturnsSuccessCountOnly() =>
+        Sta.Run(() =>
+        {
+            // 設計 §1: per-record catch(:236-251)で 1 件の失敗が他を巻き添えにしない既存契約を
+            // 保存しつつ、成功件数のみを返すことを pin(失敗分は含まない)。
+            // OfferRestore_ConfirmTrue_OneBadRecord_DoesNotAbortOthers(restoreCalls=2 のみ検証)の
+            // 返り値検証版。confirm=false 側(:519 Assert.Equal(0, restored))と対称の意味論。
+            using var host = new Host();
+            PlantBackup(host.TempDir, Rec("bad", "boom"));
+            PlantBackup(host.TempDir, Rec("good", "ok"));
+
+            var badRec = Rec("bad", "boom");
+            var goodRec = Rec("good", "ok");
+            host.Prompt.NextOutcome = new RestoreOutcome(
+                RestoreAction.Restore,
+                new[] { badRec, goodRec }
+            );
+
+            int restored = host.Backup.OfferRestoreOnStartup(
+                host.Form,
+                r =>
+                {
+                    if (r.Id == HashId("bad"))
+                        throw new InvalidOperationException("restore failed");
+                    var d = host.Docs.CreateNew();
+                    d.Editor.Text = r.Content ?? "";
+                    d.Editor.ClearSavePoint();
+                    return d;
+                },
+                confirm: true
+            );
+
+            Assert.Equal(1, restored);
+        });
+
+    [Fact]
+    public void OfferRestoreOnStartup_ConfirmTrue_RestoreEmpty_ReturnsZero() =>
+        Sta.Run(() =>
+        {
+            // 設計 §1: outcome.Checked が空(ユーザーがダイアログでチェックを全解除して Restore 確定)の
+            // ケース=戻り値 0。呼び出し側は _startupEmptyDoc を閉じない(=ユーザー意図の尊重)。
+            // 旧仕様(常に return 0)でも本テストは通るが、修正後も通ることを対称的に固定する。
+            using var host = new Host();
+            PlantBackup(host.TempDir, Rec("orphan-1", "aaa"));
+
+            host.Prompt.NextOutcome = new RestoreOutcome(
+                RestoreAction.Restore,
+                Array.Empty<BackupRecord>()
+            );
+
+            int restored = host.Backup.OfferRestoreOnStartup(
+                host.Form,
+                r => throw new Xunit.Sdk.XunitException("restore must not be called"),
+                confirm: true
+            );
+
+            Assert.Equal(0, restored);
         });
 
     // ===== Task 1b: silent catch → IBackupTraceSink 導線(restore-item / restore-item-later) =====

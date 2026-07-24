@@ -805,6 +805,76 @@ public class MainFormSmokeTests
             // Note: form は using で自動 Dispose(テスト終了時に真の Close)
         });
 
+    // ===== OFF 経路: バックアップ復元時に初期無題タブを閉じる(設計 2026-07-24) =====
+
+    // 現状バグの回帰テスト: OFF+ConfirmRestore=false+バックアップ 1 件 →
+    // 復元後は「復元 doc 1 個のみ」(起動時の initialEmpty は自動的に閉じる)。
+    // 修正前は docs.Count=2(起動時無題1+復元無題2)で赤化する。
+    [Fact]
+    public void OnShown_UnifiedOff_ConfirmFalse_BackupRestored_ClosesInitialEmptyTab() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string bkId = NewId();
+            PlantBackup(tmp, Rec(bkId, path: null, untitledNumber: 2, "restored-body"));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = false; // OFF 経路
+            settings.ConfirmRestoreOnStartup = false; // silent 自動復元
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            var docs = form.FileForTest.DocsForTest;
+            var doc = Assert.Single(docs); // 修正前は 2 件(初期無題1+復元)になる
+            Assert.Null(doc.State.Path);
+            Assert.Equal("restored-body", doc.Editor.SnapshotText);
+            Assert.True(doc.Editor.Modified);
+        });
+
+    // 復元 0 件のとき初期無題タブは残る(復元失敗時にユーザーの作業台=空タブを消さない不変)。
+    // 修正前後で共に緑=対称保存テスト。
+    [Fact]
+    public void OnShown_UnifiedOff_NoBackups_KeepsInitialEmptyTab() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            // バックアップ 0 件
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = false;
+            settings.ConfirmRestoreOnStartup = false;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            var docs = form.FileForTest.DocsForTest;
+            var doc = Assert.Single(docs); // 初期無題1 が残る
+            Assert.Null(doc.State.Path);
+            Assert.False(doc.Editor.Modified); // 初期空タブは Modified=false
+        });
+
+    // Announcer 挙動 pin: OFF+ConfirmFalse+復元成功=「バックアップを N 件復元しました」発話。
+    // 修正で新設した !_settings.ConfirmRestoreOnStartup ゲートの真側=既存挙動維持。
+    [Fact]
+    public void OnShown_UnifiedOff_ConfirmFalse_AnnouncesRestoredCount() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string bkId = NewId();
+            PlantBackup(tmp, Rec(bkId, path: null, untitledNumber: 2, "restored-body"));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = false;
+            settings.ConfirmRestoreOnStartup = false; // silent 自動復元=発話する経路
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
+            Assert.Contains("バックアップを 1 件復元しました", announce.Text);
+        });
+
     [Fact]
     public void MainForm_ControllerFields_AreReadOnly()
     {

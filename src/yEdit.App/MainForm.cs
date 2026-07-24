@@ -240,13 +240,22 @@ public sealed partial class MainForm : Form
         }
 
         // OFF: 従来どおり異常終了バックアップの復元提案のみ。
+        // 設計 2026-07-24-restore-no-initial-untitled §1: 復元件数>0 なら ON 経路
+        // (FileController.RestoreSession の openedCount>0 で initialEmpty を TryClose)と対称に
+        // 起動時の空無題タブ (_startupEmptyDoc) を閉じる。Announcer は従来どおり silent 自動復元
+        // (!ConfirmRestoreOnStartup) のときのみ発話する(確認 ON はダイアログで件数を既知)。
         int restored = _backup.OfferRestoreOnStartup(
             this,
             _file.RestoreFromBackup,
             _settings.ConfirmRestoreOnStartup
         );
         if (restored > 0)
-            _announcer.Say($"バックアップを {restored} 件復元しました");
+        {
+            if (_startupEmptyDoc is not null)
+                _docs.TryClose(_startupEmptyDoc, _ => true); // ON 経路と同じ「空無題は無条件破棄」
+            if (!_settings.ConfirmRestoreOnStartup)
+                _announcer.Say($"バックアップを {restored} 件復元しました");
+        }
     }
 
     /// <summary>
