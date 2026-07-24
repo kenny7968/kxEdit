@@ -76,6 +76,8 @@ internal sealed class CaretController
 
     /// <summary>
     /// [0, CharLength] にクランプし、UTF-16 low サロゲート位置なら 1 前方(high 側)へスナップ。
+    /// CRLF pair 中間位置(CR と LF の間)も CR の前(=行末位置)へスナップ(2026-07-25 追加=
+    /// キャレット/選択のすべての位置設定入り口を通る中央 seam として、mid-CRLF を不変条件で守る)。
     /// CharLength 位置(=EOF)はキャレットが立てる境界なのでクランプ後もそのまま許可。
     /// Task 3b で EditorControl.Caret.cs から bit-perfect 移設。
     /// </summary>

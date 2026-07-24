@@ -68,6 +68,8 @@ pos > 0 && GetChar(pos-1) == '\r' && pos < CharLength && GetChar(pos) == '\n'
 
 **利用**: 論理文字数 = `snap.CharLength - snap.CountCrlfPairs(0, snap.CharLength)`
 
+**実装時の精密化(2026-07-25 追記)**: 実装は `GetText(start, endExclusive - start)` で範囲 string を materialize する簡易版に落とし込んだ。位置照会ホットキー押下時のみの低頻度パスなため許容(全文コピーは pre-branch の `SnapshotText.Length` 経路と同コスト・§R-4 の脆弱性パスでも同判断)。将来 hot 経路が生まれた場合は piece-tree native scan への最適化を検討する。
+
 ### 5.3 Editor: `UiaTextHostAdapter`
 
 - `NextChar` / `PrevChar`: CRLF pair を ±2 で越える(サロゲート隣に追加)

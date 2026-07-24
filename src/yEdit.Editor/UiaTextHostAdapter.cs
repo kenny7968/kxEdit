@@ -346,7 +346,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
             && char.IsLowSurrogate(snap.GetChar(o + 1))
         )
             return o + 2;
-        // CRLF pair (2026-07-24 CRLF atomic caret Task 2: サロゲート atomic と対称)
+        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
         if (c == '\r' && o + 1 < snap.CharLength && snap.GetChar(o + 1) == '\n')
             return o + 2;
         return o + 1;
@@ -366,7 +366,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
             && char.IsHighSurrogate(snap.GetChar(o - 2))
         )
             return o - 2;
-        // CRLF pair (2026-07-24 CRLF atomic caret Task 2: サロゲート atomic と対称)
+        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
         if (snap.GetChar(o - 1) == '\n' && o - 2 >= 0 && snap.GetChar(o - 2) == '\r')
             return o - 2;
         return o - 1;

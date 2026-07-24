@@ -204,4 +204,20 @@ public class TextSnapshotTests
         var snap = Snap("a\r", "\nb");
         Assert.Equal(1, snap.CountCrlfPairs(0, snap.CharLength));
     }
+
+    [Fact]
+    public void CountCrlfPairs_OutOfRange_Throws()
+    {
+        var s = Snap("a\r\nb");
+        // start < 0
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.CountCrlfPairs(-1, 2));
+        // endExclusive < 0
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.CountCrlfPairs(0, -1));
+        // start > CharLength
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            s.CountCrlfPairs(s.CharLength + 1, s.CharLength)
+        );
+        // endExclusive > CharLength
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.CountCrlfPairs(0, s.CharLength + 1));
+    }
 }
