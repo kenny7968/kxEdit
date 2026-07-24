@@ -875,6 +875,58 @@ public class MainFormSmokeTests
             Assert.Contains("バックアップを 1 件復元しました", announce.Text);
         });
 
+    // ===== AnnouncePosition: 論理文字数（CRLF=1・サロゲート=2）に統一（2026-07-25 CRLF atomic Task 3）=====
+
+    // 「abc\r\ndef」は UTF-16 code unit 数=8、CRLF pair=1、論理文字数=7。
+    // AnnouncePosition の文字数を SnapshotText.Length に戻す変異が発生すると
+    // 「文字数 8」となり本 assertion が赤化する（CRLF=1 の統一が壊れた瞬間を pin）。
+    [Fact]
+    public void AnnouncePosition_CrlfDocument_ReadsLogicalCharCount() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef"); // CharLength=8・CRLF=1・論理=7
+
+            // AnnouncePosition は private=リフレクションで呼ぶ（Ctrl+Alt+P/メニューの薄いラッパ）。
+            var method = typeof(MainForm).GetMethod(
+                "AnnouncePosition",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+            );
+            Assert.NotNull(method);
+            method!.Invoke(form, null);
+
+            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
+            // 論理文字数=7 が読まれる（UTF-16 code unit 8 でも、CRLF 2 換算 8 でもない）。
+            Assert.Contains("文字数 7", announce.Text);
+        });
+
+    // 選択範囲が CRLF をまたぐ場合の選択文字数も論理換算される pin。
+    // 「abc\r\ndef」全選択（start=0, end=8）→ 論理選択長 = 8 - 1 = 7 文字。
+    [Fact]
+    public void AnnouncePosition_SelectionAcrossCrlf_ReadsLogicalSelectionLength() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef");
+            doc.Editor.SelectCharRange(0, 8); // 全選択（CRLF を含む）
+
+            var method = typeof(MainForm).GetMethod(
+                "AnnouncePosition",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+            );
+            method!.Invoke(form, null);
+
+            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
+            // 選択長も論理換算=7 文字（CRLF 2 換算 8 でもない）。
+            Assert.Contains("選択 7 文字", announce.Text);
+        });
+
     [Fact]
     public void MainForm_ControllerFields_AreReadOnly()
     {
