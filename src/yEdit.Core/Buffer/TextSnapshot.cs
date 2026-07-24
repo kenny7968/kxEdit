@@ -56,6 +56,7 @@ public sealed class TextSnapshot
     {
         ArgumentOutOfRangeException.ThrowIfNegative(start);
         ArgumentOutOfRangeException.ThrowIfNegative(endExclusive);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(start, CharLength);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(endExclusive, CharLength);
         if (start >= endExclusive)
             return 0;
@@ -64,10 +65,7 @@ public sealed class TextSnapshot
         for (int i = 0; i + 1 < t.Length; i++)
         {
             if (t[i] == '\r' && t[i + 1] == '\n')
-            {
                 count++;
-                i++;
-            }
         }
         return count;
     }

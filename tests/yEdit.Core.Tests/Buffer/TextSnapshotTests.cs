@@ -193,6 +193,8 @@ public class TextSnapshotTests
         Assert.Equal(1, s.CountCrlfPairs(0, 3));
         Assert.Equal(0, s.CountCrlfPairs(0, 2));
         Assert.Equal(1, s.CountCrlfPairs(3, 7));
+        // range が LF 位置から始まる(pair が start 境界を跨ぐ)= 範囲内に完全な pair なし → 0
+        Assert.Equal(0, s.CountCrlfPairs(2, 4));
     }
 
     [Fact]
