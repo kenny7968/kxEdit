@@ -29,6 +29,9 @@ public static class NavigationCommands
             && char.IsHighSurrogate(s.GetChar(prev - 1))
         )
             return prev - 1;
+        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
+        if (prev > 0 && s.GetChar(prev) == '\n' && s.GetChar(prev - 1) == '\r')
+            return prev - 1;
         return prev;
     }
 
@@ -43,6 +46,9 @@ public static class NavigationCommands
             && caret + 1 < s.CharLength
             && char.IsLowSurrogate(s.GetChar(caret + 1))
         )
+            return caret + 2;
+        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
+        if (c == '\r' && caret + 1 < s.CharLength && s.GetChar(caret + 1) == '\n')
             return caret + 2;
         return caret + 1;
     }

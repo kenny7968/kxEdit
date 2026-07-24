@@ -49,6 +49,29 @@ public sealed class TextSnapshot
         return GetText(pos, 1)[0];
     }
 
+    /// <summary>[start, endExclusive) に含まれる CRLF pair の数(=論理文字数計算用)。
+    /// ピース跨ぎ("...\r" | "\n...")も 1 pair としてカウントする。低頻度(位置照会ホットキー押下時のみ)
+    /// なため O(N) 走査を許容する。</summary>
+    public int CountCrlfPairs(int start, int endExclusive)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(start);
+        ArgumentOutOfRangeException.ThrowIfNegative(endExclusive);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(endExclusive, CharLength);
+        if (start >= endExclusive)
+            return 0;
+        string t = GetText(start, endExclusive - start);
+        int count = 0;
+        for (int i = 0; i + 1 < t.Length; i++)
+        {
+            if (t[i] == '\r' && t[i + 1] == '\n')
+            {
+                count++;
+                i++;
+            }
+        }
+        return count;
+    }
+
     public int GetLineStart(int line)
     {
         if (line < 0 || line >= LineCount)

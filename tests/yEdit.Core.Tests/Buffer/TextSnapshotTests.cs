@@ -162,4 +162,44 @@ public class TextSnapshotTests
             Snap("これは1行目\r", "\n2nd line\nempty next", "\r\r", "\n\n最終行😀").PieceCount
         );
     }
+
+    [Fact]
+    public void CountCrlfPairs_EmptyRange_ReturnsZero()
+    {
+        var s = Snap("a\r\nb");
+        Assert.Equal(0, s.CountCrlfPairs(0, 0));
+        Assert.Equal(0, s.CountCrlfPairs(2, 2));
+        Assert.Equal(0, s.CountCrlfPairs(s.CharLength, s.CharLength));
+    }
+
+    [Fact]
+    public void CountCrlfPairs_FullRange_CountsCrlfPairs()
+    {
+        var s = Snap("a\r\nb\r\nc");
+        Assert.Equal(2, s.CountCrlfPairs(0, s.CharLength));
+    }
+
+    [Fact]
+    public void CountCrlfPairs_LoneCrLfMixed_CountsOnlyPairs()
+    {
+        var s = Snap("a\rb\nc\r\nd\rd\ne"); // CRLF 1 個 + 孤立 CR 2 個 + 孤立 LF 2 個
+        Assert.Equal(1, s.CountCrlfPairs(0, s.CharLength));
+    }
+
+    [Fact]
+    public void CountCrlfPairs_PartialRange_Correct()
+    {
+        var s = Snap("a\r\nb\r\nc");
+        Assert.Equal(1, s.CountCrlfPairs(0, 3));
+        Assert.Equal(0, s.CountCrlfPairs(0, 2));
+        Assert.Equal(1, s.CountCrlfPairs(3, 7));
+    }
+
+    [Fact]
+    public void CountCrlfPairs_PieceBoundaryStraddled_CountsCrlfAcrossPieces()
+    {
+        // 意図的に "a\r" | "\nb" の 2 ピース構成(Snap ヘルパで複数ピース版を組む)
+        var snap = Snap("a\r", "\nb");
+        Assert.Equal(1, snap.CountCrlfPairs(0, snap.CharLength));
+    }
 }

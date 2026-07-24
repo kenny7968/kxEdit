@@ -93,6 +93,11 @@ internal sealed class CaretController
             if (char.IsHighSurrogate(prev))
                 return offset - 1;
         }
+        // CRLF pair の中間位置(pos-1='\r'・pos='\n')は CR の前へスナップ(行末位置=MoveEnd と同位置)
+        // 2026-07-24: キャレット/選択のすべての位置設定入り口が本メソッドを通るため、
+        // ここで一度スナップすれば mid-CRLF は不変条件として守られる。
+        if (c == '\n' && snap.GetChar(offset - 1) == '\r')
+            return offset - 1;
         return offset;
     }
 }
