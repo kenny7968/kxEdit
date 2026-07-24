@@ -184,7 +184,9 @@ public sealed class BackupCoordinator : IDisposable
     /// デリゲート(本文を載せ dirty のまま)。復元した文書には元 Id を引き継がせ、既存のバックアップ
     /// ファイルを継続使用する(孤児・無保護窓を作らない)。チェックしなかった項目は安全側で残し、
     /// 次回再提案する(明示的に消すのは「すべて破棄」のみ)。
-    /// confirm=false ではダイアログを出さず全件復元し、その件数を返す(ダイアログ経路は 0 を返す)。
+    /// confirm=false ではダイアログを出さず全件復元し、その件数を返す。
+    /// confirm=true でも Restore 選択時は実復元件数を返す(設計 2026-07-24-restore-no-initial-untitled §1・
+    /// 呼び出し側は件数&gt;0 で起動時の空無題タブを閉じる判断に使う)。DiscardAll/Later は 0。
     /// </summary>
     public int OfferRestoreOnStartup(
         IWin32Window owner,
@@ -231,6 +233,11 @@ public sealed class BackupCoordinator : IDisposable
         switch (outcome.Action)
         {
             case RestoreAction.Restore:
+                // 設計 2026-07-24-restore-no-initial-untitled §1: 実復元件数を返す。
+                // 呼び出し側(MainForm.OnShown OFF 経路)がこの件数で _startupEmptyDoc の
+                // TryClose を判断する(ON 経路 FileController.RestoreSession の
+                // openedCount>0 && initialEmpty is not null と対称)。
+                int restored = 0;
                 foreach (var rec in outcome.Checked)
                 {
                     try
@@ -240,6 +247,7 @@ public sealed class BackupCoordinator : IDisposable
                         // Task 4(設計 §3.4): adopt-move で消費済みファイルも自セッション dir へ
                         // 引き取る(チェックしなかった record は据え置き=次回再提案)。
                         AdoptRestored(doc, rec);
+                        restored++;
                     }
                     catch (Exception ex)
                     {
@@ -251,16 +259,16 @@ public sealed class BackupCoordinator : IDisposable
                     }
                 }
                 // チェックしなかった項目は削除しない(SR 誤操作での消失を避け、次回再提案)。
-                break;
+                return restored;
 
             case RestoreAction.DiscardAll:
                 _writer?.DeleteAll();
-                break;
+                return 0;
 
             case RestoreAction.Later:
-                break; // 何もしない(次回再提案)
+            default:
+                return 0; // 何もしない(次回再提案)
         }
-        return 0;
     }
 
     /// <summary>起動時復元の入力収集(sweep+LoadAll+trace)。OfferRestoreOnStartup と
