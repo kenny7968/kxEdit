@@ -927,6 +927,31 @@ public class MainFormSmokeTests
             Assert.Contains("選択 7 文字", announce.Text);
         });
 
+    // LF-only（改行なし+改行 LF のみ）= CRLF pair 0 = 論理文字数 == CharLength。
+    // 「abc\ndef」は UTF-16 code unit 数=7、CRLF pair=0、論理文字数=7。
+    // 「常に -1 する」等の誤った変異（例：無条件で CharLength-1 を返す）を殺す pin。
+    [Fact]
+    public void AnnouncePosition_LfDocument_ReadsCharLengthAsIs() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.ReplaceCharRange(0, 0, "abc\ndef"); // CharLength=7・CRLF=0・論理=7
+
+            var method = typeof(MainForm).GetMethod(
+                "AnnouncePosition",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+            );
+            Assert.NotNull(method);
+            method!.Invoke(form, null);
+
+            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
+            // CRLF pair 0=論理=CharLength=7 がそのまま読まれる（-1 変異等で 6 になったら赤化）。
+            Assert.Contains("文字数 7", announce.Text);
+        });
+
     [Fact]
     public void MainForm_ControllerFields_AreReadOnly()
     {
