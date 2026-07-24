@@ -855,13 +855,21 @@ public sealed partial class MainForm : Form
         int totalLines = ed.LineCount;
         int column = ed.GetColumn(ed.CurrentPosition) + 1;
         var (s, e) = ed.GetSelectionCharRange();
+        // 2026-07-25: 論理文字数（CRLF=1・サロゲート=2）に統一。CharLength は UTF-16 code unit 数=
+        // CRLF を 2 として数えるため、CRLF pair 数を差し引く（数え方は Task 1 の CountCrlfPairs
+        // 単体テストで保証済み）。CountCrlfPairs は現状 GetText で範囲 string を materialize する
+        // ため SnapshotText.Length 経路と同コスト。位置照会ホットキー押下時のみの低頻度パスなので
+        // 許容する（設計 §CountCrlfPairs 実装コメント参照）。
+        var snap = ed.CurrentBuffer.Current;
+        int totalLogical = snap.CharLength - snap.CountCrlfPairs(0, snap.CharLength);
+        int selLogical = (e - s) - snap.CountCrlfPairs(s, e);
         _announcer.Say(
             PositionFormatter.Format(
                 line,
                 totalLines,
                 column,
-                ed.SnapshotText.Length,
-                e - s,
+                totalLogical,
+                selLogical,
                 ed.Overtype
             )
         );

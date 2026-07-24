@@ -32,10 +32,52 @@ public class NavigationCommandsTests
     }
 
     [Fact]
+    public void MoveLeftChar_SkipsCrlfPair()
+    {
+        var s = Snap("a\r\nb");
+        Assert.Equal(1, NavigationCommands.MoveLeftChar(s, 3));
+    }
+
+    [Fact]
+    public void MoveLeftChar_LoneCr_MovesOneStep()
+    {
+        var s = Snap("a\rb");
+        Assert.Equal(1, NavigationCommands.MoveLeftChar(s, 2));
+    }
+
+    [Fact]
+    public void MoveLeftChar_LoneLf_MovesOneStep()
+    {
+        var s = Snap("a\nb");
+        Assert.Equal(1, NavigationCommands.MoveLeftChar(s, 2));
+    }
+
+    [Fact]
     public void MoveLeftChar_OnEmptyBuffer_ReturnsZero()
     {
         var s = Snap("");
         Assert.Equal(0, NavigationCommands.MoveLeftChar(s, 0));
+    }
+
+    [Fact]
+    public void MoveRightChar_SkipsCrlfPair()
+    {
+        var s = Snap("a\r\nb");
+        Assert.Equal(3, NavigationCommands.MoveRightChar(s, 1));
+    }
+
+    [Fact]
+    public void MoveRightChar_LoneCr_MovesOneStep()
+    {
+        var s = Snap("a\rb");
+        Assert.Equal(2, NavigationCommands.MoveRightChar(s, 1));
+    }
+
+    [Fact]
+    public void MoveRightChar_LoneLf_MovesOneStep()
+    {
+        var s = Snap("a\nb");
+        Assert.Equal(2, NavigationCommands.MoveRightChar(s, 1));
     }
 
     [Fact]

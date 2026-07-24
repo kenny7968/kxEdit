@@ -202,21 +202,25 @@ public class EditorControlConvertEolsTests
         });
     }
 
-    // P7 I-3 Task 3 Minor-2: 文書 "a\r\nb"(char length=4)にキャレット=2(CRLF の LF を指す)
-    // → CountNonBreakAndBreaksInSnapshot は「\r 単独 + LF 単独」に分けて数える安全側=(M=1, K=1)
-    // 変換後 "a\nb"(char length=3)にキャレット=1+1*1=2(=同じ論理位置)
+    // P7 I-3 Task 3 Minor-2 → 2026-07-24 CRLF atomic caret 対応で更新:
+    // 文書 "a\r\nb"(char length=4)に SetCaretCharOffset(2) を要求しても、
+    // CaretController.SnapAndClamp が mid-CRLF を CR の前(offset=1)へスナップするため
+    // caret はそもそも LF 位置に立たない(=境界回帰: 復元後も mid-CRLF に落ちない)。
+    // ConvertEols(Lf) 変換後 "a\nb"(char length=3)は「a」の直後=offset 1 のまま保たれる
+    // (prefix "a" は非改行 1・改行 0=1+0*1=1)。
     [Fact]
-    public void ConvertEols_CaretOnLfOfCrlf_ConvertToLf_LogicalPositionPreserved()
+    public void ConvertEols_CaretRequestedMidCrlf_SnappedAndPreservedAcrossConversion()
     {
         Sta.Run(() =>
         {
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("a\r\nb"));
-            ctrl.SetCaretCharOffset(2); // CRLF の LF を指す
+            ctrl.SetCaretCharOffset(2); // mid-CRLF 要求 → SnapAndClamp が offset=1 へスナップ
+            Assert.Equal(1, ctrl.CaretCharOffset); // 中央 seam で snap されたことを明示
             ctrl.ConvertEols(LineEnding.Lf);
             Assert.Equal("a\nb", ctrl.SnapshotText);
-            // caret は「a\n」の直後(=位置 2)にあるはず(CRLF→LF で 1 個縮んだ論理位置と一致)
-            Assert.Equal(2, ctrl.CaretCharOffset);
+            // caret は「a」の直後(=位置 1)。変換前の論理位置と一致(prefix=1 非改行+0 改行)
+            Assert.Equal(1, ctrl.CaretCharOffset);
         });
     }
 }

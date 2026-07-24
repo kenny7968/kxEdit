@@ -76,6 +76,8 @@ internal sealed class CaretController
 
     /// <summary>
     /// [0, CharLength] にクランプし、UTF-16 low サロゲート位置なら 1 前方(high 側)へスナップ。
+    /// CRLF pair 中間位置(CR と LF の間)も CR の前(=行末位置)へスナップ(2026-07-25 追加=
+    /// キャレット/選択のすべての位置設定入り口を通る中央 seam として、mid-CRLF を不変条件で守る)。
     /// CharLength 位置(=EOF)はキャレットが立てる境界なのでクランプ後もそのまま許可。
     /// Task 3b で EditorControl.Caret.cs から bit-perfect 移設。
     /// </summary>
@@ -93,6 +95,11 @@ internal sealed class CaretController
             if (char.IsHighSurrogate(prev))
                 return offset - 1;
         }
+        // CRLF pair の中間位置(pos-1='\r'・pos='\n')は CR の前へスナップ(行末位置=MoveEnd と同位置)
+        // 2026-07-24: キャレット/選択のすべての位置設定入り口が本メソッドを通るため、
+        // ここで一度スナップすれば mid-CRLF は不変条件として守られる。
+        if (c == '\n' && snap.GetChar(offset - 1) == '\r')
+            return offset - 1;
         return offset;
     }
 }
