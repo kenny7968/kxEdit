@@ -36,14 +36,28 @@ public sealed class DocumentInfoController
             hasBom: doc.State.HasBom,
             lineEnding: doc.State.LineEnding,
             fileMeta: _meta.TryGet(doc.State.Path),
-            // ParseCsv は文書単位のメモ化済み=CSV モード中の他経路と同じ結果を再パースなしで得る。
+            // ParseCsv は文書単位(スナップショット参照)のメモ化済み=CSV モード中の他経路と
+            // 同じ結果を再パースなしで得る。通常モードの .csv では本呼び出しが初回パースになるが、
+            // 結果はキャッシュされ、以降は編集でスナップショットが差し替わるまで再利用される。
             // モード突入時は CsvController.TryEnterMode が csv.Ok を確認するが、F2 セル編集の確定で
             // Ok=false へ落ちてもモードは継続する(onCommit は ParseError を読み上げるだけ)ため、
             // Ok=false の CsvDocument がここへ来る。寸法を出さない判断は Builder.MeasureCsv 側に置く。
-            csv: doc.State.CsvMode ? doc.ParseCsv() : null
+            csv: NeedsCsvDimensions(doc) ? doc.ParseCsv() : null
         );
         return DocumentInfoFormatter.Format(info);
     }
+
+    /// <summary>CSV の行数・列数を出すか。CSV モード中に加えて、拡張子 .csv のファイルは
+    /// 通常モードでも出す(CSV を開いている以上、モードの ON/OFF に関わらず寸法を知りたいため)。
+    /// 拡張子判定は MainForm.AutoEnterCsvMode の自動進入判定と同じ規則
+    /// (<see cref="StringComparison.OrdinalIgnoreCase"/>)に揃える。</summary>
+    private static bool NeedsCsvDimensions(Document doc) =>
+        doc.State.CsvMode
+        || string.Equals(
+            System.IO.Path.GetExtension(doc.State.Path),
+            ".csv",
+            StringComparison.OrdinalIgnoreCase
+        );
 
     /// <summary>ダイアログを表示する。アクティブ文書が無ければ何もしない。
     /// 閉じたら編集領域へフォーカスを戻す(操作継続性)。</summary>

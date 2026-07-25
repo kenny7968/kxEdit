@@ -138,17 +138,42 @@ public class DocumentInfoControllerTests
             }
         });
 
-    /// <summary>CSV モード時だけ CSV 行が付く(Controller の CsvMode 三項演算の kill)。</summary>
+    /// <summary>CSV モード中は拡張子に関わらず CSV 行が付く(手動でモードに入れた .txt 等も対象)。</summary>
     [Fact]
-    public void BuildText_csv_mode_appends_dimensions() =>
+    public void BuildText_csv_mode_appends_dimensions_regardless_of_extension() =>
         Sta.Run(() =>
         {
             var (form, docs) = HostForm.CreateWithDocs();
             using (form)
             {
                 var doc = docs.CreateNew();
+                doc.State.Path = @"d:\x\data.txt"; // .csv ではない=モード側の条件だけで通す
                 doc.Editor.Text = "a,b,c\r\nd,e,f";
                 doc.State.CsvMode = true;
+
+                string? text = new DocumentInfoController(docs, new StubFileMeta()).BuildText();
+
+                Assert.NotNull(text);
+                Assert.EndsWith("CSV: 2 行 × 3 列", text);
+            }
+        });
+
+    /// <summary>拡張子 .csv なら通常モード(CsvMode=false)でも CSV 行を出す。
+    /// 大文字 .CSV でも判定されること(OrdinalIgnoreCase → Ordinal の変異の kill)を含めて固定する。
+    /// MainForm.AutoEnterCsvMode の自動進入判定と同じ規則。</summary>
+    [Theory]
+    [InlineData(@"d:\x\data.csv")]
+    [InlineData(@"d:\x\DATA.CSV")]
+    public void BuildText_csv_extension_appends_dimensions_even_in_normal_mode(string path) =>
+        Sta.Run(() =>
+        {
+            var (form, docs) = HostForm.CreateWithDocs();
+            using (form)
+            {
+                var doc = docs.CreateNew();
+                doc.State.Path = path;
+                doc.Editor.Text = "a,b,c\r\nd,e,f";
+                doc.State.CsvMode = false; // 通常モード
 
                 string? text = new DocumentInfoController(docs, new StubFileMeta()).BuildText();
 
@@ -165,6 +190,7 @@ public class DocumentInfoControllerTests
             using (form)
             {
                 var doc = docs.CreateNew();
+                doc.State.Path = @"d:\x\notes.txt"; // 拡張子も .csv ではない
                 doc.Editor.Text = "a,b,c\r\nd,e,f"; // 内容は CSV だがモードは OFF
                 doc.State.CsvMode = false;
 
