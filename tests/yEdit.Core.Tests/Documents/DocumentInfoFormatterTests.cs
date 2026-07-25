@@ -150,6 +150,55 @@ public class DocumentInfoFormatterTests
         Assert.Contains("ファイルサイズ: 9,876,543,210 バイト" + NL, result);
     }
 
+    /// <summary>パス由来の値に含まれる CR/LF が行構造を壊さない(偽の項目行を注入できない)。
+    /// BK-L-4 / CSV-L-5 で確立した SanitizeForDisplay 適用の横断不変条件を本表示面でも守る。</summary>
+    [Fact]
+    public void Line_breaks_in_path_values_cannot_inject_extra_lines()
+    {
+        var info = new DocumentInfo(
+            DisplayName: "a\r\n文字コード: FAKE",
+            Format: FormatKind.Other,
+            Extension: ".x\ny",
+            Directory: "d:\\x\r\n更新日時: 1999-01-01 00:00:00",
+            CharacterCount: 0,
+            EncodingLabel: "UTF-8",
+            LineEnding: LineEnding.Crlf,
+            CreationTime: null,
+            LastWriteTime: null,
+            FileSizeBytes: null,
+            Csv: null
+        );
+        string result = DocumentInfoFormatter.Format(info);
+
+        Assert.Equal(9, result.Split(NL).Length); // 項目 9 行のまま=注入されていない
+        Assert.Contains("ファイル名: a 文字コード: FAKE" + NL, result); // 改行は空白へ潰れる
+        Assert.Contains("形式: その他(.x y)" + NL, result);
+        Assert.Contains(@"保存ディレクトリ: d:\x 更新日時: 1999-01-01 00:00:00" + NL, result);
+        Assert.EndsWith("更新日時: -", result); // 本物の更新日時は欠損のまま
+    }
+
+    /// <summary>BiDi 制御文字(RLO 等)は除去する。ファイル名の拡張子偽装(BK-L-4)を封じる。</summary>
+    [Fact]
+    public void Bidi_control_chars_in_file_name_are_removed()
+    {
+        var info = Info(format: FormatKind.Text, extension: ".txt") with
+        {
+            DisplayName = "ab" + (char)0x202E + "cd",
+        };
+        string result = DocumentInfoFormatter.Format(info);
+
+        Assert.DoesNotContain((char)0x202E, result);
+        Assert.Contains("ファイル名: abcd" + NL, result);
+    }
+
+    /// <summary>制御文字だけの値は他の欠損項目と同じ「-」に落とす(空欄描画にしない)。</summary>
+    [Fact]
+    public void Value_that_sanitizes_to_empty_becomes_hyphen()
+    {
+        var info = Info() with { Directory = "\u202E\u200B" };
+        Assert.Contains("保存ディレクトリ: -" + NL, DocumentInfoFormatter.Format(info));
+    }
+
     [Theory]
     [InlineData(LineEnding.Crlf, "CRLF")]
     [InlineData(LineEnding.Lf, "LF")]

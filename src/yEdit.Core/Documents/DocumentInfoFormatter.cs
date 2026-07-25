@@ -20,9 +20,9 @@ public static class DocumentInfoFormatter
         ArgumentNullException.ThrowIfNull(info);
         var sb = new StringBuilder();
 
-        sb.Append("ファイル名: ").Append(info.DisplayName).Append(NL);
+        sb.Append("ファイル名: ").Append(Safe(info.DisplayName)).Append(NL);
         sb.Append("形式: ").Append(FormatFormat(info.Format, info.Extension)).Append(NL);
-        sb.Append("保存ディレクトリ: ").Append(info.Directory ?? Missing).Append(NL);
+        sb.Append("保存ディレクトリ: ").Append(Safe(info.Directory)).Append(NL);
         sb.Append("文字数: ").Append(info.CharacterCount.ToString("N0", Culture)).Append(NL);
         sb.Append("文字コード: ").Append(info.EncodingLabel).Append(NL);
         sb.Append("改行コード: ").Append(info.LineEnding.ToDisplayString()).Append(NL);
@@ -43,14 +43,29 @@ public static class DocumentInfoFormatter
         return sb.ToString();
     }
 
+    /// <summary>パス由来の攻撃者制御文字列を 1 行表示用に無害化する
+    /// (BK-L-4 / CSV-L-5 で確立した横断不変条件=RestoreDialog と同じ扱い)。
+    /// 値だけに適用し、ラベルと <see cref="NL"/> は Formatter が持つ信頼済み定数のままにすることで、
+    /// 「1 行 = 1 項目」の行構造が値の中の CR/LF で壊されないようにする。
+    /// 長さは切り詰めない: 本ダイアログは保存先パスの確認そのものが用途で、
+    /// 到達性はダイアログ側の水平スクロールで担保する(一覧項目の RestoreDialog とは要件が違う)。
+    /// 無害化の結果が空になる値(null・空文字列・制御文字だけの値)は他の欠損項目と同じ「-」に落とす。
+    /// </summary>
+    private static string Safe(string? value)
+    {
+        string s = SanitizeForDisplay.OneLine(value);
+        return s.Length > 0 ? s : Missing;
+    }
+
     private static string FormatFormat(FormatKind kind, string? ext) =>
         kind switch
         {
             FormatKind.Text => "テキスト(.txt)",
             FormatKind.Csv => "CSV(.csv)",
             FormatKind.Markdown => "マークダウン(.md)",
-            FormatKind.Other => ext is null ? "その他(拡張子なし)" : $"その他({ext})",
-            _ => Missing, // FormatKind.Unsaved(未保存は形式を持たない)
+            FormatKind.Other => ext is null ? "その他(拡張子なし)" : $"その他({Safe(ext)})",
+            FormatKind.Unsaved => Missing, // 未保存は形式を持たない
+            _ => Missing,
         };
 
     private static string FormatSize(long? bytes) =>
