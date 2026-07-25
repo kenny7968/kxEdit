@@ -7,8 +7,14 @@ namespace yEdit.Accessibility;
 /// 旧 v1(P7 で撤去)は全文 string 経路だったのに対し、v2 は
 /// 位置歩き + 範囲テキスト + 座標 API を持つ。
 ///
-/// スレッド: RPC スレッドから呼ばれ得る。実装側は不変スナップショット参照 +
-/// キャッシュ値で応答すること(<see cref="SetSelection"/> / <see cref="SetFocus"/> のみ UI マーシャリング)。
+/// スレッド: RPC スレッドから呼ばれ得る。実装側は次の 3 分類で応答すること。
+/// <list type="bullet">
+/// <item>書き込み系(<see cref="SetSelection"/> / <see cref="SetFocus"/> /
+/// <see cref="ScrollRangeIntoView"/>)は <c>BeginInvoke</c>(戻り値が不要=RPC スレッドを待たせない)。</item>
+/// <item>UI スレッド専用状態を要する読み取り(<see cref="GetBoundingRectangles"/> /
+/// <see cref="OffsetFromScreenPoint"/> / <see cref="GetVisibleRange"/>)は同期 <c>Invoke</c>。</item>
+/// <item>それ以外は不変スナップショット参照 + キャッシュ値で応答(マーシャリングしない)。</item>
+/// </list>
 /// </summary>
 public interface IUiaTextHost
 {
@@ -70,6 +76,31 @@ public interface IUiaTextHost
 
     /// <summary>スクリーン座標 (x, y) 直下の文字オフセット(HitTest 相当)。範囲外は clamp。</summary>
     int OffsetFromScreenPoint(double x, double y);
+
+    // ---------- スクロール / 可視範囲 ----------
+
+    /// <summary>
+    /// [start, end) を可視域へスクロールする(実装は UI スレッドへマーシャリング)。
+    /// <paramref name="alignToTop"/> が true なら範囲**先頭**を、false なら範囲**末尾**を
+    /// 対象にする(UIA <c>ITextRangeProvider.ScrollIntoView</c> の意味論)。
+    /// 選択・キャレットは変更しない(装飾スクロール)。
+    /// 対象が既に可視なら何もしない=SR がテキストを歩くたびに画面が飛ぶのを防ぐ。
+    ///
+    /// <b>範囲外 / stale な offset は実装側で clamp すること</b>(<see cref="GetTextRange"/> と同じ流儀)。
+    /// 呼び出し元の <c>TextRangeProviderV2</c> は ctor でしか clamp しないため、SR が範囲を掴んだまま
+    /// 文書が縮むと stale な offset がそのまま届く。ここで clamp しないと行番号解決が
+    /// 例外を投げ、UI スレッドへマーシャリング済みなら未処理例外=アプリ落ちになる。
+    /// </summary>
+    void ScrollRangeIntoView(int start, int end, bool alignToTop);
+
+    /// <summary>
+    /// 現在ビューポートに見えている本文の範囲 [Start, End)。
+    /// 末尾行の改行は含めない(<see cref="LineEndNoBreakOf"/> と同じ流儀)。
+    /// 水平スクロールで横に隠れている部分は「可視」に含める(行単位で報告する)。
+    /// 実装は UI スレッド専用状態を要するため同期マーシャリングする。
+    /// バッファ未設定 / Handle 未生成では (0, 0)。
+    /// </summary>
+    (int Start, int End) GetVisibleRange();
 
     // ---------- 属性 ----------
 

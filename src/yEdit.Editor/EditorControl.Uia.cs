@@ -1,5 +1,5 @@
 // EditorControl.Uia.cs
-// Phase 3 Task 3d 完了後: IUiaTextHost 22 メンバ実装と Uia 系 12 field 所有権は UiaTextHostAdapter
+// Phase 3 Task 3d 完了後: IUiaTextHost 全メンバ実装と Uia 系 12 field 所有権は UiaTextHostAdapter
 // (_uia) へ完全移設済み。本ファイルには以下だけが残る:
 //   - EditorControl の IUiaTextHost explicit interface 実装 (全て _uia への薄い delegation)
 //   - Editor.Tests からの観測用 test hook forwarder (instance + static)
@@ -55,7 +55,7 @@ public sealed partial class EditorControl
         EditorControl c
     ) => c._uia.UiaEventCounts;
 
-    // ==================== IUiaTextHost 22 メンバ (全て Adapter への薄い委譲) ====================
+    // ==================== IUiaTextHost 全メンバ (全て Adapter への薄い委譲) ====================
     // EditorControl 側で explicit interface implementation として残置する理由:
     //   - 既存 Editor.Tests (EditorControlUiaHostTests 305 行 / EditorControlBoundingRectsTests /
     //     EditorControlOffsetFromPointTests / EditorControlCacheTests 等) が `(IUiaTextHost)ctrl`
@@ -98,6 +98,13 @@ public sealed partial class EditorControl
 
     int IUiaTextHost.OffsetFromScreenPoint(double x, double y) =>
         ((IUiaTextHost)_uia).OffsetFromScreenPoint(x, y);
+
+    // === スクロール / 可視域 (interface と adapter の節順に合わせる: 座標 → スクロール → 属性) ===
+
+    void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop) =>
+        ((IUiaTextHost)_uia).ScrollRangeIntoView(start, end, alignToTop);
+
+    (int Start, int End) IUiaTextHost.GetVisibleRange() => ((IUiaTextHost)_uia).GetVisibleRange();
 
     nint IUiaTextHost.Handle => ((IUiaTextHost)_uia).Handle;
     bool IUiaTextHost.HasFocus => ((IUiaTextHost)_uia).HasFocus;

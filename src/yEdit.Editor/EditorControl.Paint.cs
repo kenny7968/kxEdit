@@ -25,10 +25,12 @@ public sealed partial class EditorControl
             // HScrollBar 高さを明示的に減算。(ScrollableControl と違って Control は
             // DisplayRectangle でも同じ挙動)
             int paintWidth = Math.Max(0, ClientSize.Width - _vscroll.Width);
-            int paintHeight = Math.Max(
-                0,
-                ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0)
-            );
+            // 可視高さの定義は PaintHeightPx (EditorControl.Caret.cs) に一本化する。
+            // ここで同じ式をコピーすると、UIA の GetVisibleCharRange / BringCaretIntoView /
+            // ScrollCharRangeIntoView と「どこまで見えているか」の定義が食い違う。
+            // ローカルへ 1 度だけ受けるのは、以降 2 箇所 (ViewportLayout.Build / FrameBuilder.Build)
+            // で同一値を使うことを保証するため(式自体は移設前と同一=挙動不変)。
+            int paintHeight = PaintHeightPx;
             var rows = ViewportLayout.Build(snap, _topLine, paintHeight, _wrapColumns, _metrics);
             int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
 

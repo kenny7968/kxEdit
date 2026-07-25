@@ -48,6 +48,11 @@ public class IUiaTextHostContractStubTests
         public string AutomationId => "";
 
         public void SetFocus() { }
+
+        public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
+
+        // Task 2: 本 stub は viewport を持たないため「文書全体が可視」で固定する。
+        public (int Start, int End) GetVisibleRange() => (0, TextLength);
     }
 
     [Fact]

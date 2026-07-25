@@ -68,7 +68,7 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
     // 初期化は ctor で _caretCtrl / _font / _metrics 等が揃った後に new する (host=this を渡すため)。
     private readonly ImeController _imeCtrl;
 
-    // Phase 3 (Task 3d) で抽出した UIA テキストホスト adapter。IUiaTextHost 22 メンバ実装 +
+    // Phase 3 (Task 3d) で抽出した UIA テキストホスト adapter。IUiaTextHost 全メンバ実装 +
     // Uia 系 12 field (_bufferSnapshot / _bounds / _boundsSync / _clientToScreenX/Y /
     // _lastLineSegs / _hwnd / _provider / _testHook_LastGetObjectServed /
     // _uiaTextChangedCount / _uiaSelectionChangedCount / _uiaFocusChangedCount) の所有権をここに移譲。
@@ -191,11 +191,11 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
             insertConfirmedText: InsertConfirmedText
         );
 
-        // Task 3d: UiaTextHostAdapter (IUiaTextHost 22 メンバ実装 + Uia 系 12 field 所有)。
+        // Task 3d: UiaTextHostAdapter (IUiaTextHost 全メンバ実装 + Uia 系 12 field 所有)。
         // this を UI thread 側 host として渡す (RectangleToScreen / PointToScreen / InvokeRequired /
         // BeginInvoke / IsHandleCreated / IsDisposed / Handle / ComputeCaretPointForUia /
         // OffsetFromClientPoint / Metrics / WrapColumns / HasFocusCached / SetSelectionCharRange /
-        // Focus を Adapter から呼ぶ)。
+        // ScrollCharRangeIntoView / Focus を Adapter から呼ぶ)。
         _uia = new UiaTextHostAdapter(this, _caretCtrl);
     }
 
@@ -370,6 +370,30 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
     // WinForms Control には ContainsFocus が居るため名前衝突しない別名で露出する
     // (Control.Focused は内部で GetFocus() を呼び RPC スレッドから読むと常に false=v1 対応と同旨)。
     internal bool HasFocusCached => _hasFocus;
+
+    /// <summary>
+    /// UIA <c>ITextProvider.GetVisibleRanges</c> の実処理(UI スレッド専用)。
+    /// 現在ビューポートに見えている本文の範囲 [Start, End) を返す。
+    /// </summary>
+    /// <remarks>
+    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="ViewportLayout.Build"/> と
+    /// <see cref="PaintHeightPx"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
+    /// 折り返し ON では視覚行境界になる。末尾行の改行は含めない。
+    /// バッファ未設定・可視行ゼロでは (0, 0)。
+    /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.2。
+    /// </remarks>
+    internal (int Start, int End) GetVisibleCharRange()
+    {
+        if (_buffer is null)
+            return (0, 0);
+        var snap = _buffer.Current;
+        var rows = ViewportLayout.Build(snap, _topLine, PaintHeightPx, _wrapColumns, _metrics);
+        if (rows.Count == 0)
+            return (0, 0);
+        var first = rows[0];
+        var last = rows[rows.Count - 1];
+        return (first.SegmentStartChar, last.SegmentStartChar + last.SegmentLength);
+    }
 
     /// <summary>P6 Task 3: 現在のバッファ論理行数(App 層互換=`Lines.Count` 相当)。</summary>
     public int LineCount => _buffer?.Current.LineCount ?? 0;
@@ -1530,7 +1554,7 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         int xInSeg = PixelMapper.OffsetToPx(segSpan, localOffset, _metrics);
 
         int lineHeight = _metrics.LineHeightPx;
-        int paintHeight = Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
+        int paintHeight = PaintHeightPx;
 
         // TopLine の先頭視覚行を Y=0 として、対象視覚行までの積み上げ視覚行数を算出。
         // paintHeight を超えたら以降の Wrap は無駄なので早期退避(Task 10 I-1)。

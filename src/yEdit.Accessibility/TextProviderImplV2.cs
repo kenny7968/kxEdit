@@ -23,8 +23,17 @@ internal sealed class TextProviderImplV2 : ITextProvider
         return new ITextRangeProvider[] { new TextRangeProviderV2(this, s, e) };
     }
 
-    public ITextRangeProvider[] GetVisibleRanges() =>
-        new ITextRangeProvider[] { new TextRangeProviderV2(this, 0, Host.TextLength) };
+    /// <summary>
+    /// 現在ビューポートに見えている範囲を 1 本返す(プレーンテキストエディタなので連続 1 範囲)。
+    /// 旧実装は常に文書全体を返していたが、それは <c>GetBoundingRectangles</c> が画面外で
+    /// 空配列を返す挙動と矛盾していた。典拠:
+    /// docs/plans/2026-07-25-uia-scrollintoview-design.md §5.2。
+    /// </summary>
+    public ITextRangeProvider[] GetVisibleRanges()
+    {
+        var (s, e) = Host.GetVisibleRange();
+        return new ITextRangeProvider[] { new TextRangeProviderV2(this, s, e) };
+    }
 
     public ITextRangeProvider RangeFromChild(IRawElementProviderSimple childElement) =>
         new TextRangeProviderV2(this, 0, 0);

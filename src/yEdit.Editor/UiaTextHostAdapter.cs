@@ -1,5 +1,5 @@
 // UiaTextHostAdapter.cs
-// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 22 メンバ + Uia 系 12 field の
+// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 全メンバ + Uia 系 12 field の
 // 所有権を bit-perfect 移設した adapter。§C.4 例外 (OnHandle*/On*Changed の Uia.cs 帰属)
 // を解消し、EditorControl 本体側の OnHandle*/On*Changed から Adapter へ通知する形に統一する。
 //
@@ -8,8 +8,8 @@
 //     _clientToScreenX / _clientToScreenY / _lastLineSegs / _hwnd / _provider /
 //     _testHook_LastGetObjectServed / _uiaTextChangedCount / _uiaSelectionChangedCount /
 //     _uiaFocusChangedCount)
-//   - IUiaTextHost 22 メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
-//     キャッシュ値応答。SetSelection / SetFocus のみ UI スレッドへ Invoke)
+//   - IUiaTextHost 全メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
+//     キャッシュ値応答。SetSelection / SetFocus / ScrollRangeIntoView のみ UI スレッドへ Invoke)
 //   - UI スレッド側からの通知経路: OnSnapshotChanged / OnBoundsChanged /
 //     OnHandleCreated / OnHandleDestroyed / RaiseTextChanged / RaiseSelectionChanged /
 //     RaiseFocusChanged / EnsureProvider
@@ -18,7 +18,8 @@
 // 非責務 (host 側に残す):
 //   - ComputeCaretPoint (UI スレッド専用状態 _topLine / _scrollX 等を参照) = host.ComputeCaretPoint 経由
 //   - OffsetFromClientPoint (同上) = host.OffsetFromClientPoint 経由
-//   - SetSelectionCharRange / Focus (UI スレッド専用の caret / 選択操作) = host 経由
+//   - SetSelectionCharRange / ScrollCharRangeIntoView / Focus (UI スレッド専用の caret / 選択 /
+//     スクロール操作) = host 経由
 //
 // Task 3b Obs 4 復旧: GetSelection は _caret.Caret / _caret.Anchor を local capture して
 // Min/Max を計算する (2 field read 窓)。CaretController.Selection 経由だと 4 field read
@@ -291,7 +292,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// <summary>_testHook_LastGetObjectServed の read (Test hook 経由)。</summary>
     public bool TestHook_LastGetObjectServed => _testHook_LastGetObjectServed;
 
-    // === IUiaTextHost 22 メンバ実装 (RPC thread から呼ばれ得る) ===
+    // === IUiaTextHost 全メンバ実装 (RPC thread から呼ばれ得る) ===
     // 元 EditorControl.Uia.cs から bit-perfect 移設 (field 参照だけ「自分の field」へ付け替え・
     // Compute* / OffsetFromClientPoint / SetSelectionCharRange / Focus は _host へ委譲)。
 
@@ -682,6 +683,69 @@ internal class UiaTextHostAdapter : IUiaTextHost
             clientY = 0;
         int pos = _host.OffsetFromClientPoint(clientX, clientY);
         return Math.Clamp(pos, 0, snap.CharLength);
+    }
+
+    // === スクロール (interface の節順に合わせてここに置く: 座標 → スクロール → 属性) ===
+
+    void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop)
+    {
+        // SetSelection と同形 (P5 Task 14 I-3)。このガードは 2 つの意味で load-bearing:
+        //   1. 破棄後 / Handle 未生成での BeginInvoke による InvalidOperationException を防ぐ
+        //   2. Control.InvokeRequired は Handle 未生成 / 破棄後に false を返す=ガードが無いと
+        //      RPC スレッドがそのまま UI スレッド専有状態 (ClientSize / _hscroll.Visible /
+        //      PositionCaret) に触れる。CLAUDE.md §2 の a11y 鉄則違反になる。
+        if (_host.IsDisposed || !_host.IsHandleCreated)
+            return;
+        if (_host.InvokeRequired)
+        {
+            // 書き込み系は fire-and-forget (RPC スレッドを待たせない=deadlock 回避)。
+            // WinForms の invoke キューは FIFO のため、SR が直後に呼ぶ同期 Invoke 系
+            // (GetBoundingRectangles 等) はこのスクロールの後に走る。
+            //
+            // 自身へ再入するのは、UI スレッド到達時に上の Dispose / Handle ガードを再評価するため
+            // (到達時は InvokeRequired == false なので無限ループにはならない)。
+            // 隣の SetFocus は `() => _host.Focus()` で再入しないが、そちらに合わせて
+            // 揃えないこと=再評価の効果が失われる。
+            _host.BeginInvoke(
+                new Action(() => ((IUiaTextHost)this).ScrollRangeIntoView(start, end, alignToTop))
+            );
+            return;
+        }
+        _host.ScrollCharRangeIntoView(start, end, alignToTop);
+    }
+
+    (int Start, int End) IUiaTextHost.GetVisibleRange()
+    {
+        // UI スレッド専用状態 (_topLine / _metrics / ClientSize) を要する読み取りのため、
+        // TryFindVisualSegment と同形で同期 Invoke する
+        // (書き込み系の ScrollRangeIntoView が BeginInvoke なのは戻り値が不要だから)。
+        //
+        // GetBoundingRectangles は「InvokeRequired → IsHandleCreated」の順で catch も持たないが、
+        // こちらは Handle ガードを先に置く: Handle が無ければ ClientSize が無意味なので
+        // そもそも計算に入る意味がない (GetBoundingRectangles 側の順序は既存踏襲=本作業の射程外)。
+        //
+        // IsDisposed を見ないのは、Dispose が Handle を落とすので !IsHandleCreated が拾い、
+        // Invoke 実行中に破棄される race は下の ObjectDisposedException catch が拾うため
+        // (書き込み系が IsDisposed を見るのは BeginInvoke 自体が投げるのを防ぐ目的で、
+        //  同期 Invoke + catch のこちらには不要)。
+        if (!_host.IsHandleCreated)
+            return (0, 0); // UI スレッドが束縛されていない
+        if (_host.InvokeRequired)
+        {
+            try
+            {
+                return _host.Invoke(new Func<(int, int)>(() => _host.GetVisibleCharRange()));
+            }
+            catch (ObjectDisposedException)
+            {
+                return (0, 0);
+            }
+            catch (InvalidOperationException)
+            {
+                return (0, 0);
+            } // Handle 破棄との race
+        }
+        return _host.GetVisibleCharRange();
     }
 
     // P5 Task 14 (I-2): live プロパティ Handle は RPC で CreateHandle を誘発し得るためキャッシュ返し。
