@@ -36,8 +36,10 @@ public sealed class DocumentInfoController
             hasBom: doc.State.HasBom,
             lineEnding: doc.State.LineEnding,
             fileMeta: _meta.TryGet(doc.State.Path),
-            // CSV モードは CsvController.TryEnterMode が csv.Ok を確認してからでないと入れないため、
-            // ここでのパースは常に成功する(ParseCsv は文書単位のメモ化済み=再パースしない)。
+            // ParseCsv は文書単位のメモ化済み=CSV モード中の他経路と同じ結果を再パースなしで得る。
+            // モード突入時は CsvController.TryEnterMode が csv.Ok を確認するが、F2 セル編集の確定で
+            // Ok=false へ落ちてもモードは継続する(onCommit は ParseError を読み上げるだけ)ため、
+            // Ok=false の CsvDocument がここへ来る。寸法を出さない判断は Builder.MeasureCsv 側に置く。
             csv: doc.State.CsvMode ? doc.ParseCsv() : null
         );
         return DocumentInfoFormatter.Format(info);

@@ -24,7 +24,10 @@ public sealed class DocumentInfoDialog : Form
         {
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
+            // 水平も出す: FixedDialog + WordWrap=false のため、これが無いと幅を超えた行
+            // (OneDrive 同期フォルダや repos 配下の長いパス)へ晴眼・弱視ユーザーが到達できない。
+            // WordWrap=false は「1 行=1 項目」という SR の読み単位を守るために維持する。
+            ScrollBars = ScrollBars.Both,
             WordWrap = false,
             Dock = DockStyle.Fill,
             Text = text,
@@ -38,7 +41,6 @@ public sealed class DocumentInfoDialog : Form
             Text = "閉じる(&C)",
             DialogResult = DialogResult.Cancel,
             AutoSize = true,
-            TabIndex = 1,
         };
 
         var buttonPanel = new FlowLayoutPanel

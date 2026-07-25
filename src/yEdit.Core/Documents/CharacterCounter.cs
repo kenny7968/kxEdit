@@ -9,9 +9,10 @@ namespace yEdit.Core.Documents;
 /// - サロゲートペア = 1 文字(Rune 単位)
 /// - Rune.IsWhiteSpace(Unicode White_Space)に該当する文字を除外
 ///   = 半角スペース(U+0020) / タブ(U+0009) / CR(U+000D) / LF(U+000A) / 全角スペース(U+3000) / NBSP 等
-/// - 不正な UTF-16 シーケンス(未対 high/low サロゲート等)はスキップ
-///   (バッファ層が UTF-8 バックエンドで U+FFFD へ正規化するため TextSnapshot 経由では
-///    到達しない防御。CharacterCounterTests がその正規化ごと固定している)
+/// - 不正な UTF-16 シーケンス(未対 high/low サロゲート等)は、その 1 文字だけをスキップする
+///   (後続の正常な文字は巻き添えにしない)。バッファ層が UTF-8 バックエンドで U+FFFD へ
+///   正規化するため TextSnapshot 経由では到達しない防御。CharacterCounterTests が
+///   その正規化ごと固定している
 ///
 /// 設計判断: 位置照会(Ctrl+Alt+P)側の CRLF=1 論理文字(サロゲート=2)とは異なる基準を採る。
 /// 本メソッドは「人間に自然な文字数」= CRLF は空白として除外・サロゲート=1(Rune)を優先する。
@@ -33,12 +34,14 @@ public static class CharacterCounter
         {
             buf[0] = (char)ch;
             int len = 1;
-            if (char.IsHighSurrogate(buf[0]))
+            // ペアが成立するときだけ次の 1 文字を消費する。Read() で無条件に食うと、
+            // high サロゲートの直後にある正常な文字まで巻き添えで捨ててしまう。
+            // Peek() は EOF で -1 を返し、(char)(-1)=U+FFFF は low サロゲートではないので
+            // 明示の EOF 分岐は不要。
+            int next = reader.Peek();
+            if (char.IsHighSurrogate(buf[0]) && next >= 0 && char.IsLowSurrogate((char)next))
             {
-                int ch2 = reader.Read();
-                if (ch2 < 0)
-                    break; // 未対 high のまま EOF → 破棄
-                buf[1] = (char)ch2;
+                buf[1] = (char)reader.Read();
                 len = 2;
             }
             var status = Rune.DecodeFromUtf16(buf[..len], out Rune rune, out _);

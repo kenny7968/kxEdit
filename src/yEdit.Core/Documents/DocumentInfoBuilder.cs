@@ -37,17 +37,12 @@ public static class DocumentInfoBuilder
         ArgumentNullException.ThrowIfNull(encoding);
 
         (FormatKind format, string? extension) = DecideFormat(path);
-        // 未保存時のラベルは DocumentState.DisplayName と同じ規則("無題 N" / 連番未確定なら "無題")。
-        string displayName =
-            path is not null ? Path.GetFileNameWithoutExtension(path)
-            : untitledNumber > 0 ? $"無題 {untitledNumber}"
-            : "無題";
 
         return new DocumentInfo(
-            DisplayName: displayName,
+            DisplayName: DecideDisplayName(path, untitledNumber),
             Format: format,
             Extension: extension,
-            Directory: path is not null ? Path.GetDirectoryName(path) : null,
+            Directory: DecideDirectory(path),
             CharacterCount: CharacterCounter.CountVisible(snapshot),
             EncodingLabel: ComposeEncodingLabel(encoding, hasBom),
             LineEnding: lineEnding,
@@ -56,6 +51,29 @@ public static class DocumentInfoBuilder
             FileSizeBytes: fileMeta?.Length,
             Csv: MeasureCsv(csv)
         );
+    }
+
+    /// <summary>表示名。保存済みは拡張子を除いたファイル名、未保存は DocumentState.DisplayName と
+    /// 同じ規則("無題 N" / 連番未確定なら "無題")。</summary>
+    private static string DecideDisplayName(string? path, int untitledNumber)
+    {
+        if (path is null)
+            return untitledNumber > 0 ? $"無題 {untitledNumber}" : "無題";
+        // dotfile(".gitignore" 等)は先頭ドットが拡張子区切りと解釈され
+        // GetFileNameWithoutExtension が空文字列を返すため、ファイル名全体へフォールバックする
+        // (空欄表示になると SR は「ファイル名」の後に何も読まない)。
+        string stem = Path.GetFileNameWithoutExtension(path);
+        return stem.Length > 0 ? stem : Path.GetFileName(path);
+    }
+
+    /// <summary>保存ディレクトリ。未保存 or ルート情報を持たない相対パスは null
+    /// (Formatter が「-」に落とす。空文字列のまま渡すと値なしの空欄描画になる)。</summary>
+    private static string? DecideDirectory(string? path)
+    {
+        if (path is null)
+            return null;
+        string? dir = Path.GetDirectoryName(path);
+        return string.IsNullOrEmpty(dir) ? null : dir;
     }
 
     private static (FormatKind, string?) DecideFormat(string? path)
@@ -73,10 +91,14 @@ public static class DocumentInfoBuilder
         };
     }
 
-    /// <summary>CSV の (行数, 最大列数)。列数は行ごとの列数の最大値=不揃いでも最も広い行に合わせる。</summary>
+    /// <summary>CSV の (行数, 最大列数)。列数は行ごとの列数の最大値=不揃いでも最も広い行に合わせる。
+    /// パース失敗(Ok=false)なら null=CSV 行を出さない。CsvParser は引用符未終端や上限超過でも
+    /// 例外ではなく打ち切った部分結果を Ok=false で返すため、そのまま数えると実データと異なる
+    /// 寸法を正しい情報として見せてしまう(CSV モード中は F2 セル編集の確定で Ok=false へ
+    /// 落ちてもモードは継続する=CsvController の onCommit は読み上げのみ)。</summary>
     private static (int Rows, int Cols)? MeasureCsv(CsvDocument? csv)
     {
-        if (csv is null)
+        if (csv is null || !csv.Ok)
             return null;
         int cols = 0;
         foreach (var row in csv.Rows)

@@ -104,6 +104,37 @@ public class DocumentInfoBuilderTests
         Assert.Equal(@"d:\repo", info.Directory);
     }
 
+    /// <summary>dotfile は GetFileNameWithoutExtension が空を返す(先頭ドットが拡張子区切り扱い)。
+    /// 「ファイル名: 」が空欄になる退行を防ぐため、ファイル名全体へフォールバックする。</summary>
+    [Fact]
+    public void Dotfile_falls_back_to_full_file_name()
+    {
+        var info = Build(@"d:\repo\.gitignore");
+        Assert.Equal(".gitignore", info.DisplayName);
+        Assert.Equal(FormatKind.Other, info.Format);
+        Assert.Equal(".gitignore", info.Extension);
+        Assert.Equal(@"d:\repo", info.Directory);
+    }
+
+    /// <summary>多重拡張子は最後の 1 つだけが拡張子(残りは名前側に残る)。</summary>
+    [Fact]
+    public void Multi_dot_name_keeps_all_but_last_extension()
+    {
+        var info = Build(@"d:\repo\archive.tar.gz");
+        Assert.Equal("archive.tar", info.DisplayName);
+        Assert.Equal(".gz", info.Extension);
+    }
+
+    /// <summary>ルート情報を持たない相対パスは Directory=null(Formatter が「-」に落とす)。
+    /// 空文字列のまま渡すと値なしの空欄描画になるため、null へ正規化する。</summary>
+    [Fact]
+    public void Relative_path_without_directory_reports_null_directory()
+    {
+        var info = Build("a.txt");
+        Assert.Equal("a", info.DisplayName);
+        Assert.Null(info.Directory);
+    }
+
     [Fact]
     public void FileMeta_propagates_when_provided()
     {
@@ -172,6 +203,19 @@ public class DocumentInfoBuilderTests
         var empty = new CsvDocument(Array.Empty<IReadOnlyList<CsvField>>(), ok: true);
         var info = Build(@"d:\x.csv", csv: empty);
         Assert.Equal((0, 0), info.Csv);
+    }
+
+    /// <summary>パース失敗(Ok=false)の CsvDocument は寸法を出さない。CsvParser は引用符未終端で
+    /// 打ち切った部分結果を返すため、数えると実データと異なる寸法を正しい情報として見せてしまう。
+    /// CSV モード中に F2 セル編集で Ok=false へ落ちてもモードは継続するため実際に到達する。</summary>
+    [Fact]
+    public void Csv_with_parse_failure_omits_dimensions()
+    {
+        // 1 行目は改行で確定済み・2 行目で引用符が閉じずに EOF → Ok=false だが Rows は 1 行残る。
+        var broken = CsvParser.Parse(Snap("a,b,c\r\nd,\"unterminated"));
+        Assert.False(broken.Ok); // 前提: パース失敗している
+        Assert.NotEmpty(broken.Rows); // 前提: 部分結果は残っている(=素通しなら寸法が出てしまう)
+        Assert.Null(Build(@"d:\x.csv", csv: broken).Csv);
     }
 
     [Fact]
