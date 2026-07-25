@@ -18,7 +18,7 @@ internal class UiaAnnouncer : IAnnouncer
     /// <summary>UIA-M-4: 連続 Raise の throttle 窓 (50 ms)。この窓内の 2 度目以降の Say は
     /// Raise を skip し、trailing timer に最終メッセージを bufferする。窓経過後に trailing が
     /// 発火して最後の 1 件だけを Raise する契約。既存 SR キューがフラッシュされる猶予として
-    /// 50 ms は NVDA/PC-Talker の実機観測から選んだ小さめの値 (design §PR-G (3) UIA-M-4)。</summary>
+    /// 50 ms は NVDA の実機観測から選んだ小さめの値 (design §PR-G (3) UIA-M-4)。</summary>
     internal static readonly TimeSpan ThrottleWindow = TimeSpan.FromMilliseconds(50);
 
     protected readonly Label _label;

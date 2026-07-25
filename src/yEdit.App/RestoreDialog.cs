@@ -6,7 +6,7 @@ namespace yEdit.App;
 
 /// <summary>
 /// 起動時のクラッシュ復元ダイアログ（モーダル・CheckedListBox）。前回の異常終了で残った
-/// バックアップを一覧し、復元するものを選ばせる。標準 Win32 コントロールなので PC-Talker/NVDA が
+/// バックアップを一覧し、復元するものを選ばせる。標準 Win32 コントロールなので NVDA が
 /// ネイティブに各項目を読む。
 /// </summary>
 public sealed class RestoreDialog : Form

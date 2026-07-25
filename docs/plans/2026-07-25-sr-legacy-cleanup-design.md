@@ -224,7 +224,82 @@ PR description に「校閲依頼」として明記する。
 は削除済み機構の墓標で、現状の説明としては不要。`PC-Talker` 文字列を含まないため §3.1 の
 編集ルールの対象外として今回は残す。次に `AppSettings.cs` を触る機会に削除を検討する。
 
-## 8. 挙動不変の担保(CLAUDE.md §2)
+## 8. 実施記録(2026-07-25 追記)
+
+### 8.1 調査漏れ 1 件と、その判断
+
+§4.3 の完了条件を `-i`(case-insensitive)付きで再実行したところ、策定時の調査
+(case-sensitive)では拾えなかった 1 箇所が判明した。
+
+`tests/yEdit.Core.Tests/Settings/SettingsStoreTests.cs:240`
+
+```csharp
+File.WriteAllText(path, "{\"PreferredScreenReader\":\"pctalker\",\"TabWidth\":8}");
+```
+
+策定時のパターン `PC-Talker|PcTalker|PCTalker|pctk|PCTK` は小文字連結の `pctalker` に
+マッチしない(`pctk` は部分列ではない)。**以後この種の棚卸しでは `rg -i` を既定とする。**
+
+**判断: このファイルは変更しない(§4.2 の OUT へ追加)。**
+
+当該テスト `Load_ignores_unknown_removed_keys` は、P7 で削除した `PreferredScreenReader`
+キーが**実ユーザーのディスク上の `settings.json` に残っていても起動失敗しない**ことを固定する
+前方互換テストである。`"pctalker"` は陳腐化した記述ではなく、**その実データを表す fixture**
+であり、書き換えるとテストが守っている実シナリオとの対応が崩れる。
+`:235` の説明コメントも、テストの存在理由を述べるうえで削除済みフィールド名の明示が必要。
+
+### 8.2 `AppSettings.cs:4` の評価を訂正
+
+§7「軽微」で「削除を検討する」とした
+`// P7 撤去: PreferredScreenReader フィールドは削除（…）。`
+は、§8.1 の前方互換テストと**対になる互換仕様の説明**であり、陳腐化した墓標ではない。
+「なぜフィールドが無いのか」「なぜ未知キーを無視してよいのか」を実装側に残す記述として
+機能している。**今後も削除しない**(§7 の当該記述を撤回する)。
+
+### 8.3 完了条件の実測結果
+
+`rg -i 'pc-?talker|pctk' --glob '!docs/plans/**'` の残存は次の 4 種のみ。すべて意図的。
+
+| 残存箇所 | 根拠 |
+|---|---|
+| `README.md:151` | §4.1: 開発者向け経緯説明として固有名を残す |
+| `docs/report-pctalker-speech/**` | 判断 1: 歴史記録として残す |
+| `tests/yEdit.Editor.Tests/RaiseUiaSelectionEventsTests.cs:7` | §4.2: 典拠スナップショットのファイルパス(§8 により不変) |
+| `tests/yEdit.Core.Tests/Settings/SettingsStoreTests.cs:235,240` | §8.1: 前方互換テストの fixture と説明 |
+
+### 8.4 §6 からの逸脱: `sr-regression.ps1` は実行せず構文検証に置換
+
+§6 は「構文が壊れていないことの確認として 1 回実行する(`word-sim.ps1` は BOMless UTF-8 のため
+`pwsh` を用いる)」としていたが、**本環境に `pwsh` が未インストール**だった
+(`Get-Command pwsh` → 未検出)。WinPS 5.1 で実行すると `word-sim.ps1` が
+`tools/README.md:59` の既知問題(BOMless UTF-8 の日本語コメントを Shift-JIS 誤解釈)で
+落ちるため、**本変更とは無関係な pre-existing FAIL** がノイズとして出る。
+
+§6 の目的は構文検証(UIA 応答は不変のため回帰目的ではない)であるため、
+ファイルのエンコーディング判定を迂回して構文のみを検証する方法に置き換えた。
+
+```powershell
+$src = [System.IO.File]::ReadAllText($full, [System.Text.UTF8Encoding]::new($false))
+[System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$null, [ref]$errors)
+```
+
+結果: `word-sim.ps1` / `sr-regression.ps1` ともに **parse errors = 0**。
+加えて `word-sim.ps1` の編集行(3 行目)が**非 ASCII 文字を 1 つも含まない**ことを確認し、
+当該編集が上記既知問題を新たに誘発しないことを担保した。
+
+**申し送り**: `tools/sr-regression.ps1` の機能実行(UIA クライアントとしての疎通確認)は
+未実施。実行にはフォアグラウンドのデスクトップセッションと、`word-sim.ps1` のために
+`pwsh` のインストールが必要。本ブランチは UIA 応答を変更しないため回帰目的では不要だが、
+次に a11y 関連の挙動変更を行うときまでに `pwsh` を導入しておくのが望ましい。
+
+### 8.5 ps1 のエンコーディング維持を確認
+
+| ファイル | 先頭 3 バイト | 判定 |
+|---|---|---|
+| `tools/word-sim.ps1` | `23 20 53`(`# S`) | BOMless UTF-8 維持(§4.1 のとおり) |
+| `tools/sr-regression.ps1` | `ef bb bf` | BOM 付き UTF-8 維持(ユーザーが直接起動する ps1) |
+
+## 9. 挙動不変の担保(CLAUDE.md §2)
 
 本作業の変更は以下に限られ、コンパイル結果に影響しない。
 

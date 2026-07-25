@@ -54,12 +54,12 @@ powershell -File tools\sr-regression.ps1
 
 ### `word-sim.ps1`(子スクリプト)
 
-同じく `--uia` 起動先に対し、NVDA の TextUnit.Word 呼び出しパターン(Expand / Move span / MoveEndpointByUnit)を 6 ケース再現。PC-Talker は TextUnit.Word を呼ばない(P0 trace で確認済)ため、これは主に NVDA 用の回帰。
+同じく `--uia` 起動先に対し、NVDA の TextUnit.Word 呼び出しパターン(Expand / Move span / MoveEndpointByUnit)を 6 ケース再現。これは NVDA 用の回帰。
 
 **注意**: このスクリプトは日本語コメントが BOMless UTF-8 で入っており、WinPS 5.1 の日本語ロケール環境ではパーサが Shift-JIS 誤解釈してエラーになる。`sr-regression.ps1` は `pwsh` があれば優先使用してこれを回避する。単体実行するときも `pwsh` 推奨。
 
 ### 判定の限界(重要)
 
-このスイートは「UIA プロバイダが SR 呼び出しに**正しく応答するか**」までしか検証しない。「SR が**実際に発声するか**」(PC-Talker の空行問題のような発声側事象)は検出できない。**PASS でも L5 の人手確認は省略しない**。
+このスイートは「UIA プロバイダが SR 呼び出しに**正しく応答するか**」までしか検証しない。「SR が**実際に発声するか**」(発声側で起きる事象)は検出できない。**PASS でも L5 の人手確認は省略しない**。
 
 典拠: `docs/plans/2026-07-13-test-strategy-phase3-sr-perf-design.md` §1・`docs/plans/2026-07-16-test-strategy-phase3.md`。

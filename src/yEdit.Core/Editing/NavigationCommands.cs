@@ -99,7 +99,7 @@ public static class NavigationCommands
     /// <param name="wrapColumns">折り返し桁数(半角換算)。&lt;=0 で折り返し無し=<see cref="MoveHomeSmart(TextSnapshot, int)"/> と同じ論理行挙動。</param>
     /// <param name="metrics">文字幅計測(<see cref="LineLayout.Wrap"/> と同じ流儀)。</param>
     /// <remarks>
-    /// <para>折り返し ON 時: キャレットが属する視覚セグメントの先頭を返す=NVDA/PC-Talker/ナレーターが
+    /// <para>折り返し ON 時: キャレットが属する視覚セグメントの先頭を返す=NVDA/ナレーターが
     /// 視覚行の先頭から読むように App 層キー入力を統一する(P7 チェックリスト N-3=論理行頭に飛んで
     /// 視覚行の先頭から読まれない問題の解消)。</para>
     /// <list type="bullet">

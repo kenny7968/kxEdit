@@ -1379,9 +1379,9 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         NativeMethods.ShowCaret(Handle);
 
         // P5 Task 9: フォーカス獲得時の UIA イベント明示発火。
-        // PC-Talker は 2 秒ポーリングで選択を追う既知挙動(HANDOFF §13.6)があるため、
         // フォーカス獲得時に AutomationFocusChangedEvent + TextSelectionChangedEvent を
-        // 明示発火して SR に「今ここにフォーカスがある」と伝える(v1 ScintillaHost 踏襲)。
+        // 明示発火して SR に「今ここにフォーカスがある」と伝える(UIA 標準の good practice・
+        // v1 ScintillaHost 踏襲)。SR のフォーカス追跡はこれに依存する(`cd8b526` で実証)。
         _uia.RaiseFocusChanged();
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();

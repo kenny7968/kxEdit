@@ -6,7 +6,7 @@ namespace yEdit.Accessibility;
 
 /// <summary>
 /// UIA テキスト範囲(v2)。[Start, End) のオフセット対で表現。
-/// v1 の Move スパン保持ロジックを踏襲(PC-Talker の文字歩きが動く条件)。
+/// v1 の Move スパン保持ロジックを踏襲(文字歩きが動く条件)。
 /// テキストアクセスは全て <see cref="_owner"/>.Host の v2 メンバ経由。
 /// </summary>
 internal sealed class TextRangeProviderV2 : ITextRangeProvider
@@ -205,7 +205,7 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
             }
         _start = _end = pos;
 
-        // v1 実装の Move スパン保持を踏襲(PC-Talker の文字歩き=Expand(Char)→Move(Char,1)→GetText で
+        // v1 実装の Move スパン保持を踏襲(文字歩き=Expand(Char)→Move(Char,1)→GetText で
         // 2 文字目以降が空にならないように、非退化だった元の状態を復元)
         if (!wasDegenerate)
             ExpandToEnclosingUnit(unit);
@@ -282,9 +282,12 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
     public void RemoveFromSelection() { /* SupportedTextSelection.Single のため無効 */
     }
 
+    /// <summary>未実装(申し送り)。v1 挙動を踏襲してスクロールしない。UIA 対応 SR が
+    /// レビューカーソルで画面外テキストを読むときの実害を実機で確認してから実装可否を判断する。
+    /// 典拠: docs/plans/2026-07-25-sr-legacy-cleanup-design.md §7 案 C。</summary>
     public void ScrollIntoView(
         bool alignToTop
-    ) { /* PC-Talker はテキスト歩きで読めるため省略(v1 挙動踏襲) */
+    ) { /* 未実装(申し送り): 上記 summary 参照 */
     }
 
     public IRawElementProviderSimple[] GetChildren() =>
