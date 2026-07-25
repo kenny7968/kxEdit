@@ -245,18 +245,29 @@ public sealed partial class EditorControl
     /// hscroll を除いた描画高さ(px)。可視判定の単一定義。
     /// </summary>
     /// <remarks>
-    /// 可視判定を行う経路(<see cref="BringCaretIntoView"/> /
-    /// <see cref="ScrollCharRangeIntoView"/>)は必ずここを通す。個別にコピーすると
+    /// 可視判定・可視域計算を行う経路(<see cref="BringCaretIntoView"/> /
+    /// <see cref="ScrollCharRangeIntoView"/> / <see cref="ComputeCaretPoint"/> /
+    /// <see cref="GetVisibleCharRange"/> / <c>OnPaint</c>)は必ずここを通す。個別にコピーすると
     /// 「どこまで見えているか」の定義が経路ごとに食い違い、hscroll の下に隠れた行を
-    /// 可視と誤判定する(Task 7 レビュー I-1 で実際に起きた不具合)。
+    /// 可視と誤判定する(Task 7 レビュー I-1 で実際に起きた不具合。そのとき一致させる相手が
+    /// <see cref="ComputeCaretPoint"/> だった=根拠になっている当人もここを通す)。
     /// </remarks>
     private int PaintHeightPx =>
         Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
 
     /// <summary>
-    /// 可視論理行数(折り返し ON では視覚行数を論理行数と見なす近似=
-    /// <see cref="BringCaretIntoView"/> 以来の流儀)。可視判定の単一定義。
+    /// <b>完全に可視な</b>論理行数(floor)。部分的に見えている最終行は含まない。
+    /// 折り返し ON では視覚行数を論理行数と見なす近似(<see cref="BringCaretIntoView"/> 以来の流儀)。
     /// </summary>
+    /// <remarks>
+    /// スクロール判断(<see cref="BringCaretIntoView"/> / <see cref="ScrollCharRangeIntoView"/>)は
+    /// 保守的に floor を使う=対象行が完全に見える位置へ寄せる。
+    /// 一方、可視域の<b>報告</b>(<see cref="GetVisibleCharRange"/>)は <c>ViewportLayout.Build</c>
+    /// = ceil(<c>y &lt; heightPx</c> の間だけ積む=最終行が途中で切れていても含む)を使うため
+    /// <b>1 行多くなり得る</b>。どちらも意図した挙動で、報告側は実描画準拠=
+    /// <see cref="ComputeCaretPoint"/> の可視性判定・したがって <c>GetBoundingRectangles</c> と一致する。
+    /// 実測例: <c>LineHeightPx = 20</c> / <c>ClientSize.Height = 110</c> のとき本値 5 に対し報告は 6 行。
+    /// </remarks>
     private int VisibleRowCount => Math.Max(1, PaintHeightPx / Math.Max(1, _metrics.LineHeightPx));
 
     /// <summary>
@@ -277,7 +288,7 @@ public sealed partial class EditorControl
     /// (キャレットが右端ぎりぎりで隠れるのを防ぐ)。paintWidth が半角 1 文字幅より狭い極小
     /// ウィンドウでは、この 1 サイクル余分にスクロールしても届かず ScrollX がクランプで
     /// 頭打ちになるが、そのケースは表示自体が破綻しているので実害なし(S-3 レビュー)。
-    /// 垂直方向の可視行数は <c>paintHeight = ClientSize.Height - hscroll.Height</c> ベースで
+    /// 垂直方向の可視行数は <see cref="VisibleRowCount"/>(=<see cref="PaintHeightPx"/> ベース)で
     /// 計算する(<see cref="ComputeCaretPoint"/> の可視性判定と一致させる=Task 7 レビュー I-1)。
     /// 一致していないと、最下論理行にキャレットが来たとき「垂直はまだ可視」と誤判断され
     /// hscroll の下に張り付いたまま TopLine が動かないケースが発生する。
@@ -394,6 +405,29 @@ public sealed partial class EditorControl
     /// 水平方向と「対象行が可視域に入りきらない」端数の処理は
     /// <see cref="EnsureVisibleCharRange"/> に委ねる(caret / anchor の保存・復元も同メソッドが行う)。
     ///
+    /// <b>無変化呼び出しの早期リターン(挙動不変の最適化)。</b>
+    /// <see cref="EnsureVisibleCharRange"/> は finally で <see cref="PositionCaret"/> を呼び、
+    /// その先の <see cref="ComputeCaretPoint"/> が対象論理行を丸ごと <c>GetText</c> して
+    /// <c>LineLayout.Wrap</c> し直す。<c>Wrap</c> は非 ASCII で code point ごとに GDI
+    /// <c>MeasureText</c> を呼ぶため、折り返し ON の CJK 長行では 1 回で秒オーダーになる
+    /// (レビュー実測: 20,000 文字の CJK 単一論理行・<c>WrapColumns=80</c> で 1,584 ms)。
+    /// SR はレビューカーソルを 1 単位動かすたびにここを呼び、しかも Adapter は
+    /// fire-and-forget なので、投入速度 &gt; 消化速度になると invoke キューが単調増加する。
+    ///
+    /// 等価性の根拠(スクロールが起きないときに <see cref="EnsureVisibleCharRange"/> を
+    /// 呼ばなくてよい理由):
+    /// <list type="bullet">
+    /// <item><c>alreadyVisible</c> のとき <see cref="BringCaretIntoView"/> の垂直分岐は
+    /// <c>logicalLine &lt; _topLine</c> / <c>&gt;= _topLine + visibleRows</c> の両方とも不発。</item>
+    /// <item><see cref="BringCaretIntoView"/> の水平分岐は <c>_wrapColumns == 0 &amp;&amp; _hscroll.Visible</c>
+    /// が条件。早期リターンの条件 <c>_wrapColumns &gt; 0 || !_hscroll.Visible</c> はその否定。</item>
+    /// <item><see cref="TopLine"/> / <see cref="ScrollX"/> を動かしていないので
+    /// <see cref="PositionCaret"/> の再呼び出しも不要(OS 側キャレットは既に正しい位置にある)。</item>
+    /// </list>
+    /// 観測可能な挙動差が無いためこの分岐に直接のテストは無い。両方の脚は既存テストが押さえている
+    /// =<c>ScrollCharRangeIntoView_KeepsTopLine_WhenTargetAlreadyVisible</c>(早期リターン側)と
+    /// <c>ScrollCharRangeIntoView_ScrollsHorizontally_WhenTargetOffScreenRight</c>(通過側)。
+    ///
     /// 可視性: 呼び出し元は <see cref="UiaTextHostAdapter"/> の 1 箇所のみ(App 層参照なし)。
     /// 命名は <c>IUiaTextHost.SetSelection</c> ↔ <see cref="SetSelectionCharRange"/> と同じ
     /// 「<c>Char</c> を挟む」規則に揃えている。
@@ -407,9 +441,16 @@ public sealed partial class EditorControl
         int line = snap.GetLineIndexOfChar(target);
 
         int visibleRows = VisibleRowCount;
+        bool alreadyVisible = line >= _topLine && line < _topLine + visibleRows;
+        // 垂直に動かす必要が無く、水平も動く余地が無いなら完全 no-op で抜ける。
+        // EnsureVisibleCharRange は finally で PositionCaret() を呼び、その先の
+        // ComputeCaretPoint が対象論理行を丸ごと再折り返しするため、無変化呼び出しでも
+        // 折り返し ON の長行では秒オーダーのコストになる(SR は歩くたびに呼ぶ)。
+        if (alreadyVisible && (_wrapColumns > 0 || !_hscroll.Visible))
+            return;
 
         // 既に可視なら垂直は動かさない(視界の揺れ防止)
-        if (line < _topLine || line >= _topLine + visibleRows)
+        if (!alreadyVisible)
             TopLine = alignToTop ? line : line - visibleRows + 1;
 
         // 水平 + 保険。caret / anchor は EnsureVisibleCharRange が try/finally で復元する

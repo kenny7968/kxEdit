@@ -1,5 +1,5 @@
 // UiaTextHostAdapter.cs
-// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 22 メンバ + Uia 系 12 field の
+// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 全メンバ + Uia 系 12 field の
 // 所有権を bit-perfect 移設した adapter。§C.4 例外 (OnHandle*/On*Changed の Uia.cs 帰属)
 // を解消し、EditorControl 本体側の OnHandle*/On*Changed から Adapter へ通知する形に統一する。
 //
@@ -717,8 +717,17 @@ internal class UiaTextHostAdapter : IUiaTextHost
     (int Start, int End) IUiaTextHost.GetVisibleRange()
     {
         // UI スレッド専用状態 (_topLine / _metrics / ClientSize) を要する読み取りのため、
-        // GetBoundingRectangles / TryFindVisualSegment と同形で同期 Invoke する
+        // TryFindVisualSegment と同形で同期 Invoke する
         // (書き込み系の ScrollRangeIntoView が BeginInvoke なのは戻り値が不要だから)。
+        //
+        // GetBoundingRectangles は「InvokeRequired → IsHandleCreated」の順で catch も持たないが、
+        // こちらは Handle ガードを先に置く: Handle が無ければ ClientSize が無意味なので
+        // そもそも計算に入る意味がない (GetBoundingRectangles 側の順序は既存踏襲=本作業の射程外)。
+        //
+        // IsDisposed を見ないのは、Dispose が Handle を落とすので !IsHandleCreated が拾い、
+        // Invoke 実行中に破棄される race は下の ObjectDisposedException catch が拾うため
+        // (書き込み系が IsDisposed を見るのは BeginInvoke 自体が投げるのを防ぐ目的で、
+        //  同期 Invoke + catch のこちらには不要)。
         if (!_host.IsHandleCreated)
             return (0, 0); // UI スレッドが束縛されていない
         if (_host.InvokeRequired)

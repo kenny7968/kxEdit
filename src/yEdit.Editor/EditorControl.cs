@@ -1554,7 +1554,7 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         int xInSeg = PixelMapper.OffsetToPx(segSpan, localOffset, _metrics);
 
         int lineHeight = _metrics.LineHeightPx;
-        int paintHeight = Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
+        int paintHeight = PaintHeightPx;
 
         // TopLine の先頭視覚行を Y=0 として、対象視覚行までの積み上げ視覚行数を算出。
         // paintHeight を超えたら以降の Wrap は無駄なので早期退避(Task 10 I-1)。

@@ -99,16 +99,18 @@ public sealed partial class EditorControl
     int IUiaTextHost.OffsetFromScreenPoint(double x, double y) =>
         ((IUiaTextHost)_uia).OffsetFromScreenPoint(x, y);
 
-    nint IUiaTextHost.Handle => ((IUiaTextHost)_uia).Handle;
-    bool IUiaTextHost.HasFocus => ((IUiaTextHost)_uia).HasFocus;
-    int IUiaTextHost.ControlTypeId => ((IUiaTextHost)_uia).ControlTypeId;
-    string IUiaTextHost.Name => ((IUiaTextHost)_uia).Name;
-    string IUiaTextHost.AutomationId => ((IUiaTextHost)_uia).AutomationId;
+    // === スクロール / 可視域 (interface と adapter の節順に合わせる: 座標 → スクロール → 属性) ===
 
     void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop) =>
         ((IUiaTextHost)_uia).ScrollRangeIntoView(start, end, alignToTop);
 
     (int Start, int End) IUiaTextHost.GetVisibleRange() => ((IUiaTextHost)_uia).GetVisibleRange();
+
+    nint IUiaTextHost.Handle => ((IUiaTextHost)_uia).Handle;
+    bool IUiaTextHost.HasFocus => ((IUiaTextHost)_uia).HasFocus;
+    int IUiaTextHost.ControlTypeId => ((IUiaTextHost)_uia).ControlTypeId;
+    string IUiaTextHost.Name => ((IUiaTextHost)_uia).Name;
+    string IUiaTextHost.AutomationId => ((IUiaTextHost)_uia).AutomationId;
 
     void IUiaTextHost.SetFocus() => ((IUiaTextHost)_uia).SetFocus();
 }

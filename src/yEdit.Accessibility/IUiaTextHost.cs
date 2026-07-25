@@ -7,9 +7,14 @@ namespace yEdit.Accessibility;
 /// 旧 v1(P7 で撤去)は全文 string 経路だったのに対し、v2 は
 /// 位置歩き + 範囲テキスト + 座標 API を持つ。
 ///
-/// スレッド: RPC スレッドから呼ばれ得る。実装側は不変スナップショット参照 +
-/// キャッシュ値で応答すること(<see cref="SetSelection"/> / <see cref="SetFocus"/> /
-/// <see cref="ScrollRangeIntoView"/> のみ UI マーシャリング)。
+/// スレッド: RPC スレッドから呼ばれ得る。実装側は次の 3 分類で応答すること。
+/// <list type="bullet">
+/// <item>書き込み系(<see cref="SetSelection"/> / <see cref="SetFocus"/> /
+/// <see cref="ScrollRangeIntoView"/>)は <c>BeginInvoke</c>(戻り値が不要=RPC スレッドを待たせない)。</item>
+/// <item>UI スレッド専用状態を要する読み取り(<see cref="GetBoundingRectangles"/> /
+/// <see cref="OffsetFromScreenPoint"/> / <see cref="GetVisibleRange"/>)は同期 <c>Invoke</c>。</item>
+/// <item>それ以外は不変スナップショット参照 + キャッシュ値で応答(マーシャリングしない)。</item>
+/// </list>
 /// </summary>
 public interface IUiaTextHost
 {

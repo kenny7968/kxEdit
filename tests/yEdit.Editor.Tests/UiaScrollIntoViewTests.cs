@@ -351,7 +351,11 @@ public class UiaScrollIntoViewTests
             {
                 c.SetSource(TextBuffer.FromString(text));
                 c.TopLine = 0;
-                int off = LineStartOffset(text, 25);
+                // 非縮退範囲を渡す: 2 段の forwarder(EditorControl.Uia.cs → adapter)が
+                // start / end を取り違えていないことを seam 全体で固定する。
+                // 縮退範囲 (off, off) だと adapter を (end, end, ...) に変異させても差が出ない。
+                int start = LineStartOffset(text, 25);
+                int end = LineStartOffset(text, 29);
                 IUiaTextHost host = c;
 
                 Exception? ex = null;
@@ -359,7 +363,7 @@ public class UiaScrollIntoViewTests
                 {
                     try
                     {
-                        host.ScrollRangeIntoView(off, off, alignToTop: true);
+                        host.ScrollRangeIntoView(start, end, alignToTop: true);
                     }
                     catch (Exception e)
                     {
@@ -380,7 +384,7 @@ public class UiaScrollIntoViewTests
                     "cross-thread host call must complete without deadlock"
                 );
                 Assert.Null(ex);
-                Assert.Equal(25, c.TopLine);
+                Assert.Equal(25, c.TopLine); // end (=行 29) を見ていたら 29 になる
             }
             finally
             {

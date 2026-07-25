@@ -75,6 +75,18 @@ public class UiaVisibleRangeTests
                     $"End が行頭を指している (end={end0})"
                 );
                 Assert.True(text[end1 - 1] != '\n', $"End が行頭を指している (end={end1})");
+
+                // 可視域は「viewport 全体」であって 1 行ではない = Task 2 の存在意義そのもの。
+                // last を rows[0] にする実装(=先頭行だけ返す)をここで殺す。壊れると
+                // 「NVDA に見えている範囲が 1 行だけ」という形で出て、設計書 §5.3 の
+                // L5 リスク判定(通し読みが縮んだ原因)を誤らせる。
+                // VisibleRows は floor・実装は ceil なので実装の方が広い = 不等号で比較する
+                // (厳密等値にすると端数高さで脆くなる)。
+                int lastFloorLine = 10 + VisibleRows(c) - 1;
+                Assert.True(
+                    end1 >= LineStartOffset(text, lastFloorLine),
+                    $"可視域が最終可視行に届いていない (end={end1}, lastFloorLine={lastFloorLine})"
+                );
             }
         });
 
@@ -142,6 +154,22 @@ public class UiaVisibleRangeTests
             {
                 Assert.Equal((0, 0), c.GetVisibleCharRange());
             }
+        });
+
+    [Fact]
+    public void GetVisibleCharRange_ReturnsZero_WhenPaintHeightIsZero() =>
+        Sta.Run(() =>
+        {
+            // rows.Count == 0 ガードの被覆。高さ 0 なら PaintHeightPx == 0 →
+            // ViewportLayout.Build は heightPx <= 0 で空リストを返す。ガードが無いと
+            // rows[0] が ArgumentOutOfRangeException を投げる。
+            //
+            // この経路は Adapter の同期 Invoke の中で走る。Adapter が catch しているのは
+            // ObjectDisposedException / InvalidOperationException だけなので、
+            // ArgumentOutOfRangeException は RPC スレッド経由で UIA の COM 境界へ抜ける。
+            using var c = new EditorControl { Size = new System.Drawing.Size(400, 0) };
+            c.SetSource(TextBuffer.FromString("a\nb\nc"));
+            Assert.Equal((0, 0), c.GetVisibleCharRange());
         });
 
     [Fact]

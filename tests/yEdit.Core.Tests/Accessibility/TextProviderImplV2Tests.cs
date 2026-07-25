@@ -58,10 +58,11 @@ public class TextProviderImplV2Tests
 
         public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
 
-        // Task 2: GetVisibleRanges の委譲検証用。既定値は他テストに影響しない中立値
-        // (= TextLength と同じ全体範囲)。委譲テストは必ず非既定値を明示的に設定する
-        // =旧実装 (0, TextLength) と区別できる形にするため。
-        public (int Start, int End) VisibleRange { get; set; } = (0, 100);
+        // Task 2: GetVisibleRanges の委譲検証用。既定値は「文書全体ではない」値にしておく
+        // (TextLength == 100 なので (0, 100) は文字どおり全体可視=旧実装と同値になり、
+        //  将来「既定のまま呼ぶテスト」が書かれたときに旧挙動と区別できなくなる)。
+        // 委譲テストは引き続き非既定値を明示的に設定する。
+        public (int Start, int End) VisibleRange { get; set; } = (3, 42);
 
         public (int Start, int End) GetVisibleRange() => VisibleRange;
     }
