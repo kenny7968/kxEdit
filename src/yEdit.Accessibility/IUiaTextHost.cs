@@ -80,6 +80,11 @@ public interface IUiaTextHost
     /// 対象にする(UIA <c>ITextRangeProvider.ScrollIntoView</c> の意味論)。
     /// 選択・キャレットは変更しない(装飾スクロール)。
     /// 対象が既に可視なら何もしない=SR がテキストを歩くたびに画面が飛ぶのを防ぐ。
+    ///
+    /// <b>範囲外 / stale な offset は実装側で clamp すること</b>(<see cref="GetTextRange"/> と同じ流儀)。
+    /// 呼び出し元の <c>TextRangeProviderV2</c> は ctor でしか clamp しないため、SR が範囲を掴んだまま
+    /// 文書が縮むと stale な offset がそのまま届く。ここで clamp しないと行番号解決が
+    /// 例外を投げ、UI スレッドへマーシャリング済みなら未処理例外=アプリ落ちになる。
     /// </summary>
     void ScrollRangeIntoView(int start, int end, bool alignToTop);
 

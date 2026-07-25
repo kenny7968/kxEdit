@@ -68,7 +68,7 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
     // 初期化は ctor で _caretCtrl / _font / _metrics 等が揃った後に new する (host=this を渡すため)。
     private readonly ImeController _imeCtrl;
 
-    // Phase 3 (Task 3d) で抽出した UIA テキストホスト adapter。IUiaTextHost 22 メンバ実装 +
+    // Phase 3 (Task 3d) で抽出した UIA テキストホスト adapter。IUiaTextHost 全メンバ実装 +
     // Uia 系 12 field (_bufferSnapshot / _bounds / _boundsSync / _clientToScreenX/Y /
     // _lastLineSegs / _hwnd / _provider / _testHook_LastGetObjectServed /
     // _uiaTextChangedCount / _uiaSelectionChangedCount / _uiaFocusChangedCount) の所有権をここに移譲。
@@ -191,11 +191,11 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
             insertConfirmedText: InsertConfirmedText
         );
 
-        // Task 3d: UiaTextHostAdapter (IUiaTextHost 22 メンバ実装 + Uia 系 12 field 所有)。
+        // Task 3d: UiaTextHostAdapter (IUiaTextHost 全メンバ実装 + Uia 系 12 field 所有)。
         // this を UI thread 側 host として渡す (RectangleToScreen / PointToScreen / InvokeRequired /
         // BeginInvoke / IsHandleCreated / IsDisposed / Handle / ComputeCaretPointForUia /
         // OffsetFromClientPoint / Metrics / WrapColumns / HasFocusCached / SetSelectionCharRange /
-        // Focus を Adapter から呼ぶ)。
+        // ScrollCharRangeIntoView / Focus を Adapter から呼ぶ)。
         _uia = new UiaTextHostAdapter(this, _caretCtrl);
     }
 

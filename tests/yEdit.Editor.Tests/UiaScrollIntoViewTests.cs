@@ -21,6 +21,17 @@ public class UiaScrollIntoViewTests
 {
     private const int LineCount = 30;
 
+    /// <summary>
+    /// 既定のフィクスチャ。Handle だけ生成し <c>Show()</c> はしない=垂直スクロールの検証用。
+    /// </summary>
+    /// <remarks>
+    /// 本ファイルにはフィクスチャが 2 系統ある。使い分けは次のとおり:
+    /// - <b>本メソッド</b>: 垂直方向だけを見るテスト(hscroll は出ない=短い行しか置かないため)。
+    /// - <b>各テスト内で組む <c>f.Show()</c> + <c>f.ClientSize</c> 強制版</b>:
+    ///   hscroll の表示や実レイアウトの確定が要るテストだけ。unshown だと ClientSize の
+    ///   子への伝播が不完全で hscroll が出ず、水平方向の脚を駆動できない。
+    /// Task 2(GetVisibleRanges)のテストもこの基準で選ぶこと。
+    /// </remarks>
     private static (Form f, EditorControl c) MakeControl(string text, int width, int height)
     {
         var f = new Form { Size = new System.Drawing.Size(width, height) };
@@ -117,8 +128,10 @@ public class UiaScrollIntoViewTests
             {
                 c.TopLine = 0;
                 int expected = 25 - VisibleRows(c) + 1;
-                int off = LineStartOffset(text, 25);
+                // 期待値が 0 に潰れると ClampTopLine の 0 クランプと区別できず無意味になる。
+                Assert.True(expected > 0, $"fixture broken: expected={expected} (must be > 0)");
 
+                int off = LineStartOffset(text, 25);
                 c.ScrollCharRangeIntoView(off, off, alignToTop: false);
 
                 Assert.Equal(expected, c.TopLine);
@@ -136,16 +149,20 @@ public class UiaScrollIntoViewTests
             using (f)
             using (c)
             {
-                int start = LineStartOffset(text, 1);
+                // 非既定位置 TopLine=5 から検証する(後半は no-change 判定のため、既定 0 だと
+                // 「動かなかった」と「そもそも 0 だった」を区別できない = CLAUDE.md §4 の教訓)。
+                // start(行 6)が可視域 [5, 5+VisibleRows) に入っている必要がある。
+                Assert.True(VisibleRows(c) > 1, $"fixture broken: VisibleRows={VisibleRows(c)}");
+                int start = LineStartOffset(text, 6);
                 int end = LineStartOffset(text, 25);
 
-                c.TopLine = 0;
+                c.TopLine = 5;
                 c.ScrollCharRangeIntoView(start, end, alignToTop: false);
                 Assert.Equal(25 - VisibleRows(c) + 1, c.TopLine); // end を見た
 
-                c.TopLine = 0;
+                c.TopLine = 5;
                 c.ScrollCharRangeIntoView(start, end, alignToTop: true);
-                Assert.Equal(0, c.TopLine); // start(行 1)は既に可視 → 動かない
+                Assert.Equal(5, c.TopLine); // start(行 6)は既に可視 → 動かない
             }
         });
 
@@ -285,6 +302,148 @@ public class UiaScrollIntoViewTests
                 c.Dispose();
                 f.Close();
             }
+        });
+
+    [Fact]
+    public void ScrollCharRangeIntoView_ClampsOutOfRangeOffsets_WithoutThrowing() =>
+        Sta.Run(() =>
+        {
+            // Important-3: TextRangeProviderV2 は ctor でしか clamp しないため、SR が範囲を掴んだまま
+            // 文書が縮むと stale な offset が届く。SnapAndClamp を外すと GetLineIndexOfChar が
+            // ArgumentOutOfRangeException を投げ、BeginInvoke コールバック内=UI スレッドの
+            // 未処理例外(アプリ落ち)になる。現実装が塞いでいることをここで固定する。
+            var text = MakeText();
+            var (f, c) = MakeControl(text, width: 400, height: 120);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                Assert.Null(
+                    Record.Exception(() =>
+                        c.ScrollCharRangeIntoView(int.MaxValue, int.MaxValue, alignToTop: true)
+                    )
+                );
+                // 末尾側へ落ちる(文書末尾行が上端に来る)
+                Assert.Equal(LineCount - 1, c.TopLine);
+
+                Assert.Null(
+                    Record.Exception(() => c.ScrollCharRangeIntoView(-5, -5, alignToTop: false))
+                );
+                // 先頭側へ落ちる(行 0 は下端整列しても ClampTopLine で 0)
+                Assert.Equal(0, c.TopLine);
+            }
+        });
+
+    [Fact]
+    public void ScrollRangeIntoView_MarshalsToUiThread_AndScrolls() =>
+        Sta.Run(() =>
+        {
+            // Important-1: RPC スレッド越境の実経路(BeginInvoke 分岐 + 自己再入ラムダの終端 +
+            // 実スクロール)を一度に被覆する。UI スレッド上から呼ぶ既存テストは
+            // InvokeRequired == false のためこの分岐に一度も入っていなかった。
+            // 型は EditorControlUiaHostTests.Host_LineStartOf_WithWrap_CalledFromNonUiThread_MarshalsSafely に倣う。
+            var text = MakeText();
+            using var f = new Form { Size = new System.Drawing.Size(400, 120) };
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            f.Show(); // Handle 生成 + レイアウト確定(InvokeRequired を true にするため必須)
+            try
+            {
+                c.SetSource(TextBuffer.FromString(text));
+                c.TopLine = 0;
+                int off = LineStartOffset(text, 25);
+                IUiaTextHost host = c;
+
+                Exception? ex = null;
+                var task = System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        host.ScrollRangeIntoView(off, off, alignToTop: true);
+                    }
+                    catch (Exception e)
+                    {
+                        ex = e;
+                    }
+                });
+
+                // UI スレッドで DoEvents ループを回して BeginInvoke を進行させる。
+                // 書き込み系は fire-and-forget なので task 完了 = UI 側完了ではない。
+                // TopLine が動くまで(またはタイムアウトまで)回す。
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while ((!task.IsCompleted || c.TopLine == 0) && sw.ElapsedMilliseconds < 3000)
+                    Application.DoEvents();
+                task.Wait(1000);
+
+                Assert.True(
+                    task.IsCompleted,
+                    "cross-thread host call must complete without deadlock"
+                );
+                Assert.Null(ex);
+                Assert.Equal(25, c.TopLine);
+            }
+            finally
+            {
+                c.Dispose();
+                f.Close();
+            }
+        });
+
+    [Fact]
+    public void ScrollRangeIntoView_NoOp_WhenHandleNotCreated_FromNonUiThread() =>
+        Sta.Run(() =>
+        {
+            // Important-1: Control.InvokeRequired は Handle 未生成 / 破棄後に false を返す。
+            // adapter の `IsDisposed || !IsHandleCreated` ガードが無いと、RPC スレッドが
+            // そのまま ClientSize / _hscroll.Visible / PositionCaret に触れる
+            // = CLAUDE.md §2 の a11y 鉄則違反。TopLine が動かないことでガードを固定する。
+            //
+            // フィクスチャ注記: SetSource 自体が Handle を生成する(実測)。そのため
+            // 「Handle 未生成 かつ バッファあり」は SetSource 後に Handle だけ落として作る。
+            // バッファが無いと ScrollCharRangeIntoView が _buffer null で即 return し、
+            // ガードを外しても観測差が出ない=変異を殺せないため、この手順が必要。
+            // Control.DestroyHandle は protected なので reflection で呼ぶ
+            // (CaretScrollTests が OnKeyDown を reflection で叩くのと同じ流儀)。
+            var text = MakeText();
+            using var c = new EditorControl { Size = new System.Drawing.Size(400, 120) };
+            c.SetSource(TextBuffer.FromString(text));
+            c.TopLine = 7; // 非既定位置(既定 0 だと no-change を既定値と区別できない)
+
+            typeof(Control)
+                .GetMethod(
+                    "DestroyHandle",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                )!
+                .Invoke(c, null);
+
+            Assert.False(c.IsHandleCreated, "fixture broken: Handle が生成されたまま");
+            Assert.False(c.IsDisposed, "fixture broken: Dispose 済み=別の disjunct を見てしまう");
+            Assert.Equal(7, c.TopLine); // Handle 破棄で TopLine が動いていないこと
+            int off = LineStartOffset(text, 25);
+            IUiaTextHost host = c;
+
+            Exception? ex = null;
+            var task = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    host.ScrollRangeIntoView(off, off, alignToTop: true);
+                }
+                catch (Exception e)
+                {
+                    ex = e;
+                }
+            });
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (!task.IsCompleted && sw.ElapsedMilliseconds < 3000)
+                Application.DoEvents();
+            task.Wait(1000);
+
+            Assert.True(task.IsCompleted, "cross-thread host call must complete without deadlock");
+            Assert.Null(ex);
+            Assert.Equal(7, c.TopLine); // ガードで弾かれ UI スレッド専有状態に触れていない
         });
 
     [Fact]

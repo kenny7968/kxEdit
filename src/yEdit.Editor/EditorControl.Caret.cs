@@ -242,6 +242,24 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
+    /// hscroll を除いた描画高さ(px)。可視判定の単一定義。
+    /// </summary>
+    /// <remarks>
+    /// 可視判定を行う経路(<see cref="BringCaretIntoView"/> /
+    /// <see cref="ScrollCharRangeIntoView"/>)は必ずここを通す。個別にコピーすると
+    /// 「どこまで見えているか」の定義が経路ごとに食い違い、hscroll の下に隠れた行を
+    /// 可視と誤判定する(Task 7 レビュー I-1 で実際に起きた不具合)。
+    /// </remarks>
+    private int PaintHeightPx =>
+        Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
+
+    /// <summary>
+    /// 可視論理行数(折り返し ON では視覚行数を論理行数と見なす近似=
+    /// <see cref="BringCaretIntoView"/> 以来の流儀)。可視判定の単一定義。
+    /// </summary>
+    private int VisibleRowCount => Math.Max(1, PaintHeightPx / Math.Max(1, _metrics.LineHeightPx));
+
+    /// <summary>
     /// 現在のキャレット位置(<c>_caretCtrl.Caret</c>)を可視領域内に収める(P3 Task 7)。
     /// - 垂直: キャレットの論理行が [TopLine, TopLine + visibleRows) の外なら <see cref="TopLine"/> を調整。
     /// - 水平: 折り返し OFF かつ <see cref="_hscroll"/> 表示中で、キャレット X が
@@ -272,8 +290,7 @@ public sealed partial class EditorControl
 
         int logicalLine = snap.GetLineIndexOfChar(_caretCtrl.Caret);
         // I-1 対応: paintHeight ベースで可視行数を算出(ComputeCaretPoint の可視性判定と一致)。
-        int paintHeight = Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
-        int visibleRows = Math.Max(1, paintHeight / Math.Max(1, _metrics.LineHeightPx));
+        int visibleRows = VisibleRowCount;
 
         // 垂直: caret 論理行が [TopLine, TopLine+visibleRows) に入るように TopLine 調整
         if (logicalLine < _topLine)
@@ -370,14 +387,18 @@ public sealed partial class EditorControl
     /// 呼び出し元 (<c>TextRangeProviderV2</c>) が範囲を作った後にバッファが縮むと stale に
     /// なり得るため、ここで <see cref="SnapAndClamp"/> を通す(二重防御)。
     ///
-    /// <c>visibleRows</c> を論理行数として扱うのは折り返し ON では近似だが、
-    /// <see cref="BringCaretIntoView"/> と同じ流儀を意図的に踏襲している。
-    /// ここだけ別計算にすると 2 つの可視判定が食い違う。
+    /// 可視行数は <see cref="VisibleRowCount"/>(可視判定の単一定義)を使う。折り返し ON では
+    /// 近似になるが、<see cref="BringCaretIntoView"/> と同じ値を見ることを構造で担保する
+    /// =ここだけ別計算にすると 2 つの可視判定が食い違う。
     ///
     /// 水平方向と「対象行が可視域に入りきらない」端数の処理は
     /// <see cref="EnsureVisibleCharRange"/> に委ねる(caret / anchor の保存・復元も同メソッドが行う)。
+    ///
+    /// 可視性: 呼び出し元は <see cref="UiaTextHostAdapter"/> の 1 箇所のみ(App 層参照なし)。
+    /// 命名は <c>IUiaTextHost.SetSelection</c> ↔ <see cref="SetSelectionCharRange"/> と同じ
+    /// 「<c>Char</c> を挟む」規則に揃えている。
     /// </remarks>
-    public void ScrollCharRangeIntoView(int start, int end, bool alignToTop)
+    internal void ScrollCharRangeIntoView(int start, int end, bool alignToTop)
     {
         if (_buffer is null)
             return;
@@ -385,8 +406,7 @@ public sealed partial class EditorControl
         int target = SnapAndClamp(alignToTop ? start : end);
         int line = snap.GetLineIndexOfChar(target);
 
-        int paintHeight = Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
-        int visibleRows = Math.Max(1, paintHeight / Math.Max(1, _metrics.LineHeightPx));
+        int visibleRows = VisibleRowCount;
 
         // 既に可視なら垂直は動かさない(視界の揺れ防止)
         if (line < _topLine || line >= _topLine + visibleRows)
