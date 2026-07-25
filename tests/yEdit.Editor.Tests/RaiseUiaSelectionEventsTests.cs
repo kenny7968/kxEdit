@@ -3,7 +3,7 @@ namespace yEdit.Editor.Tests;
 /// <summary>
 /// RaiseUiaSelectionEvents プロパティ受け口の契約テスト(既定 true・読み書き可能)。
 /// CSV モード(CsvController)が誤読み抑止に使う温存機能。
-/// EmptyLineNavigationTests から移設(PC-Talker サポート廃止=CaretEnteredEmptyLine 削除に伴い
+/// EmptyLineNavigationTests から移設(個別 SR 対応廃止=CaretEnteredEmptyLine 削除に伴い
 /// docs/plans/2026-07-13-pctalker-removal-design.md)。
 /// </summary>
 public class RaiseUiaSelectionEventsTests

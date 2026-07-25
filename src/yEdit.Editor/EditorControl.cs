@@ -1378,10 +1378,14 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         PositionCaret();
         NativeMethods.ShowCaret(Handle);
 
-        // P5 Task 9: フォーカス獲得時の UIA イベント明示発火。
-        // PC-Talker は 2 秒ポーリングで選択を追う既知挙動(HANDOFF §13.6)があるため、
-        // フォーカス獲得時に AutomationFocusChangedEvent + TextSelectionChangedEvent を
-        // 明示発火して SR に「今ここにフォーカスがある」と伝える(v1 ScintillaHost 踏襲)。
+        // P5 Task 9: フォーカス獲得時の UIA イベント明示発火(初出 `e24494a`・v1 ScintillaHost 踏襲)。
+        // AutomationFocusChangedEvent は UIA プロバイダの標準作法。TextSelectionChangedEvent は
+        // フォーカス時にキャレット位置を SR へ再提示するための意図的な追加発火で、CSV モードは
+        // RaiseUiaSelectionEvents=false で抑止する。契約は EditorControlUiaFocusEventTests で固定。
+        // 発火は WM_GETOBJECT(UiaRootObjectId)で実際に served になったプロバイダからのみ行う
+        // (UiaTextHostAdapter.RaiseUia の _provider null ガード)。提供していないプロバイダから
+        // 発火すると UIA→MSAA ブリッジのエコーが SR のフォーカス追跡を乗っ取る事故が v1 で
+        // 起きている(`d1a57af`)ため、この前提を崩さないこと。
         _uia.RaiseFocusChanged();
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();

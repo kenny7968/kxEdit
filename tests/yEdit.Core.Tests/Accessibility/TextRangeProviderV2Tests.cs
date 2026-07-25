@@ -153,7 +153,7 @@ public class TextRangeProviderV2Tests
     [Fact]
     public void Move_CharForward_PreservesUnitSpan()
     {
-        // PC-Talker の文字歩き挙動: Expand(Char) → Move(Char, 1) → GetText を繰り返し
+        // 文字歩き挙動: Expand(Char) → Move(Char, 1) → GetText を繰り返し
         var p = MakeProvider("abc");
         var r = new TextRangeProviderV2(p, 0, 0);
         r.ExpandToEnclosingUnit(TextUnit.Character); // "a"

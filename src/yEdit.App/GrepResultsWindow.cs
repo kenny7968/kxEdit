@@ -5,7 +5,7 @@ namespace yEdit.App;
 
 /// <summary>
 /// grep 結果のモードレス一覧（ListBox・1 行 1 ヒット）。標準 Win32 ListBox なので
-/// PC-Talker/NVDA が各項目をネイティブに読む（我々の UIA 層は不要）。Enter/ダブルクリックで
+/// NVDA が各項目をネイティブに読む（我々の UIA 層は不要）。Enter/ダブルクリックで
 /// 選択ヒットを生成時に受け取ったコールバック(<see cref="GrepResultsCallbacks.OnActivate"/>)で
 /// 通知し、上位（MainForm）がジャンプする。
 /// </summary>

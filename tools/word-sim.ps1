@@ -1,6 +1,6 @@
 # Simulate SR word-navigation call patterns against EditorSmoke (--uia).
 # Verifies the provider's TextUnit.Word behavior (Expand/Move span/GetSelection/MoveEndpointByUnit).
-# Background: PC-Talker never calls TextUnit.Word (proven by P0 trace); NVDA relies on it.
+# Background: NVDA relies on TextUnit.Word for word navigation.
 # P6 Task 17: v1 用 ProbeExe 分岐を撤去。EditorSmokeExe(v2)固定。
 param(
     [string]$Exe = ""

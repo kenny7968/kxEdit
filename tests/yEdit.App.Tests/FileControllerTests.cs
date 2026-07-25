@@ -619,7 +619,7 @@ public class FileControllerTests
             string path = tmp.File("a.txt");
             File2.WriteAllText(path, "abc"); // ASCII=どのコードページでも同一内容(判定を決定的にする)
             var doc = host.File.TryOpenOrActivate(path)!;
-            // PC-Talker 廃止後も温存の UIA 配線: LoadInto が RaiseUiaSelectionEvents を確実に戻すことを固定
+            // 個別 SR 対応廃止後も温存の UIA 配線: LoadInto が RaiseUiaSelectionEvents を確実に戻すことを固定
             doc.Editor.RaiseUiaSelectionEvents = false;
             host.Dialogs.EncodingCodePage = 932;
 
