@@ -18,6 +18,7 @@ public sealed partial class MainForm : Form
     private readonly BackupCoordinator _backup; // コンストラクタで生成
     private readonly CsvController _csv; // コンストラクタで生成
     private readonly KinsokuFormatController _kinsoku; // コンストラクタで生成(FormatWithKinsoku を委譲)
+    private readonly DocumentInfoController _documentInfo; // コンストラクタで生成([ファイル]>文書情報)
     private bool _restoreOffered; // 起動時の復元提案を一度だけ行う
     private readonly ToolStripStatusLabel _posLabel = new("行 1, 桁 1");
     private readonly ToolStripStatusLabel _encLabel = new("UTF-8");
@@ -176,6 +177,7 @@ public sealed partial class MainForm : Form
             cellPicker: new WinFormsCellPicker()
         );
         _kinsoku = new KinsokuFormatController(_docs, _announcer);
+        _documentInfo = new DocumentInfoController(_docs);
         _docs.BeforeActiveChange = () => _csv.AbortEdit(); // タブ切替直前に F2 編集を中断（焦点の引き戻し防止）
         // P6 で編集エンジンが自作 EditorControl (v2 UIA 単一経路) に統一されたため、
         // CSVモード中に Editor がフォーカスを得た瞬間にシンクへ強制退避していた仕組みは撤去。
@@ -576,6 +578,8 @@ public sealed partial class MainForm : Form
             Keys.Control | Keys.Shift | Keys.S
         );
         file.DropDownItems.Add(new ToolStripSeparator());
+        // ショートカットは割り当てない(Alt→F→I で到達・設計 2026-07-25 §0)。
+        AddMenuItem(file, "文書情報(&I)", (_, _) => _documentInfo.Show(this));
         AddMenuItem(file, "タブを閉じる(&W)", (_, _) => CloseActiveTab(), Keys.Control | Keys.W);
         AddMenuItem(file, "終了(&X)", (_, _) => Close());
         RebuildRecentMenu();
