@@ -321,6 +321,88 @@ CLAUDE.md §3 の前倒し例外(後続タスクが依存する新しい抽象�
 `BeginInvoke` のキューが膨張しないか。
 なお同じ性質は既存の `SetSelection` / `SetFocus` にもあり、本作業で新規に生じるものではない。
 
-## 8. 申し送り(follow-up)
+## 8. 実施記録(2026-07-25 追記)
+
+### 8.1 実装時の精密化: タスク分割を Task 1a / 1b に割った
+
+§7 の Task 1(= §5.1 の `ScrollIntoView` 経路)を **1a(配線)/ 1b(スクロール本体)** に分けた。
+
+C# では新しいインターフェースメンバを足した瞬間に全実装クラスがコンパイルエラーになるため、
+そのまま TDD を回すと RED が「コンパイルエラー」になり、テストの検出力を確認できない。
+配線を先に通してから assertion failure で RED を作る形にした。
+
+### 8.2 実装時の精密化: インターフェース名と `EditorControl` 実処理名を分ける
+
+§5.1 のコードスニペットは `EditorControl.ScrollRangeIntoView` と書いているが、
+**実装は `EditorControl.ScrollCharRangeIntoView`** になった。
+
+`EditorControl` は `IUiaTextHost` を explicit interface implementation で実装し、実体は
+`UiaTextHostAdapter` へ委譲される。Adapter は逆に `_host`(= `EditorControl`)の
+public / internal メソッドを呼び返す。両者を同名にすると `_host.Xxx(...)` の解決先が
+読み手に分からなくなる(コンパイルは通るが、explicit 実装は具象型経由では見えないため
+public 側に解決される)。既存コードもこの規則を守っている
+(`IUiaTextHost.SetSelection` ↔ `EditorControl.SetSelectionCharRange`)。
+
+**採用した規則**(前倒しコード品質レビュー Minor-1 で確定):
+
+| インターフェース | `EditorControl` 側 |
+|---|---|
+| `IUiaTextHost.SetSelection` | `SetSelectionCharRange`(既存) |
+| `IUiaTextHost.ScrollRangeIntoView` | `ScrollCharRangeIntoView` |
+| `IUiaTextHost.GetVisibleRange` | `GetVisibleCharRange` |
+
+§5.2 は当初インターフェース側を `GetVisibleCharRange` としていたが、上記の衝突を避けるため
+**`GetVisibleRange` へ改めた**。`ForUia` 接尾辞(既存 `ComputeCaretPointForUia` の流儀)は
+新規メンバには使わない。既存の実際の規則は「衝突するときだけ改名する」であり
+(`OffsetFromClientPoint` は衝突しないので無印)、`Char` を挟む方が既存 `SetSelectionCharRange`
+と揃う。`ComputeCaretPointForUia` は改名しない(スコープ外)。
+
+`EditorControl` 側の実処理メソッドは **`internal`** とする。呼び出し元は adapter 1 箇所のみで
+App 層からの参照がなく、同 seam の他メンバ(`ComputeCaretPointForUia` / `HasFocusCached` /
+`OffsetFromClientPoint`)も `internal` のため。
+
+### 8.3 §6.5 のミューテーション表の誤記
+
+§6.5 は「Adapter の `IsDisposed || !IsHandleCreated` ガードを除去 → 破棄済み no-throw が赤」
+としていたが、**策定時点では事実と異なっていた**。
+
+`ScrollRangeIntoView_NoThrow_WhenHandleNotCreated` / `_AfterDispose` は UI スレッド上で走るため
+`InvokeRequired == false` となり、**`BeginInvoke` 分岐に一度も入らない**。実測でガードを削除しても
+全件 PASS(SURVIVED)だった。
+
+さらに重要な事実として、**`Control.InvokeRequired` は Handle 未生成 / 破棄後に false を返す**。
+つまりこのガードは「`BeginInvoke` の `InvalidOperationException` 防止」だけでなく、
+**RPC スレッドが `ClientSize` / `_hscroll.Visible` / `PositionCaret()` を直接触るのを防ぐ**という
+CLAUDE.md §2 a11y 鉄則そのものを守っている。二重に load-bearing でありながら両方とも未被覆だった。
+
+前倒しコード品質レビュー Important-1 の対応として、`Task.Run` から呼んで UI スレッドで
+`Application.DoEvents()` を回すクロススレッドテストを追加し、ガード除去で
+`TopLine` が 7 → 25 に化ける(= RPC スレッドが UI 状態を書き換えた証拠)ことを確認した。
+前例は `tests/yEdit.Editor.Tests/EditorControlUiaHostTests.cs` の
+`Host_LineStartOf_WithWrap_CalledFromNonUiThread_MarshalsSafely`。
+
+なお `SetSource` 自体が Handle を生成するため、「Handle 未生成 + バッファあり」の状態は
+`Control.DestroyHandle` を reflection で呼んで作っている(`CaretScrollTests` が `OnKeyDown` を
+reflection で叩くのと同じ流儀)。
+
+### 8.4 前倒しコード品質レビューで判明した構造的な弱さ
+
+§5.1 の `<remarks>` は「`visibleRows` をここだけ別計算にすると 2 つの可視判定が食い違う」を
+採用理由に挙げていたが、**その一致は当初コピペでしか担保されていなかった**。
+`PaintHeightPx` / `VisibleRowCount` を private accessor に括り出し、構造で担保する形に改めた。
+
+同じ式は `EditorControl.Paint.cs`(描画経路)にも存在する。§5.2 の `GetVisibleCharRange` は
+「描画と同じ定義を使う」ことが要点のため、描画側も同 accessor に寄せる。
+
+### 8.5 却下した指摘
+
+- **テスト stub 用の `abstract class UiaTextHostStubBase` 導入**(前倒し品質レビュー提案)。
+  レビュアー自身が「3 回目以降が見えたら」と条件付きで挙げており、本作業は 2 回目。YAGNI により却下。
+  3 回目のメンバ追加が視野に入った時点で再検討する。
+- **`+ 1` 脱落のミューテーションが SURVIVED する件**(仕様レビュー Nit-4)。
+  後段の `BringCaretIntoView` が同じ式で下端整列を再計算して補正するため観測不能。
+  挙動は正しく欠陥ではないため修正しない。
+
+## 9. 申し送り(follow-up)
 
 実装後に追記する。
