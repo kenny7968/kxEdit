@@ -361,15 +361,38 @@ public sealed partial class EditorControl
     /// 選択・キャレットは変更しない。<c>SetSource</c> 前は no-op。
     /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.1。
     /// </summary>
+    /// <remarks>
+    /// **既に可視なら垂直方向は動かさない。** UIA 仕様の文言だけを読むと「常に整列させる」
+    /// 実装もあり得るが、SR がテキストを歩くたびに画面が飛び、晴眼・弱視ユーザーに実害が出る
+    /// (CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
+    ///
+    /// <paramref name="start"/> / <paramref name="end"/> は UIA 範囲の端点だが、
+    /// 呼び出し元 (<c>TextRangeProviderV2</c>) が範囲を作った後にバッファが縮むと stale に
+    /// なり得るため、ここで <see cref="SnapAndClamp"/> を通す(二重防御)。
+    ///
+    /// <c>visibleRows</c> を論理行数として扱うのは折り返し ON では近似だが、
+    /// <see cref="BringCaretIntoView"/> と同じ流儀を意図的に踏襲している。
+    /// ここだけ別計算にすると 2 つの可視判定が食い違う。
+    ///
+    /// 水平方向と「対象行が可視域に入りきらない」端数の処理は
+    /// <see cref="EnsureVisibleCharRange"/> に委ねる(caret / anchor の保存・復元も同メソッドが行う)。
+    /// </remarks>
     public void ScrollCharRangeIntoView(int start, int end, bool alignToTop)
     {
         if (_buffer is null)
             return;
-        // Task 1b で実装する(この時点では配線のみ)。
-        // 下の discard は 0 warning 維持のための足場: 本体が空だと guard の `return;` が
-        // S3626 (redundant jump) で落ちる。Task 1b で本体を書くときに削除する。
-        _ = start;
-        _ = end;
-        _ = alignToTop;
+        var snap = _buffer.Current;
+        int target = SnapAndClamp(alignToTop ? start : end);
+        int line = snap.GetLineIndexOfChar(target);
+
+        int paintHeight = Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
+        int visibleRows = Math.Max(1, paintHeight / Math.Max(1, _metrics.LineHeightPx));
+
+        // 既に可視なら垂直は動かさない(視界の揺れ防止)
+        if (line < _topLine || line >= _topLine + visibleRows)
+            TopLine = alignToTop ? line : line - visibleRows + 1;
+
+        // 水平 + 保険。caret / anchor は EnsureVisibleCharRange が try/finally で復元する
+        EnsureVisibleCharRange(target, 0);
     }
 }
