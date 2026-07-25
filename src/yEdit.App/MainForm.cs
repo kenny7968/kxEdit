@@ -18,6 +18,7 @@ public sealed partial class MainForm : Form
     private readonly BackupCoordinator _backup; // コンストラクタで生成
     private readonly CsvController _csv; // コンストラクタで生成
     private readonly KinsokuFormatController _kinsoku; // コンストラクタで生成(FormatWithKinsoku を委譲)
+    private readonly DocumentInfoController _documentInfo; // コンストラクタで生成([ファイル]>文書情報)
     private bool _restoreOffered; // 起動時の復元提案を一度だけ行う
     private readonly ToolStripStatusLabel _posLabel = new("行 1, 桁 1");
     private readonly ToolStripStatusLabel _encLabel = new("UTF-8");
@@ -176,6 +177,7 @@ public sealed partial class MainForm : Form
             cellPicker: new WinFormsCellPicker()
         );
         _kinsoku = new KinsokuFormatController(_docs, _announcer);
+        _documentInfo = new DocumentInfoController(_docs);
         _docs.BeforeActiveChange = () => _csv.AbortEdit(); // タブ切替直前に F2 編集を中断（焦点の引き戻し防止）
         // P6 で編集エンジンが自作 EditorControl (v2 UIA 単一経路) に統一されたため、
         // CSVモード中に Editor がフォーカスを得た瞬間にシンクへ強制退避していた仕組みは撤去。
@@ -576,6 +578,8 @@ public sealed partial class MainForm : Form
             Keys.Control | Keys.Shift | Keys.S
         );
         file.DropDownItems.Add(new ToolStripSeparator());
+        // ショートカットは割り当てない(Alt→F→I で到達・設計 2026-07-25 §0)。
+        AddMenuItem(file, "文書情報(&I)", (_, _) => _documentInfo.Show(this));
         AddMenuItem(file, "タブを閉じる(&W)", (_, _) => CloseActiveTab(), Keys.Control | Keys.W);
         AddMenuItem(file, "終了(&X)", (_, _) => Close());
         RebuildRecentMenu();
@@ -845,7 +849,9 @@ public sealed partial class MainForm : Form
 
     // ==================== 読み上げ照会（SR 利便・M6） ====================
 
-    /// <summary>現在位置（行/総行/桁/文字数/選択数）を読み上げる。</summary>
+    /// <summary>現在位置（行/総行/桁）を読み上げる。
+    /// 2026-07-25: 文字数と選択数は本メソッドから削除し、詳細は [ファイル]&gt;文書情報 へ集約した
+    /// （位置照会=編集位置の指標・文書情報=文書全体の内容量の指標という棲み分け。設計 2026-07-25 §0）。</summary>
     private void AnnouncePosition()
     {
         var ed = _docs.Active?.Editor;
@@ -854,25 +860,7 @@ public sealed partial class MainForm : Form
         int line = ed.CurrentLine + 1;
         int totalLines = ed.LineCount;
         int column = ed.GetColumn(ed.CurrentPosition) + 1;
-        var (s, e) = ed.GetSelectionCharRange();
-        // 2026-07-25: 論理文字数（CRLF=1・サロゲート=2）に統一。CharLength は UTF-16 code unit 数=
-        // CRLF を 2 として数えるため、CRLF pair 数を差し引く（数え方は Task 1 の CountCrlfPairs
-        // 単体テストで保証済み）。CountCrlfPairs は現状 GetText で範囲 string を materialize する
-        // ため SnapshotText.Length 経路と同コスト。位置照会ホットキー押下時のみの低頻度パスなので
-        // 許容する（設計 §CountCrlfPairs 実装コメント参照）。
-        var snap = ed.CurrentBuffer.Current;
-        int totalLogical = snap.CharLength - snap.CountCrlfPairs(0, snap.CharLength);
-        int selLogical = (e - s) - snap.CountCrlfPairs(s, e);
-        _announcer.Say(
-            PositionFormatter.Format(
-                line,
-                totalLines,
-                column,
-                totalLogical,
-                selLogical,
-                ed.Overtype
-            )
-        );
+        _announcer.Say(PositionFormatter.Format(line, totalLines, column, ed.Overtype));
     }
 
     /// <summary>行番号を入力して移動する。</summary>

@@ -875,22 +875,25 @@ public class MainFormSmokeTests
             Assert.Contains("バックアップを 1 件復元しました", announce.Text);
         });
 
-    // ===== AnnouncePosition: 論理文字数（CRLF=1・サロゲート=2）に統一（2026-07-25 CRLF atomic Task 3）=====
+    // ===== AnnouncePosition: 位置のみを読む(2026-07-25 文書情報ダイアログ導入) =====
 
-    // 「abc\r\ndef」は UTF-16 code unit 数=8、CRLF pair=1、論理文字数=7。
-    // AnnouncePosition の文字数を SnapshotText.Length に戻す変異が発生すると
-    // 「文字数 8」となり本 assertion が赤化する（CRLF=1 の統一が壊れた瞬間を pin）。
+    // 設計 2026-07-25 §0: 位置照会からは「文字数 M」も「選択 K 文字」も削除し、
+    // 文字数の詳細は [ファイル]>文書情報 へ集約する。ここでは
+    // (a) 行/全/桁 が読まれること (b) 文字数・選択が読まれないこと の両側を固定する。
+    // 「選択あり」「非先頭行」という非既定状態から検証を始める(既定状態だと選択削除の
+    // 変異が vacuous に通ってしまうため)。
     [Fact]
-    public void AnnouncePosition_CrlfDocument_ReadsLogicalCharCount() =>
+    public void AnnouncePosition_ReadsLineTotalAndColumnOnly() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
 
             var doc = form.FileForTest.DocsForTest[0];
-            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef"); // CharLength=8・CRLF=1・論理=7
+            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef"); // 2 行・CharLength=8
+            doc.Editor.SelectCharRange(0, 8); // 全選択(旧仕様なら「選択 7 文字」が付いた)
 
-            // AnnouncePosition は private=リフレクションで呼ぶ（Ctrl+Alt+P/メニューの薄いラッパ）。
+            // AnnouncePosition は private=リフレクションで呼ぶ(Ctrl+Alt+P/メニューの薄いラッパ)。
             var method = typeof(MainForm).GetMethod(
                 "AnnouncePosition",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
@@ -899,68 +902,78 @@ public class MainFormSmokeTests
             method!.Invoke(form, null);
 
             var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
-            // 論理文字数=7 が読まれる（UTF-16 code unit 8 でも、CRLF 2 換算 8 でもない）。
-            Assert.Contains("文字数 7", announce.Text);
+            Assert.Equal("行 2 / 全 2、桁 4", announce.Text);
         });
 
-    // 選択範囲が CRLF をまたぐ場合の選択文字数も論理換算される pin。
-    // 「abc\r\ndef」全選択（start=0, end=8）→ 論理選択長 = 8 - 1 = 7 文字。
+    // ===== [ファイル] > 文書情報(設計 2026-07-25) =====
+
+    /// <summary>メニュー項目テキストのアクセラレータ("...(&amp;I)" の I)。持たなければ null。</summary>
+    private static char? AccelOf(string text)
+    {
+        int i = text.IndexOf('&');
+        return i >= 0 && i + 1 < text.Length ? char.ToUpperInvariant(text[i + 1]) : null;
+    }
+
+    // 文書情報は [タブを閉じる] の直上に置く(設計 §0)。位置が動くとキーボード操作の
+    // 手順記憶(Alt→F→↑↑ 等)が崩れるため、隣接関係を機械固定する。
     [Fact]
-    public void AnnouncePosition_SelectionAcrossCrlf_ReadsLogicalSelectionLength() =>
+    public void File_menu_contains_document_info_directly_above_close_tab() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
 
-            var doc = form.FileForTest.DocsForTest[0];
-            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef");
-            doc.Editor.SelectCharRange(0, 8); // 全選択（CRLF を含む）
+            var file = form.MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
+                .First(mi => mi.Text!.StartsWith("ファイル", StringComparison.Ordinal));
+            var items = file.DropDownItems.OfType<ToolStripMenuItem>().ToList();
+            int docInfoIdx = items.FindIndex(mi => mi.Text == "文書情報(&I)");
+            int closeTabIdx = items.FindIndex(mi => mi.Text == "タブを閉じる(&W)");
 
-            var method = typeof(MainForm).GetMethod(
-                "AnnouncePosition",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-            );
-            method!.Invoke(form, null);
-
-            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
-            // 選択長も論理換算=7 文字（CRLF 2 換算 8 でもない）。
-            Assert.Contains("選択 7 文字", announce.Text);
+            Assert.True(docInfoIdx >= 0, "文書情報 メニューが見つからない");
+            Assert.True(closeTabIdx >= 0, "タブを閉じる メニューが見つからない");
+            Assert.Equal(closeTabIdx - 1, docInfoIdx); // 直上
         });
 
-    // LF-only（改行なし+改行 LF のみ）= CRLF pair 0 = 論理文字数 == CharLength。
-    // 「abc\ndef」は UTF-16 code unit 数=7、CRLF pair=0、論理文字数=7。
-    // 「常に -1 する」等の誤った変異（例：無条件で CharLength-1 を返す）を殺す pin。
+    // アクセラレータ &I が [ファイル] 内で衝突しないこと(衝突すると Alt→F→I で選べず巡回になる)。
     [Fact]
-    public void AnnouncePosition_LfDocument_ReadsCharLengthAsIs() =>
+    public void File_menu_accelerators_are_unique() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
 
-            var doc = form.FileForTest.DocsForTest[0];
-            doc.Editor.ReplaceCharRange(0, 0, "abc\ndef"); // CharLength=7・CRLF=0・論理=7
+            var file = form.MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
+                .First(mi => mi.Text!.StartsWith("ファイル", StringComparison.Ordinal));
+            var keys = file
+                .DropDownItems.OfType<ToolStripMenuItem>()
+                .Select(mi => AccelOf(mi.Text!))
+                .Where(c => c is not null)
+                .Select(c => c!.Value)
+                .ToList();
 
-            var method = typeof(MainForm).GetMethod(
-                "AnnouncePosition",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-            );
-            Assert.NotNull(method);
-            method!.Invoke(form, null);
-
-            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
-            // CRLF pair 0=論理=CharLength=7 がそのまま読まれる（-1 変異等で 6 になったら赤化）。
-            Assert.Contains("文字数 7", announce.Text);
+            Assert.Contains('I', keys); // 文書情報(&I) が居る
+            Assert.Equal(keys.Count, keys.Distinct().Count()); // 重複なし
         });
 
     [Fact]
     public void MainForm_ControllerFields_AreReadOnly()
     {
-        // Task 1a: null! 代入経路を止め、6 Controller を readonly 化する契約を固定。
+        // Task 1a: null! 代入経路を止め、Controller 群を readonly 化する契約を固定。
         // 実装後は宣言時か ctor 初期化リストで確定代入 = readonly が復活する。
+        // 2026-07-25: 文書情報ダイアログの _documentInfo を 7 個目として追加。
         var type = typeof(MainForm);
         var flags =
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-        string[] controllerFields = { "_file", "_search", "_grep", "_backup", "_csv", "_kinsoku" };
+        string[] controllerFields =
+        {
+            "_file",
+            "_search",
+            "_grep",
+            "_backup",
+            "_csv",
+            "_kinsoku",
+            "_documentInfo",
+        };
         foreach (var name in controllerFields)
         {
             var field = type.GetField(name, flags);
