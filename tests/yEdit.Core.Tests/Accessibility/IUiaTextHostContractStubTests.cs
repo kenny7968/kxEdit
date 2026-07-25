@@ -48,6 +48,8 @@ public class IUiaTextHostContractStubTests
         public string AutomationId => "";
 
         public void SetFocus() { }
+
+        public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
     }
 
     [Fact]

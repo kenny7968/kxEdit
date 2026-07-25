@@ -55,6 +55,8 @@ public class TextProviderImplV2Tests
         public string AutomationId => "editor";
 
         public void SetFocus() { }
+
+        public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
     }
 
     [Fact]

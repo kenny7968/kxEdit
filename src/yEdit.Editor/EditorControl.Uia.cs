@@ -55,7 +55,7 @@ public sealed partial class EditorControl
         EditorControl c
     ) => c._uia.UiaEventCounts;
 
-    // ==================== IUiaTextHost 22 メンバ (全て Adapter への薄い委譲) ====================
+    // ==================== IUiaTextHost 23 メンバ (全て Adapter への薄い委譲) ====================
     // EditorControl 側で explicit interface implementation として残置する理由:
     //   - 既存 Editor.Tests (EditorControlUiaHostTests 305 行 / EditorControlBoundingRectsTests /
     //     EditorControlOffsetFromPointTests / EditorControlCacheTests 等) が `(IUiaTextHost)ctrl`
@@ -104,6 +104,9 @@ public sealed partial class EditorControl
     int IUiaTextHost.ControlTypeId => ((IUiaTextHost)_uia).ControlTypeId;
     string IUiaTextHost.Name => ((IUiaTextHost)_uia).Name;
     string IUiaTextHost.AutomationId => ((IUiaTextHost)_uia).AutomationId;
+
+    void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop) =>
+        ((IUiaTextHost)_uia).ScrollRangeIntoView(start, end, alignToTop);
 
     void IUiaTextHost.SetFocus() => ((IUiaTextHost)_uia).SetFocus();
 }

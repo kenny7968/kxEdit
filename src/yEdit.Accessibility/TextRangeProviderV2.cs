@@ -282,13 +282,14 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
     public void RemoveFromSelection() { /* SupportedTextSelection.Single のため無効 */
     }
 
-    /// <summary>未実装(申し送り)。v1 挙動を踏襲してスクロールしない。UIA 対応 SR が
-    /// レビューカーソルで画面外テキストを読むときの実害を実機で確認してから実装可否を判断する。
-    /// 典拠: docs/plans/2026-07-25-sr-legacy-cleanup-design.md §7 案 C。</summary>
-    public void ScrollIntoView(
-        bool alignToTop
-    ) { /* 未実装(申し送り): 上記 summary 参照 */
-    }
+    /// <summary>
+    /// 範囲を可視域へスクロールする。<paramref name="alignToTop"/> が true なら範囲先頭を、
+    /// false なら範囲末尾を対象にする。判断(可視判定・整列・クランプ)は host 側に集約し、
+    /// ここは純委譲に留める。選択・キャレットは変更しない。
+    /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.1。
+    /// </summary>
+    public void ScrollIntoView(bool alignToTop) =>
+        _owner.Host.ScrollRangeIntoView(_start, _end, alignToTop);
 
     public IRawElementProviderSimple[] GetChildren() =>
         System.Array.Empty<IRawElementProviderSimple>();

@@ -354,4 +354,22 @@ public sealed partial class EditorControl
             PositionCaret();
         }
     }
+
+    /// <summary>
+    /// UIA <c>ITextRangeProvider.ScrollIntoView</c> の実処理(UI スレッド専用)。
+    /// <paramref name="alignToTop"/> が true なら範囲先頭を、false なら範囲末尾を可視域へ入れる。
+    /// 選択・キャレットは変更しない。<c>SetSource</c> 前は no-op。
+    /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.1。
+    /// </summary>
+    public void ScrollCharRangeIntoView(int start, int end, bool alignToTop)
+    {
+        if (_buffer is null)
+            return;
+        // Task 1b で実装する(この時点では配線のみ)。
+        // 下の discard は 0 warning 維持のための足場: 本体が空だと guard の `return;` が
+        // S3626 (redundant jump) で落ちる。Task 1b で本体を書くときに削除する。
+        _ = start;
+        _ = end;
+        _ = alignToTop;
+    }
 }

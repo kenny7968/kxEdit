@@ -105,14 +105,25 @@ public class TextRangeProviderV2Tests
         public string AutomationId => "editor";
 
         public void SetFocus() { }
+
+        // Task 1a: ScrollIntoView の委譲検証用に引数を記録する。
+        public (int Start, int End, bool AlignToTop)? LastScroll { get; private set; }
+
+        public void ScrollRangeIntoView(int start, int end, bool alignToTop) =>
+            LastScroll = (start, end, alignToTop);
     }
 
-    private static TextProviderImplV2 MakeProvider(string text)
+    private static (InMemoryHost Host, TextProviderImplV2 Provider) MakeProviderWithHost(
+        string text
+    )
     {
         var host = new InMemoryHost(text);
         var root = new TextControlProviderV2(host);
-        return new TextProviderImplV2(host, root);
+        return (host, new TextProviderImplV2(host, root));
     }
+
+    private static TextProviderImplV2 MakeProvider(string text) =>
+        MakeProviderWithHost(text).Provider;
 
     [Fact]
     public void ExpandToEnclosingUnit_Character_ReturnsOneCodePoint()
@@ -460,6 +471,8 @@ public class TextRangeProviderV2Tests
         public string AutomationId => "editor";
 
         public void SetFocus() { }
+
+        public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
     }
 
     [Fact]
@@ -482,5 +495,40 @@ public class TextRangeProviderV2Tests
             $"Expected MaxRequestedLength <= {ChunkSize} but got {host.MaxRequestedLength}"
         );
         Assert.True(host.GetTextRangeCalls > 0);
+    }
+
+    [Fact]
+    public void ScrollIntoView_DelegatesRangeAndAlignToTop_ToHost()
+    {
+        var (host, p) = MakeProviderWithHost("line0\nline1\nline2\nline3");
+        var r = new TextRangeProviderV2(p, 6, 11); // "line1"
+
+        r.ScrollIntoView(alignToTop: true);
+
+        Assert.Equal((6, 11, true), host.LastScroll);
+    }
+
+    [Fact]
+    public void ScrollIntoView_PassesAlignToTopFalse_Unchanged()
+    {
+        var (host, p) = MakeProviderWithHost("line0\nline1\nline2\nline3");
+        var r = new TextRangeProviderV2(p, 6, 11);
+
+        r.ScrollIntoView(alignToTop: false);
+
+        Assert.Equal((6, 11, false), host.LastScroll);
+    }
+
+    [Fact]
+    public void ScrollIntoView_DelegatesDegenerateRange_ToHost()
+    {
+        // 縮退範囲 (start == end) でも委譲される。SR のレビューカーソルは
+        // 縮退範囲を歩くため、ここが落ちると実機で効かない。
+        var (host, p) = MakeProviderWithHost("line0\nline1");
+        var r = new TextRangeProviderV2(p, 3, 3);
+
+        r.ScrollIntoView(alignToTop: true);
+
+        Assert.Equal((3, 3, true), host.LastScroll);
     }
 }

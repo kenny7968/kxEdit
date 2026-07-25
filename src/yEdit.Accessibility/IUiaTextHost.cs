@@ -8,7 +8,8 @@ namespace yEdit.Accessibility;
 /// 位置歩き + 範囲テキスト + 座標 API を持つ。
 ///
 /// スレッド: RPC スレッドから呼ばれ得る。実装側は不変スナップショット参照 +
-/// キャッシュ値で応答すること(<see cref="SetSelection"/> / <see cref="SetFocus"/> のみ UI マーシャリング)。
+/// キャッシュ値で応答すること(<see cref="SetSelection"/> / <see cref="SetFocus"/> /
+/// <see cref="ScrollRangeIntoView"/> のみ UI マーシャリング)。
 /// </summary>
 public interface IUiaTextHost
 {
@@ -70,6 +71,17 @@ public interface IUiaTextHost
 
     /// <summary>スクリーン座標 (x, y) 直下の文字オフセット(HitTest 相当)。範囲外は clamp。</summary>
     int OffsetFromScreenPoint(double x, double y);
+
+    // ---------- スクロール ----------
+
+    /// <summary>
+    /// [start, end) を可視域へスクロールする(実装は UI スレッドへマーシャリング)。
+    /// <paramref name="alignToTop"/> が true なら範囲**先頭**を、false なら範囲**末尾**を
+    /// 対象にする(UIA <c>ITextRangeProvider.ScrollIntoView</c> の意味論)。
+    /// 選択・キャレットは変更しない(装飾スクロール)。
+    /// 対象が既に可視なら何もしない=SR がテキストを歩くたびに画面が飛ぶのを防ぐ。
+    /// </summary>
+    void ScrollRangeIntoView(int start, int end, bool alignToTop);
 
     // ---------- 属性 ----------
 

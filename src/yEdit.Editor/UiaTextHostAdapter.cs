@@ -8,8 +8,8 @@
 //     _clientToScreenX / _clientToScreenY / _lastLineSegs / _hwnd / _provider /
 //     _testHook_LastGetObjectServed / _uiaTextChangedCount / _uiaSelectionChangedCount /
 //     _uiaFocusChangedCount)
-//   - IUiaTextHost 22 メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
-//     キャッシュ値応答。SetSelection / SetFocus のみ UI スレッドへ Invoke)
+//   - IUiaTextHost 23 メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
+//     キャッシュ値応答。SetSelection / SetFocus / ScrollRangeIntoView のみ UI スレッドへ Invoke)
 //   - UI スレッド側からの通知経路: OnSnapshotChanged / OnBoundsChanged /
 //     OnHandleCreated / OnHandleDestroyed / RaiseTextChanged / RaiseSelectionChanged /
 //     RaiseFocusChanged / EnsureProvider
@@ -291,7 +291,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// <summary>_testHook_LastGetObjectServed の read (Test hook 経由)。</summary>
     public bool TestHook_LastGetObjectServed => _testHook_LastGetObjectServed;
 
-    // === IUiaTextHost 22 メンバ実装 (RPC thread から呼ばれ得る) ===
+    // === IUiaTextHost 23 メンバ実装 (RPC thread から呼ばれ得る) ===
     // 元 EditorControl.Uia.cs から bit-perfect 移設 (field 参照だけ「自分の field」へ付け替え・
     // Compute* / OffsetFromClientPoint / SetSelectionCharRange / Focus は _host へ委譲)。
 
@@ -696,6 +696,25 @@ internal class UiaTextHostAdapter : IUiaTextHost
     string IUiaTextHost.Name => "本文";
 
     string IUiaTextHost.AutomationId => "editor";
+
+    void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop)
+    {
+        // SetSelection と同形 (P5 Task 14 I-3): 破棄後 / Handle 未生成での BeginInvoke による
+        // InvalidOperationException を防ぐ。
+        if (_host.IsDisposed || !_host.IsHandleCreated)
+            return;
+        if (_host.InvokeRequired)
+        {
+            // 書き込み系は fire-and-forget (RPC スレッドを待たせない=deadlock 回避)。
+            // WinForms の invoke キューは FIFO のため、SR が直後に呼ぶ同期 Invoke 系
+            // (GetBoundingRectangles 等) はこのスクロールの後に走る。
+            _host.BeginInvoke(
+                new Action(() => ((IUiaTextHost)this).ScrollRangeIntoView(start, end, alignToTop))
+            );
+            return;
+        }
+        _host.ScrollCharRangeIntoView(start, end, alignToTop);
+    }
 
     void IUiaTextHost.SetFocus()
     {
