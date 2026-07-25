@@ -299,6 +299,84 @@ $src = [System.IO.File]::ReadAllText($full, [System.Text.UTF8Encoding]::new($fal
 | `tools/word-sim.ps1` | `23 20 53`(`# S`) | BOMless UTF-8 維持(§4.1 のとおり) |
 | `tools/sr-regression.ps1` | `ef bb bf` | BOM 付き UTF-8 維持(ユーザーが直接起動する ps1) |
 
+### 8.6 レビュー指摘の反映(fixup)
+
+別エージェントによる統合 1 パスレビューを実施。**Important 1 件 + Minor 2 件 + Nit 4 件**。
+うち挙動不変・スコープ整合・取りこぼしなしは独立に検証され(コメント除去後のコード文字列が
+`main` と完全一致・ps1 の非コメントトークン列の SHA256 一致)、指摘は記述の正確性に集中した。
+
+#### Important-1: `cd8b526` 引用が解決不能かつ引用元の実測と逆(→ ① fixup で修正)
+
+`src/yEdit.Editor/EditorControl.cs` OnGotFocus のコメントで、PC-Talker 根拠を除去した代わりに
+「SR のフォーカス追跡はこれに依存する(`cd8b526` で実証)」と書いたが、**二重に誤りだった**。
+
+1. `cd8b526` は現行履歴に存在しない(`git cat-file -t cd8b526` → not a valid object)。
+   セッションメモリー由来の**履歴書き換え前の hash** を転記していた。
+2. 対応する実コミット `d1a57af`(2026-07-04「NVDA無音修正: NVDA経路では自前UIAプロバイダを
+   生成せずUIAイベントも発火しない」)の実測記録は**逆の結論**を示す。提供していないプロバイダ
+   から発火した UIA イベントが UIA→MSAA ブリッジ経由でエコーされ、**NVDA のフォーカス追跡を
+   乗っ取って無音化させた**。修正内容は NVDA 経路で発火を**やめる**ことだった。
+   同コミットは「PC-Talker経路(ServeUiaProvider=true)は挙動不変」と明記しており、
+   この明示発火に依存していたのは PC-Talker 経路である。
+
+すなわち **PC-Talker 根拠の除去自体は正しかった**(初出 `e24494a` の subject が
+「P5: Task 9 OnGotFocus で FocusChanged + TextSelectionChanged 明示発火(**PC-Talker 2 秒
+ポーリング対策**)」と明記)が、**代替根拠が無根拠な一般化だった**。レガシー根拠を検証可能な
+根拠に置き換えるという本作業の目的からすると後退であり、fixup で修正した。
+
+修正後の根拠は repo 内で検証可能なものに限定した:
+
+- `AutomationFocusChangedEvent` = UIA プロバイダの標準作法(これは一般化できる)
+- `TextSelectionChangedEvent` = キャレット位置の再提示を目的とした**意図的な追加発火**。
+  `RaiseUiaSelectionEvents=false`(CSV モード)で抑止できる事実がこれを裏づける
+- 契約テスト `tests/yEdit.Editor.Tests/EditorControlUiaFocusEventTests.cs`
+  (`OnGotFocus_RaisesFocusChangedAndTextSelectionChanged`)
+- v1 の事故が v2 で構造的に再発しない理由 = `UiaTextHostAdapter.RaiseUia` の
+  `if (_provider is null) return;` ガード。**v1 の教訓自体は失わずコメントに残した**
+- 引用 hash は解決可能な `e24494a` / `d1a57af` のみ
+
+#### Minor-1: 「UIA 標準の good practice」の過度な一般化(→ ① Important-1 に畳み込み)
+
+`TextSelectionChangedEvent` は「選択が変化した」ことを伝えるイベントで、フォーカス獲得時点で
+選択は変化していない。2 イベントをまとめて「標準の good practice」と書くのは 2 つ目について
+不正確。修正後は 2 イベントの根拠を書き分けた。
+
+#### Minor-2: 設計書 §1 の `75d2817` も解決不能(→ 本節で訂正)
+
+§1 の「マージ `75d2817`」は解決不能。**正しくは `7f4a344`**
+(2026-07-13「PC-Talkerサポート廃止(専用実装の排除)をマージ」)。日付「2026-07-13」は正しい。
+Important-1 と同じ原因(セッションメモリー由来の書き換え前 hash)。
+**以後、コメント・文書に commit hash を書くときは `git cat-file -t` で解決可能性を確認する。**
+
+#### Nit-1: §4.1 の件数集計の誤り(→ 本節で訂正)
+
+`src(7 ファイル / 9 箇所)` は誤りで、**正しくは 6 ファイル / 8 箇所**
+(`NavigationCommands` 1 / `TextRangeProviderV2` 3 / `EditorControl` 1 / `GrepResultsWindow` 1 /
+`RestoreDialog` 1 / `UiaAnnouncer` 1)。`IN(15 ファイル)` は編集対象 14 + 設計書 1 の合算。
+表の中身と diff は完全一致しており実装への影響はない。
+
+#### Nit-2: §8.3 の残存表(→ 却下)
+
+`SettingsStoreTests.cs:235` は `pctalker` 文字列を含まず完了条件 grep には掛からない。
+§8.3 の表は「意図的に残す箇所」を示す趣旨で `:235`(説明コメント)と `:240`(fixture)を
+対で挙げているため、記述は意図どおり。訂正不要。
+
+#### Nit-3: 言い換え後の冗長・同語反復(→ ① fixup で修正)
+
+`tools/README.md:57` の「これは NVDA 用の回帰。」は直前の文と重複。元文
+「PC-Talker は TextUnit.Word を呼ばない…ため、これは主に NVDA 用の回帰。」は
+**PC-Talker との対比のみを目的とした文**だったため、文ごと削除するのが編集ルールの
+忠実な適用と判断し削除した。
+`tools/README.md:63` / `tools/sr-regression.ps1:25` の「(発声側で起きる事象)」も
+直前の「SR が実際に発声するか」の同語反復のため括弧ごと削除した。
+
+#### Nit-4: §7 の「別 Issue として登録」が実態と不一致(→ 本節で訂正)
+
+本リポジトリは Issue を使っていない(`gh issue list --state all` → 空)。申し送りは
+CLAUDE.md §8 のとおり**設計書の申し送り節で管理**する。§7 案 C の管理場所は本設計書 §7 であり、
+`ScrollIntoView` の src コメントが §7 を指しているのは実際の運用と整合している。
+§7 の「別 Issue として登録し」という一文のみ実態と異なる。
+
 ## 9. 挙動不変の担保(CLAUDE.md §2)
 
 本作業の変更は以下に限られ、コンパイル結果に影響しない。
