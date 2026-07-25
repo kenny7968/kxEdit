@@ -57,6 +57,13 @@ public class TextProviderImplV2Tests
         public void SetFocus() { }
 
         public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
+
+        // Task 2: GetVisibleRanges の委譲検証用。既定値は他テストに影響しない中立値
+        // (= TextLength と同じ全体範囲)。委譲テストは必ず非既定値を明示的に設定する
+        // =旧実装 (0, TextLength) と区別できる形にするため。
+        public (int Start, int End) VisibleRange { get; set; } = (0, 100);
+
+        public (int Start, int End) GetVisibleRange() => VisibleRange;
     }
 
     [Fact]
@@ -117,6 +124,38 @@ public class TextProviderImplV2Tests
         Assert.Equal(
             "editor",
             root.GetPropertyValue(AutomationElementIdentifiers.AutomationIdProperty.Id)
+        );
+    }
+
+    [Fact]
+    public void GetVisibleRanges_UsesHostVisibleRange()
+    {
+        // 旧実装は常に (0, TextLength) = (0, 100) を返していた。
+        // 非既定の可視域を与えて、旧実装と区別できる形で固定する。
+        var h = new Host { VisibleRange = (10, 25) };
+        var root = new TextControlProviderV2(h);
+        var pi = new TextProviderImplV2(h, root);
+
+        var ranges = pi.GetVisibleRanges();
+
+        Assert.Single(ranges);
+        var r = (TextRangeProviderV2)ranges[0];
+        var probe = new TextRangeProviderV2(pi, 10, 25);
+        Assert.Equal(
+            0,
+            r.CompareEndpoints(
+                System.Windows.Automation.Text.TextPatternRangeEndpoint.Start,
+                probe,
+                System.Windows.Automation.Text.TextPatternRangeEndpoint.Start
+            )
+        );
+        Assert.Equal(
+            0,
+            r.CompareEndpoints(
+                System.Windows.Automation.Text.TextPatternRangeEndpoint.End,
+                probe,
+                System.Windows.Automation.Text.TextPatternRangeEndpoint.End
+            )
         );
     }
 }

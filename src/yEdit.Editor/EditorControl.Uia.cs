@@ -108,5 +108,7 @@ public sealed partial class EditorControl
     void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop) =>
         ((IUiaTextHost)_uia).ScrollRangeIntoView(start, end, alignToTop);
 
+    (int Start, int End) IUiaTextHost.GetVisibleRange() => ((IUiaTextHost)_uia).GetVisibleRange();
+
     void IUiaTextHost.SetFocus() => ((IUiaTextHost)_uia).SetFocus();
 }

@@ -72,7 +72,7 @@ public interface IUiaTextHost
     /// <summary>スクリーン座標 (x, y) 直下の文字オフセット(HitTest 相当)。範囲外は clamp。</summary>
     int OffsetFromScreenPoint(double x, double y);
 
-    // ---------- スクロール ----------
+    // ---------- スクロール / 可視範囲 ----------
 
     /// <summary>
     /// [start, end) を可視域へスクロールする(実装は UI スレッドへマーシャリング)。
@@ -87,6 +87,15 @@ public interface IUiaTextHost
     /// 例外を投げ、UI スレッドへマーシャリング済みなら未処理例外=アプリ落ちになる。
     /// </summary>
     void ScrollRangeIntoView(int start, int end, bool alignToTop);
+
+    /// <summary>
+    /// 現在ビューポートに見えている本文の範囲 [Start, End)。
+    /// 末尾行の改行は含めない(<see cref="LineEndNoBreakOf"/> と同じ流儀)。
+    /// 水平スクロールで横に隠れている部分は「可視」に含める(行単位で報告する)。
+    /// 実装は UI スレッド専用状態を要するため同期マーシャリングする。
+    /// バッファ未設定 / Handle 未生成では (0, 0)。
+    /// </summary>
+    (int Start, int End) GetVisibleRange();
 
     // ---------- 属性 ----------
 

@@ -371,6 +371,30 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
     // (Control.Focused は内部で GetFocus() を呼び RPC スレッドから読むと常に false=v1 対応と同旨)。
     internal bool HasFocusCached => _hasFocus;
 
+    /// <summary>
+    /// UIA <c>ITextProvider.GetVisibleRanges</c> の実処理(UI スレッド専用)。
+    /// 現在ビューポートに見えている本文の範囲 [Start, End) を返す。
+    /// </summary>
+    /// <remarks>
+    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="ViewportLayout.Build"/> と
+    /// <see cref="PaintHeightPx"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
+    /// 折り返し ON では視覚行境界になる。末尾行の改行は含めない。
+    /// バッファ未設定・可視行ゼロでは (0, 0)。
+    /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.2。
+    /// </remarks>
+    internal (int Start, int End) GetVisibleCharRange()
+    {
+        if (_buffer is null)
+            return (0, 0);
+        var snap = _buffer.Current;
+        var rows = ViewportLayout.Build(snap, _topLine, PaintHeightPx, _wrapColumns, _metrics);
+        if (rows.Count == 0)
+            return (0, 0);
+        var first = rows[0];
+        var last = rows[rows.Count - 1];
+        return (first.SegmentStartChar, last.SegmentStartChar + last.SegmentLength);
+    }
+
     /// <summary>P6 Task 3: 現在のバッファ論理行数(App 層互換=`Lines.Count` 相当)。</summary>
     public int LineCount => _buffer?.Current.LineCount ?? 0;
 

@@ -714,6 +714,31 @@ internal class UiaTextHostAdapter : IUiaTextHost
         _host.ScrollCharRangeIntoView(start, end, alignToTop);
     }
 
+    (int Start, int End) IUiaTextHost.GetVisibleRange()
+    {
+        // UI スレッド専用状態 (_topLine / _metrics / ClientSize) を要する読み取りのため、
+        // GetBoundingRectangles / TryFindVisualSegment と同形で同期 Invoke する
+        // (書き込み系の ScrollRangeIntoView が BeginInvoke なのは戻り値が不要だから)。
+        if (!_host.IsHandleCreated)
+            return (0, 0); // UI スレッドが束縛されていない
+        if (_host.InvokeRequired)
+        {
+            try
+            {
+                return _host.Invoke(new Func<(int, int)>(() => _host.GetVisibleCharRange()));
+            }
+            catch (ObjectDisposedException)
+            {
+                return (0, 0);
+            }
+            catch (InvalidOperationException)
+            {
+                return (0, 0);
+            } // Handle 破棄との race
+        }
+        return _host.GetVisibleCharRange();
+    }
+
     // P5 Task 14 (I-2): live プロパティ Handle は RPC で CreateHandle を誘発し得るためキャッシュ返し。
     nint IUiaTextHost.Handle => _hwnd;
 

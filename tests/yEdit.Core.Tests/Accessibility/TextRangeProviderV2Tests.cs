@@ -111,6 +111,9 @@ public class TextRangeProviderV2Tests
 
         public void ScrollRangeIntoView(int start, int end, bool alignToTop) =>
             LastScroll = (start, end, alignToTop);
+
+        // Task 2: 本 stub は viewport を持たないため「文書全体が可視」で固定する。
+        public (int Start, int End) GetVisibleRange() => (0, TextLength);
     }
 
     private static (InMemoryHost Host, TextProviderImplV2 Provider) MakeProviderWithHost(
@@ -473,6 +476,9 @@ public class TextRangeProviderV2Tests
         public void SetFocus() { }
 
         public void ScrollRangeIntoView(int start, int end, bool alignToTop) { }
+
+        // Task 2: 本 stub は viewport を持たないため「文書全体が可視」で固定する。
+        public (int Start, int End) GetVisibleRange() => (0, TextLength);
     }
 
     [Fact]
