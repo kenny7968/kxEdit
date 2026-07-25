@@ -403,6 +403,134 @@ reflection で叩くのと同じ流儀)。
   後段の `BringCaretIntoView` が同じ式で下端整列を再計算して補正するため観測不能。
   挙動は正しく欠陥ではないため修正しない。
 
+### 8.6 最終ブランチレビュー 2 パスの結果
+
+CLAUDE.md §3 工程 5 のとおり、**パスごとに独立した別エージェント**を起動した。両パスとも
+**「マージ可」**、Critical / High はゼロ。指摘はすべて「正しい実装が、正しいまま保たれる保証」の話だった。
+
+#### コード品質パス
+
+ミューテーション **20 件**(指定表 8 + レビュアー自主追加 12)を実行。SURVIVED 3 件が指摘の実体。
+
+| SURVIVED した変異 | なぜ問題か | 対応 |
+|---|---|---|
+| `rows[rows.Count - 1]` → `rows[0]` | **§5.2 の存在意義そのもの**(可視域 = viewport であって 1 行ではない)が未固定。壊れると「SR に見えている範囲が 1 行だけ」という形で出るため、§5.3 の L5 リスク判定を誤らせる | ① fixup |
+| `rows.Count == 0` ガード除去 | `Size = (400, 0)` で到達可能。ガード無しだと `ArgumentOutOfRangeException` が**同期 `Invoke` の中**で発生し、Adapter が catch していない型なので RPC スレッド経由で UIA の COM 境界へ抜ける | ① fixup |
+| Adapter が `(end, end, alignToTop)` を渡す | インターフェース経由で seam 全体を通すテスト 2 本が**両方とも縮退範囲** `off, off` を渡しており、範囲端点の取り違えを誰も拾えない | ① fixup |
+
+Minor 4 件 / Nit 3 件(`ComputeCaretPoint` の `PaintHeightPx` 未寄せ・floor/ceil の呼び名・
+`IUiaTextHost` summary の「のみ」・Adapter の「同形」コメント・メンバ数の残存・配置順・
+`IsDisposed` 不要理由の未記載)も fixup で反映した。
+
+#### 脆弱性パス
+
+RPC 境界・例外安全性・情報漏洩を個別に検証。**新規経路のガード配置は既存メンバより厳格**で、
+a11y 鉄則は守られている(`IsHandleCreated` を `InvokeRequired` 分岐の**外**に置いている)。
+
+**Medium-1(① fixup)**: `ScrollCharRangeIntoView` に「何も動かす余地がない」ケースの早期リターンが
+無く、無変化呼び出しでも `EnsureVisibleCharRange` の `finally` の `PositionCaret()` →
+`ComputeCaretPoint` が**対象論理行を丸ごと再折り返し**していた。実測 **1,584 ms/回**
+(20,000 文字の CJK 単一論理行・`WrapColumns=80`)、**22.9 MB alloc/回**(4 MB ASCII 単一行)。
+
+**旧実装は空メソッドだったため、これは本ブランチが新規に持ち込んだコスト**である。折り返し ON の
+日本語長段落は yEdit の主要ユースケースであり、SR はレビューカーソルを動かすたびに
+`ScrollIntoView` を呼ぶ。Adapter は fire-and-forget なので投入速度 > 消化速度になり
+invoke キューが単調増加する。早期リターンで解消した(等価性の根拠はコード `<remarks>` に記載)。
+
+成立しないと判定された懸念(いずれも根拠付き): stale range からの例外(`SnapAndClamp` が保証)/
+`_vscroll.Value` の範囲外代入(バッファ変異は必ず `UpdateVerticalScrollbar` を先に通る)/
+整数オーバーフロー(`visibleRows >= 1` で発生不能)/ デッドロック(新規経路はロックを取らず、
+UI スレッドから RPC を同期待ちする箇所もない)/ 情報漏洩(`(0, TextLength)` → 部分範囲 = 単調縮小)。
+
+### 8.7 ゲート実行結果(2026-07-25)
+
+| 項目 | 結果 |
+|---|---|
+| `tools/pre-merge-check.ps1` | **EXIT 0**。Core 973 / Editor 306 / App 444 全緑・0 warning・CSharpier 306 files clean |
+| `tools/sr-regression.ps1` | **EXIT 0・全 PASS**。`verify-uia-editor.ps1` 5 ケース + `word-sim.ps1` 6 ケース |
+
+**§6.4 の予想は外れた。** §6.4 は「`pwsh` 未インストール環境では `word-sim.ps1` が
+`tools/README.md` の既知問題(BOMless UTF-8 の日本語コメントを Shift-JIS 誤解釈)で落ちる」と
+予想し、PR #28(§8.4)は同じ理由で実行自体を見送っていた。今回 WinPS 5.1 フォールバックで
+実行したところ**警告バナーは出たが 6 ケースすべて PASS** した。
+
+既知問題は環境のロケール / コードページに依存する可能性がある。`tools/README.md` の注意書きを
+書き換えるかどうかは、複数環境での再現確認が要るため本ブランチでは触らない(→ §9)。
+
+### 8.8 プロセス上の教訓: ミューテーション検証後の `--no-build`
+
+脆弱性パスのレビュアーが実際に踏んだ。**ミューテーション検証のあとソースを復元しても、
+増分ビルドが timestamp を見てコピーを省くため `tests/*/bin/` に変異したままの DLL が残ることがある。**
+その状態で `dotnet test --no-build` を回すと、**変異したバイナリを本物と誤認**する。
+
+このときの失敗 5 件は「三項反転の挙動」と完全に一致しており、実装バグと見分けがつかなかった。
+**ミューテーション検証を挟むセッションでは、復元のたびにビルド込みでテストを回すこと。**
+
 ## 9. 申し送り(follow-up)
 
-実装後に追記する。
+### 9.1 `GetVisibleRanges` の計算量(脆弱性パス Medium-2・受容)
+
+`ViewportLayout.Build` は各論理行について `LineLayout.Wrap` で**全セグメントを作り切ってから**
+可視分だけ切り捨てる。「見えているのは 30 行」でも先頭論理行が 20 万文字なら 20 万文字ぶん折り返す。
+
+実測 **1,640 ms/回**(20,000 文字 CJK 単一行・`WrapColumns=80`)、**22.9 MB alloc/回**
+(4 MB ASCII 単一行)。Adapter は**同期 `Invoke`** なので RPC スレッドもその間ブロックされる。
+変更前は `(0, TextLength)` = O(1)・マーシャリングなしだった。
+
+**受容の理由**: 同じコストは `OnPaint` が既に払っており(= yEdit のこの文書形状に対する
+既存の性能特性)、新しい崖ではない。根治は `LineLayout.Wrap` を打ち切り可能にする Core 変更で、
+**描画経路も同時に速くなる本命**だが設計・検証の範囲が別物になる。単一エントリキャッシュは
+ブランチ終盤に無効化面(スナップショット / 折り返し / リサイズ / フォント変更)を増やすため見送った。
+
+**回収条件**: L5 または実運用で「SR 操作時の引っかかり」が観測されたら着手する。
+着手するなら `LineLayout.Wrap` の打ち切り(根治)を選ぶ。
+
+### 9.2 既存欠陥: `GetBoundingRectangles` / `OffsetFromScreenPoint` のガード位置(脆弱性パス Low-3)
+
+`UiaTextHostAdapter` の既存 2 メンバは `IsHandleCreated` を **`InvokeRequired` 分岐の内側**にしか
+置いていない。`Control.InvokeRequired` は Handle 未生成 / 破棄後に false を返すため、
+**RPC スレッドがそのまま `ComputeBoundingRectangles` を実行**する。
+
+到達シナリオ(レビュアーが特定): SR がプロバイダ参照を掴んだままユーザーがタブを閉じる →
+Handle 破棄 → SR が `GetBoundingRectangles` を呼ぶ → RPC スレッドで `ComputeCaretPointForUia` →
+`GdiCharMetrics.MeasureRun` が**破棄済み `_font` で `TextRenderer.MeasureText`**。
+System.Drawing が投げるので native UAF にはならず HRESULT で返るが、CLAUDE.md §2 の鉄則違反。
+
+**本ブランチは悪化させていない**(新規 2 メンバは分岐の外側に置いて正しく塞いでいる)。
+修正は `IsHandleCreated` チェックを `InvokeRequired` の外へ出す 2 行。別作業で回収する。
+
+### 9.3 `ScrollRangeIntoView` の `BeginInvoke` に catch が無い(脆弱性パス Low-2)
+
+ガード〜`BeginInvoke` 間で Handle が消えると RPC スレッドへ `InvalidOperationException` が飛ぶ。
+`GetVisibleRange` は catch するが `ScrollRangeIntoView` はしない。既存 `SetSelection` / `SetFocus` と
+同形で**本ブランチによる悪化はゼロ**、CCW が HRESULT に変換するのでクラッシュもしない。
+ただし `ScrollIntoView` は「UIA に残された唯一のスクロール手段」(§2.1)なので、タブクローズと
+競合したときに SR 側へエラーが露出する。**3 メンバまとめて直すのが筋**なので別作業とする。
+
+### 9.4 `EnsureVisibleCharRange` の caret 一時退避窓(脆弱性パス Low-1)
+
+`EnsureVisibleCharRange` は `try` 内で caret を一時的に対象位置へ移し `finally` で復元する。
+一方 `IUiaTextHost.GetSelection` は `_caret.Caret` / `_caret.Anchor` を live で無同期読みするため、
+窓の間に別スレッドの `GetSelection` が実際とは違うキャレットを観測し得る。
+
+セキュリティ影響はなく、読み上げ位置の正確性の問題。**§8.6 Medium-1 の早期リターンにより、
+既に可視なケース(= SR の通常操作の大半)ではこの窓自体が消えた。** 残る窓は実スクロールを
+伴うときだけで、そのときは caret が動いて当然の局面である。観測されたら再検討する。
+
+### 9.5 `GetVisibleRanges` が縮退範囲を返す場合(品質パス Nit-4)
+
+Handle 未生成・空文書・可視行ゼロでは `(0, 0)` の縮退範囲を 1 本返す。UIA 仕様は
+「可視範囲を決められないときは空配列」とも読める。§5.2 で「1 本返す」と決めた判断どおりだが、
+**L5 の ② が想定外の挙動をしたとき真っ先に疑う候補**になるため記録する。
+
+### 9.6 `BeginInvoke` 自己再入の意図的な未被覆(品質パス Nit-5)
+
+Adapter の `BeginInvoke` が `((IUiaTextHost)this).ScrollRangeIntoView(...)` と自身へ再入するのは、
+UI スレッド到達時にガードを再評価するため。この効果を殺す変異は SURVIVED する
+(race テストは flaky になるため追わない判断)。**意図的に未被覆**であることを記録する。
+コード側にはコメントで load-bearing である旨を明記済み。
+
+### 9.7 `tools/README.md` の `word-sim.ps1` 既知問題(§8.7)
+
+WinPS 5.1 での Shift-JIS 誤解釈は**本環境では再現しなかった**。ロケール / コードページ依存の
+可能性がある。注意書きを書き換えるには複数環境での再現確認が要るため本ブランチでは触らない。
