@@ -112,6 +112,39 @@ public class TextSnapshotGetCharEquivalenceTests
         AssertAllPositionsMatch(buf.Current);
     }
 
+    [Theory]
+    [InlineData("é")] // 2 バイト
+    [InlineData("あ")] // 3 バイト
+    [InlineData("😀")] // 4 バイト
+    public void GetChar_MatchesGetText_AcrossAppendBufferBlockBoundary(string multiByte)
+    {
+        // AppendBuffer は 64KB ブロックの残りに収まらない挿入を「コードポイント境界まで後退
+        // スナップして詰める」(AppendBuffer.Append)。このスナップが落ちるとコードポイントが
+        // ピースを跨ぎ、DecodeUtf16At が継続バイトを先頭バイトとして読む=同一ブロックの
+        // 未書込ゼロ領域を読んで例外なしに誤った char を返す(静かな破壊)。
+        // 他の等価テストはここへ到達しない: AfterEdits は総量 1.5KB 程度でブロックに届かず、
+        // AfterLargeInsert は LargeInsertBytes 超で専用チャンク経路へ分岐するため。
+        for (int gap = 0; gap <= 5; gap++)
+        {
+            var buf = TextBuffer.FromString("");
+            int fill = AppendBuffer.BlockBytes - gap;
+            // 1 回の挿入が LargeInsertBytes を超えると専用チャンクへ逃げてブロックを消費しない
+            for (int written = 0; written < fill; )
+            {
+                int n = Math.Min(AppendBuffer.LargeInsertBytes, fill - written);
+                buf.Insert(buf.Current.CharLength, new string('a', n));
+                written += n;
+            }
+            buf.Insert(buf.Current.CharLength, multiByte + "xyz");
+
+            var snap = buf.Current;
+            AssertEveryPieceIsWholeCodePoints(snap);
+            // 境界前後だけ全位置照合する(全 65,000 位置を回すと参照実装側が桁違いに遅いため)
+            for (int pos = fill - 4; pos < snap.CharLength; pos++)
+                Assert.Equal(snap.GetText(pos, 1)[0], snap.GetChar(pos));
+        }
+    }
+
     [Fact]
     public void GetChar_MidSurrogatePosition_ReturnsLowSurrogate()
     {

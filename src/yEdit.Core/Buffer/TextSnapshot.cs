@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 
 namespace yEdit.Core.Buffers;
@@ -8,6 +9,16 @@ namespace yEdit.Core.Buffers;
 /// </summary>
 public sealed class TextSnapshot
 {
+    /// <summary><see cref="DecodeUtf16At"/> の Debug 多層防御: ピース先頭がコードポイント途中。</summary>
+    private const string LeadByteBroken =
+        "UTF-8 先頭バイトでない=ピース範囲がコードポイントの途中から始まっている"
+        + "(GetChar は範囲内を読んだまま静かに誤った char を返す)。";
+
+    /// <summary><see cref="DecodeUtf16At"/> の Debug 多層防御: コードポイントが途中で切れている。</summary>
+    private const string ContinuationByteBroken =
+        "UTF-8 継続バイトが無い=ピース範囲がコードポイントを分断している"
+        + "(GetChar は範囲外/誤ったバイトを読む)。";
+
     internal static readonly TextSnapshot Empty = new(null);
 
     private readonly PieceTree.Node? _root;
@@ -52,9 +63,9 @@ public sealed class TextSnapshot
     /// <b>依存する前提</b>(いずれも既存の <c>Encoding.UTF8.GetString</c> 経路が既に依存している):
     /// <list type="bullet">
     /// <item>ピース境界はコードポイント境界(<see cref="TextBufferBuilder"/> /
-    /// <c>AppendBuffer</c> / <c>PieceTree.Split</c> がいずれも境界へスナップする)
+    /// <see cref="AppendBuffer"/> / <see cref="PieceTree.Split"/> がいずれも境界へスナップする)
     /// = コードポイントがピースを跨がない。</item>
-    /// <item>バッファは <c>Utf8Sanitizer</c> 済みで不正 UTF-8 を含まない
+    /// <item>バッファは <see cref="Utf8Sanitizer"/> 済みで不正 UTF-8 を含まない
     /// = 継続バイトの存在を検査せずに読める。</item>
     /// </list>
     /// <paramref name="pos"/> がサロゲート中間(low サロゲート位置)のとき、
@@ -79,6 +90,13 @@ public sealed class TextSnapshot
             if (pos < t.Piece.CharLen)
             {
                 var p = t.Piece;
+                // ピース境界はコードポイント境界なので、ピース内オフセット 0 は必ず
+                // コードポイント先頭 = CharToByte を呼ばずに読める(IsLfAt の FirstIsLf 早道と同じ)。
+                // AppendBuffer のチャンクは格子幅=ブロック長で格子表が先頭 1 エントリしかなく、
+                // CharToByte 内の CumAt(byteStart) が最大 64 KB 走査するため、この回避は
+                // 1 文字ピースが多数ある文書(散在する 1 文字挿入の繰り返し)で効く。
+                if (pos == 0)
+                    return DecodeUtf16At(p.Chunk.Span, p.ByteStart, wantLowSurrogate: false);
                 int b = p.Chunk.CharToByte(p.ByteStart, p.ByteLen, pos, out int actual);
                 return DecodeUtf16At(p.Chunk.Span, b, wantLowSurrogate: actual != pos);
             }
@@ -93,17 +111,34 @@ public sealed class TextSnapshot
     /// true なら 2 単位目(low サロゲート)を返す。
     /// wantLowSurrogate=true は 4 バイト列でのみ起こる(<c>CharToByte</c> が 2 単位進む唯一の形)。
     /// </summary>
+    /// <remarks>
+    /// 先頭バイトの妥当性も継続バイトの存在も検査せずに読む(<see cref="GetChar"/> の前提節を参照)。
+    /// 前提が破れると例外なしに誤った char を返す「静かな破壊」になるため、Debug 構成でのみ
+    /// 多層防御として両方を表明する(Release では <see cref="Debug"/> ごと消える)。
+    /// 2 種類あるのは破れ方が 2 通りだから: ピースが<b>途中から始まる</b>(先頭バイト)と
+    /// ピースが<b>途中で切れる</b>(継続バイト)で、前者は範囲内を読むため例外にならない。
+    /// 前提そのものは <c>TextSnapshotGetCharEquivalenceTests</c> の
+    /// <c>AssertEveryPieceIsWholeCodePoints</c> が全ピースについて固定している。
+    /// </remarks>
     private static char DecodeUtf16At(ReadOnlySpan<byte> s, int byteOffset, bool wantLowSurrogate)
     {
         byte b0 = s[byteOffset];
+        // 先頭バイトが妥当な UTF-8 lead か(0x00-0x7F / 0xC2-0xF4)。継続バイト 0x80-0xBF なら
+        // ピースがコードポイントの途中から始まっている=範囲内を読んだまま静かに誤値を返す形。
+        // 3 引数版を使うのは、2 引数版の message が [CallerArgumentExpression] 付きで
+        // 明示指定が S3236 になるため(detailMessage にどのバイトかを載せる)。
+        Debug.Assert(b0 < 0x80 || (b0 >= 0xC2 && b0 <= 0xF4), LeadByteBroken, "byteOffset");
         if (b0 < 0x80)
             return (char)b0;
+        Debug.Assert((s[byteOffset + 1] & 0xC0) == 0x80, ContinuationByteBroken, "byteOffset + 1");
         if (b0 < 0xE0)
             return (char)(((b0 & 0x1F) << 6) | (s[byteOffset + 1] & 0x3F));
+        Debug.Assert((s[byteOffset + 2] & 0xC0) == 0x80, ContinuationByteBroken, "byteOffset + 2");
         if (b0 < 0xF0)
             return (char)(
                 ((b0 & 0x0F) << 12) | ((s[byteOffset + 1] & 0x3F) << 6) | (s[byteOffset + 2] & 0x3F)
             );
+        Debug.Assert((s[byteOffset + 3] & 0xC0) == 0x80, ContinuationByteBroken, "byteOffset + 3");
         int cp =
             ((b0 & 0x07) << 18)
             | ((s[byteOffset + 1] & 0x3F) << 12)
