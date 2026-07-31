@@ -85,6 +85,28 @@ public class ImeCompositionStateTests
         Assert.Equal(1, ImeCompositionState.SnapCursorPos(text, 1)); // text[1]=high — 保持
     }
 
+    // 境界値: cursor が [0, Length] を外れたらクランプする。
+    // 2026-07-31: SnapCursorPos を TextBoundary.SnapToCodePointStart へ委譲する前に、
+    // 既存挙動(Math.Clamp)を境界まで固定して等価性を検証可能にする。
+    [Fact]
+    public void SnapCursorPos_OutOfRangeCursor_IsClamped()
+    {
+        string text = "あ😀い"; // Length = 4
+        Assert.Equal(0, ImeCompositionState.SnapCursorPos(text, -1));
+        Assert.Equal(0, ImeCompositionState.SnapCursorPos(text, int.MinValue));
+        Assert.Equal(4, ImeCompositionState.SnapCursorPos(text, 5));
+        Assert.Equal(4, ImeCompositionState.SnapCursorPos(text, int.MaxValue));
+    }
+
+    // 空文字列は Length=0 なので、どの cursor でも 0 に落ちる(縮退ケース)。
+    [Fact]
+    public void SnapCursorPos_EmptyText_ReturnsZero()
+    {
+        Assert.Equal(0, ImeCompositionState.SnapCursorPos("", 0));
+        Assert.Equal(0, ImeCompositionState.SnapCursorPos("", 3));
+        Assert.Equal(0, ImeCompositionState.SnapCursorPos("", -2));
+    }
+
     // Clauses のバイト長不整合(4 の倍数でない): 切り捨てで tolerate する
     [Fact]
     public void ParseClauses_IgnoresTrailingPartialDword()
