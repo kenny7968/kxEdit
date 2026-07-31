@@ -205,6 +205,21 @@ public sealed class TextSnapshot
     }
 
     /// <summary>pos の文字がLFか(バイト1点照会・stringデコードなし)。pos &lt; CharLength 前提。</summary>
+    /// <remarks>
+    /// <b>畳まない判断(2026-07-31)</b>。本メソッドは <c>GetChar(pos) == '\n'</c> と等価で、
+    /// 木降下も <see cref="GetChar"/> とほぼ同型(差は範囲チェックの有無と、ピース先頭で
+    /// <c>Stats.FirstIsLf</c> を返すか 1 バイトをデコードするかだけ)。
+    /// <b>当初の「ピース先頭の fast path を失うため」という理由は誤りだった</b>=
+    /// <see cref="GetChar"/> にも同じ <c>pos == 0</c> 早道があり、そちらも <c>CharToByte</c> を
+    /// 呼ばない O(1) である。
+    /// 実際に畳まない理由は<b>畳んでも得が小さく、全文字アクセスの土台である木降下に触る
+    /// リスクの方が大きい</b>こと。唯一の呼び出し元 <see cref="GetLineIndexOfChar"/> は
+    /// 接頭辞末尾が CR のときだけここへ来る低頻度経路で、削れるのは 1 呼び出しあたり僅かである。
+    /// <b>ただし 22 行の木降下が 2 本並存している状態は、2026-07-31 の文字アクセス seam ブランチが
+    /// 解消しようとした構図そのもの</b>という自覚は持っておくこと(設計書 §4.3 も
+    /// 「重複として畳める(任意)」と書いている)。畳むなら <see cref="GetChar"/> 側へ寄せる
+    /// 変更として、ベンチ付きで行うこと。
+    /// </remarks>
     private bool IsLfAt(int pos)
     {
         var t = _root;

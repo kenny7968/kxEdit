@@ -6,15 +6,8 @@ namespace yEdit.Core.Text;
 /// 文字境界の判定・歩進を 1 箇所に集約する純ロジック(2026-07-31 新設)。
 ///
 /// <b>このクラスが文字境界規則のオーナー</b>: 呼び出し元で <c>char.IsHighSurrogate</c> や
-/// <c>'\r'</c> + <c>'\n'</c> の並び判定を手書きしないこと。2026-07-31 時点で src 配下
-/// 14 ファイル・21 箇所へ散っていたものをここへ集約した。
-/// <b>CRLF 隣接判定には正当な例外が 2 つある</b>(どちらも境界歩進ではないので集約対象外):
-/// <list type="bullet">
-/// <item><see cref="Buffers.TextSnapshot"/> の <c>GetLineEnd</c> = 本クラスが依存する<b>下位層</b>。
-/// 寄せると循環参照になる。</item>
-/// <item><c>UiaTextHostAdapter.LineEndNoBreakOf</c> = 行末から改行を LF → CR の順に剥がす処理。
-/// pair を 1 単位として跨ぐ歩進ではない。</item>
-/// </list>
+/// <c>'\r'</c> + <c>'\n'</c> の並び判定を手書きしないこと。2026-07-31 に 15 ファイル・22 箇所へ
+/// 散っていた手書き判定をここへ寄せた(うち 1 件は Task 6 のセルフレビューで見つけた棚卸し漏れ)。
 /// 規則を変えるときに直す場所が
 /// <b>本ファイルの境界述語 4 つと span 版 2 メソッドだけ</b>で済む状態を保つこと。
 /// 述語は「前進 / 後退」×「サロゲート / CRLF」の 2×2 で、片方向だけ直して逆方向を落とす失敗
@@ -28,7 +21,25 @@ namespace yEdit.Core.Text;
 /// span 版 2 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
 /// 共有できないから(共有すると短絡が効かず読みが増える)。
 ///
+/// <b>本登録簿の適用範囲</b>: <c>TextSnapshot</c> 上 / 行内 span 上を<b>キャレット・描画単位で
+/// 歩く</b>経路に限る。バイト層(<c>TextChunk</c> / <c>Utf8Scan</c>)と、EOL 変換・整形・計数系
+/// (Rune ベース)は対象外。<c>rg IsHighSurrogate src</c> が次にヒットするのは
+/// <b>seam の破れではなく意図的な除外</b>(設計書 §3 でスコープ外と決めた 4 ファイル・5 箇所):
+/// <list type="bullet">
+/// <item><c>Text.KinsokuFormatter</c>(禁則整形・2 箇所)/ <c>Text.SanitizeForDisplay</c>
+/// (表示用サニタイズ)= Rune ベースで流儀が違う</item>
+/// <item><c>Documents.CharacterCounter</c> = 文字数の数え上げ(境界歩進ではない)</item>
+/// <item><c>yEdit.App.GrepResultsWindow</c> = 表示文字列の切り詰め</item>
+/// </list>
+/// CRLF 隣接判定も同様に、境界歩進でないものは対象外:
+/// <see cref="Buffers.TextSnapshot"/> の <c>GetLineEnd</c> / <c>CountCrlfPairs</c>
+/// (加えて前者は本クラスが依存する<b>下位層</b>=寄せると循環参照になる)、
+/// <c>UiaTextHostAdapter.LineEndNoBreakOf</c>(行末の改行剥がし)、
+/// <c>EditorControl</c> の EOL 変換(ストリーム変換の carry 処理)。
+///
 /// 典拠: docs/plans/2026-07-31-char-access-seam-design.md §4.1。
+/// ただし <c>docs/plans/</c> は策定時スナップショット(CLAUDE.md §8)なので、
+/// <b>「現在」の登録簿は本クラス doc が唯一の正</b>。
 ///
 /// <b>2 つの単位を意図的に分けている</b>:
 /// <list type="bullet">
@@ -159,7 +170,12 @@ public static class TextBoundary
             return 0;
         int prev = pos - 1;
         // prev == 0(文書先頭)ならペアは成立しえない=読まずに確定する
-        if (prev > 0 && IsSurrogatePairEndingAt(snap, prev, snap.GetChar(prev)))
+        // (PrevLogicalChar と同じ 2 段ガード形。逆方向だけ直して片方を落とす失敗を防ぐため
+        //  2 つの Prev 系は形まで揃えておく)
+        if (prev <= 0)
+            return 0;
+        char c = snap.GetChar(prev);
+        if (IsSurrogatePairEndingAt(snap, prev, c))
             return prev - 1;
         return prev;
     }
@@ -199,8 +215,9 @@ public static class TextBoundary
             return 0;
         int prev = pos - 1;
         // prev == 0(文書先頭)ならどちらの pair も成立しえない=読まずに確定する
+        // (PrevCodePoint と同じ 2 段ガード形)
         if (prev <= 0)
-            return prev;
+            return 0;
         char c = snap.GetChar(prev);
         if (IsSurrogatePairEndingAt(snap, prev, c) || IsCrlfEndingAt(snap, prev, c))
             return prev - 1;
