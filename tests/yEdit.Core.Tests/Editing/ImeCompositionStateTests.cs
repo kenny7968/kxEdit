@@ -107,6 +107,14 @@ public class ImeCompositionStateTests
         Assert.Equal(0, ImeCompositionState.SnapCursorPos("", -2));
     }
 
+    // null は明示ガードで ArgumentNullException にする。TextBoundary への委譲で AsSpan() の
+    // 暗黙変換に流すと null が空 span 化して静かに 0 を返すため、そちらへ倒さないことを固定する。
+    [Fact]
+    public void SnapCursorPos_NullText_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => ImeCompositionState.SnapCursorPos(null!, 1));
+    }
+
     // Clauses のバイト長不整合(4 の倍数でない): 切り捨てで tolerate する
     [Fact]
     public void ParseClauses_IgnoresTrailingPartialDword()
