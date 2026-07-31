@@ -169,11 +169,53 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void SnapToLogicalCharStart_LfAtDocumentStart_DoesNotReadBeforeStart()
+    {
+        // 先頭が LF の文書(空行始まり)。pos == 0 は CRLF 判定へ進まず、GetChar(-1) を読まない。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(Snap("\nabc"), 0));
+    }
+
+    [Fact]
     public void SnapToLogicalCharStart_ClampsOutOfRange()
     {
         var s = Snap("abc");
         Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(s, -5));
         Assert.Equal(3, TextBoundary.SnapToLogicalCharStart(s, 99));
+    }
+
+    // ===== 範囲外入力の契約(クラス doc の表を固定する) =====
+    // 家族ごとに非対称なのは「進めない側」だけを no-op として許容しているため。
+    // クランプで隠すと呼び出し側のスナップ漏れが発見できなくなるので throw 側は throw のまま守る。
+
+    [Fact]
+    public void OutOfRange_NextFamily_ThrowsBelowZero_ClampsAboveEnd()
+    {
+        var s = Snap("ab");
+        Assert.Throws<ArgumentOutOfRangeException>(() => TextBoundary.NextCodePoint(s, -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TextBoundary.NextLogicalChar(s, -1));
+        Assert.Equal(2, TextBoundary.NextCodePoint(s, 99));
+        Assert.Equal(2, TextBoundary.NextLogicalChar(s, 99));
+    }
+
+    [Fact]
+    public void OutOfRange_PrevFamily_ClampsBelowZero_ThrowsAboveEnd()
+    {
+        var s = Snap("ab");
+        Assert.Equal(0, TextBoundary.PrevCodePoint(s, -1));
+        Assert.Equal(0, TextBoundary.PrevLogicalChar(s, -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TextBoundary.PrevCodePoint(s, 99));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TextBoundary.PrevLogicalChar(s, 99));
+    }
+
+    [Fact]
+    public void OutOfRange_PrevFamily_DegenerateNoReadCase_DoesNotThrow()
+    {
+        // 実装は必要な位置しか読まない。prev == 0 になる範囲外(空文書 + pos == 1)は
+        // 読取が起きないため throw せず 0 を返す。クラス doc の但し書きを固定する。
+        var empty = Snap("");
+        Assert.Equal(0, TextBoundary.PrevCodePoint(empty, 1));
+        Assert.Equal(0, TextBoundary.PrevLogicalChar(empty, 1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TextBoundary.PrevCodePoint(empty, 2));
     }
 
     // ===== span 版(Layout / 描画) =====
@@ -194,6 +236,35 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void CodePointLengthAt_Span_HighSurrogateFollowedByNonLow_IsOne()
+    {
+        // span 版はバッファ層の U+FFFD 正規化を通らないため、対の揃わない high サロゲートを
+        // 構築できる(snapshot 版と違い到達可能=テストで塞げる穴)
+        ReadOnlySpan<char> text = "a\ud83db".AsSpan();
+        Assert.Equal(1, TextBoundary.CodePointLengthAt(text, 1));
+    }
+
+    [Fact]
+    public void SnapToCodePointStart_Span_LoneLowSurrogateIsNotSnapped()
+    {
+        // 直前が high サロゲートでない low サロゲートは pair ではない=動かさない
+        ReadOnlySpan<char> text = "a\udc00b".AsSpan();
+        Assert.Equal(1, TextBoundary.SnapToCodePointStart(text, 1));
+    }
+
+    [Fact]
+    public void CodePointLengthAt_Span_OutOfRange_ThrowsIndexOutOfRange()
+    {
+        // snapshot 版(ArgumentOutOfRangeException)と例外型が違う契約を固定する
+        Assert.Throws<IndexOutOfRangeException>(() =>
+            TextBoundary.CodePointLengthAt("ab".AsSpan(), 2)
+        );
+        Assert.Throws<IndexOutOfRangeException>(() =>
+            TextBoundary.CodePointLengthAt("ab".AsSpan(), -1)
+        );
+    }
+
+    [Fact]
     public void SnapToCodePointStart_Span()
     {
         var text = "a😀b".AsSpan();
@@ -201,6 +272,14 @@ public class TextBoundaryTests
         Assert.Equal(1, TextBoundary.SnapToCodePointStart(text, 1));
         Assert.Equal(0, TextBoundary.SnapToCodePointStart(text, 0));
         Assert.Equal(4, TextBoundary.SnapToCodePointStart(text, 4)); // 末尾は動かさない
+    }
+
+    [Fact]
+    public void SnapToCodePointStart_Span_LowSurrogateAtIndexZero_DoesNotReadBeforeStart()
+    {
+        // スライスが pair を割って low サロゲートから始まる場合。i == 0 は text[-1] を読まない。
+        ReadOnlySpan<char> text = "\udc00b".AsSpan();
+        Assert.Equal(0, TextBoundary.SnapToCodePointStart(text, 0));
     }
 
     [Fact]
