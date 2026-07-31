@@ -8,9 +8,17 @@ namespace yEdit.Core.Text;
 /// <b>このクラスが文字境界規則のオーナー</b>: 呼び出し元で <c>char.IsHighSurrogate</c> や
 /// <c>'\r'</c> + <c>'\n'</c> の並び判定を手書きしないこと。2026-07-31 時点で src 配下
 /// 14 ファイル・21 箇所へ散っていたものをここへ集約した。規則を変えるときに直す場所が
-/// <b>本ファイルの境界述語 3 つ</b>(<c>IsSurrogatePairStartingAt</c> /
-/// <c>IsSurrogatePairEndingAt</c> / <c>IsCrlfEndingAt</c>)<b>と span 版 2 メソッドだけ</b>で
-/// 済む状態を保つこと(span 版は <c>TextSnapshot</c> ではなく indexer で読むため述語を共有できない)。
+/// <b>本ファイルの境界述語 4 つと span 版 2 メソッドだけ</b>で済む状態を保つこと。
+/// 述語は「前進 / 後退」×「サロゲート / CRLF」の 2×2 で、片方向だけ直して逆方向を落とす失敗
+/// (2026-07-24 に実際に起きた)を欠けが見える形で防ぐためにこの構成にしている:
+/// <list type="bullet">
+/// <item>前進: <see cref="IsSurrogatePairStartingAt"/> / <see cref="IsCrlfStartingAt"/></item>
+/// <item>後退・スナップ: <see cref="IsSurrogatePairEndingAt"/> / <see cref="IsCrlfEndingAt"/></item>
+/// </list>
+/// <b>述語を 1 つでもインライン展開して登録簿から外さないこと。</b> 単一利用でも述語のまま残す
+/// (登録簿は完全でなければ「ここだけ直せばよい」という宣言そのものが罠になる)。
+/// span 版 2 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
+/// 共有できないから(共有すると短絡が効かず読みが増える)。
 ///
 /// 典拠: docs/plans/2026-07-31-char-access-seam-design.md §4.1。
 ///
@@ -56,14 +64,16 @@ namespace yEdit.Core.Text;
 public static class TextBoundary
 {
     // ===== 境界述語(規則の唯一の定義。規則を変えるときはここだけを直す) =====
+    // 前進 / 後退 × サロゲート / CRLF の 2×2 をすべて述語として持つ。
+    // 片方向だけを直して逆方向を落とす失敗(2026-07-24)を、欠けが見えることで防ぐ。
     // GetChar は安くないため、呼び出し側が既に読んだ char は引数で受け取り再読を避ける。
 
     /// <summary>
     /// <paramref name="pos"/> から始まるサロゲートペアか(前進側の規則の唯一の定義)。
     /// </summary>
-    /// <param name="c">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
-    private static bool IsSurrogatePairStartingAt(TextSnapshot snap, int pos, char c) =>
-        char.IsHighSurrogate(c)
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
+    private static bool IsSurrogatePairStartingAt(TextSnapshot snap, int pos, char charAtPos) =>
+        char.IsHighSurrogate(charAtPos)
         && pos + 1 < snap.CharLength
         && char.IsLowSurrogate(snap.GetChar(pos + 1));
 
@@ -71,18 +81,27 @@ public static class TextBoundary
     /// <paramref name="pos"/>(= low サロゲート側)で終わるサロゲートペアか
     /// (後退 / スナップ側の規則の唯一の定義)。
     /// </summary>
-    /// <param name="c">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
     /// <remarks><paramref name="pos"/> &gt; 0 は呼び出し側が保証する
     /// (<c>pos - 1</c> を読むため)。</remarks>
-    private static bool IsSurrogatePairEndingAt(TextSnapshot snap, int pos, char c) =>
-        char.IsLowSurrogate(c) && char.IsHighSurrogate(snap.GetChar(pos - 1));
+    private static bool IsSurrogatePairEndingAt(TextSnapshot snap, int pos, char charAtPos) =>
+        char.IsLowSurrogate(charAtPos) && char.IsHighSurrogate(snap.GetChar(pos - 1));
 
-    /// <summary><paramref name="pos"/>(= LF 側)で終わる CRLF pair か(規則の唯一の定義)。</summary>
-    /// <param name="c">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
+    /// <summary>
+    /// <paramref name="pos"/>(= CR 側)から始まる CRLF pair か(前進側の規則の唯一の定義)。
+    /// </summary>
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
+    private static bool IsCrlfStartingAt(TextSnapshot snap, int pos, char charAtPos) =>
+        charAtPos == '\r' && pos + 1 < snap.CharLength && snap.GetChar(pos + 1) == '\n';
+
+    /// <summary>
+    /// <paramref name="pos"/>(= LF 側)で終わる CRLF pair か(後退 / スナップ側の規則の唯一の定義)。
+    /// </summary>
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
     /// <remarks><paramref name="pos"/> &gt; 0 は呼び出し側が保証する
     /// (<c>pos - 1</c> を読むため)。</remarks>
-    private static bool IsCrlfEndingAt(TextSnapshot snap, int pos, char c) =>
-        c == '\n' && snap.GetChar(pos - 1) == '\r';
+    private static bool IsCrlfEndingAt(TextSnapshot snap, int pos, char charAtPos) =>
+        charAtPos == '\n' && snap.GetChar(pos - 1) == '\r';
 
     // ===== コードポイント単位: サロゲートのみ atomic・CR と LF は別々に数える =====
 
@@ -154,10 +173,7 @@ public static class TextBoundary
         if (pos >= snap.CharLength)
             return snap.CharLength;
         char c = snap.GetChar(pos);
-        if (IsSurrogatePairStartingAt(snap, pos, c))
-            return pos + 2;
-        // CRLF は前進側で 1 箇所しか判定しないため述語を切り出していない
-        if (c == '\r' && pos + 1 < snap.CharLength && snap.GetChar(pos + 1) == '\n')
+        if (IsSurrogatePairStartingAt(snap, pos, c) || IsCrlfStartingAt(snap, pos, c))
             return pos + 2;
         return pos + 1;
     }

@@ -169,6 +169,26 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void CrlfRule_NonLfAfterLoneCr_IsNotTreatedAsPairEnd()
+    {
+        // 孤立 CR(Mac 改行)の直後の通常文字は CRLF pair の後半ではない。
+        // SnapToLogicalCharStart_LoneLfIsNotSnapped の鏡像(CR 側から見た no-snap)。
+        // これが崩れると キャレットが 'b' から CR へ引き戻され、← が 1 回で 2 文字戻る。
+        var s = Snap("a\rb");
+        Assert.Equal(2, TextBoundary.SnapToLogicalCharStart(s, 2));
+        Assert.Equal(2, TextBoundary.PrevLogicalChar(s, 3));
+    }
+
+    [Fact]
+    public void CrlfRule_NonCrBeforeLoneLf_IsNotTreatedAsPairStart()
+    {
+        // 孤立 LF(Unix 改行)の直前の通常文字は CRLF pair の前半ではない。
+        // CrlfRule_NonLfAfterLoneCr_IsNotTreatedAsPairEnd の鏡像(前進側)。
+        // これが崩れると → が 1 回で 'a' と LF をまとめて飛び越える(LF 改行の文書で常時再現)。
+        Assert.Equal(1, TextBoundary.NextLogicalChar(Snap("a\nb"), 0));
+    }
+
+    [Fact]
     public void SnapToLogicalCharStart_LfAtDocumentStart_DoesNotReadBeforeStart()
     {
         // 先頭が LF の文書(空行始まり)。pos == 0 は CRLF 判定へ進まず、GetChar(-1) を読まない。
