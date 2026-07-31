@@ -42,11 +42,75 @@ public sealed class TextSnapshot
         return sb.ToString();
     }
 
+    /// <summary>
+    /// pos の code unit を返す。ピース木を降りて <see cref="TextChunk.CharToByte"/> を
+    /// <b>1 回だけ</b>呼び、そのバイト位置から UTF-8 を直接 UTF-16 化する
+    /// (2026-07-31: 旧実装 <c>GetText(pos, 1)[0]</c> は 1 文字ごとに StringBuilder と
+    /// string を作り、char↔byte マッピングを 2 回行っていた=1 呼び出し 128 B / 最大 64 KB 走査)。
+    /// </summary>
+    /// <remarks>
+    /// <b>依存する前提</b>(いずれも既存の <c>Encoding.UTF8.GetString</c> 経路が既に依存している):
+    /// <list type="bullet">
+    /// <item>ピース境界はコードポイント境界(<see cref="TextBufferBuilder"/> /
+    /// <c>AppendBuffer</c> / <c>PieceTree.Split</c> がいずれも境界へスナップする)
+    /// = コードポイントがピースを跨がない。</item>
+    /// <item>バッファは <c>Utf8Sanitizer</c> 済みで不正 UTF-8 を含まない
+    /// = 継続バイトの存在を検査せずに読める。</item>
+    /// </list>
+    /// <paramref name="pos"/> がサロゲート中間(low サロゲート位置)のとき、
+    /// <c>CharToByte</c> は低い方へスナップして <c>actual == pos - 1</c> を返す。
+    /// これを low サロゲート要求として使い分ける(旧実装の <c>GetSubstring</c> が
+    /// 「終端が中間ならコードポイントを丸ごと含めてから Substring」で得ていた結果と等価)。
+    /// </remarks>
     public char GetChar(int pos)
     {
         if (pos < 0 || pos >= CharLength)
             throw new ArgumentOutOfRangeException(nameof(pos));
-        return GetText(pos, 1)[0];
+        var t = _root;
+        while (true)
+        {
+            int leftChars = PieceTree.SumOf(t!.Left).CharLen;
+            if (pos < leftChars)
+            {
+                t = t.Left;
+                continue;
+            }
+            pos -= leftChars;
+            if (pos < t.Piece.CharLen)
+            {
+                var p = t.Piece;
+                int b = p.Chunk.CharToByte(p.ByteStart, p.ByteLen, pos, out int actual);
+                return DecodeUtf16At(p.Chunk.Span, b, wantLowSurrogate: actual != pos);
+            }
+            pos -= t.Piece.CharLen;
+            t = t.Right;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="byteOffset"/> の UTF-8 コードポイントを UTF-16 化し、
+    /// <paramref name="wantLowSurrogate"/>=false なら 1 単位目(BMP 文字または high サロゲート)、
+    /// true なら 2 単位目(low サロゲート)を返す。
+    /// wantLowSurrogate=true は 4 バイト列でのみ起こる(<c>CharToByte</c> が 2 単位進む唯一の形)。
+    /// </summary>
+    private static char DecodeUtf16At(ReadOnlySpan<byte> s, int byteOffset, bool wantLowSurrogate)
+    {
+        byte b0 = s[byteOffset];
+        if (b0 < 0x80)
+            return (char)b0;
+        if (b0 < 0xE0)
+            return (char)(((b0 & 0x1F) << 6) | (s[byteOffset + 1] & 0x3F));
+        if (b0 < 0xF0)
+            return (char)(
+                ((b0 & 0x0F) << 12) | ((s[byteOffset + 1] & 0x3F) << 6) | (s[byteOffset + 2] & 0x3F)
+            );
+        int cp =
+            ((b0 & 0x07) << 18)
+            | ((s[byteOffset + 1] & 0x3F) << 12)
+            | ((s[byteOffset + 2] & 0x3F) << 6)
+            | (s[byteOffset + 3] & 0x3F);
+        int v = cp - 0x10000;
+        return wantLowSurrogate ? (char)(0xDC00 + (v & 0x3FF)) : (char)(0xD800 + (v >> 10));
     }
 
     /// <summary>[start, endExclusive) に含まれる CRLF pair の数(=論理文字数計算用)。
