@@ -32,6 +32,7 @@ using System.Windows.Forms;
 using yEdit.Accessibility;
 using yEdit.Core.Buffers;
 using yEdit.Core.Layout;
+using yEdit.Core.Text;
 
 namespace yEdit.Editor;
 
@@ -332,25 +333,20 @@ internal class UiaTextHostAdapter : IUiaTextHost
         _host.SetSelectionCharRange(start, end);
     }
 
+    // 2026-07-31: 歩進規則は Core の TextBoundary に一本化した。
+    // 以前はここに NavigationCommands.MoveRightChar/MoveLeftChar と論理的に等価な実装が
+    // 丸ごと重複しており、CRLF atomic 化(2026-07-24)のとき両方へ手で規則を入れる必要があった。
+    // 片方を落とすとキーボード操作と SR 読みだけが食い違い、自動テストで気づきにくい。
+    // clamp と snapshot null 処理だけがここに残る(UiaTextHostAdapterClampTests が固定)。
+    // Math.Clamp は削らないこと: TextBoundary の範囲外契約は非対称で、NextLogicalChar は
+    // pos < 0 で、PrevLogicalChar は pos > CharLength で ArgumentOutOfRangeException になる
+    // (UIA クライアントは範囲外オフセットを渡し得る=RPC スレッドでプロバイダ失敗として現れる)。
     int IUiaTextHost.NextChar(int offset)
     {
         var snap = _bufferSnapshot;
         if (snap is null)
             return 0;
-        int o = Math.Clamp(offset, 0, snap.CharLength);
-        if (o >= snap.CharLength)
-            return snap.CharLength;
-        char c = snap.GetChar(o);
-        if (
-            char.IsHighSurrogate(c)
-            && o + 1 < snap.CharLength
-            && char.IsLowSurrogate(snap.GetChar(o + 1))
-        )
-            return o + 2;
-        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
-        if (c == '\r' && o + 1 < snap.CharLength && snap.GetChar(o + 1) == '\n')
-            return o + 2;
-        return o + 1;
+        return TextBoundary.NextLogicalChar(snap, Math.Clamp(offset, 0, snap.CharLength));
     }
 
     int IUiaTextHost.PrevChar(int offset)
@@ -358,19 +354,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         var snap = _bufferSnapshot;
         if (snap is null)
             return 0;
-        int o = Math.Clamp(offset, 0, snap.CharLength);
-        if (o <= 0)
-            return 0;
-        if (
-            char.IsLowSurrogate(snap.GetChar(o - 1))
-            && o - 2 >= 0
-            && char.IsHighSurrogate(snap.GetChar(o - 2))
-        )
-            return o - 2;
-        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
-        if (snap.GetChar(o - 1) == '\n' && o - 2 >= 0 && snap.GetChar(o - 2) == '\r')
-            return o - 2;
-        return o - 1;
+        return TextBoundary.PrevLogicalChar(snap, Math.Clamp(offset, 0, snap.CharLength));
     }
 
     int IUiaTextHost.LineStartOf(int offset)

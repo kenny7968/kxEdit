@@ -8,6 +8,7 @@
 // 責務: state 操作 (SnapAndClamp + 選択セマンティクス) のみ。
 // Invalidate / PositionCaret / AfterEdit / UIA イベント発火 等の副作用は EditorControl 側に残す。
 using yEdit.Core.Buffers;
+using yEdit.Core.Text;
 
 namespace yEdit.Editor;
 
@@ -75,31 +76,13 @@ internal sealed class CaretController
     public void ClearSelection() => _anchor = _caret;
 
     /// <summary>
-    /// [0, CharLength] にクランプし、UTF-16 low サロゲート位置なら 1 前方(high 側)へスナップ。
-    /// CRLF pair 中間位置(CR と LF の間)も CR の前(=行末位置)へスナップ(2026-07-25 追加=
-    /// キャレット/選択のすべての位置設定入り口を通る中央 seam として、mid-CRLF を不変条件で守る)。
-    /// CharLength 位置(=EOF)はキャレットが立てる境界なのでクランプ後もそのまま許可。
-    /// Task 3b で EditorControl.Caret.cs から bit-perfect 移設。
+    /// [0, CharLength] にクランプし、論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
+    /// 前方へスナップする。CharLength 位置(=EOF)はキャレットが立てる境界なので許可。
+    /// キャレット/選択のすべての位置設定入り口が本メソッドを通るため、ここで一度スナップすれば
+    /// mid-surrogate / mid-CRLF は不変条件として守られる。
     /// </summary>
-    public static int SnapAndClamp(int offset, TextSnapshot snap)
-    {
-        if (offset <= 0)
-            return 0;
-        if (offset >= snap.CharLength)
-            return snap.CharLength;
-        // offset > 0 は前段の早期 return で保証済み
-        char c = snap.GetChar(offset);
-        if (char.IsLowSurrogate(c))
-        {
-            char prev = snap.GetChar(offset - 1);
-            if (char.IsHighSurrogate(prev))
-                return offset - 1;
-        }
-        // CRLF pair の中間位置(pos-1='\r'・pos='\n')は CR の前へスナップ(行末位置=MoveEnd と同位置)
-        // 2026-07-24: キャレット/選択のすべての位置設定入り口が本メソッドを通るため、
-        // ここで一度スナップすれば mid-CRLF は不変条件として守られる。
-        if (c == '\n' && snap.GetChar(offset - 1) == '\r')
-            return offset - 1;
-        return offset;
-    }
+    /// <remarks>2026-07-31: 判定の実体は <see cref="TextBoundary.SnapToLogicalCharStart"/> へ移した
+    /// (同じ規則が Core / UIA / ここの 3 箇所に散っていたため)。</remarks>
+    public static int SnapAndClamp(int offset, TextSnapshot snap) =>
+        TextBoundary.SnapToLogicalCharStart(snap, offset);
 }

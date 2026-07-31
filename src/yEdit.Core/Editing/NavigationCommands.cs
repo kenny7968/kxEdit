@@ -1,5 +1,6 @@
 using yEdit.Core.Buffers;
 using yEdit.Core.Layout;
+using yEdit.Core.Text;
 
 namespace yEdit.Core.Editing;
 
@@ -17,41 +18,16 @@ namespace yEdit.Core.Editing;
 /// </remarks>
 public static class NavigationCommands
 {
-    /// <summary>左に1文字移動。サロゲートペアは1文字として扱う。先頭では動かない。</summary>
-    public static int MoveLeftChar(TextSnapshot s, int caret)
-    {
-        if (caret <= 0)
-            return 0;
-        int prev = caret - 1;
-        if (
-            prev > 0
-            && char.IsLowSurrogate(s.GetChar(prev))
-            && char.IsHighSurrogate(s.GetChar(prev - 1))
-        )
-            return prev - 1;
-        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
-        if (prev > 0 && s.GetChar(prev) == '\n' && s.GetChar(prev - 1) == '\r')
-            return prev - 1;
-        return prev;
-    }
+    /// <summary>左に1文字移動。サロゲートペア・CRLF pair は1文字として扱う。先頭では動かない。</summary>
+    /// <remarks>2026-07-31: 歩進規則の実体は <see cref="TextBoundary.PrevLogicalChar"/> へ移した
+    /// (UIA 側 <c>UiaTextHostAdapter.PrevChar</c> と同じ規則を 2 箇所に書いていたため)。</remarks>
+    public static int MoveLeftChar(TextSnapshot s, int caret) =>
+        TextBoundary.PrevLogicalChar(s, caret);
 
-    /// <summary>右に1文字移動。サロゲートペアは1文字として扱う。末尾では動かない。</summary>
-    public static int MoveRightChar(TextSnapshot s, int caret)
-    {
-        if (caret >= s.CharLength)
-            return s.CharLength;
-        char c = s.GetChar(caret);
-        if (
-            char.IsHighSurrogate(c)
-            && caret + 1 < s.CharLength
-            && char.IsLowSurrogate(s.GetChar(caret + 1))
-        )
-            return caret + 2;
-        // CRLF pair (2026-07-24: サロゲート atomic と対称=CR と LF の間にキャレットを立てない)
-        if (c == '\r' && caret + 1 < s.CharLength && s.GetChar(caret + 1) == '\n')
-            return caret + 2;
-        return caret + 1;
-    }
+    /// <summary>右に1文字移動。サロゲートペア・CRLF pair は1文字として扱う。末尾では動かない。</summary>
+    /// <remarks>2026-07-31: 歩進規則の実体は <see cref="TextBoundary.NextLogicalChar"/> へ移した。</remarks>
+    public static int MoveRightChar(TextSnapshot s, int caret) =>
+        TextBoundary.NextLogicalChar(s, caret);
 
     /// <summary>現在行の先頭(char offset)。</summary>
     public static int MoveHome(TextSnapshot s, int caret)
