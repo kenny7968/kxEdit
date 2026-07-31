@@ -139,7 +139,13 @@ if (charAccessMode)
             $"| {r.Name} | {r.Value} | {r.Target} | {(r.Pass is null ? "―" : r.Pass.Value ? "PASS" : "FAIL")} |"
         );
     Console.WriteLine($"(sink={caSink})");
-    bool caPass = caResults.All(r => r.Pass is not false);
+    // 空振り PASS の防止: All は空集合で true を返すため、判定行(Pass 非 null)が 1 つも
+    // 無いと「測っていないのに合格」になる。シナリオ配列から DoD 条件
+    // (ASCII 1,000,000)を外すと黙って通ってしまうので、判定行の存在自体をゲートに含める。
+    int caJudgedRows = caResults.Count(r => r.Pass is not null);
+    if (caJudgedRows == 0)
+        Console.WriteLine("DoD 判定行が 0 件(シナリオ設定に DoD 条件が含まれていない=ゲート無効)");
+    bool caPass = caJudgedRows > 0 && caResults.All(r => r.Pass is not false);
     Console.WriteLine(caPass ? "DoD 達成 (EXIT 0)" : "DoD 未達 (EXIT 1)");
     return caPass ? 0 : 1;
 }
