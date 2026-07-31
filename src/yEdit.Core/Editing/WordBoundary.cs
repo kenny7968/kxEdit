@@ -34,9 +34,19 @@ internal enum CharClass
 /// <see cref="ArgumentOutOfRangeException"/> が透過的に伝播する(NavigationCommands と同方針)。
 /// EditorControl 側は SnapAndClamp で必ずスナップしてから呼ぶこと。
 ///
-/// 2026-07-31: 内部の code-point 歩進は <see cref="Text.TextBoundary"/> へ移した。
-/// <b>本クラスは CRLF を atomic に扱わない</b>(CR と LF を別々の LineBreak として数える設計)。
-/// 論理文字単位が要るキャレット / UIA 系とは意図的に別の API を使っている。
+/// 2026-07-31: 内部の code-point 歩進は <see cref="Text.TextBoundary"/> の <c>*CodePoint*</c> 系へ
+/// 移した(キャレット / UIA が使う <c>*LogicalChar*</c> 系ではない)。CodePoint 系は CRLF を
+/// atomic に扱わず、CR と LF の間で止まる。
+///
+/// <b>ただしこの選択は現状テストで固定できない。</b> <c>ClassOf</c> が CR と LF を<b>同一の</b>
+/// <c>CharClass.LineBreak</c> に写すため、内部歩進を LogicalChar 系へ丸ごと入れ替えても
+/// 観測可能な差は出ない(2026-07-31 に網羅探索で確認=長さ 5 以下の全文字列 × 全キャレット位置で
+/// 差分ゼロ)。LogicalChar が飛ばす CRLF の中間位置はどのループ述語の判定も変えず、
+/// サロゲート側は両系が同じ述語を共有するため原理的に差が出ないから。
+///
+/// よって CodePoint 系を使うのは<b>予防的な措置</b>である。差が出るのは <c>ClassOf</c> が
+/// CR と LF を別クラスとして扱うようになったとき=そのとき Ctrl+←→ の単語境界が変わるが、
+/// <b>テストは赤くならない</b>。<c>ClassOf</c> の改変時はこの注意書きだけが防壁になる。
 /// </remarks>
 public static class WordBoundary
 {
