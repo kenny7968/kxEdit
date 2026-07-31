@@ -1,3 +1,5 @@
+using yEdit.Core.Text;
+
 namespace yEdit.Core.Layout;
 
 /// <summary>
@@ -19,14 +21,7 @@ internal static class PixelMapper
             charOffset = segment.Length;
 
         // low サロゲート位置なら pair 先頭へ前方スナップ
-        if (
-            charOffset < segment.Length
-            && char.IsLowSurrogate(segment[charOffset])
-            && char.IsHighSurrogate(segment[charOffset - 1])
-        )
-        {
-            charOffset -= 1;
-        }
+        charOffset = TextBoundary.SnapToCodePointStart(segment, charOffset);
 
         return metrics.MeasureRun(segment[..charOffset]);
     }
@@ -54,16 +49,7 @@ internal static class PixelMapper
         while (i < segment.Length)
         {
             // 次の code-point を切り出す(サロゲートペアは 2 code-unit 分)
-            int cpLen;
-            char c = segment[i];
-            if (
-                char.IsHighSurrogate(c)
-                && i + 1 < segment.Length
-                && char.IsLowSurrogate(segment[i + 1])
-            )
-                cpLen = 2;
-            else
-                cpLen = 1;
+            int cpLen = TextBoundary.CodePointLengthAt(segment, i);
 
             int cpWidth = metrics.MeasureRun(segment.Slice(i, cpLen));
 

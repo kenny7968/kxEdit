@@ -1,5 +1,6 @@
 using System.Globalization;
 using yEdit.Core.Buffers;
+using yEdit.Core.Text;
 
 namespace yEdit.Core.Layout;
 
@@ -352,10 +353,7 @@ internal static class FrameBuilder
             }
 
             // サロゲートペアなら 2 進める(空白判定を安全にスキップ)
-            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
-                i += 2;
-            else
-                i += 1;
+            i += TextBoundary.CodePointLengthAt(span, i);
         }
     }
 }

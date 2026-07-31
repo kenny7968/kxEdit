@@ -306,17 +306,9 @@ public sealed partial class EditorControl
             if (caret < snap.CharLength)
             {
                 char nc = snap.GetChar(caret);
+                // 改行は潰さない(CRLF pair も含めて跨がない)= MoveRightChar とは意図的に違う
                 if (nc != '\r' && nc != '\n')
-                {
-                    overwriteLen =
-                        (
-                            char.IsHighSurrogate(nc)
-                            && caret + 1 < snap.CharLength
-                            && char.IsLowSurrogate(snap.GetChar(caret + 1))
-                        )
-                            ? 2
-                            : 1;
-                }
+                    overwriteLen = TextBoundary.CodePointLengthAt(snap, caret);
             }
             _buffer.Replace(caret, overwriteLen, text);
             _caretCtrl.SetTo(caret + text.Length, _buffer.Current);

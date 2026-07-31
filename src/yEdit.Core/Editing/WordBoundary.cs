@@ -1,4 +1,5 @@
 using yEdit.Core.Buffers;
+using yEdit.Core.Text;
 
 namespace yEdit.Core.Editing;
 
@@ -31,7 +32,11 @@ internal enum CharClass
 /// <remarks>
 /// 前提違反時(caret が [0, CharLength] を外れる/サロゲート中間)は、TextSnapshot 側から
 /// <see cref="ArgumentOutOfRangeException"/> が透過的に伝播する(NavigationCommands と同方針)。
-/// EditorControl 側は Task 6 の SnapAndClamp で必ずスナップしてから呼ぶこと。
+/// EditorControl 側は SnapAndClamp で必ずスナップしてから呼ぶこと。
+///
+/// 2026-07-31: 内部の code-point 歩進は <see cref="Text.TextBoundary"/> へ移した。
+/// <b>本クラスは CRLF を atomic に扱わない</b>(CR と LF を別々の LineBreak として数える設計)。
+/// 論理文字単位が要るキャレット / UIA 系とは意図的に別の API を使っている。
 /// </remarks>
 public static class WordBoundary
 {
@@ -83,20 +88,20 @@ public static class WordBoundary
     {
         if (caret <= 0)
             return 0;
-        int pos = MoveLeftCp(snap, caret);
+        int pos = TextBoundary.PrevCodePoint(snap, caret);
         // 左隣を空白/改行としてスキップ(後方=空白の直前まで)
         while (pos > 0)
         {
             var cls = ClassOf(snap, pos);
             if (cls != CharClass.Whitespace && cls != CharClass.LineBreak)
                 break;
-            pos = MoveLeftCp(snap, pos);
+            pos = TextBoundary.PrevCodePoint(snap, pos);
         }
         // 位置 pos の class を単語 class として、その連続をさらに左へ
         var wordCls = ClassOf(snap, pos);
         while (pos > 0)
         {
-            int prev = MoveLeftCp(snap, pos);
+            int prev = TextBoundary.PrevCodePoint(snap, pos);
             if (ClassOf(snap, prev) != wordCls)
                 break;
             pos = prev;
@@ -128,39 +133,11 @@ public static class WordBoundary
         return CharClass.Other;
     }
 
-    private static int MoveLeftCp(TextSnapshot snap, int pos)
-    {
-        if (pos <= 0)
-            return 0;
-        int prev = pos - 1;
-        if (
-            prev > 0
-            && char.IsLowSurrogate(snap.GetChar(prev))
-            && char.IsHighSurrogate(snap.GetChar(prev - 1))
-        )
-            return prev - 1;
-        return prev;
-    }
-
-    private static int MoveRightCp(TextSnapshot snap, int pos)
-    {
-        if (pos >= snap.CharLength)
-            return snap.CharLength;
-        char c = snap.GetChar(pos);
-        if (
-            char.IsHighSurrogate(c)
-            && pos + 1 < snap.CharLength
-            && char.IsLowSurrogate(snap.GetChar(pos + 1))
-        )
-            return pos + 2;
-        return pos + 1;
-    }
-
     /// <summary>pred が真の間、code-point 単位で右へ進む。</summary>
     private static int SkipForwardWhile(TextSnapshot snap, int pos, Func<CharClass, bool> pred)
     {
         while (pos < snap.CharLength && pred(ClassOf(snap, pos)))
-            pos = MoveRightCp(snap, pos);
+            pos = TextBoundary.NextCodePoint(snap, pos);
         return pos;
     }
 }

@@ -533,13 +533,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         int p = pos;
         while (p > 0)
         {
-            int prev = p - 1;
-            if (
-                prev > 0
-                && char.IsLowSurrogate(snap.GetChar(prev))
-                && char.IsHighSurrogate(snap.GetChar(prev - 1))
-            )
-                prev--;
+            int prev = TextBoundary.PrevCodePoint(snap, p);
             char pc = snap.GetChar(prev);
             if (char.IsWhiteSpace(pc) || pc == '\r' || pc == '\n')
                 break;
@@ -556,14 +550,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
             char c = snap.GetChar(p);
             if (char.IsWhiteSpace(c) || c == '\r' || c == '\n')
                 break;
-            if (
-                char.IsHighSurrogate(c)
-                && p + 1 < snap.CharLength
-                && char.IsLowSurrogate(snap.GetChar(p + 1))
-            )
-                p += 2;
-            else
-                p++;
+            p = TextBoundary.NextCodePoint(snap, p);
         }
         return p;
     }
