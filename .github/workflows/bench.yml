@@ -33,10 +33,14 @@ jobs:
         continue-on-error: true
         run: dotnet run --project tests/yEdit.Core.Bench -c Release --no-build -- --layout
 
+      - name: 文字アクセスベンチ(--characcess)
+        continue-on-error: true
+        run: dotnet run --project tests/yEdit.Core.Bench -c Release --no-build -- --characcess
+
       - name: 運用注記
         shell: pwsh
         run: |
           Write-Output '---'
           Write-Output 'このワークフローは Phase 3 設計書 §2 のとおり参考情報として実行しています。'
-          Write-Output 'しきい値ゲートはローカル(tools/pre-merge-check.ps1 併走で dotnet run --typing / --layout)を正とし、'
+          Write-Output 'しきい値ゲートはローカル(tools/pre-merge-check.ps1 併走で dotnet run --typing / --layout / --characcess)を正とし、'
           Write-Output 'ホステッドランナーの EXIT 1 はリリースブロッカーにしません。'

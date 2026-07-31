@@ -3,7 +3,7 @@ using System.Text;
 namespace yEdit.Core.Buffers;
 
 /// <summary>
-/// 不変UTF-8バイトチャンク+格子(既定64KB)の累積統計表。
+/// 不変UTF-8バイトチャンク+格子(既定4KB)の累積統計表。
 /// ピース分割・行検索・文字⇔バイト変換の走査を格子1マスに局所化する(O(log n + 格子幅))。
 ///
 /// 格子表: エントリ (ByteOff, CharOff, BreaksTo)。ByteOff は格子点をコード点境界へ前方スナップした位置。
@@ -21,7 +21,14 @@ internal sealed class TextChunk
     private readonly int[] _gChar;
     private readonly int[] _gBreaks;
 
-    public TextChunk(ReadOnlyMemory<byte> bytes, int gridBytes = 64 * 1024)
+    // 2026-07-31: 既定 64KB → 4KB。格子幅はそのまま CharToByte の線形走査量になり、
+    // GetChar / 単語ナビのコストを支配する(64KB 時は 1 文字読むのに最大 64KB 走査していた)。
+    // 代償(4MB チャンク 1 個あたりの実測値):
+    //   格子表 896 B → 12,416 B(+11.5 KB = チャンクの 0.27%。512MB 文書で +1.4 MB)
+    //   構築   9.0 ms → 10.8 ms(+1.8 ms。総走査量は幅によらず O(n) だが、格子点ごとの
+    //                            定数コストが 16 倍になるため。文書構築全体では約 +11%)
+    // 注: AppendBuffer の共有ブロックは gridBytes: BlockBytes を明示して除外している(理由は同所)。
+    public TextChunk(ReadOnlyMemory<byte> bytes, int gridBytes = 4 * 1024)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(gridBytes, 1);
         _bytes = bytes;

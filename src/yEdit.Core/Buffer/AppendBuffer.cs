@@ -6,7 +6,8 @@ namespace yEdit.Core.Buffers;
 /// 編集挿入用の追記バッファ。64KB固定ブロック列で、公開済み範囲は以後不変
 /// (ブロックが満杯になったら新規作成。配列再確保・上書き禁止=スナップショット安全)。
 /// ブロックを包む TextChunk は同一ブロックにつき1個を共有し、ピースは範囲だけ変える
-/// (格子幅=ブロック長=64KBのため格子表は空で、未書込領域が構築時に走査されることはない)。
+/// (gridBytes に BlockBytes を明示指定して格子表を空に保つ。未書込領域が構築時に
+///  走査されず、かつ書込後に累積値が古くならない=本クラスの安全性の要)。
 /// </summary>
 internal sealed class AppendBuffer
 {
@@ -17,7 +18,11 @@ internal sealed class AppendBuffer
     private TextChunk _chunk;
     private int _pos;
 
-    public AppendBuffer() => _chunk = new TextChunk(_block);
+    // gridBytes: BlockBytes は必須(既定値に頼らない)。本クラスは TextChunk で包んだ後も
+    // 同じ _block へ書き込み続けるため、格子表が先頭エントリだけである必要がある。
+    // 格子を細かくすると未書込のゼロ領域で累積 (CharOff, BreaksTo) がキャッシュされ、
+    // 後から書いた文字の char↔byte 対応が静かに壊れる(2026-07-31 の格子細分化で顕在化)。
+    public AppendBuffer() => _chunk = new TextChunk(_block, gridBytes: BlockBytes);
 
     /// <summary>text をUTF-8で追記し、参照ピース列(通常1〜2個)を返す。孤立サロゲートは既定でU+FFFD置換。</summary>
     public List<Piece> Append(string text)
@@ -47,7 +52,7 @@ internal sealed class AppendBuffer
                 off = cut;
             }
             _block = new byte[BlockBytes];
-            _chunk = new TextChunk(_block);
+            _chunk = new TextChunk(_block, gridBytes: BlockBytes); // 理由は ctor のコメント参照
             _pos = 0;
         }
         pieces.Add(Write(bytes, off, bytes.Length - off));

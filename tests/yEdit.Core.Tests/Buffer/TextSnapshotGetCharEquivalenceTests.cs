@@ -16,6 +16,13 @@ public class TextSnapshotGetCharEquivalenceTests
     // ASCII / CJK(3 バイト)/ 絵文字(4 バイト)/ CRLF・LF・CR 混在をすべて含む
     private const string MixedFixture = "abc\r\nあいう\n😀xy\rz\r\n漢字😀あ\nEnd😀";
 
+    /// <summary>
+    /// AppendBuffer 探針ブロック(<see cref="AppendProbeBlock"/>)の ASCII 部。
+    /// 周期 11・全文字相異なので「2 文字ずれ」が必ず別の文字として現れる。
+    /// '\n' を含むのは、格子が CharOff と同時に BreaksTo もキャッシュするため。
+    /// </summary>
+    private const string ProbePattern = "0123456789\n";
+
     private static void AssertAllPositionsMatch(TextSnapshot snap)
     {
         AssertEveryPieceIsWholeCodePoints(snap);
@@ -72,7 +79,7 @@ public class TextSnapshotGetCharEquivalenceTests
     [Fact]
     public void GetChar_MatchesGetText_AtEveryPosition_LargeDocument()
     {
-        // 格子(既定 64KB)を何マスも跨ぐ規模にして、格子点前後の境界も踏ませる
+        // 格子(既定 4KB)を何マスも跨ぐ規模にして、格子点前後の境界も踏ませる
         var sb = new StringBuilder();
         for (int i = 0; i < 2000; i++)
             sb.Append(MixedFixture);
@@ -82,9 +89,10 @@ public class TextSnapshotGetCharEquivalenceTests
     [Fact]
     public void GetChar_MatchesGetText_AfterEdits()
     {
-        // ピース分割 + AppendBuffer 経由のタイピングを経た木でも一致すること。
-        // Task 4 の格子細分化が AppendBuffer の「生成後に同じ配列へ書き続ける」前提を
-        // 壊していないかを捕まえる唯一の実質的な網。
+        // ピース分割 + AppendBuffer 経由のタイピングを経た木でも一致すること
+        // (AppendBuffer の格子表が空である前提の網は
+        //  GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock が担う。
+        //  本テストは GetChar と GetText が同じ木で一致することだけを見る)。
         var buf = TextBuffer.FromString(MixedFixture);
         for (int i = 0; i < 500; i++)
         {
@@ -143,6 +151,81 @@ public class TextSnapshotGetCharEquivalenceTests
             for (int pos = fill - 4; pos < snap.CharLength; pos++)
                 Assert.Equal(snap.GetText(pos, 1)[0], snap.GetChar(pos));
         }
+    }
+
+    [Fact]
+    public void GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock()
+    {
+        // AppendBuffer が共有ブロックを gridBytes: BlockBytes で包んでいること
+        // (= 格子表が先頭 1 エントリだけ)を固定する。ctor 側の指定を守る。
+        var buf = TextBuffer.FromString("");
+        string src = AppendProbeBlock(buf);
+        AssertProbeTailMatchesSource(buf.Current, src);
+    }
+
+    [Fact]
+    public void GetChar_MatchesSourceText_AcrossSecondAppendBufferBlock()
+    {
+        // 姉妹テスト。AppendBuffer は 1 ブロックを使い切ると _block を再確保して
+        // TextChunk を作り直すので、明示指定は ctor と繰上げの 2 箇所に必要になる。
+        // 照合対象は 2 ブロック目の末尾だけなので、落ちたら繰上げ側の指定が原因と分かる
+        // (1 ブロック = 64KB なので連続タイピングで現実に到達する経路)。
+        var buf = TextBuffer.FromString("");
+        string first = AppendProbeBlock(buf); // 1 ブロック目を使い切って繰上げさせる
+        string second = AppendProbeBlock(buf);
+        AssertProbeTailMatchesSource(buf.Current, first + second);
+    }
+
+    /// <summary>
+    /// AppendBuffer の 1 ブロック(64KB)をちょうど埋める探針テキストを末尾へ書き込み、
+    /// 書き込んだ文字列を返す。末尾への連続挿入は TextBuffer.Splice の隣接マージで
+    /// 1 ピースへ融合するので、ブロック全域を覆う 1 ピースができる。
+    ///
+    /// 先頭 1 文字だけ 3 バイト(あ)にするのが要点。以降ブロック全域で
+    /// 「バイト位置 = 文字位置 + 2」となる。TextChunk 構築時ブロックは全ゼロなので、
+    /// 細かい格子はゼロ領域から求めた「1 バイト = 1 文字 / break 0 個」を格子点に焼き付ける。
+    /// 実際の内容はそこから常に 2 文字ずれているため、<b>格子幅がいくつであっても</b>
+    /// 格子点へ飛んだ瞬間に 2 文字数え過ぎ、2 文字手前のバイトを返す。
+    /// </summary>
+    private static string AppendProbeBlock(TextBuffer buf)
+    {
+        var sb = new StringBuilder(AppendBuffer.BlockBytes);
+        sb.Append('あ'); // 3 バイト 1 文字
+        while (sb.Length < AppendBuffer.BlockBytes - 2)
+            sb.Append(ProbePattern[sb.Length % ProbePattern.Length]);
+        string text = sb.ToString(); // 文字数 = BlockBytes-2 / バイト数 = BlockBytes ちょうど
+
+        // 1 回の挿入が LargeInsertBytes を超えると専用チャンクへ逃げてブロックを消費しない
+        const int ChunkChars = 32_000;
+        for (int off = 0; off < text.Length; off += ChunkChars)
+            buf.Insert(
+                buf.Current.CharLength,
+                text.Substring(off, Math.Min(ChunkChars, text.Length - off))
+            );
+        return text;
+    }
+
+    /// <summary>
+    /// 探針ブロックの<b>末尾側だけ</b>を元文字列(ground truth)と照合する。
+    ///
+    /// 末尾を見るのは、問い合わせ文字位置が最大になる点だから: 格子幅がいくつでも
+    /// 「その位置以下の格子点」が必ず存在するので、1 箇所で全格子幅を捕まえられる。
+    /// 全位置照合にしないのは、正しい実装(格子 1 エントリ)だと 1 回の GetChar が
+    /// O(pos) 走査になり全位置で O(n²) になるため。
+    ///
+    /// 参照が GetText ではなく元文字列であることも要。GetText は同じ
+    /// TextChunk.CharToByte を通るので、格子が壊れれば同じだけ壊れて一致してしまう
+    /// (= この不変条件は GetChar と GetText の相互比較では原理的に検出できない)。
+    /// </summary>
+    private static void AssertProbeTailMatchesSource(TextSnapshot snap, string src)
+    {
+        AssertEveryPieceIsWholeCodePoints(snap);
+        Assert.Equal(src.Length, snap.CharLength);
+        for (int pos = src.Length - 16; pos < src.Length; pos++)
+            Assert.Equal(src[pos], snap.GetChar(pos));
+        // 格子は CharOff と同時に BreaksTo もゼロ領域から焼き付ける。行検索は
+        // TextChunk.NthBreakEndChar 経由でそれを読むので、最終行頭でまとめて捕まえる。
+        Assert.Equal(src.LastIndexOf('\n') + 1, snap.GetLineStart(snap.LineCount - 1));
     }
 
     [Fact]
