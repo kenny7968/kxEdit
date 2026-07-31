@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using yEdit.Core.Buffers;
+using yEdit.Core.Editing;
 using yEdit.Core.Layout;
 
 // P1 TextBuffer 性能ゲート(設計書DoD): --mb <サイズ> 既定1024
@@ -8,10 +9,13 @@ using yEdit.Core.Layout;
 // P2 Task 14: --layout 追加。TextBuffer ベンチ実行後、レイアウト層の性能ゲートを走らせる。
 // P3 Task 14: --typing 追加。1M 文字を 1 文字ずつ Insert する応答性ベンチ(目標 5µs/挿入 以下)。
 //             他モードとは排他=--typing 単独で早期 return(TextBuffer 合成文書構築は走らせない)。
+// 文字アクセス seam Task 2: --characcess 追加。GetChar の位置依存コストと単語ナビを測る。
+//             --typing と同様に単独で早期 return する。
 
 int mb = 1024;
 bool layoutMode = false;
 bool typingMode = false;
+bool charAccessMode = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out int m))
@@ -26,6 +30,10 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--typing")
     {
         typingMode = true;
+    }
+    else if (args[i] == "--characcess")
+    {
+        charAccessMode = true;
     }
 }
 
@@ -54,6 +62,86 @@ if (typingMode)
     bool typingPass = typingSw.Elapsed.TotalSeconds < 5.0;
     Console.WriteLine(typingPass ? "PASS (EXIT 0)" : "FAIL (EXIT 1)");
     return typingPass ? 0 : 1;
+}
+
+// ---- 2026-07-31 文字アクセス seam: --characcess ----
+// GetChar のコスト特性(格子セル内の位置で変わる)と、実操作 Ctrl+← 相当の
+// WordBoundary.PrevWordStart を測る。DoD = 1M 文字 ASCII で PrevWordStart < 0.05 ms。
+// 他ベンチとは独立=単独で return する。
+if (charAccessMode)
+{
+    Console.WriteLine("--characcess: 文字アクセス(GetChar / 単語ナビ)ベンチ");
+
+    static string MakeWordDoc(int chars, bool cjk)
+    {
+        var sb = new StringBuilder(chars);
+        var r = new Random(20260731);
+        while (sb.Length < chars)
+        {
+            int wordLen = r.Next(2, 9);
+            for (int i = 0; i < wordLen; i++)
+                sb.Append(cjk ? (char)('あ' + r.Next(40)) : (char)('a' + r.Next(26)));
+            sb.Append(r.Next(12) == 0 ? '\n' : ' ');
+        }
+        return sb.ToString(0, chars);
+    }
+
+    var caResults = new List<(string Name, string Value, string Target, bool? Pass)>();
+    long caSink = 0;
+
+    // --- GetChar 単発(位置依存を見る) ---
+    var gcSnap = TextBuffer.FromString(MakeWordDoc(1_000_000, cjk: false)).Current;
+    foreach (int probe in new[] { 0, gcSnap.CharLength / 2, gcSnap.CharLength - 10 })
+    {
+        for (int w = 0; w < 1000; w++)
+            caSink += gcSnap.GetChar(probe); // ウォームアップ
+        const int GcIters = 20_000;
+        var gcSw = Stopwatch.StartNew();
+        for (int i = 0; i < GcIters; i++)
+            caSink += gcSnap.GetChar(probe);
+        gcSw.Stop();
+        double gcNs = gcSw.Elapsed.TotalNanoseconds / GcIters;
+        caResults.Add(($"C1 GetChar(pos={probe})", $"{gcNs:N0} ns/回", "記録のみ", null));
+    }
+
+    // --- Ctrl+← 相当(DoD 判定はこれ) ---
+    foreach (bool cjk in new[] { false, true })
+    {
+        foreach (int chars in new[] { 10_000, 200_000, 1_000_000 })
+        {
+            var wbSnap = TextBuffer.FromString(MakeWordDoc(chars, cjk)).Current;
+            int mid = wbSnap.CharLength / 2;
+            for (int w = 0; w < 50; w++)
+                caSink += WordBoundary.PrevWordStart(wbSnap, mid + w); // ウォームアップ
+            const int WbIters = 300;
+            var wbSw = Stopwatch.StartNew();
+            for (int i = 0; i < WbIters; i++)
+                caSink += WordBoundary.PrevWordStart(wbSnap, mid + i);
+            wbSw.Stop();
+            double wbMs = wbSw.Elapsed.TotalMilliseconds / WbIters;
+            bool isDod = !cjk && chars == 1_000_000;
+            caResults.Add(
+                (
+                    $"C2 PrevWordStart({(cjk ? "CJK" : "ASCII")} {chars:N0})",
+                    $"{wbMs:F3} ms/回",
+                    isDod ? "<0.05ms (DoD)" : "記録のみ",
+                    isDod ? wbMs < 0.05 : null
+                )
+            );
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("| # シナリオ | 結果 | 目標 | 判定 |");
+    Console.WriteLine("|---|---|---|---|");
+    foreach (var r in caResults)
+        Console.WriteLine(
+            $"| {r.Name} | {r.Value} | {r.Target} | {(r.Pass is null ? "―" : r.Pass.Value ? "PASS" : "FAIL")} |"
+        );
+    Console.WriteLine($"(sink={caSink})");
+    bool caPass = caResults.All(r => r.Pass is not false);
+    Console.WriteLine(caPass ? "DoD 達成 (EXIT 0)" : "DoD 未達 (EXIT 1)");
+    return caPass ? 0 : 1;
 }
 
 long targetBytes = (long)mb * 1024 * 1024;
