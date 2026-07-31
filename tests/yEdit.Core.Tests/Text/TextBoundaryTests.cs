@@ -39,6 +39,13 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void PrevCodePoint_SurrogatePairAtDocumentStart_IsAtomic()
+    {
+        // 文書先頭のペア = prev > 0 の境界(prefix 付き fixture "a😀b" では prev == 1 に当たらない)
+        Assert.Equal(0, TextBoundary.PrevCodePoint(Snap("😀b"), 2));
+    }
+
+    [Fact]
     public void NextCodePoint_DoesNotSkipCrlf()
     {
         // 論理文字版との差を固定する = CRLF は 2 歩かかる
@@ -99,12 +106,23 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void PrevLogicalChar_SurrogatePairAtDocumentStart_IsAtomic()
+    {
+        // CRLF 側(LogicalChar_CrlfAtDocumentEdges_IsAtomic)と対称の prev > 0 境界
+        Assert.Equal(0, TextBoundary.PrevLogicalChar(Snap("😀b"), 2));
+    }
+
+    [Fact]
     public void LogicalChar_LoneCrAndLoneLf_MoveOneStep()
     {
         Assert.Equal(2, TextBoundary.NextLogicalChar(Snap("a\rb"), 1));
         Assert.Equal(2, TextBoundary.NextLogicalChar(Snap("a\nb"), 1));
         Assert.Equal(1, TextBoundary.PrevLogicalChar(Snap("a\rb"), 2));
         Assert.Equal(1, TextBoundary.PrevLogicalChar(Snap("a\nb"), 2));
+        // 改行が EOF に来る文書(Mac 形式 = 末尾が孤立 CR)。CRLF 判定の先読みが
+        // CharLength ちょうどを踏まないことを固定する(踏むと GetChar が throw する)。
+        Assert.Equal(2, TextBoundary.NextLogicalChar(Snap("a\r"), 1));
+        Assert.Equal(2, TextBoundary.NextLogicalChar(Snap("a\n"), 1));
     }
 
     [Fact]
