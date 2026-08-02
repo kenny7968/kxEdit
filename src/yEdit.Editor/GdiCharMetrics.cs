@@ -14,9 +14,11 @@ namespace yEdit.Editor;
 /// <b>スレッド安全性(重要)</b>: 本クラスは <b>UI スレッド専用</b>である。
 /// <see cref="_nonAsciiWidths"/> は非スレッドセーフな <see cref="Dictionary{TKey,TValue}"/> で、
 /// 複数スレッドから同時に書かれると値がずれるのではなく<b>構造が壊れる</b>(無限ループ・例外)。
-/// UIA RPC スレッドからは <c>UiaTextHostAdapter</c> が <see cref="Control.Invoke(Delegate)"/> で
-/// UI スレッドへマーシャリングしてから呼ぶ(<c>TryFindVisualSegment</c> / <c>GetVisibleRange</c> /
-/// <c>GetBoundingRectangles</c> / <c>GetOffsetFromPoint</c>)。この契約を崩さないこと。
+/// UIA RPC スレッドからは <c>UiaTextHostAdapter</c> が UI スレッドへマーシャリングしてから呼ぶ。
+/// <see cref="Control.Invoke(Delegate)"/> で同期マーシャリングする読み取り系は
+/// <c>TryFindVisualSegment</c> / <c>GetVisibleRange</c> / <c>GetBoundingRectangles</c> /
+/// <c>OffsetFromScreenPoint</c> の 4 経路。書き込み系(<c>SetSelection</c> / <c>SetFocus</c> /
+/// <c>ScrollRangeIntoView</c>)も同様に UI スレッドへ移してから呼ぶ。この契約を崩さないこと。
 /// </remarks>
 public sealed class GdiCharMetrics : ICharMetrics
 {

@@ -21,7 +21,9 @@ public class GdiCharMetricsCacheTests
 
     [Theory]
     [InlineData("a")] // ASCII
-    [InlineData("\t")] // タブ(ASCII 経路・スペース幅へ読み替え)
+    // タブ。ここでは冪等性しか見ていない(ASCII は参照比較のガードで除外される)。
+    // 「ASCII 経路を通ること」自体は Tab_keeps_the_ascii_path_and_reads_as_a_space_width が守る。
+    [InlineData("\t")]
     [InlineData("あ")] // BMP CJK
     [InlineData("漢")] // BMP CJK
     [InlineData("😀")] // astral(サロゲートペア)
@@ -93,5 +95,28 @@ public class GdiCharMetricsCacheTests
             // (コードポイント幅の和と一致するとは限らないため、キャッシュを使ってはならない)。
             Assert.Equal(Reference("あいうえお", font), m.MeasureRun("あいうえお"));
             Assert.Equal(Reference("あa", font), m.MeasureRun("あa"));
+        });
+
+    /// <summary>
+    /// キャッシュを引く条件が「非 ASCII のときだけ」であることを守る。
+    /// TAB は <c>_asciiWidths['\t'] = _asciiWidths[' ']</c> で意図的にスペース幅へ
+    /// 読み替えられており、ASCII 経路を外れると <c>MeasureText("\t").Width</c>(= 0)へ
+    /// 変わるため、この 1 本だけが両経路を区別できる。
+    /// </summary>
+    /// <remarks>
+    /// 仕様レビューのミューテーション検証で見つかった穴。<c>MeasureRun</c> の
+    /// <c>text[0] &gt;= 128</c> を <c>&gt;= 9</c> に変異させると TAB がキャッシュ経路へ流れ込むが、
+    /// この 1 本を足す前は Editor 層 320 件が全 PASS のまま通過していた(等価変異ではない)。
+    /// </remarks>
+    [Fact]
+    public void Tab_keeps_the_ascii_path_and_reads_as_a_space_width() =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+
+            Assert.Equal(m.MeasureRun(" "), m.MeasureRun("\t"));
+            // スペース幅そのものが 0 だと上の等値が無意味になるため、前提を明示しておく。
+            Assert.True(m.MeasureRun(" ") > 0);
         });
 }
