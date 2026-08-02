@@ -105,6 +105,24 @@ Task 3 で GDI 込みの実測を取り、この推論を確定させる。
 (ascii < cjk < mixed)は `MeasureRun` ではなく `GetText` の UTF-8 デコードコスト
 (1 バイト / 3 バイト / 混在)に由来する。
 
+#### ファイル読み込み経路は無害
+
+Smoke ベンチは `TextBuffer.FromString` で文書を作るため、「ファイルを開く」の前半
+(読み込み・エンコーディング判定・行末検出)を測っていない。同ベンチで
+`TextFileService.LoadAsBufferAuto` を実ファイルに対して測った。
+
+| 文字種 | 100K 文字 | 500K 文字 | 2M 文字 |
+|---|---|---|---|
+| ascii | 13.9 ms | 12.0 ms | 15.1 ms |
+| cjk | 10.0 ms | 10.1 ms | 16.8 ms |
+
+**全条件 10〜17 ms でほぼ一定。** 長大 1 行でも `EncodingDetector` /
+`TextBufferBuilder` は非線形にならない。**読み込み側は主因ではない。**
+
+これは「§9.8 の fixture が ASCII だった場合」の代替仮説を 1 つ潰す意味がある。
+ASCII 500KB を折り返し ON で開いた場合の合計は Load 12 ms + setSource 6.2 ms +
+paint 15.5 ms ≒ **34 ms** にしかならず、240 秒とは 4 桁違う。
+
 #### F-6 は実測で裏づけられた
 
 同ベンチの後半で `AppendBuffer` 現ブロック経路(`TextBuffer.FromString` ではなく

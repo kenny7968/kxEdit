@@ -46,7 +46,7 @@ internal static class LargeLineBench
         };
         using var editor = new EditorControl { Dock = DockStyle.Fill };
         form.Controls.Add(editor);
-        form.Show(); // ハンドル生成(offscreen だと Invalidate/Update が no-op)
+        form.Show(); // ハンドル生成(Show しないと Invalidate/Update が no-op)
         // 設計書 §2.1 の申し送り: フォーカスが無いと ComputeCaretPoint(経路 ②)が
         // スキップされ、主犯の 1 つを測り落とす。
         editor.Focus();

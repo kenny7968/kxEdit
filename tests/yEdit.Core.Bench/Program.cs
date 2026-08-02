@@ -3,6 +3,7 @@ using System.Text;
 using yEdit.Core.Buffers;
 using yEdit.Core.Editing;
 using yEdit.Core.Layout;
+using yEdit.Core.Text;
 
 // P1 TextBuffer 性能ゲート(設計書DoD): --mb <サイズ> 既定1024
 // 目標未達があれば EXIT 1
@@ -265,6 +266,39 @@ if (largeLineMode)
                 Console.WriteLine(
                     $"{kind},{len},{wrap},{llSw.Elapsed.TotalMilliseconds:F1},{llRows.Count}"
                 );
+            }
+        }
+    }
+
+    // --- ファイル読み込み経路(TextFileService.LoadAsBufferAuto) ---
+    // Smoke ベンチは TextBuffer.FromString で文書を作るため、実際の「ファイルを開く」の
+    // 前半=読み込み・エンコーディング判定・行末検出を測っていない。長大 1 行でここが
+    // 非線形なら描画とは別の主因になりうるので潰しておく。
+    Console.WriteLine();
+    Console.WriteLine("ファイル読み込み経路(LoadAsBufferAuto)");
+    Console.WriteLine("kind,chars,fileBytes,loadMs");
+    foreach (string loadKind in new[] { "ascii", "cjk" })
+    {
+        foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), $"yedit-largeline-{loadKind}-{len}.txt");
+#pragma warning disable S6966 // reason: ベンチの top-level 非 async パス。計測対象は Load 側であり、fixture 書き出しの非同期化は測定に無関係
+            File.WriteAllText(tmp, MakeSingleLine(len, loadKind), new UTF8Encoding(false));
+#pragma warning restore S6966
+            try
+            {
+                long fileBytes = new FileInfo(tmp).Length;
+                var loadSw = Stopwatch.StartNew();
+                var loaded = TextFileService.LoadAsBufferAuto(tmp);
+                loadSw.Stop();
+                llSink += loaded.Buffer.Current.CharLength;
+                Console.WriteLine(
+                    $"{loadKind},{len},{fileBytes},{loadSw.Elapsed.TotalMilliseconds:F1}"
+                );
+            }
+            finally
+            {
+                File.Delete(tmp);
             }
         }
     }
