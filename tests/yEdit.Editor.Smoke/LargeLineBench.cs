@@ -38,9 +38,9 @@ internal static class LargeLineBench
             Width = 900,
             Height = 700,
             StartPosition = FormStartPosition.Manual,
-            // GdiBench は (-32000,-32000) の完全オフスクリーンに置くが、その位置では
-            // ウィンドウの可視領域が空になり Update()(UpdateWindow)が WM_PAINT を
-            // 配送しない=経路 ③ を測り落とす。画面内に置くこと自体が測定条件である。
+            // 完全に画面外 (-32000,-32000) のウィンドウは可視領域が空になり
+            // Update()(UpdateWindow)が WM_PAINT を配送しない=経路 ③ を測り落とす。
+            // 画面内に置くこと自体が測定条件である(GdiBench も同じ理由で画面内)。
             Location = new Point(100, 100),
             ShowInTaskbar = false,
         };
