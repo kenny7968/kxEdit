@@ -303,6 +303,31 @@ if (largeLineMode)
         }
     }
 
+    // --- F-5 の実測: 空白・改行を含まない長大トークンでの単語ナビ ---
+    // 既存 --characcess は MakeWordDoc(空白・改行あり)を使うため、区切りが無い場合の
+    // 最悪ケースを測っていない。WordBoundary.PrevWordStart は空白を探して 1 文字ずつ
+    // 走査するので、区切りが 1 つも無いと行頭まで全走査する。
+    // 同じ構造が UIA 側にもあり(UiaTextHostAdapter.WordBoundary_WordStart / _WordEnd)、
+    // TextRangeProviderV2.ExpandToEnclosingUnit(TextUnit.Word) は WordStart と WordEnd を
+    // 両方呼ぶため SR の単語単位読み 1 回あたりのコストは概ねこの 2 倍になる。
+    Console.WriteLine();
+    Console.WriteLine("F-5: 空白なし長大トークンの単語ナビ");
+    Console.WriteLine("chars,prevWordStartMs");
+    foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
+    {
+        var tokSnap = TextBuffer.FromString(MakeSingleLine(len, "ascii")).Current;
+        llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength); // ウォームアップ
+        double tokBest = double.MaxValue; // 3 回の最小値(既存 --characcess の流儀)
+        for (int r = 0; r < 3; r++)
+        {
+            var tokSw = Stopwatch.StartNew();
+            llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength);
+            tokSw.Stop();
+            tokBest = Math.Min(tokBest, tokSw.Elapsed.TotalMilliseconds);
+        }
+        Console.WriteLine($"{len},{tokBest:F1}");
+    }
+
     // --- F-6 の空白埋め: AppendBuffer 現ブロック経路 ---
     // 既存 --characcess は TextBuffer.FromString(builder チャンク)だけを測っており、
     // 「実際にタイプして育てた文書」= AppendBuffer の現ブロックに一度も触れていない。

@@ -56,6 +56,13 @@ internal static class LargeLineBench
         Console.WriteLine(
             $"editor.ClientSize={editor.ClientSize}(高さ 0 なら経路 ③ を測れていない)"
         );
+        // JIT ウォームアップ(捨て打ち・計測外)。これが無いと最初の 1 条件だけ初回 JIT を
+        // 含んで見かけ上遅くなり、100K が 500K より遅いという逆転が表に出る。
+        editor.SetOrReplaceSource(TextBuffer.FromString(MakeSingleLine(100_000, "ascii")));
+        editor.Invalidate();
+        editor.Update();
+        Application.DoEvents();
+
         Console.WriteLine();
         Console.WriteLine("kind,chars,wrapColumns,setSourceMs,paintMsPerFrame,paintReps");
 
