@@ -228,20 +228,45 @@ if (largeLineMode)
     // 空白も改行も含まない 1 行を作る。文字種を振るのは GdiCharMetrics.MeasureRun が
     // 「全 ASCII なら配列加算・非 ASCII を 1 文字でも含むと GDI へ落ちる」ためで、
     // 本ベンチ自体は MonoCharMetrics なので文字種で分岐しない=構造コストの基準線になる。
+    // ただし MonoCharMetrics はサロゲートペアに専用分岐を持つため emoji は構造側でも意味がある。
+    //
+    // kind ごとの狙い(Editor.Smoke --largeline の MakeSingleLine と同一の生成規則・同一シード。
+    //  2 つのベンチが対であることが設計の前提なので、片方だけ変えないこと):
+    //   ascii   … a-z の 26 種。基準線
+    //   cjk     … U+3042 から 40 種。異なるコードポイントが 40 種しかないため、
+    //             幅メモ化(設計書 §4.1 変更 A)の初回コストが実文書より小さく出る点に注意
+    //   mixed   … ascii と cjk を半々
+    //   cjkwide … CJK 統合漢字 U+4E00〜U+55FF の 2,048 種。日本語の実文書に近い文字種数
+    //   emoji   … U+1F600〜U+1F64F の 80 種=サロゲートペア。1 コードポイント = 2 char なので
+    //             chars は char 数であってコードポイント数ではない(末尾がペアの中間で切れうるが、
+    //             LineLayout は単独サロゲートを 1 code-unit として扱う契約なので測定は成立する)
+    //
+    // ascii / cjk / mixed の生成規則は変更しないこと(調査 §2.3 との前後比較が壊れる)。
     static string MakeSingleLine(int chars, string kind)
     {
         var sb = new StringBuilder(chars);
         var r = new Random(20260802); // 決定的(既存ベンチの流儀)
         while (sb.Length < chars)
         {
-            sb.Append(
-                kind switch
-                {
-                    "ascii" => (char)('a' + r.Next(26)),
-                    "cjk" => (char)('あ' + r.Next(40)),
-                    _ => r.Next(2) == 0 ? (char)('a' + r.Next(26)) : (char)('あ' + r.Next(40)),
-                }
-            );
+            switch (kind)
+            {
+                case "ascii":
+                    sb.Append((char)('a' + r.Next(26)));
+                    break;
+                case "cjk":
+                    sb.Append((char)('あ' + r.Next(40)));
+                    break;
+                case "cjkwide":
+                    sb.Append((char)(0x4E00 + r.Next(2048))); // U+4E00〜U+55FF
+                    break;
+                case "emoji":
+                    // 1 回で 2 char(サロゲートペア)積む。U+1F600〜U+1F64F。
+                    sb.Append(char.ConvertFromUtf32(0x1F600 + r.Next(80)));
+                    break;
+                default: // "mixed"
+                    sb.Append(r.Next(2) == 0 ? (char)('a' + r.Next(26)) : (char)('あ' + r.Next(40)));
+                    break;
+            }
         }
         return sb.ToString(0, chars);
     }
@@ -252,7 +277,7 @@ if (largeLineMode)
     long llSink = 0; // 最適化防止(既存ベンチの流儀)
     Console.WriteLine();
     Console.WriteLine("kind,chars,wrapColumns,buildMs,rows");
-    foreach (string kind in new[] { "ascii", "cjk", "mixed" })
+    foreach (string kind in new[] { "ascii", "cjk", "mixed", "cjkwide", "emoji" })
     {
         foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
         {

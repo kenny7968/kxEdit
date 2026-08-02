@@ -66,7 +66,7 @@ internal static class LargeLineBench
         Console.WriteLine();
         Console.WriteLine("kind,chars,wrapColumns,setSourceMs,paintMsPerFrame,paintReps");
 
-        foreach (string kind in new[] { "ascii", "cjk", "mixed" })
+        foreach (string kind in new[] { "ascii", "cjk", "mixed", "cjkwide", "emoji" })
         {
             foreach (int wrap in new[] { 0, 80 })
             {
@@ -123,20 +123,70 @@ internal static class LargeLineBench
     /// <summary>
     /// 空白も改行も含まない 1 行を作る(Core.Bench --largeline と同一の生成規則・同一シード)。
     /// </summary>
+    /// <remarks>
+    /// <paramref name="kind"/> ごとの狙い。
+    /// <list type="table">
+    /// <item>
+    ///   <term>ascii</term>
+    ///   <description>a-z の 26 種。<c>GdiCharMetrics</c> の ASCII 配列加算だけを通る基準線。</description>
+    /// </item>
+    /// <item>
+    ///   <term>cjk</term>
+    ///   <description>U+3042 から 40 種。<b>異なるコードポイントが 40 種しかない</b>ため、
+    ///   幅メモ化(設計書 §4.1 変更 A)の初回コストが実文書より小さく出る点に注意
+    ///   (日本語の実文書は 2,000 種程度=<c>cjkwide</c> が実文書相当)。</description>
+    /// </item>
+    /// <item>
+    ///   <term>mixed</term>
+    ///   <description>ascii と cjk を半々に混ぜる。非 ASCII を 1 文字でも含むと
+    ///   複数文字 run が GDI へ落ちる経路の確認用。</description>
+    /// </item>
+    /// <item>
+    ///   <term>cjkwide</term>
+    ///   <description>CJK 統合漢字 U+4E00〜U+55FF の 2,048 種。日本語の実文書に近い文字種数で
+    ///   幅メモ化の初回コストを測る。<c>cjk</c> との差が「文字種数の効果」になる。</description>
+    /// </item>
+    /// <item>
+    ///   <term>emoji</term>
+    ///   <description>U+1F600〜U+1F64F の 80 種=<b>サロゲートペア</b>。<c>LineLayout</c> の
+    ///   <c>TextBoundary.CodePointLengthAt</c> と <c>GdiCharMetrics</c> の UTF-32 キー経路を踏ませる。</description>
+    /// </item>
+    /// </list>
+    /// <b>ascii / cjk / mixed の生成規則は変更しないこと。</b>
+    /// 調査(2026-08-02-large-line-resilience-design.md §2.3)および Task 2 / Task 4 の
+    /// 測定値との前後比較が成立しなくなる。
+    /// <para>
+    /// <b>emoji の注意</b>: 1 コードポイント = 2 char のため <paramref name="chars"/> は char 数であって
+    /// コードポイント数ではない。末尾の <c>ToString(0, chars)</c> がサロゲートペアの中間で切ることが
+    /// あるが、<c>LineLayout</c> は単独サロゲートを 1 code-unit として扱う契約
+    /// (<c>LineLayoutTests.Lone_high_surrogate_is_treated_as_single_code_unit</c>)なので測定は成立する。
+    /// </para>
+    /// </remarks>
     private static string MakeSingleLine(int chars, string kind)
     {
         var sb = new StringBuilder(chars);
         var r = new Random(20260802);
         while (sb.Length < chars)
         {
-            sb.Append(
-                kind switch
-                {
-                    "ascii" => (char)('a' + r.Next(26)),
-                    "cjk" => (char)('あ' + r.Next(40)),
-                    _ => r.Next(2) == 0 ? (char)('a' + r.Next(26)) : (char)('あ' + r.Next(40)),
-                }
-            );
+            switch (kind)
+            {
+                case "ascii":
+                    sb.Append((char)('a' + r.Next(26)));
+                    break;
+                case "cjk":
+                    sb.Append((char)('あ' + r.Next(40)));
+                    break;
+                case "cjkwide":
+                    sb.Append((char)(0x4E00 + r.Next(2048))); // U+4E00〜U+55FF
+                    break;
+                case "emoji":
+                    // 1 回で 2 char(サロゲートペア)積む。U+1F600〜U+1F64F。
+                    sb.Append(char.ConvertFromUtf32(0x1F600 + r.Next(80)));
+                    break;
+                default: // "mixed"
+                    sb.Append(r.Next(2) == 0 ? (char)('a' + r.Next(26)) : (char)('あ' + r.Next(40)));
+                    break;
+            }
         }
         return sb.ToString(0, chars);
     }
