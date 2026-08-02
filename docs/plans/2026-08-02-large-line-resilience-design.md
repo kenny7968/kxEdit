@@ -77,7 +77,56 @@ UIA 側の `_lastLineSegs` だけがキャッシュだが、`OnSnapshotChanged` 
 
 ### 2.2 構造コスト(GDI 抜き・Task 2)
 
-(Task 2 で記述)
+`tests/yEdit.Core.Bench --largeline`。`MonoCharMetrics`(固定幅)で `ViewportLayout.Build`
+を測る = GDI を経路から外した基準線。可視 40 行相当・`topLine = 0`。
+
+| 文字種 | 100K 文字 | 500K 文字 | 2M 文字 | 伸び(100K → 2M) |
+|---|---|---|---|---|
+| ascii / wrap OFF | 0.2 ms | 0.2 ms | 1.3 ms | ×6.5 |
+| ascii / wrap 80 | 0.5 ms | 1.5 ms | 6.5 ms | ×13 |
+| cjk / wrap OFF | 0.3 ms | 1.6 ms | 7.7 ms | ×26 |
+| cjk / wrap 80 | 0.7 ms | 3.4 ms | 13.2 ms | ×19 |
+| mixed / wrap OFF | 0.7 ms | 3.4 ms | 14.7 ms | ×21 |
+| mixed / wrap 80 | 1.4 ms | 6.8 ms | **29.7 ms** | ×21 |
+
+**行長 20 倍に対して伸びは 6.5〜26 倍 = 線形。O(n²) ではない。**
+そして**最悪でも 29.7 ms** であり、§9.8 の 240 秒とは **4 桁違う**。
+
+#### 結論: 240 秒ハングは構造由来ではない
+
+`ViewportLayout.Build` / `LineLayout.Wrap` / `TextSnapshot.GetText` というデータ構造側の
+アルゴリズムは、巨大 1 行に対して素直に線形でミリ秒級に収まっている。
+**したがって主因は `ICharMetrics` の実装差 = `GdiCharMetrics` の GDI 呼び出しである。**
+同じ `Wrap` を `MonoCharMetrics` から `GdiCharMetrics` に替えるだけで 4 桁増える計算になり、
+これは §2.1 の既存コメント(20,000 文字 CJK・`WrapColumns=80` で 1,584 ms)と整合する。
+Task 3 で GDI 込みの実測を取り、この推論を確定させる。
+
+なお本ベンチは `MonoCharMetrics` を使うため**文字種で分岐しない**。上表の文字種差
+(ascii < cjk < mixed)は `MeasureRun` ではなく `GetText` の UTF-8 デコードコスト
+(1 バイト / 3 バイト / 混在)に由来する。
+
+#### F-6 は実測で裏づけられた
+
+同ベンチの後半で `AppendBuffer` 現ブロック経路(`TextBuffer.FromString` ではなく
+1 文字ずつ `Insert` して育てた文書)を測った。70,000 文字 / ピース数 2。
+
+| 位置 | `GetChar` |
+|---|---|
+| pos = 8,750 | 13,799 ns/回 |
+| pos = 26,250 | 34,009 ns/回 |
+| pos = 61,250 | **79,380 ns/回** |
+
+**位置にほぼ比例して増える**(ブロック先頭からの線形走査そのもの)。比較のため、
+PR #33 §9.2 の読み込み済み文書(`TextBufferBuilder` 由来チャンク・4KB 格子)では
+**133 ns(格子点)〜 2,742 ns(格子セル末尾)**だった。
+
+**わずか 70,000 文字の編集中文書が、1M 文字の読み込み済み文書より約 29〜600 倍遅い。**
+文書サイズではなくブロック内オフセットがコストを決めるため、こうした逆転が起きる。
+`WordBoundary.PrevWordStart` も **0.0960 ms/回**で、PR #33 の DoD 基準 0.05 ms
+(1M 文字 ASCII・読み込み済み)の約 2 倍にあたる。
+
+F-6 の申し送り「1 回の `GetChar` あたり最大 64KB 走査という着手前の姿がこの領域だけ残る」は
+**推定ではなく実測された事実**になった。棚卸し表の F-6「まず実測で空白を埋める」は完了。
 
 ### 2.3 GDI 込みの実経路(Task 3)
 

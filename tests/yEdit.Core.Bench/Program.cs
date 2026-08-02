@@ -11,11 +11,15 @@ using yEdit.Core.Layout;
 //             他モードとは排他=--typing 単独で早期 return(TextBuffer 合成文書構築は走らせない)。
 // 文字アクセス seam Task 2: --characcess 追加。GetChar の位置依存コストと単語ナビを測る。
 //             --typing と同様に単独で早期 return する。
+// 巨大 1 行調査 Task 2: --largeline 追加。空白・改行を一切含まない単一長大行に対する
+//             ViewportLayout の構造コストを GDI 抜きで測る(GDI 込みは Editor.Smoke --largeline)。
+//             単独で早期 return する。
 
 int mb = 1024;
 bool layoutMode = false;
 bool typingMode = false;
 bool charAccessMode = false;
+bool largeLineMode = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out int m))
@@ -34,6 +38,10 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--characcess")
     {
         charAccessMode = true;
+    }
+    else if (args[i] == "--largeline")
+    {
+        largeLineMode = true;
     }
 }
 
@@ -205,6 +213,110 @@ if (charAccessMode)
     bool caPass = caJudgedRows > 0 && caResults.All(r => r.Pass is not false);
     Console.WriteLine(caPass ? "DoD 達成 (EXIT 0)" : "DoD 未達 (EXIT 1)");
     return caPass ? 0 : 1;
+}
+
+// ---- 2026-08-02 巨大 1 行調査: --largeline ----
+// 空白・改行を一切含まない単一長大行の構造コスト。MonoCharMetrics(固定幅)を使って
+// GDI を経路から外すことで、非線形性が「構造由来」か「GDI 由来」かを切り分ける
+// (GDI 込みは tests/yEdit.Editor.Smoke --largeline が対)。
+// 判定ゲートは持たない=調査用のため常に EXIT 0。他ベンチとは独立=単独で return する。
+if (largeLineMode)
+{
+    Console.WriteLine("--largeline: 巨大 1 行の構造コスト(MonoCharMetrics・GDI 抜き)");
+
+    // 空白も改行も含まない 1 行を作る。文字種を振るのは GdiCharMetrics.MeasureRun が
+    // 「全 ASCII なら配列加算・非 ASCII を 1 文字でも含むと GDI へ落ちる」ためで、
+    // 本ベンチ自体は MonoCharMetrics なので文字種で分岐しない=構造コストの基準線になる。
+    static string MakeSingleLine(int chars, string kind)
+    {
+        var sb = new StringBuilder(chars);
+        var r = new Random(20260802); // 決定的(既存ベンチの流儀)
+        while (sb.Length < chars)
+        {
+            sb.Append(
+                kind switch
+                {
+                    "ascii" => (char)('a' + r.Next(26)),
+                    "cjk" => (char)('あ' + r.Next(40)),
+                    _ => r.Next(2) == 0 ? (char)('a' + r.Next(26)) : (char)('あ' + r.Next(40)),
+                }
+            );
+        }
+        return sb.ToString(0, chars);
+    }
+
+    var llMetrics = new MonoCharMetrics(halfWidthPx: 8, lineHeightPx: 20);
+    int llHeightPx = 40 * llMetrics.LineHeightPx; // 可視 40 行相当
+
+    long llSink = 0; // 最適化防止(既存ベンチの流儀)
+    Console.WriteLine();
+    Console.WriteLine("kind,chars,wrapColumns,buildMs,rows");
+    foreach (string kind in new[] { "ascii", "cjk", "mixed" })
+    {
+        foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
+        {
+            var llSnap = TextBuffer.FromString(MakeSingleLine(len, kind)).Current;
+            foreach (int wrap in new[] { 0, 80 })
+            {
+                llSink += ViewportLayout.Build(llSnap, 0, llHeightPx, wrap, llMetrics).Count; // ウォームアップ(JIT)
+                var llSw = Stopwatch.StartNew();
+                var llRows = ViewportLayout.Build(llSnap, 0, llHeightPx, wrap, llMetrics);
+                llSw.Stop();
+                Console.WriteLine(
+                    $"{kind},{len},{wrap},{llSw.Elapsed.TotalMilliseconds:F1},{llRows.Count}"
+                );
+            }
+        }
+    }
+
+    // --- F-6 の空白埋め: AppendBuffer 現ブロック経路 ---
+    // 既存 --characcess は TextBuffer.FromString(builder チャンク)だけを測っており、
+    // 「実際にタイプして育てた文書」= AppendBuffer の現ブロックに一度も触れていない。
+    // 同クラスの共有チャンクは格子表を先頭 1 エントリに固定しているため(設計書 §2.4)、
+    // CharToByte がブロック先頭からの線形走査になる=最大 64KB 走査が残る領域。
+    Console.WriteLine();
+    Console.WriteLine("F-6: AppendBuffer 現ブロック経路(タイプして育てた文書)");
+    var typedBuf = new TextBufferBuilder().Build();
+    var typedRnd = new Random(20260802);
+    // 64KB ブロックをまたぐ長さにする。単語区切りを入れて PrevWordStart が動くようにする。
+    for (int i = 0; i < 70_000; i++)
+    {
+        typedBuf.Insert(
+            typedBuf.Current.CharLength,
+            typedRnd.Next(8) == 0 ? " " : ((char)('a' + typedRnd.Next(26))).ToString()
+        );
+    }
+    var typedSnap = typedBuf.Current;
+    Console.WriteLine(
+        $"typed 文書: {typedSnap.CharLength:N0} 文字 / ピース数 {typedSnap.PieceCount}"
+    );
+    long f6Sink = 0;
+    foreach (int frac in new[] { 1, 2, 4 })
+    {
+        int pos = typedSnap.CharLength * (frac - 1) / 4 + typedSnap.CharLength / 8;
+        for (int w = 0; w < 1_000; w++)
+            f6Sink += typedSnap.GetChar(pos); // ウォームアップ
+        const int F6Iters = 20_000;
+        var f6Sw = Stopwatch.StartNew();
+        for (int i = 0; i < F6Iters; i++)
+            f6Sink += typedSnap.GetChar(pos);
+        f6Sw.Stop();
+        Console.WriteLine(
+            $"  GetChar(pos={pos:N0}): {f6Sw.Elapsed.TotalNanoseconds / F6Iters:N0} ns/回"
+        );
+    }
+    for (int w = 0; w < 50; w++)
+        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - w); // ウォームアップ
+    var f6NavSw = Stopwatch.StartNew();
+    for (int i = 0; i < 200; i++)
+        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - i * 10);
+    f6NavSw.Stop();
+    Console.WriteLine($"  PrevWordStart × 200: {f6NavSw.Elapsed.TotalMilliseconds / 200:F4} ms/回");
+
+    Console.WriteLine($"(sink={llSink + f6Sink})");
+    Console.WriteLine();
+    Console.WriteLine("(調査用ベンチのため判定ゲートなし) EXIT 0");
+    return 0;
 }
 
 long targetBytes = (long)mb * 1024 * 1024;
