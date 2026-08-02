@@ -1,3 +1,5 @@
+using yEdit.Core.Text;
+
 namespace yEdit.Core.Layout;
 
 /// <summary>
@@ -45,12 +47,7 @@ internal static class LineLayout
         while (i < line.Length)
         {
             // 次の code-point を切り出す(サロゲートペアは 2 code-unit 分)
-            int cpLen;
-            char c = line[i];
-            if (char.IsHighSurrogate(c) && i + 1 < line.Length && char.IsLowSurrogate(line[i + 1]))
-                cpLen = 2;
-            else
-                cpLen = 1;
+            int cpLen = TextBoundary.CodePointLengthAt(line, i);
 
             int cpWidth = metrics.MeasureRun(line.Slice(i, cpLen));
 

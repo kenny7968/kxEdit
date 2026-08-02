@@ -1,3 +1,5 @@
+using yEdit.Core.Text;
+
 namespace yEdit.Core.Layout;
 
 /// <summary>ASCII=1・BMP CJK=2・サロゲートペア=2 の固定幅(テスト用)。</summary>
@@ -16,16 +18,15 @@ public sealed class MonoCharMetrics : ICharMetrics
     public int MeasureRun(ReadOnlySpan<char> text)
     {
         int px = 0;
-        for (int i = 0; i < text.Length; i++)
+        int i = 0;
+        // 他の span 系 4 箇所と同じ「長さを受け取って進む」形に揃える(二重進行を作らない)。
+        // サロゲートペアは _half * 2 を 1 回だけ加える = BMP 2 文字分ではない。
+        while (i < text.Length)
         {
+            int cpLen = TextBoundary.CodePointLengthAt(text, i);
             char c = text[i];
-            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
-            {
-                px += _half * 2;
-                i++;
-                continue;
-            }
-            px += (c < 0x80 || c == '\t') ? _half : _half * 2; // ASCII/タブ=1・それ以外=2
+            px += (cpLen == 1 && (c < 0x80 || c == '\t')) ? _half : _half * 2; // ASCII/タブ=1・それ以外=2
+            i += cpLen;
         }
         return px;
     }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using yEdit.Core.Buffers;
+using yEdit.Core.Editing;
 using yEdit.Core.Layout;
 
 // P1 TextBuffer 性能ゲート(設計書DoD): --mb <サイズ> 既定1024
@@ -8,10 +9,13 @@ using yEdit.Core.Layout;
 // P2 Task 14: --layout 追加。TextBuffer ベンチ実行後、レイアウト層の性能ゲートを走らせる。
 // P3 Task 14: --typing 追加。1M 文字を 1 文字ずつ Insert する応答性ベンチ(目標 5µs/挿入 以下)。
 //             他モードとは排他=--typing 単独で早期 return(TextBuffer 合成文書構築は走らせない)。
+// 文字アクセス seam Task 2: --characcess 追加。GetChar の位置依存コストと単語ナビを測る。
+//             --typing と同様に単独で早期 return する。
 
 int mb = 1024;
 bool layoutMode = false;
 bool typingMode = false;
+bool charAccessMode = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out int m))
@@ -26,6 +30,10 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--typing")
     {
         typingMode = true;
+    }
+    else if (args[i] == "--characcess")
+    {
+        charAccessMode = true;
     }
 }
 
@@ -54,6 +62,149 @@ if (typingMode)
     bool typingPass = typingSw.Elapsed.TotalSeconds < 5.0;
     Console.WriteLine(typingPass ? "PASS (EXIT 0)" : "FAIL (EXIT 1)");
     return typingPass ? 0 : 1;
+}
+
+// ---- 2026-07-31 文字アクセス seam: --characcess ----
+// GetChar のコスト特性(格子セル内の位置で変わる)と、実操作 Ctrl+← 相当の
+// WordBoundary.PrevWordStart を測る。
+// DoD = 1M 文字 ASCII で PrevWordStart の<中央値>が 0.05 ms 未満。
+// 中央値なのは、コストが格子セル内オフセットにほぼ比例する=測定位置 1 点では
+// 運で 5 倍以上変わるため(Task 4 レビューでの発見)。最悪値も併記するが判定には使わない
+// (外れ値に振り回されるため)。他ベンチとは独立=単独で return する。
+if (charAccessMode)
+{
+    Console.WriteLine("--characcess: 文字アクセス(GetChar / 単語ナビ)ベンチ");
+
+    static string MakeWordDoc(int chars, bool cjk)
+    {
+        var sb = new StringBuilder(chars);
+        var r = new Random(20260731);
+        while (sb.Length < chars)
+        {
+            int wordLen = r.Next(2, 9);
+            for (int i = 0; i < wordLen; i++)
+                sb.Append(cjk ? (char)('あ' + r.Next(40)) : (char)('a' + r.Next(26)));
+            sb.Append(r.Next(12) == 0 ? '\n' : ' ');
+        }
+        return sb.ToString(0, chars);
+    }
+
+    var caResults = new List<(string Name, string Value, string Target, bool? Pass)>();
+    long caSink = 0;
+    int grid = TextChunk.DefaultGridBytes;
+    Console.WriteLine($"格子幅(TextChunk 既定): {grid:N0} B");
+
+    // CharToByte は「直近格子点から目標位置まで 1 バイトずつ前進」する。したがって
+    // 文字アクセスのコストは文書サイズではなく「格子セル内オフセット」にほぼ比例する。
+    // ASCII 文書は 1 バイト = 1 文字なので pos % grid がそのまま走査バイト数になる。
+
+    double MeasureGetCharNs(TextSnapshot s, int pos)
+    {
+        for (int w = 0; w < 1000; w++)
+            caSink += s.GetChar(pos); // ウォームアップ
+        const int GcIters = 20_000;
+        double best = double.MaxValue; // 3 ラウンドの最小値(GC / 周波数変動の外れ値を落とす)
+        for (int round = 0; round < 3; round++)
+        {
+            var gcSw = Stopwatch.StartNew();
+            for (int i = 0; i < GcIters; i++)
+                caSink += s.GetChar(pos);
+            gcSw.Stop();
+            best = Math.Min(best, gcSw.Elapsed.TotalNanoseconds / GcIters);
+        }
+        return best;
+    }
+
+    // --- C1 GetChar 単発: セル内オフセット依存を明示する ---
+    var gcSnap = TextBuffer.FromString(MakeWordDoc(1_000_000, cjk: false)).Current;
+    int gcBase = 500_000 / grid * grid; // 格子点ちょうど
+    caResults.Add(
+        (
+            "C1 GetChar(pos=0・ピース先頭 fast path)",
+            $"{MeasureGetCharNs(gcSnap, 0):N0} ns/回",
+            "記録のみ",
+            null
+        )
+    );
+    foreach (int off in new[] { 0, grid / 4, grid / 2, 3 * grid / 4, grid - 1 })
+        caResults.Add(
+            (
+                $"C1 GetChar(格子点 {gcBase:N0} + {off:N0} B)",
+                $"{MeasureGetCharNs(gcSnap, gcBase + off):N0} ns/回",
+                "記録のみ",
+                null
+            )
+        );
+
+    // --- C2 Ctrl+← 相当(DoD 判定はこれ) ---
+    // 単一の開始位置で測ると、その位置のセル内オフセットの運で結果が変わる
+    // (4KB 格子ではセル先頭付近とセル末尾で 5 倍以上開く)。DoD の意図は
+    // 「Ctrl+← が速い」であって「ある 1 点で速い」ではないので、開始位置を
+    // 決定的な乱択で散らしてセル全域を踏ませ、中央値でゲートし最悪値も必ず出す。
+    (double Median, double Worst) SweepPrevWordStart(TextSnapshot s)
+    {
+        const int Samples = 256; // 位置数(セル内オフセットが偏らないだけ取る)
+        const int Repeats = 3; // 位置ごとに最小値=OS 由来の外れ値を落として位置の素コストを見る
+        var rng = new Random(20260731); // 決定的(既存ベンチの流儀)
+        int lo = Math.Min(1000, s.CharLength / 4);
+        var positions = new int[Samples];
+        for (int i = 0; i < Samples; i++)
+            positions[i] = rng.Next(lo, s.CharLength);
+        for (int w = 0; w < 200; w++)
+            caSink += WordBoundary.PrevWordStart(s, positions[w % Samples]); // ウォームアップ
+
+        var ms = new double[Samples];
+        for (int i = 0; i < Samples; i++)
+        {
+            double best = double.MaxValue;
+            for (int r = 0; r < Repeats; r++)
+            {
+                var sw = Stopwatch.StartNew();
+                caSink += WordBoundary.PrevWordStart(s, positions[i]);
+                sw.Stop();
+                best = Math.Min(best, sw.Elapsed.TotalMilliseconds);
+            }
+            ms[i] = best;
+        }
+        Array.Sort(ms);
+        return (ms[Samples / 2], ms[^1]);
+    }
+
+    foreach (bool cjk in new[] { false, true })
+    {
+        foreach (int chars in new[] { 10_000, 200_000, 1_000_000 })
+        {
+            var wbSnap = TextBuffer.FromString(MakeWordDoc(chars, cjk)).Current;
+            var (median, worst) = SweepPrevWordStart(wbSnap);
+            bool isDod = !cjk && chars == 1_000_000;
+            caResults.Add(
+                (
+                    $"C2 PrevWordStart({(cjk ? "CJK" : "ASCII")} {chars:N0})",
+                    $"中央値 {median:F3} / 最悪 {worst:F3} ms/回",
+                    isDod ? "中央値 <0.05ms (DoD)" : "記録のみ",
+                    isDod ? median < 0.05 : null
+                )
+            );
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("| # シナリオ | 結果 | 目標 | 判定 |");
+    Console.WriteLine("|---|---|---|---|");
+    foreach (var r in caResults)
+        Console.WriteLine(
+            $"| {r.Name} | {r.Value} | {r.Target} | {(r.Pass is null ? "―" : r.Pass.Value ? "PASS" : "FAIL")} |"
+        );
+    Console.WriteLine($"(sink={caSink})");
+    // 空振り PASS の防止: All は空集合で true を返すため、判定行(Pass 非 null)が 1 つも
+    // 無いと「測っていないのに合格」になる。シナリオ配列から DoD 条件
+    // (ASCII 1,000,000)を外すと黙って通ってしまうので、判定行の存在自体をゲートに含める。
+    int caJudgedRows = caResults.Count(r => r.Pass is not null);
+    if (caJudgedRows == 0)
+        Console.WriteLine("DoD 判定行が 0 件(シナリオ設定に DoD 条件が含まれていない=ゲート無効)");
+    bool caPass = caJudgedRows > 0 && caResults.All(r => r.Pass is not false);
+    Console.WriteLine(caPass ? "DoD 達成 (EXIT 0)" : "DoD 未達 (EXIT 1)");
+    return caPass ? 0 : 1;
 }
 
 long targetBytes = (long)mb * 1024 * 1024;

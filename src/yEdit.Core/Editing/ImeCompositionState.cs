@@ -1,3 +1,5 @@
+using yEdit.Core.Text;
+
 namespace yEdit.Core.Editing;
 
 public readonly record struct ImeCompositionState(
@@ -37,13 +39,18 @@ public readonly record struct ImeCompositionState(
         return buf;
     }
 
-    /// <summary>CursorPos がサロゲート pair の low 位置を指していたら high 位置にスナップ。</summary>
+    /// <summary>CursorPos がサロゲート pair の low 位置を指していたら high 位置にスナップ。
+    /// あわせて [0, text.Length] へクランプする。</summary>
+    /// <remarks>
+    /// 2026-07-31: サロゲート判定の実体は <see cref="Text.TextBoundary.SnapToCodePointStart"/>
+    /// へ移した(未確定文字列は改行を含まないので code-point 単位で足りる)。
+    /// <paramref name="text"/> の null は明示ガードで <see cref="ArgumentNullException"/> にする=
+    /// <c>AsSpan()</c> の暗黙変換に流すと null が静かに空 span 化して 0 を返すようになり、
+    /// 呼び出し側のバグを隠すため(<see cref="Text.TextBoundary"/> の snapshot 版と同じ方針)。
+    /// </remarks>
     public static int SnapCursorPos(string text, int cursor)
     {
-        if (cursor <= 0 || cursor >= text.Length)
-            return Math.Clamp(cursor, 0, text.Length);
-        if (char.IsLowSurrogate(text[cursor]) && char.IsHighSurrogate(text[cursor - 1]))
-            return cursor - 1;
-        return cursor;
+        ArgumentNullException.ThrowIfNull(text);
+        return TextBoundary.SnapToCodePointStart(text.AsSpan(), cursor);
     }
 }
