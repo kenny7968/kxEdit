@@ -571,12 +571,21 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // ハンドル未生成 / 非可視範囲は空配列。
     double[] IUiaTextHost.GetBoundingRectangles(int start, int end)
     {
+        // 2026-08-02: Handle ガードを InvokeRequired の手前へ出した(GetVisibleRange /
+        // TryFindVisualSegment / SetSelection / SetFocus / ScrollRangeIntoView と同形)。
+        // Control.InvokeRequired は Handle 未生成 / 破棄後に false を返すため、内側に置くと
+        // ガードへ到達せず ComputeBoundingRectangles が RPC スレッド上で走る。その先の
+        // ComputeCaretPoint → GdiCharMetrics.MeasureRun は非スレッドセーフな
+        // Dictionary(幅メモ)へ書き込むので、UI スレッドと同時に走ると構造が壊れる
+        // (= TryGetValue の無限ループで UI スレッドが永久に戻らない)。
+        // 実測: Handle 破棄後の EditorControl へワーカースレッドから呼ぶと
+        // InvokeRequired=False のまま幅メモにエントリが 1 件増えることを確認済み。
+        // 踏む窓は「SR がプロバイダを掴んだままタブ / アプリが teardown に入る」場面
+        // (OnHandleDestroyed は _provider も _bufferSnapshot も落とさないため RPC は通る)。
+        if (!_host.IsHandleCreated)
+            return Array.Empty<double>();
         if (_host.InvokeRequired)
-        {
-            if (!_host.IsHandleCreated)
-                return Array.Empty<double>();
             return _host.Invoke(new Func<double[]>(() => ComputeBoundingRectangles(start, end)));
-        }
         return ComputeBoundingRectangles(start, end);
     }
 
@@ -629,12 +638,13 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // RPC スレッドから呼ばれた場合は Invoke で UI スレッドへマーシャリングする。
     int IUiaTextHost.OffsetFromScreenPoint(double x, double y)
     {
+        // 2026-08-02: Handle ガードを InvokeRequired の手前へ出した。理由は
+        // GetBoundingRectangles と同一(InvokeRequired は Handle 未生成 / 破棄後に false を
+        // 返すため、内側のガードには到達せず RPC スレッドが幅メモの Dictionary へ書き込む)。
+        if (!_host.IsHandleCreated)
+            return 0;
         if (_host.InvokeRequired)
-        {
-            if (!_host.IsHandleCreated)
-                return 0;
             return _host.Invoke(new Func<int>(() => ComputeOffsetFromScreenPoint(x, y)));
-        }
         return ComputeOffsetFromScreenPoint(x, y);
     }
 
@@ -691,9 +701,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         // TryFindVisualSegment と同形で同期 Invoke する
         // (書き込み系の ScrollRangeIntoView が BeginInvoke なのは戻り値が不要だから)。
         //
-        // GetBoundingRectangles は「InvokeRequired → IsHandleCreated」の順で catch も持たないが、
-        // こちらは Handle ガードを先に置く: Handle が無ければ ClientSize が無意味なので
-        // そもそも計算に入る意味がない (GetBoundingRectangles 側の順序は既存踏襲=本作業の射程外)。
+        // Handle ガードを先に置く: Handle が無ければ ClientSize が無意味なので
+        // そもそも計算に入る意味がない。2026-08-02 に GetBoundingRectangles /
+        // OffsetFromScreenPoint も同じ順序へ揃えたため、読み取り系 4 経路はすべて同形になった
+        // (それまでこの 2 つは「InvokeRequired → IsHandleCreated」の順で、Handle が無いとき
+        //  RPC スレッドがそのまま計算に入っていた)。
         //
         // IsDisposed を見ないのは、Dispose が Handle を落とすので !IsHandleCreated が拾い、
         // Invoke 実行中に破棄される race は下の ObjectDisposedException catch が拾うため

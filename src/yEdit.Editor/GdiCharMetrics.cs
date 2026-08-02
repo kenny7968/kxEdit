@@ -19,6 +19,14 @@ namespace yEdit.Editor;
 /// <c>TryFindVisualSegment</c> / <c>GetVisibleRange</c> / <c>GetBoundingRectangles</c> /
 /// <c>OffsetFromScreenPoint</c> の 4 経路。書き込み系(<c>SetSelection</c> / <c>SetFocus</c> /
 /// <c>ScrollRangeIntoView</c>)も同様に UI スレッドへ移してから呼ぶ。この契約を崩さないこと。
+/// <para>
+/// <b>マーシャリングの前提</b>: 7 経路とも <c>IsHandleCreated</c> を
+/// <c>InvokeRequired</c> の<b>手前</b>で見て、Handle が無ければ縮退値を返して抜ける。
+/// <see cref="Control.InvokeRequired"/> は Handle 未生成 / 破棄後に <c>false</c> を返すため、
+/// この順序が崩れると RPC スレッドがマーシャリングを経ずに本クラスへ到達する。
+/// 順序を変えないこと(2026-08-02 に <c>GetBoundingRectangles</c> /
+/// <c>OffsetFromScreenPoint</c> の 2 経路を実測で発見して是正した)。
+/// </para>
 /// </remarks>
 public sealed class GdiCharMetrics : ICharMetrics
 {

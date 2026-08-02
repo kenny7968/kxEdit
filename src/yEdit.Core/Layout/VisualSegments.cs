@@ -1,7 +1,7 @@
 namespace yEdit.Core.Layout;
 
 /// <summary>視覚セグメント列(<see cref="LineLayout.Wrap"/> 出力)への共通照会を集約する。
-/// EditorControl の TryFindVisualSegmentCore / VerticalNavigation.FindSegIndex /
+/// UiaTextHostAdapter の TryFindVisualSegmentCore / VerticalNavigation.FindSegIndex /
 /// NavigationCommands.MoveHomeSmart(wrap overload) から共有する。</summary>
 public static class VisualSegments
 {

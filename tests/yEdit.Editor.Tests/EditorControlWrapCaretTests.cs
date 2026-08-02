@@ -365,7 +365,8 @@ public class EditorControlWrapCaretTests
     ) =>
         Sta.Run(() =>
         {
-            // 60 コードポイント。折り返し 10 桁では最終セグメントが半端な長さになる。
+            // 62 コードポイント要求。折り返し 10 桁では最終セグメントが半端な長さになる。
+            // (Mixed は 1 単位 4 コードポイントのため切り上がって 64 になる)
             string line = LineOf(kind, 62);
             var (f, c) = MakeControl(line, 10, visibleRows: 200);
             using (f)
