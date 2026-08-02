@@ -2,8 +2,8 @@ using yEdit.Core.Buffers;
 using yEdit.Core.Text;
 using yEdit.Editor.Smoke;
 
-// P2 Task 14 の smoke 起動器。--bench を渡すと GDI 経由の実描画ベンチ(offscreen Form)
-// を走らせて EXIT 0/1 で判定する。それ以外の起動では EditorControl を Fill させた
+// P2 Task 14 の smoke 起動器。--bench を渡すと GDI 経由の実描画ベンチ(画面内 Form。
+// 理由は GdiBench.Run)を走らせて EXIT 0/1 で判定する。それ以外の起動では EditorControl を Fill させた
 // 単体 Form を出し、ファイルを読み込ませて eye check する用途。
 //
 // エンコーディングプロバイダ登録: MainForm の Shift_JIS / EUC-JP メニューが使えるように
