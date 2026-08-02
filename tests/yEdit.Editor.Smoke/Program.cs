@@ -15,6 +15,14 @@ if (args.Length > 0 && args[0] == "--bench")
     return GdiBench.Run(args);
 }
 
+// 2026-08-02 巨大 1 行調査 Task 3: --largeline。空白・改行を一切含まない単一長大行を
+// 実 EditorControl へ載せ、バッファ差し込みと初回描画を GDI 込みで測る
+// (GDI 抜きの構造コストは yEdit.Core.Bench --largeline が対)。
+if (args.Length > 0 && args[0] == "--largeline")
+{
+    return LargeLineBench.Run();
+}
+
 // P4 Task 14: --ime サブコマンド。ATOK 実機検証(docs/plans/2026-07-06-p4-ime-checklist.md)
 // 用に、未確定色/下線を目視しやすい長文サンプルをメモリ上で生成して開いた状態から起動する。
 if (args.Length > 0 && args[0] == "--ime")
