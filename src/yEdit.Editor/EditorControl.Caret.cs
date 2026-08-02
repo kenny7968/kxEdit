@@ -411,6 +411,9 @@ public sealed partial class EditorControl
     /// <c>LineLayout.Wrap</c> し直す。<c>Wrap</c> は非 ASCII で code point ごとに GDI
     /// <c>MeasureText</c> を呼ぶため、折り返し ON の CJK 長行では 1 回で秒オーダーになる
     /// (レビュー実測: 20,000 文字の CJK 単一論理行・<c>WrapColumns=80</c> で 1,584 ms)。
+    /// 2026-08-02 の変更 B-2 で <see cref="ComputeCaretPoint"/> は可視分に打ち切るように
+    /// なったため、この 1,584 ms は行末キャレット時(打ち切りが効かない)を除いて
+    /// 当てはまらない。早期リターンの妥当性自体は不変。
     /// SR はレビューカーソルを 1 単位動かすたびにここを呼び、しかも Adapter は
     /// fire-and-forget なので、投入速度 &gt; 消化速度になると invoke キューが単調増加する。
     ///

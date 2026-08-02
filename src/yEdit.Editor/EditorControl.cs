@@ -1546,14 +1546,25 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         // - 通常は「seg.OffsetInLine + seg.Length で終わる直前」まで
         // - 最終セグメントに限り「末尾ちょうど」も許容(EOL キャレット位置)
         //
-        // EOL 分岐は「segments の最後の要素 = 論理行の最終セグメント」を仮定している。
-        // 打ち切られている(ReachedLineEnd=false)ときこの仮定は成り立たないので
-        // ReachedLineEnd を条件に足す。実のところ WrapThroughOffset は
-        // 「covered > caretInLine」を厳密な不等号で保証するため、打ち切り時には
-        // 最後の要素で必ず caretInLine < segEnd が先に成立し EOL 分岐には到達しない
-        // (= ReachedLineEnd の判定は現状到達不能)。それでも明示するのは、この安全性が
-        // WrapThroughOffset 側の「>」1 文字だけに依存しており、そこが「>=」に緩むと
-        // ここが静かに壊れる(行末キャレットが 1 行下・左端へずれる)ためである。
+        // EOL 分岐は「segments の最後の要素 = 論理行の最終セグメント」を仮定しており、
+        // 打ち切られている(ReachedLineEnd=false)ときその仮定は成り立たない。よって
+        // ReachedLineEnd を条件に足してあるが、これは防御ではなく「依存関係を明示する
+        // ドキュメント」である。実際:
+        //   - WrapThroughOffset は「covered > caretInLine」を厳密な不等号で保証するため、
+        //     打ち切り時は最後の要素で必ず caretInLine < segEnd が先に成立し
+        //     EOL 分岐には到達しない
+        //   - そもそも EOL 分岐は segIdx を segments.Count - 1(初期値と同じ)に
+        //     するだけなので、発火してもしなくても結果は変わらない
+        //     = ReachedLineEnd を外しても観測可能な挙動は変化しない(実証済み)
+        //
+        // 本当に load-bearing なのは LineLayout.WrapCore の
+        // 「segStart > minCoverOffset」の「>」1 文字の方。ここを「>=」に緩めると
+        // 「セグメント境界ちょうど」のキャレット(offset == 次セグメント先頭)が
+        // 打ち切りに巻き込まれ、次の視覚行へ降りずに 1 行「上」・前セグメント「末尾」
+        // (右端)に留まる。行末キャレットは segStart が line.Length に到達しないため
+        // 打ち切られず無傷=症状は行末ではなくセグメント境界に出る。
+        // この「>」は EditorControlWrapCaretTests(Editor 13 件)と
+        // LineLayoutPrefixTests(Core 5 件)が守っている。
         int segIdx = segments.Count - 1;
         for (int i = 0; i < segments.Count; i++)
         {
@@ -1598,10 +1609,14 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
             int lEnd = snap.GetLineEnd(line, includeBreak: false);
             int lLen = lEnd - lStart;
             string lText = lLen == 0 ? string.Empty : snap.GetText(lStart, lLen);
-            // ループ継続中は accumulated < maxUsefulRows(そうでなければ既に return 済み)
-            // なので rowsNeeded は本来 1 以上。Math.Max は paintHeight=0 で
-            // maxUsefulRows=0 になる縁のケースを WrapFirstSegments の事前条件(1 以上)に
-            // 合わせるための防御。
+            // Math.Max(1, ...) は到達可能な生きた防御(外してはならない)。
+            // PaintHeightPx は 0 になり得る(フォーム最小化・レイアウト確定前・
+            // hscroll より低いペイン)。そのとき maxUsefulRows=0 → rowsNeeded=0 となり、
+            // WrapFirstSegments の ThrowIfNegativeOrZero が発火して
+            // PositionCaret / OnPaint / UIA 経路へ ArgumentOutOfRangeException が抜ける
+            // (打ち切り導入で新設された例外面。変更前の Wrap は投げなかった)。
+            // ループ継続中の通常ケースでは accumulated < maxUsefulRows が成り立つため
+            // rowsNeeded は 1 以上になる。
             int rowsNeeded = maxUsefulRows - visualRowsBeforeThisLine;
             var segs = LineLayout
                 .WrapFirstSegments(lText, maxWidthPx, _metrics, Math.Max(1, rowsNeeded))

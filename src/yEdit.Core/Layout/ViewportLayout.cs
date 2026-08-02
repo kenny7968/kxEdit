@@ -41,7 +41,7 @@ internal static class ViewportLayout
             return result;
 
         // wrap ON なら max px を 1 度だけ計算(GdiCharMetrics 想定でホットパスを守る)。
-        // OFF のときは LineLayout.Wrap に 0 を渡せば単一セグメントが返る。
+        // OFF のときは WrapFirstSegments に 0 を渡せば単一セグメントが返る。
         int maxWidthPx = wrapColumns > 0 ? wrapColumns * metrics.MeasureRun("0") : 0;
         int lineHeight = metrics.LineHeightPx;
 

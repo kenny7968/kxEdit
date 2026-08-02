@@ -307,6 +307,25 @@ public class EditorControlWrapCaretTests
         });
 
     /// <summary>
+    /// PaintHeightPx が 0(最小化・レイアウト確定前・hscroll より低いペイン)でも、
+    /// 積み上げループの打ち切り本数が WrapFirstSegments の事前条件(1 以上)を割らないこと。
+    /// Math.Max(1, ...) を外すと ArgumentOutOfRangeException が PositionCaret / UIA 経路へ抜ける
+    /// (打ち切り導入で新設された例外面)。
+    /// </summary>
+    [Fact]
+    public void Caret_below_top_line_with_zero_paint_height_is_invisible_and_does_not_throw() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("aaaa\nbbbb\ncccc\ndddd", 10, visibleRows: 0);
+            using (f)
+            using (c)
+            {
+                var p = c.ComputeCaretPoint(10); // 行 2 の先頭
+                Assert.False(p.Visible);
+            }
+        });
+
+    /// <summary>
     /// 巨大 1 行の行末キャレット。WrapThroughOffset は行末オフセットでは打ち切れない
     /// (行末まで走らないと「含むセグメント」が決まらない)=ReachedLineEnd は true。
     /// 打ち切りを入れても行末の扱いが変わらないことを固定する。
