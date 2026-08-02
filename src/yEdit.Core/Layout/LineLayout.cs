@@ -8,18 +8,22 @@ namespace yEdit.Core.Layout;
 public readonly record struct WrapSegment(int OffsetInLine, int Length);
 
 /// <summary>
-/// <see cref="LineLayout.WrapPrefix"/> の結果。
+/// <see cref="LineLayout.WrapFirstSegments"/> / <see cref="LineLayout.WrapThroughOffset"/> の結果。
 /// <paramref name="Segments"/> は完全な <see cref="LineLayout.Wrap"/> 結果の prefix と
 /// 厳密に一致する。<paramref name="ReachedLineEnd"/> が false なら打ち切られており、
 /// 「最後の要素が論理行の最終セグメントである」とみなしてはならない
-/// (EOL キャレット位置の判定がずれる)。
+/// (EOL キャレット位置の判定がずれる。<see cref="VisualSegments.FindContaining"/> の
+/// remarks も参照)。
 /// </summary>
 /// <remarks>
 /// <b>等価性の注意</b>: record struct だが <paramref name="Segments"/> は参照型のため、
 /// == / Equals は内容比較にならない(リストの参照同一性で比較される)。
 /// 内容を比べたい場合は <paramref name="Segments"/> を要素単位で比較すること。
 /// </remarks>
-public readonly record struct WrapResult(IReadOnlyList<WrapSegment> Segments, bool ReachedLineEnd);
+internal readonly record struct WrapResult(
+    IReadOnlyList<WrapSegment> Segments,
+    bool ReachedLineEnd
+);
 
 /// <summary>
 /// 論理行 1 本を最大幅で分割する純関数(設計書 §2-3 の char-based 折り返し)。
@@ -45,54 +49,86 @@ internal static class LineLayout
         ICharMetrics metrics
     ) =>
         // minSegments = int.MaxValue = 「どれだけ積んでも足りない」= 打ち切りが起きない。
-        // 実装を WrapPrefix 1 本に保つことで、打ち切り結果が完全結果の prefix であることが
+        // 実装を WrapCore 1 本に保つことで、打ち切り結果が完全結果の prefix であることが
         // 構造的に保証される(2 実装間の同期に頼らない)。
-        WrapPrefix(
-            line,
-            maxWidthPx,
-            metrics,
-            minSegments: int.MaxValue,
-            minCoverOffset: -1
-        ).Segments;
+        WrapCore(line, maxWidthPx, metrics, minSegments: int.MaxValue, minCoverOffset: -1).Segments;
 
     /// <summary>
-    /// <see cref="Wrap"/> と同じ規則で折り返しつつ、要求を満たした時点で走査を打ち切る。
-    /// 打ち切り条件は次の<b>両方</b>が満たされたとき(セグメントを閉じた直後にのみ判定する)。
-    /// <list type="bullet">
-    /// <item>確定済みセグメント数が <paramref name="minSegments"/> 以上
-    ///   (0 = 個数の要求なし)</item>
-    /// <item>確定済みセグメントが <paramref name="minCoverOffset"/> を<b>超えて</b>カバー
-    ///   (-1 = オフセットの要求なし)</item>
-    /// </list>
-    /// 行末まで到達したら要求に関わらず全セグメントを返し、
+    /// <see cref="Wrap"/> と同じ規則で折り返しつつ、先頭 <paramref name="segmentCount"/> 個の
+    /// 視覚行が確定した時点で走査を打ち切る。行末まで到達した場合は要求に関わらず
+    /// 全セグメントを返し、<see cref="WrapResult.ReachedLineEnd"/> に true を入れる。
+    /// </summary>
+    /// <remarks>
+    /// 返るセグメント列が完全な <see cref="Wrap"/> 結果の prefix と厳密に一致することは
+    /// <c>LineLayoutPrefixTests</c> で検証している(根拠は <see cref="WrapCore"/> の remarks)。
+    /// 行全体が欲しいときは <see cref="Wrap"/> を使う。
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="segmentCount"/> が 0 以下。<see cref="Wrap"/> は必ず 1 個以上返す契約なので
+    /// 0 を渡すのは呼び出し側のバグ(静かに 1 として扱わず落とす)。
+    /// </exception>
+    public static WrapResult WrapFirstSegments(
+        ReadOnlySpan<char> line,
+        int maxWidthPx,
+        ICharMetrics metrics,
+        int segmentCount
+    )
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(segmentCount);
+        return WrapCore(line, maxWidthPx, metrics, segmentCount, minCoverOffset: -1);
+    }
+
+    /// <summary>
+    /// <see cref="Wrap"/> と同じ規則で折り返しつつ、<paramref name="offsetInLine"/> を
+    /// <b>含む</b>セグメントが確定した時点で走査を打ち切る
+    /// (<paramref name="offsetInLine"/> は論理行内の code unit オフセット。+1 して渡す必要はない)。
+    /// 行末まで到達した場合は全セグメントを返し、
     /// <see cref="WrapResult.ReachedLineEnd"/> に true を入れる。
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 打ち切り結果が完全結果の prefix になるのは、<see cref="Wrap"/> が左から右への
-    /// 貪欲な走査で、セグメント境界が<b>先行する内容だけ</b>で決まるためである。
-    /// この性質は <c>LineLayoutPrefixTests</c> で検証している。
+    /// 行末オフセット(= line.Length)を渡すと必ず行末まで走る。これは仕様であり、
+    /// 行末キャレットに対してこの打ち切りは効かない(設計書 §2 の非対称性)。
     /// </para>
     /// <para>
-    /// <b>呼び出し方</b>:
-    /// 「先頭 n 視覚行が欲しい」なら <c>minSegments: n, minCoverOffset: -1</c>。
-    /// 「オフセット c を含むセグメントまで欲しい」なら <c>minSegments: 0, minCoverOffset: c</c>
-    /// (c 自身を<b>含む</b>セグメントまで返る。+1 は不要)。
-    /// 「行全体が欲しい」なら <see cref="Wrap"/> を使う
-    /// —— 両方を「要求なし」(<c>0, -1</c>)にすると最初のセグメント境界で打ち切られる。
-    /// </para>
-    /// <para>
-    /// 「要求なし」の値が 2 引数で異なる(<paramref name="minSegments"/> は 0・
-    /// <paramref name="minCoverOffset"/> は -1)ため、範囲外
-    /// (<paramref name="minSegments"/> が負・<paramref name="minCoverOffset"/> が -1 未満)は
-    /// 静かに縮退させず <see cref="ArgumentOutOfRangeException"/> にする
-    /// (<c>minSegments: -1</c> を「無制限」の意味で渡す誤用を実行時に露出させるため)。
+    /// <paramref name="offsetInLine"/> がサロゲートペアの内側を指していても、セグメント境界は
+    /// コードポイント境界にしか置かれないため、返る prefix がペアを割ることはない。
     /// </para>
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="minSegments"/> が負、または <paramref name="minCoverOffset"/> が -1 未満。
-    /// </exception>
-    public static WrapResult WrapPrefix(
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="offsetInLine"/> が負。</exception>
+    public static WrapResult WrapThroughOffset(
+        ReadOnlySpan<char> line,
+        int maxWidthPx,
+        ICharMetrics metrics,
+        int offsetInLine
+    )
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offsetInLine);
+        return WrapCore(line, maxWidthPx, metrics, minSegments: 1, minCoverOffset: offsetInLine);
+    }
+
+    /// <summary>
+    /// <see cref="Wrap"/> / <see cref="WrapFirstSegments"/> / <see cref="WrapThroughOffset"/> の
+    /// 唯一の実装。確定済みセグメント数が <paramref name="minSegments"/> 以上<b>かつ</b>
+    /// 確定済みセグメントが <paramref name="minCoverOffset"/> を<b>超えて</b>カバーした時点で
+    /// 打ち切る(判定はセグメントを閉じた直後にのみ行う)。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 打ち切り結果が完全結果の prefix になるのは、走査が左から右への貪欲な 1 パスで、
+    /// セグメント境界が<b>先行する内容だけ</b>で決まるためである。
+    /// </para>
+    /// <para>
+    /// <b>private の事前条件</b>: <paramref name="minSegments"/> は 1 以上・
+    /// <paramref name="minCoverOffset"/> は -1 以上。判定が <c>result.Add</c> の直後にしかない
+    /// 以上、評価時点で <c>result.Count &gt;= 1</c> が常に成り立つため、
+    /// <paramref name="minSegments"/> の 0 と 1 は<b>全入力で同一挙動</b>である
+    /// (「0 = 個数の要求なし」という別の意味は存在しない)。公開 API を 2 本に分けたのは、
+    /// この紛らわしいセンチネルを構造的に消すため。同様に <paramref name="minCoverOffset"/> が
+    /// -1 のときは <c>segStart &gt; -1</c> が常に真=オフセットの要求なしとして働く。
+    /// </para>
+    /// </remarks>
+    private static WrapResult WrapCore(
         ReadOnlySpan<char> line,
         int maxWidthPx,
         ICharMetrics metrics,
@@ -100,9 +136,6 @@ internal static class LineLayout
         int minCoverOffset
     )
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(minSegments);
-        ArgumentOutOfRangeException.ThrowIfLessThan(minCoverOffset, -1);
-
         // OFF: 単一セグメント
         if (maxWidthPx <= 0)
             return new WrapResult(new[] { new WrapSegment(0, line.Length) }, true);
