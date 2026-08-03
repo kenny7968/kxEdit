@@ -1,5 +1,12 @@
 # UIA 単語単位の境界ずれとコスト 調査 設計書
 
+> **2026-08-04 改訂(スコープ拡大)**: 本書 §3 の不変条件「`src/` 変更ゼロ」と §9 R2
+> 「調査が実装に流れる」は、ユーザー判断により**撤回**された。同一ブランチで
+> `docs/plans/2026-08-03-uia-word-unit-design.md` §3 の修正までを実施する。
+> ブランチ名も `feature/uia-word-unit-triage` → `feature/uia-word-unit` へ改名した。
+> 実装の計画は `docs/plans/2026-08-04-uia-word-unit-fix.md`。
+> 本書の以降の記述は策定時スナップショット(CLAUDE.md §8)としてそのまま残す。
+
 作成日: 2026-08-03
 対象: `docs/plans/2026-08-02-large-line-resilience-design.md` §4 の申し送り **N-3 / N-4**
 (= 棚卸し ID **F-3 / F-5**)

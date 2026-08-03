@@ -2,6 +2,10 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **2026-08-04 改訂(スコープ拡大)**: 本書 Task 5 の DoD 「`src/` の差分が 0 行」と
+> リスク表 R2 は**撤回**された。同一ブランチで実装まで行う。
+> 実装の計画は `docs/plans/2026-08-04-uia-word-unit-fix.md`。
+
 **Goal:** UIA の単語スパンが「空白のみ区切り」であることが生む①規則のずれ(F-3)と②空白ゼロ長大行での全走査(F-5)を、`src/` を 1 行も変えずに実測・可視化し、修正方針を確定できる材料を揃える。
 
 **Architecture:** `tests/yEdit.Editor.Smoke` に `--wordunit` サブコマンドを 1 ファイルで追加する。実 `EditorControl` に `(IUiaTextHost)` でキャストして本番の UIA 実装を直接叩き、Core の `WordBoundary`(public API)と並べて表を出す。修正候補も `src/` ではなくベンチ内で構成し、before / after を同じ表に並べる。
