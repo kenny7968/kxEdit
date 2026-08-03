@@ -493,7 +493,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return WordBoundary_WordStart(snap, o);
+        return yEdit.Core.Editing.WordBoundary.WordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.NoScanLimit
+        );
     }
 
     int IUiaTextHost.WordEnd(int offset)
@@ -502,7 +506,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return WordBoundary_WordEnd(snap, o);
+        return yEdit.Core.Editing.WordBoundary.WordEnd(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.NoScanLimit
+        );
     }
 
     int IUiaTextHost.NextWordStart(int offset)
@@ -529,38 +537,6 @@ internal class UiaTextHostAdapter : IUiaTextHost
             o,
             yEdit.Core.Editing.WordBoundary.NoScanLimit
         );
-    }
-
-    // WordStart/WordEnd は Core WordBoundary に直接メンバがないため、
-    // 「offset を含む単語の左/右端(空白でない連続の左/右端)」を素朴実装する
-    // (計画書 §5-5: v1 の TextNavigation.WordStart と同じ流儀=空白区切りだけ)。
-    private static int WordBoundary_WordStart(TextSnapshot snap, int pos)
-    {
-        if (pos <= 0)
-            return 0;
-        int p = pos;
-        while (p > 0)
-        {
-            int prev = TextBoundary.PrevCodePoint(snap, p);
-            char pc = snap.GetChar(prev);
-            if (char.IsWhiteSpace(pc) || pc == '\r' || pc == '\n')
-                break;
-            p = prev;
-        }
-        return p;
-    }
-
-    private static int WordBoundary_WordEnd(TextSnapshot snap, int pos)
-    {
-        int p = pos;
-        while (p < snap.CharLength)
-        {
-            char c = snap.GetChar(p);
-            if (char.IsWhiteSpace(c) || c == '\r' || c == '\n')
-                break;
-            p = TextBoundary.NextCodePoint(snap, p);
-        }
-        return p;
     }
 
     System.Windows.Rect IUiaTextHost.BoundingRectangle

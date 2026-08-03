@@ -54,10 +54,18 @@ public interface IUiaTextHost
     /// </summary>
     int LineEnd(int offset);
 
-    /// <summary>offset を含む単語の左端(Core WordBoundary 委譲)。</summary>
+    /// <summary>
+    /// offset を含む単語の左端(Core WordBoundary 委譲)。単語は<b>文字クラス規則</b>
+    /// (Latin / Digit / Hiragana / Katakana / Han / Other 等の同一クラス連続 = 1 単語)で
+    /// 区切られる=空白区切りではない。<see cref="WordEnd"/> と対で
+    /// <b>ダブルクリック単語選択と同じスパン</b>を返す(目に見える選択と SR が読むスパンが一致する)。
+    /// </summary>
     int WordStart(int offset);
 
-    /// <summary>offset を含む単語の右端(Core WordBoundary 委譲)。</summary>
+    /// <summary>
+    /// offset を含む単語の右端(Core WordBoundary 委譲・<see cref="WordStart"/> と同じ文字クラス規則)。
+    /// <b>末尾の空白は含まない</b>(単語の直後に続く空白 run は返り値の外)。
+    /// </summary>
     int WordEnd(int offset);
 
     /// <summary>Ctrl+→ 相当の「次の単語の先頭」。EOF なら TextLength。</summary>

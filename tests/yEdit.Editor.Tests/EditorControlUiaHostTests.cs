@@ -275,6 +275,35 @@ public class EditorControlUiaHostTests
         });
     }
 
+    /// <summary>
+    /// 2026-08-04 F-3: UIA の単語スパンが文字クラス規則(= ダブルクリック単語選択)と一致する。
+    /// 修正前は「空白 / CR / LF のみが区切り」だったため、空白の無い日本語行では
+    /// 行全体が 1 単語として SR に読まれていた(2026-08-03-uia-word-unit-design.md §2.3)。
+    /// </summary>
+    /// <remarks>
+    /// 期待値は Core の <c>WordBoundaryTests.WordStart_WordEnd_MatchDoubleClickRule</c> と
+    /// 同じ規則から採っている。重複ではない — あちらは規則そのものの正しさを、こちらは
+    /// 「UIA ホストがその規則へ本当に配線されているか」を固定する。
+    /// </remarks>
+    [Theory]
+    [InlineData("今日は晴れです。", 0, 0, 2)] // 修正前は [0,8) = 行全体
+    [InlineData("今日は晴れです。", 2, 2, 3)]
+    [InlineData("abc123def", 4, 3, 6)] // 修正前は [0,9) = 行全体
+    [InlineData("foo(bar)=baz;", 0, 0, 3)] // 修正前は [0,13) = 行全体
+    [InlineData("foo bar baz", 4, 4, 7)] // 対照群: 英文は修正前後で不変
+    public void Host_WordSpan_UsesCharClassRule(string text, int pos, int start, int end)
+    {
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            var buf = TextBuffer.FromString(text);
+            ctrl.SetSource(buf);
+            IUiaTextHost host = ctrl;
+            Assert.Equal(start, host.WordStart(pos));
+            Assert.Equal(end, host.WordEnd(pos));
+        });
+    }
+
     [Fact]
     public void Host_ControlTypeId_IsDocument()
     {
