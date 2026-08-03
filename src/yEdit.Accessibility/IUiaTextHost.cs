@@ -56,15 +56,30 @@ public interface IUiaTextHost
 
     /// <summary>
     /// offset を含む単語の左端(Core WordBoundary 委譲)。単語は<b>文字クラス規則</b>
-    /// (Latin / Digit / Hiragana / Katakana / Han / Other 等の同一クラス連続 = 1 単語)で
-    /// 区切られる=空白区切りではない。<see cref="WordEnd"/> と対で
-    /// <b>ダブルクリック単語選択と同じスパン</b>を返す(目に見える選択と SR が読むスパンが一致する)。
+    /// (Latin / Digit / Hiragana / Katakana / Han / Other 等)で区切られる=空白区切りではない。
+    /// <b>非空白 run については</b>「同一クラスの連続 = 1 単語」。
     /// </summary>
+    /// <remarks>
+    /// Whitespace / LineBreak クラスは<b>単語を成さない</b>。offset が空白 / 改行の上にあるときは
+    /// 左の空白 run を越えて<b>前の単語の頭</b>を返す(= 返り値が offset を含まない)。同じ offset を
+    /// <see cref="WordEnd"/> へ渡すと offset がそのまま返るため、両者を組むと<b>空スパンになりうる</b>
+    /// (例: <c>"    hello"</c> の offset=0 は 0 / 0)。空スパンは
+    /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の <see cref="NextChar"/> フォールバックが
+    /// 1 文字へ膨らませる。
+    ///
+    /// <b>同じ offset を渡した場合に限り</b>、<see cref="WordEnd"/> と対でダブルクリック単語選択と
+    /// 同じスパンになる(目に見える選択と SR が読むスパンが一致する)。現状の
+    /// <c>TextRangeProviderV2</c> は <see cref="WordEnd"/> へ <see cref="WordStart"/> の結果を
+    /// 渡すため、空白の上ではダブルクリックと乖離しうる(<c>"ab    cd"</c> の offset=4 で
+    /// ダブルクリック <c>[0,4)</c> / UIA <c>[0,2)</c>)。起点を offset へ揃える修正は Task 4。
+    /// </remarks>
     int WordStart(int offset);
 
     /// <summary>
     /// offset を含む単語の右端(Core WordBoundary 委譲・<see cref="WordStart"/> と同じ文字クラス規則)。
     /// <b>末尾の空白は含まない</b>(単語の直後に続く空白 run は返り値の外)。
+    /// offset が空白 / 改行の上にあるときは offset をそのまま返す
+    /// (<c>WordEnd(offset) &gt;= offset</c> は不変条件=反転レンジを UIA へ出さないため)。
     /// </summary>
     int WordEnd(int offset);
 

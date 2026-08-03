@@ -284,13 +284,27 @@ public class EditorControlUiaHostTests
     /// 期待値は Core の <c>WordBoundaryTests.WordStart_WordEnd_MatchDoubleClickRule</c> と
     /// 同じ規則から採っている。重複ではない — あちらは規則そのものの正しさを、こちらは
     /// 「UIA ホストがその規則へ本当に配線されているか」を固定する。
+    ///
+    /// <b>「英文は不変」ではない</b>(Task 3 仕様レビュー Important-1)。空白の上・行頭インデント・
+    /// EOF 直前では純 ASCII でもスパンが変わる。旧実装は空白位置でその空白 1 個を返していたが、
+    /// 新規則は<b>左の単語の頭</b>へ戻る(ダブルクリック単語選択が元からそう動く)。下の
+    /// <c>"    hello"</c> / <c>"ab    cd"</c> / <c>"don't stop"</c> がその形を固定する。
+    /// 真の対照群(新旧一致)は単一空白の <c>"hello world"</c> pos=5 側。
+    ///
+    /// 非 BMP は<b>1 行だけ</b>にしてある。xUnit は <c>InlineData</c> に非 BMP を複数並べると
+    /// test ID が衝突して黙ってスキップする(このリポジトリの既知の罠)。
     /// </remarks>
     [Theory]
     [InlineData("今日は晴れです。", 0, 0, 2)] // 修正前は [0,8) = 行全体
     [InlineData("今日は晴れです。", 2, 2, 3)]
     [InlineData("abc123def", 4, 3, 6)] // 修正前は [0,9) = 行全体
     [InlineData("foo(bar)=baz;", 0, 0, 3)] // 修正前は [0,13) = 行全体
-    [InlineData("foo bar baz", 4, 4, 7)] // 対照群: 英文は修正前後で不変
+    [InlineData("foo bar baz", 4, 4, 7)] // 単語の内側: 修正前後で不変
+    [InlineData("    hello", 2, 0, 2)] // 行頭インデント: 英文でも変わる(旧は [2,3) = 空白 1 個)
+    [InlineData("ab    cd", 4, 0, 4)] // 複数空白 run(旧は [4,5))
+    [InlineData("hello world", 5, 0, 5)] // 単一空白 = 真の対照群(新旧一致)
+    [InlineData("don't stop", 4, 4, 5)] // 英文 + 記号は意図的に変わる
+    [InlineData("a\U0001F600b", 2, 1, 3)] // サロゲート中間 offset(UIA クライアントは任意 offset を渡せる)
     public void Host_WordSpan_UsesCharClassRule(string text, int pos, int start, int end)
     {
         Sta.Run(() =>
