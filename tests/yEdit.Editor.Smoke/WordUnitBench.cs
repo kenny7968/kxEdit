@@ -50,6 +50,30 @@ internal static class WordUnitBench
     // 毎回本物と突き合わせる。<b>反射でメンバーが見つからないときに黙って PASS しないこと。</b>
     // 「照合したつもりで何も照合していない」は本リポジトリで過去に踏んだ失敗パターンである。
 
+    /// <summary>
+    /// SelfCheck 専用の追加 fixture。<b>§4.1 の表を動かさないため <see cref="Fixtures"/> とは別配列にする</b>
+    /// (§4.1 の表が Task 1 から不変であることはレビューで機械的に確認された事実)。
+    /// </summary>
+    /// <remarks>
+    /// §4.1 の fixture 7 種にはタブも CR も LF も含まれていない。そのままだと
+    /// <c>InputRouter.cs:563</c> の空白集合(<c>' ' '\t' '\r' '\n'</c>)を将来片方だけ変えても
+    /// 候補 A の照合が通ってしまう。タブと CRLF を含む 1 本を足して、空白集合の片側変更を
+    /// 検出できるようにする。
+    /// </remarks>
+    private static readonly (string Name, string Text)[] SelfCheckOnlyFixtures =
+    [
+        ("tabcrlf", "a\tb\r\ncd"),
+        ("spmix", " a \tb\r\n \r\nc "),
+    ];
+
+    /// <summary>
+    /// 照合に使う fixture(§4.1 の 7 種 + SelfCheck 専用)。
+    /// <b>プロパティにして遅延評価する</b> = static field 初期化はテキスト順に走るため、
+    /// <see cref="Fixtures"/> より前で spread すると null を掴む。
+    /// </summary>
+    private static IEnumerable<(string Name, string Text)> SelfCheckFixtures =>
+        Fixtures.Concat(SelfCheckOnlyFixtures);
+
     /// <summary>候補 A / 候補 B の写経を本物と照合する。片方でも NG なら false。</summary>
     private static bool SelfCheck()
     {
@@ -98,7 +122,7 @@ internal static class WordUnitBench
         }
 
         bool ok = true;
-        foreach (var (name, text) in Fixtures)
+        foreach (var (name, text) in SelfCheckFixtures)
         {
             var snap = TextBuffer.FromString(text).Current;
             for (int pos = 0; pos <= snap.CharLength; pos++)
@@ -139,7 +163,7 @@ internal static class WordUnitBench
     private static bool SelfCheckCandidateB()
     {
         bool ok = true;
-        foreach (var (name, text) in Fixtures)
+        foreach (var (name, text) in SelfCheckFixtures)
         {
             using var ctrl = new EditorControl();
             var buf = TextBuffer.FromString(text);
@@ -397,10 +421,15 @@ internal static class WordUnitBench
     /// </summary>
     /// <remarks>
     /// <b>3 者とも同じ形で測る</b>: <c>start = WordStart(pos)</c> → <c>end = WordEnd(start)</c>
-    /// (<c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の呼び順)。
-    /// <c>WordEnd</c> に <c>pos</c> をそのまま渡すと、<c>pos = CharLength</c> のとき
-    /// 候補 A / B とも先頭ガードで即 return し<b>何も測らない</b>ので注意
-    /// (実装計画 Task 2 Step 3 のコード片はこの誤りを含んでいた)。
+    /// (<c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の呼び順)。<c>WordEnd</c> の起点を
+    /// 間違えると測定が壊れる。実装計画 Task 2 Step 3 のコード片は<b>候補ごとに別の壊れ方</b>を
+    /// していた:
+    /// <list type="bullet">
+    /// <item>候補 A = <c>DoubleClickWordEnd(snap, CharLength)</c>。<c>target &gt;= CharLength</c> の
+    /// ガードで<b>即 return し何も測らない</b>。</item>
+    /// <item>候補 B = <c>CappedWordEnd(snap, 0, Cap)</c>。走りはするが起点が行頭側で、
+    /// <c>WordStart</c> が返した位置ではない=<b>別の位置を測ってしまう</b>。</item>
+    /// </list>
     /// </remarks>
     private static void PrintCandidateCostTable()
     {
@@ -470,8 +499,7 @@ internal static class WordUnitBench
                 int bMidEnd = CappedWordEnd(snap, bMidStart, Cap);
                 spanRows.Add(
                     $"| {kind} | {len:N0} | {curEnd - curStart:N0} | {aEnd - aStart:N0} | "
-                        + $"{bEnd - bStart:N0} | [{bMidStart:N0},{bMidEnd:N0}) = {bMidEnd - bMidStart:N0} | "
-                        + $"{(len + Cap - 1) / Cap:N0} |"
+                        + $"{bEnd - bStart:N0} | [{bMidStart:N0},{bMidEnd:N0}) = {bMidEnd - bMidStart:N0} |"
                 );
 
                 if (condSec > SkipThresholdSec)
@@ -486,27 +514,46 @@ internal static class WordUnitBench
 
         Console.WriteLine();
         Console.WriteLine(
-            "注: `現状/候補B` は候補 B が cap で定数時間になるため倍率が桁違いに大きくなる。"
-                + "**候補 A は ascii / cjk(単一クラスの長大連続)では 1x 前後にしかならない** — "
+            "注: **候補 A は ascii / cjk(単一クラスの長大連続)では 1x 前後にしかならない** — "
                 + "これが「候補 A だけでは足りない」ことの根拠である。逆に jamix では"
                 + "クラス境界で数文字止まりになるため候補 A が効く。"
+        );
+        Console.WriteLine();
+        Console.WriteLine(
+            $"注: 候補 B の**歩数**は cap({Cap:N0})で定数だが、**壁時計時間は定数ではない**。"
+                + "`TextSnapshot.GetChar` のコストが `TextChunk` の格子(`DefaultGridBytes` 既定 4KB・"
+                + "`TextChunk.CharToByte`)内の線形走査に比例するため、候補 B が触る "
+                + "`[行長-cap, 行長)` の実コストは **`行長 mod 格子幅` の位相**で数倍振れる"
+                + "(本表の ascii 100K / 500K / 2M がその実例=行長に単調でない)。"
+                + "1 文字 3 バイトの cjk / jamix で振れが小さいのは、格子 1 セルが 1,365 文字しか"
+                + "覆わないため位相の影響が小さいからである。"
+                + "**「候補 B を入れれば単語読みが定数コストになる」とは書けない。**"
         );
 
         Console.WriteLine();
         Console.WriteLine("### 候補 B がスパンをどう切り詰めるか");
         Console.WriteLine();
         Console.WriteLine(
-            "| kind | chars | 現状 span | 候補A span | 候補B span(行末から) | 候補B span(中央 pos から) | 候補B の分割数 |"
+            "| kind | chars | 現状 span | 候補A span | 候補B span(行末から) | 候補B span(中央 pos から) |"
         );
-        Console.WriteLine("|---|---|---|---|---|---|---|");
+        Console.WriteLine("|---|---|---|---|---|---|");
         foreach (string row in spanRows)
             Console.WriteLine(row);
         Console.WriteLine();
         Console.WriteLine(
-            $"注: 分割数 = ceil(chars / {Cap:N0}) = 行頭から順に読ませたときに SR が受け取る「単語」の個数。"
-                + "中央 pos の列は候補 B の副作用を示す = `WordStart(pos)` が `pos - cap` を返し "
+            "注: 候補 B が変えるのは `ExpandToEnclosingUnit(Word)` が返すスパンだけである。"
+                + "**SR が行を単語送りするときの単語の個数は変わらない** — `Move` / `MoveEndpointByUnit` の"
+                + "単語ステップは `TextRangeProviderV2.cs:302-303` のとおり `NextWordStart` / `PrevWordStart`"
+                + "(= クラス規則の `WordBoundary`)を使い、キャップの影響を受けないためである。"
+                + "したがって「cap で行が N 個の単語にタイル分割される」とは言えない"
+                + "(そもそも候補 B の expand は pos ごとに `[pos-cap, pos)` を返すのでタイルにならない)。"
+        );
+        Console.WriteLine();
+        Console.WriteLine(
+            "注: 中央 pos の列は候補 B の副作用を示す = `WordStart(pos)` が `pos - cap` を返し "
                 + "`WordEnd` がそこから cap 歩進むため、スパンが **pos の手前で終わり caret 位置の文字を含まない**。"
-                + "現状実装は行全体を返すため必ず含んでいた。Task 4 の判断材料。"
+                + "**空白ゼロ行では**現状実装は行全体を返すため必ず含んでいた"
+                + "(一般には現状実装でも含むとは限らない。§4.1 の `wsp` pos=2 が反例)。Task 4 の判断材料。"
         );
         Console.WriteLine();
         Console.WriteLine($"(sink={sink})");
