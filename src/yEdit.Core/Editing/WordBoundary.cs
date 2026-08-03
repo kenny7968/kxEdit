@@ -212,8 +212,9 @@ public static class WordBoundary
     /// 3 分岐の意味:
     /// <list type="number">
     /// <item><c>pos &lt;= 0</c>: 0。</item>
-    /// <item><c>pos &gt;= CharLength</c>(EOF): <see cref="PrevWordStart"/>(CharLength) に委譲=
-    /// 末尾が空白なら空白を左スキップして直前の単語まで戻る=末尾に近い単語の頭を返す。</item>
+    /// <item><c>pos &gt;= CharLength</c>(EOF): <see cref="PrevWordStart"/>(pos) に委譲=
+    /// 末尾が空白なら空白を左スキップして直前の単語まで戻る=末尾に近い単語の頭を返す。
+    /// <c>pos + 1</c> を足さないのは、EOF 位置に「pos 自身の文字」が無いため。</item>
     /// <item>それ以外: <see cref="PrevWordStart"/>(pos + 1) を呼ぶことで
     /// 「pos 自身を含むクラス連続の左端」を得る。</item>
     /// </list>
@@ -227,7 +228,14 @@ public static class WordBoundary
     /// <c>MouseInputTests.DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c> が固定している。
     /// </remarks>
     /// <param name="snap">走査対象のスナップショット。</param>
-    /// <param name="pos">単語の左端を求めたい位置。</param>
+    /// <param name="pos">
+    /// 単語の左端を求めたい位置。契約は <c>[0, CharLength]</c> で、<b>正規化は呼び出し側の責務</b>。
+    /// <c>pos &gt; CharLength</c> は契約違反=クラス <c>&lt;remarks&gt;</c> の前提どおり
+    /// <c>TextSnapshot</c> 側から <see cref="ArgumentOutOfRangeException"/> が透過する
+    /// (<c>UiaTextHostAdapter</c> は <c>Math.Clamp(offset, 0, snap.CharLength)</c> してから呼ぶ)。
+    /// <b><see cref="WordEnd"/> とは非対称</b>: あちらは <c>pos &gt;= CharLength</c> を
+    /// CharLength で受け止めるので投げない。上限側だけを見て「クランプ不要」と判断しないこと。
+    /// </param>
     /// <param name="maxScan">
     /// 走査上限(契約 <c>&gt;= 1</c>・窓はクラス <c>&lt;remarks&gt;</c> の表=<b>左だけ 1 狭い</b>)。
     /// 上限なしは <see cref="NoScanLimit"/>。
