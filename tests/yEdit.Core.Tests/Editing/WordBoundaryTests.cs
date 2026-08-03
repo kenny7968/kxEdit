@@ -163,7 +163,7 @@ public class WordBoundaryTests
     [InlineData("今日　は", 2, 2, 3)]
     public void WordStart_WordEnd_MatchDoubleClickRule(string text, int pos, int start, int end)
     {
-        var snap = TextBuffer.FromString(text).Current;
+        var snap = S(text);
         Assert.Equal(start, WordBoundary.WordStart(snap, pos, WordBoundary.NoScanLimit));
         Assert.Equal(end, WordBoundary.WordEnd(snap, pos, WordBoundary.NoScanLimit));
     }
@@ -171,9 +171,32 @@ public class WordBoundaryTests
     [Fact]
     public void WordStart_WordEnd_Empty_ReturnsZero()
     {
-        var snap = TextBuffer.FromString("").Current;
+        var snap = S("");
         Assert.Equal(0, WordBoundary.WordStart(snap, 0, WordBoundary.NoScanLimit));
         Assert.Equal(0, WordBoundary.WordEnd(snap, 0, WordBoundary.NoScanLimit));
+    }
+
+    /// <summary>
+    /// <c>WordEnd(pos) &gt;= pos</c> は破ってはならない不変条件。破ると
+    /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> が <c>_end == _start</c> しか
+    /// 処理していないため、<b>反転レンジ(_end &lt; _start)が UIA へ出る</b>。
+    /// </summary>
+    /// <remarks>
+    /// 空白 run の内側は、末尾空白の巻き戻しが pos を追い越しうる唯一の形
+    /// (<c>NextWordStart</c> が空白 run を抜けた先を返し、そこから左へ全部削られる)。
+    /// 「キャレットが行頭インデント内にある」という日常的な状態がこれに当たる。
+    /// </remarks>
+    [Fact]
+    public void WordEnd_OnWhitespaceRun_NeverReturnsBeforePos()
+    {
+        var snap = S("   ");
+        for (int pos = 0; pos <= snap.CharLength; pos++)
+        {
+            int end = WordBoundary.WordEnd(snap, pos, WordBoundary.NoScanLimit);
+            Assert.True(end >= pos, $"pos={pos} で end={end} = 反転レンジ");
+        }
+        // pos=1 は巻き戻しガードが実際に効いている位置(ガードを外すと 0 が返る)。
+        Assert.Equal(1, WordBoundary.WordEnd(snap, 1, WordBoundary.NoScanLimit));
     }
 
     // ===== 走査上限 =====
@@ -181,22 +204,22 @@ public class WordBoundaryTests
     [Fact]
     public void WordStart_WithMaxScan_StopsWithinWindow()
     {
-        var snap = TextBuffer.FromString(new string('a', 5000)).Current;
+        var snap = S(new string('a', 5000));
         int start = WordBoundary.WordStart(snap, 4000, maxScan: 100);
-        // WordStart は PrevWordStart(pos + 1) を呼ぶため最初の 1 歩で予算を 1 消費する。
-        // ゆえに pos から左へ実際に走れるのは maxScan - 1 歩 = 4000 - 99 = 3901(WordEnd との非対称)。
+        // 上限が効いていれば行頭(0)まで走らない。WordStart は PrevWordStart(pos + 1) を呼ぶため
+        // 最初の 1 歩で予算を 1 消費し、pos から左へ実際に走れるのは maxScan - 1 歩
+        // = 4000 - 99 = 3901(WordEnd との非対称。クラス <remarks> の窓の表を参照)。
         Assert.Equal(3901, start);
-        Assert.True(start > 0, "上限が効かず行頭まで走っている");
     }
 
     [Fact]
     public void WordEnd_WithMaxScan_StopsWithinWindow()
     {
-        var snap = TextBuffer.FromString(new string('a', 5000)).Current;
+        var snap = S(new string('a', 5000));
         int end = WordBoundary.WordEnd(snap, 1000, maxScan: 100);
-        // 右側は pos から maxScan 歩ぶん走れる(WordStart 側だけ 1 狭い)。
+        // 上限が効いていれば行末(5000)まで走らない。右側は pos から maxScan 歩ぶん走れる
+        // (WordStart 側だけ 1 狭い)。
         Assert.Equal(1100, end);
-        Assert.True(end < snap.CharLength, "上限が効かず行末まで走っている");
     }
 
     /// <summary>
@@ -206,7 +229,7 @@ public class WordBoundaryTests
     [Fact]
     public void WordSpan_WithMaxScan_ContainsCaret()
     {
-        var snap = TextBuffer.FromString(new string('a', 500_000)).Current;
+        var snap = S(new string('a', 500_000));
         const int Pos = 250_000;
         int start = WordBoundary.WordStart(snap, Pos, maxScan: 100);
         int end = WordBoundary.WordEnd(snap, Pos, maxScan: 100);
@@ -217,7 +240,7 @@ public class WordBoundaryTests
     [Fact]
     public void NextWordStart_WithMaxScan_StopsMidRun()
     {
-        var snap = TextBuffer.FromString(new string('a', 5000)).Current;
+        var snap = S(new string('a', 5000));
         int next = WordBoundary.NextWordStart(snap, 0, maxScan: 100);
         Assert.Equal(100, next);
     }
@@ -225,16 +248,17 @@ public class WordBoundaryTests
     [Fact]
     public void PrevWordStart_WithMaxScan_StopsMidRun()
     {
-        var snap = TextBuffer.FromString(new string('a', 5000)).Current;
+        var snap = S(new string('a', 5000));
         int prev = WordBoundary.PrevWordStart(snap, 5000, maxScan: 100);
-        Assert.InRange(prev, 4900, 4901);
+        // 上限が効いていれば行頭(0)まで走らない。窓は [caret - maxScan, caret] なので 5000 - 100。
+        Assert.Equal(4900, prev);
     }
 
     /// <summary>上限は 1 呼び出し全体の予算。空白 run をまたいでも合算で頭打ちになる。</summary>
     [Fact]
     public void NextWordStart_MaxScan_IsBudgetAcrossRuns()
     {
-        var snap = TextBuffer.FromString("aaaa" + new string(' ', 100) + "bbbb").Current;
+        var snap = S("aaaa" + new string(' ', 100) + "bbbb");
         int next = WordBoundary.NextWordStart(snap, 0, maxScan: 10);
         Assert.Equal(10, next);
     }
@@ -252,7 +276,7 @@ public class WordBoundaryTests
     [Fact]
     public void PrevWordStart_MaxScan_IsBudgetAcrossRuns()
     {
-        var snap = TextBuffer.FromString(new string('a', 20) + new string(' ', 4)).Current;
+        var snap = S(new string('a', 20) + new string(' ', 4));
         int prev = WordBoundary.PrevWordStart(snap, snap.CharLength, maxScan: 10);
         Assert.Equal(14, prev);
         Assert.Equal(10, snap.CharLength - prev); // 消費した総歩数 = maxScan
