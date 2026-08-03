@@ -68,10 +68,10 @@ public interface IUiaTextHost
     /// 1 文字へ膨らませる。
     ///
     /// <b>同じ offset を渡した場合に限り</b>、<see cref="WordEnd"/> と対でダブルクリック単語選択と
-    /// 同じスパンになる(目に見える選択と SR が読むスパンが一致する)。現状の
-    /// <c>TextRangeProviderV2</c> は <see cref="WordEnd"/> へ <see cref="WordStart"/> の結果を
-    /// 渡すため、空白の上ではダブルクリックと乖離しうる(<c>"ab    cd"</c> の offset=4 で
-    /// ダブルクリック <c>[0,4)</c> / UIA <c>[0,2)</c>)。起点を offset へ揃える修正は Task 4。
+    /// 同じスパンになる(目に見える選択と SR が読むスパンが一致する)。2026-08-04 Task 4 で
+    /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> が両者へ同じ offset を渡すようになったので、
+    /// 空白の上でもダブルクリックと一致する(<c>"ab    cd"</c> の offset=4 は両方 <c>[0,4)</c>。
+    /// Task 4 以前は UIA だけ <c>[0,2)</c> だった)。
     /// </remarks>
     int WordStart(int offset);
 

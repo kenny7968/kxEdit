@@ -57,8 +57,16 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
                 break;
             case TextUnit.Word:
             case TextUnit.Format:
+                // 2026-08-04: WordEnd の起点は _start ではなく pos。
+                // 走査上限が入ると WordStart(pos) は最大 cap 歩しか戻らないため、
+                // _end = WordEnd(_start) だと _start + cap = pos で終わり、スパンが
+                // キャレット位置を含まなくなる(2026-08-03-uia-word-unit-design.md §2.5 の
+                // 候補 B 欠陥 1)。pos 起点なら窓が [pos-cap, pos+cap] とキャレット中心になり、
+                // 欠陥 1 は構造的に起きない。
+                // 反転レンジを UIA へ出さないことは host 側の
+                // WordStart(pos) <= pos <= WordEnd(pos) が担保する。
                 _start = host.WordStart(pos);
-                _end = host.WordEnd(_start);
+                _end = host.WordEnd(pos);
                 if (_end == _start)
                     _end = host.NextChar(_start);
                 break;
