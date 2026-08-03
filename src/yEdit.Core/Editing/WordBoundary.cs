@@ -56,7 +56,9 @@ internal enum CharClass
 ///
 /// <c>maxScan</c> は 1 呼び出し全体の予算で、単語 run と空白 run を<b>またいでも合算</b>で
 /// 消費される。契約は <c>maxScan &gt;= 1</c>(各 API 冒頭の <c>Debug.Assert</c> で検証)。
-/// 上限なしは <see cref="NoScanLimit"/>。各 API が触れる窓:
+/// 上限なしは <see cref="NoScanLimit"/>。<b>予算を使い切ったらその位置でそのまま返す</b>
+/// (単語の途中でも切る=SR は run の一部だけを読み、キャレットも run の途中で止まる)。
+/// 各 API が触れる窓:
 ///
 /// <list type="table">
 /// <listheader><term>API</term><description>窓</description></listheader>

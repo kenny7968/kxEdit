@@ -161,6 +161,10 @@ public class WordBoundaryTests
     [InlineData("abc123def", 8, 6, 9)]
     // "今日　は": 全角空白は Other クラス = それ自体が 1 単語
     [InlineData("今日　は", 2, 2, 3)]
+    // 複数行: WordEnd の巻き戻し述語の LineBreak 側を通す唯一の形(単一行 fixture では通らない)。
+    // これが無いと「行の最後の単語のスパンが次行へまたぐ」変異が素通りする。
+    [InlineData("abc\r\ndef", 2, 0, 3)] // 行末の単語: 末尾の CRLF を含まない
+    [InlineData("abc\ndef", 2, 0, 3)] // LF 単独でも同じ
     public void WordStart_WordEnd_MatchDoubleClickRule(string text, int pos, int start, int end)
     {
         var snap = S(text);
