@@ -86,6 +86,8 @@ public static class WordBoundary
     /// 1 呼び出しで進める最大 code point 数。上限に当たった位置で打ち切る(= 単語の途中で止まる)。
     /// 上限なしは <see cref="NoScanLimit"/>。本メソッドでは単語 run のスキップと空白 run のスキップを
     /// <b>通した合計予算</b>である(空白 run をまたいでも予算は合算で消費される)。
+    /// <b>契約として <c>maxScan &gt;= 1</c> を要求する</b>(0 以下は未規定=正規化しない。0 は
+    /// 1 歩も進まず、負値は <c>budget--</c> が unchecked で折り返して実質無制限になりうる)。
     /// </param>
     public static int NextWordStart(TextSnapshot snap, int caret, int maxScan)
     {
@@ -133,7 +135,10 @@ public static class WordBoundary
     /// 1 呼び出しで進める最大 code point 数。上限に当たった位置で打ち切る(= 単語の途中で止まる)。
     /// 上限なしは <see cref="NoScanLimit"/>。手順 2 の<b>最初の 1 歩も予算に数える</b>ので、
     /// <c>maxScan</c> が 1 なら 1 code point 左へ移動した位置がそのまま返る。空白 run のスキップと
-    /// 単語 run のスキップを通した合計予算である。
+    /// 単語 run のスキップを通した合計予算である(手順 3 で予算を使い切ると手順 4 は 1 歩も進まない)。
+    /// <b>契約として <c>maxScan &gt;= 1</c> を要求する</b>(0 以下は未規定=正規化しない。0 でも
+    /// 手順 2 の 1 歩だけは進む非対称があり、負値は <c>budget--</c> が unchecked で折り返して
+    /// 実質無制限になりうる)。
     /// </param>
     public static int PrevWordStart(TextSnapshot snap, int caret, int maxScan)
     {
@@ -181,6 +186,11 @@ public static class WordBoundary
     /// <param name="maxScan">
     /// 1 呼び出しで進める最大 code point 数(<see cref="PrevWordStart"/> にそのまま渡る)。
     /// 上限に当たった位置で打ち切る(= 単語の途中で止まる)。上限なしは <see cref="NoScanLimit"/>。
+    /// <b><paramref name="pos"/> 基準の窓は左側だけ 1 狭い</b> = 下限は
+    /// <c>pos - (maxScan - 1)</c> である(<see cref="PrevWordStart"/> に <c>pos + 1</c> を渡すため
+    /// 最初の 1 歩が pos へ戻るのに消費される)。右側の <see cref="WordEnd"/> は
+    /// <c>pos + maxScan</c> まで走るので<b>両者は非対称</b>。cap の較正時にこの 1 のズレが効く。
+    /// <b>契約として <c>maxScan &gt;= 1</c> を要求する</b>(0 以下は未規定=正規化しない)。
     /// </param>
     public static int WordStart(TextSnapshot snap, int pos, int maxScan)
     {
@@ -206,7 +216,9 @@ public static class WordBoundary
     /// 1 呼び出しで進める最大 code point 数(<see cref="NextWordStart"/> にそのまま渡る)。
     /// 上限に当たった位置で打ち切る(= 単語の途中で止まる)。上限なしは <see cref="NoScanLimit"/>。
     /// 末尾空白の巻き戻しは <see cref="NextWordStart"/> が進んだ範囲の内側でしか動かないため、
-    /// 追加の予算を消費しない。
+    /// 追加の予算を消費しない。上限は <c>pos + maxScan</c>(<see cref="WordStart"/> 側の下限は
+    /// <c>pos - (maxScan - 1)</c> で 1 狭い=非対称)。
+    /// <b>契約として <c>maxScan &gt;= 1</c> を要求する</b>(0 以下は未規定=正規化しない)。
     /// </param>
     public static int WordEnd(TextSnapshot snap, int pos, int maxScan)
     {

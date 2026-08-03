@@ -140,6 +140,7 @@ public class WordBoundaryTests
     /// <summary>
     /// 期待値は <c>InputRouter.PrevWordBoundary</c> / <c>NextWordBoundary</c>(移設元)の
     /// 現行挙動そのもの。<b>この表は挙動不変の網</b>なので、実装に合わせて書き換えてはならない。
+    /// 生成手順は実装計画 Task 2 Step 1(反射で移設元を全 pos 照合)。
     /// </summary>
     [Theory]
     // "hello world": Latin run 2 つ + 空白 1
@@ -182,7 +183,9 @@ public class WordBoundaryTests
     {
         var snap = TextBuffer.FromString(new string('a', 5000)).Current;
         int start = WordBoundary.WordStart(snap, 4000, maxScan: 100);
-        Assert.InRange(start, 3900, 4000);
+        // WordStart は PrevWordStart(pos + 1) を呼ぶため最初の 1 歩で予算を 1 消費する。
+        // ゆえに pos から左へ実際に走れるのは maxScan - 1 歩 = 4000 - 99 = 3901(WordEnd との非対称)。
+        Assert.Equal(3901, start);
         Assert.True(start > 0, "上限が効かず行頭まで走っている");
     }
 
@@ -191,7 +194,8 @@ public class WordBoundaryTests
     {
         var snap = TextBuffer.FromString(new string('a', 5000)).Current;
         int end = WordBoundary.WordEnd(snap, 1000, maxScan: 100);
-        Assert.InRange(end, 1000, 1100);
+        // 右側は pos から maxScan 歩ぶん走れる(WordStart 側だけ 1 狭い)。
+        Assert.Equal(1100, end);
         Assert.True(end < snap.CharLength, "上限が効かず行末まで走っている");
     }
 
@@ -233,5 +237,24 @@ public class WordBoundaryTests
         var snap = TextBuffer.FromString("aaaa" + new string(' ', 100) + "bbbb").Current;
         int next = WordBoundary.NextWordStart(snap, 0, maxScan: 10);
         Assert.Equal(10, next);
+    }
+
+    /// <summary>
+    /// <see cref="NextWordStart_MaxScan_IsBudgetAcrossRuns"/> の対称形。
+    /// <c>PrevWordStart</c> でも予算は空白 run と単語 run で<b>共有</b>され、run をまたいでも
+    /// 合算で頭打ちになる(空白 run のスキャンが無料になっていない)。
+    /// </summary>
+    /// <remarks>
+    /// 空白ゼロの fixture(<c>new string('a', 5000)</c>)では空白 run を一度も通らないため、
+    /// 「単語 run の前で予算を張り直す」変異を素通ししてしまう。区切りを挟んだ fixture が要る。
+    /// 内訳は 1(最初の 1 歩)+ 4(空白 run 4 個)+ 5(単語 run の残り)= 10 = maxScan。
+    /// </remarks>
+    [Fact]
+    public void PrevWordStart_MaxScan_IsBudgetAcrossRuns()
+    {
+        var snap = TextBuffer.FromString(new string('a', 20) + new string(' ', 4)).Current;
+        int prev = WordBoundary.PrevWordStart(snap, snap.CharLength, maxScan: 10);
+        Assert.Equal(14, prev);
+        Assert.Equal(10, snap.CharLength - prev); // 消費した総歩数 = maxScan
     }
 }
