@@ -511,7 +511,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return yEdit.Core.Editing.WordBoundary.NextWordStart(snap, o);
+        return yEdit.Core.Editing.WordBoundary.NextWordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.NoScanLimit
+        );
     }
 
     int IUiaTextHost.PrevWordStart(int offset)
@@ -520,7 +524,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return yEdit.Core.Editing.WordBoundary.PrevWordStart(snap, o);
+        return yEdit.Core.Editing.WordBoundary.PrevWordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.NoScanLimit
+        );
     }
 
     // WordStart/WordEnd は Core WordBoundary に直接メンバがないため、

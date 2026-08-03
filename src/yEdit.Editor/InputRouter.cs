@@ -157,7 +157,7 @@ internal sealed class InputRouter
         var snap = ctx.Host.Buffer!.Current;
         bool ctrl = (e.Modifiers & Keys.Control) != 0;
         int target = ctrl
-            ? WordBoundary.PrevWordStart(snap, ctx.Caret.Caret)
+            ? WordBoundary.PrevWordStart(snap, ctx.Caret.Caret, WordBoundary.NoScanLimit)
             : NavigationCommands.MoveLeftChar(snap, ctx.Caret.Caret);
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
@@ -168,7 +168,7 @@ internal sealed class InputRouter
         var snap = ctx.Host.Buffer!.Current;
         bool ctrl = (e.Modifiers & Keys.Control) != 0;
         int target = ctrl
-            ? WordBoundary.NextWordStart(snap, ctx.Caret.Caret)
+            ? WordBoundary.NextWordStart(snap, ctx.Caret.Caret, WordBoundary.NoScanLimit)
             : NavigationCommands.MoveRightChar(snap, ctx.Caret.Caret);
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
@@ -541,8 +541,8 @@ internal sealed class InputRouter
         if (target <= 0)
             return 0;
         if (target >= snap.CharLength)
-            return WordBoundary.PrevWordStart(snap, target);
-        return WordBoundary.PrevWordStart(snap, target + 1);
+            return WordBoundary.PrevWordStart(snap, target, WordBoundary.NoScanLimit);
+        return WordBoundary.PrevWordStart(snap, target + 1, WordBoundary.NoScanLimit);
     }
 
     /// <summary>
@@ -556,7 +556,7 @@ internal sealed class InputRouter
     {
         if (target >= snap.CharLength)
             return snap.CharLength;
-        int nextWordStart = WordBoundary.NextWordStart(snap, target);
+        int nextWordStart = WordBoundary.NextWordStart(snap, target, WordBoundary.NoScanLimit);
         while (nextWordStart > target)
         {
             char c = snap.GetChar(nextWordStart - 1);

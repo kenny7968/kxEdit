@@ -160,7 +160,11 @@ if (charAccessMode)
         for (int i = 0; i < Samples; i++)
             positions[i] = rng.Next(lo, s.CharLength);
         for (int w = 0; w < 200; w++)
-            caSink += WordBoundary.PrevWordStart(s, positions[w % Samples]); // ウォームアップ
+            caSink += WordBoundary.PrevWordStart(
+                s,
+                positions[w % Samples],
+                WordBoundary.NoScanLimit
+            ); // ウォームアップ
 
         var ms = new double[Samples];
         for (int i = 0; i < Samples; i++)
@@ -169,7 +173,7 @@ if (charAccessMode)
             for (int r = 0; r < Repeats; r++)
             {
                 var sw = Stopwatch.StartNew();
-                caSink += WordBoundary.PrevWordStart(s, positions[i]);
+                caSink += WordBoundary.PrevWordStart(s, positions[i], WordBoundary.NoScanLimit);
                 sw.Stop();
                 best = Math.Min(best, sw.Elapsed.TotalMilliseconds);
             }
@@ -341,12 +345,16 @@ if (largeLineMode)
     foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
     {
         var tokSnap = TextBuffer.FromString(MakeSingleLine(len, "ascii")).Current;
-        llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength); // ウォームアップ
+        llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength, WordBoundary.NoScanLimit); // ウォームアップ
         double tokBest = double.MaxValue; // 3 回の最小値(既存 --characcess の流儀)
         for (int r = 0; r < 3; r++)
         {
             var tokSw = Stopwatch.StartNew();
-            llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength);
+            llSink += WordBoundary.PrevWordStart(
+                tokSnap,
+                tokSnap.CharLength,
+                WordBoundary.NoScanLimit
+            );
             tokSw.Stop();
             tokBest = Math.Min(tokBest, tokSw.Elapsed.TotalMilliseconds);
         }
@@ -390,10 +398,18 @@ if (largeLineMode)
         );
     }
     for (int w = 0; w < 50; w++)
-        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - w); // ウォームアップ
+        f6Sink += WordBoundary.PrevWordStart(
+            typedSnap,
+            typedSnap.CharLength - 1 - w,
+            WordBoundary.NoScanLimit
+        ); // ウォームアップ
     var f6NavSw = Stopwatch.StartNew();
     for (int i = 0; i < 200; i++)
-        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - i * 10);
+        f6Sink += WordBoundary.PrevWordStart(
+            typedSnap,
+            typedSnap.CharLength - 1 - i * 10,
+            WordBoundary.NoScanLimit
+        );
     f6NavSw.Stop();
     Console.WriteLine($"  PrevWordStart × 200: {f6NavSw.Elapsed.TotalMilliseconds / 200:F4} ms/回");
 

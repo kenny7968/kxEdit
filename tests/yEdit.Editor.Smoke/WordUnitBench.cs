@@ -244,7 +244,7 @@ internal static class WordUnitBench
                 int dcStart = DoubleClickWordStart(snap, pos);
                 int dcEnd = DoubleClickWordEnd(snap, pos);
 
-                int next = WordBoundary.NextWordStart(snap, pos);
+                int next = WordBoundary.NextWordStart(snap, pos, WordBoundary.NoScanLimit);
                 bool same = srStart == dcStart && srEnd == dcEnd;
 
                 Console.WriteLine(
@@ -271,8 +271,8 @@ internal static class WordUnitBench
         if (target <= 0)
             return 0;
         if (target >= snap.CharLength)
-            return WordBoundary.PrevWordStart(snap, target);
-        return WordBoundary.PrevWordStart(snap, target + 1);
+            return WordBoundary.PrevWordStart(snap, target, WordBoundary.NoScanLimit);
+        return WordBoundary.PrevWordStart(snap, target + 1, WordBoundary.NoScanLimit);
     }
 
     /// <summary>target の word run の終端(<c>InputRouter.NextWordBoundary</c> と同一)。</summary>
@@ -280,7 +280,7 @@ internal static class WordUnitBench
     {
         if (target >= snap.CharLength)
             return snap.CharLength;
-        int nextWordStart = WordBoundary.NextWordStart(snap, target);
+        int nextWordStart = WordBoundary.NextWordStart(snap, target, WordBoundary.NoScanLimit);
         while (nextWordStart > target)
         {
             char c = snap.GetChar(nextWordStart - 1);
@@ -370,12 +370,16 @@ internal static class WordUnitBench
 
                 sink += host.WordStart(snap.CharLength); // ウォームアップ(JIT・計測外)
                 sink += host.WordEnd(0);
-                sink += WordBoundary.PrevWordStart(snap, snap.CharLength);
+                sink += WordBoundary.PrevWordStart(snap, snap.CharLength, WordBoundary.NoScanLimit);
 
                 double startMs = BestOf3(() => sink += host.WordStart(snap.CharLength));
                 double endMs = BestOf3(() => sink += host.WordEnd(0));
                 double prevMs = BestOf3(() =>
-                    sink += WordBoundary.PrevWordStart(snap, snap.CharLength)
+                    sink += WordBoundary.PrevWordStart(
+                        snap,
+                        snap.CharLength,
+                        WordBoundary.NoScanLimit
+                    )
                 );
 
                 swCond.Stop(); // Console 出力は計測外(LargeLineBench も測定部だけを見ている)

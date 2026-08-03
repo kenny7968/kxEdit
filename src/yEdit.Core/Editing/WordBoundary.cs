@@ -47,9 +47,32 @@ internal enum CharClass
 /// よって CodePoint 系を使うのは<b>予防的な措置</b>である。差が出るのは <c>ClassOf</c> が
 /// CR と LF を別クラスとして扱うようになったとき=そのとき Ctrl+←→ の単語境界が変わるが、
 /// <b>テストは赤くならない</b>。<c>ClassOf</c> の改変時はこの注意書きだけが防壁になる。
+///
+/// 2026-08-04: public API 4 本すべてに走査上限 <c>maxScan</c> を必須引数として足した。
+/// 空白ゼロの長大行で 1 回の走査が行全体(500K 文字で約 1.4〜2.8 秒)を舐めるのを止めるため
+/// (docs/plans/2026-08-03-uia-word-unit-design.md §2.4)。省略可能引数にしていないのは、
+/// 上限なしを<b>明示的に選ばせる</b>ため(既定が無制限だと新しい呼び出しが黙って無制限になる)。
 /// </remarks>
 public static class WordBoundary
 {
+    /// <summary>
+    /// 走査上限なしを表す番兵。<b>新しい本番呼び出しでこれを使ってはならない</b> —
+    /// 上限なしの走査は空白ゼロ長大行で行全体を舐める(2026-08-03-uia-word-unit-design.md §2.4)。
+    /// テストと、上限を意図的に外すことに理由がある場所だけが使う。
+    /// </summary>
+    public const int NoScanLimit = int.MaxValue;
+
+    /// <summary>
+    /// 単語走査の既定上限(code point 数)。1 回の呼び出しがこの歩数を超えて走らない。
+    /// SR の読み上げスパン(<c>UiaTextHostAdapter</c>)と Ctrl+←→(<c>InputRouter</c>)の両方が使う。
+    /// </summary>
+    /// <remarks>
+    /// 値の根拠は docs/plans/2026-08-04-uia-word-unit-fix.md Task 6 の実測。
+    /// 上限に当たると単語の途中で切れる = SR は run の一部だけを読み、キャレットも run の
+    /// 途中で止まる。これは「500K 文字を 1 単語として読ませない」ための意図的な打ち切りである。
+    /// </remarks>
+    public const int DefaultMaxScan = 256; // Task 6 で確定させる暫定値
+
     /// <summary>次の単語の先頭に進む。EOF に達したら CharLength を返す。</summary>
     /// <remarks>
     /// 動作:
@@ -57,10 +80,18 @@ public static class WordBoundary
     /// 2. 現在位置の class が Whitespace/LineBreak → その連続をスキップして到達位置を返す
     /// 3. 現在位置の class が非空白 → 同 class の連続をスキップ → その先の空白/改行連続もスキップして到達位置を返す
     /// </remarks>
-    public static int NextWordStart(TextSnapshot snap, int caret)
+    /// <param name="snap">走査対象のスナップショット。</param>
+    /// <param name="caret">走査開始位置。</param>
+    /// <param name="maxScan">
+    /// 1 呼び出しで進める最大 code point 数。上限に当たった位置で打ち切る(= 単語の途中で止まる)。
+    /// 上限なしは <see cref="NoScanLimit"/>。本メソッドでは単語 run のスキップと空白 run のスキップを
+    /// <b>通した合計予算</b>である(空白 run をまたいでも予算は合算で消費される)。
+    /// </param>
+    public static int NextWordStart(TextSnapshot snap, int caret, int maxScan)
     {
         if (caret >= snap.CharLength)
             return snap.CharLength;
+        int budget = maxScan;
         int pos = caret;
         var start = ClassOf(snap, pos);
         if (start == CharClass.Whitespace || start == CharClass.LineBreak)
@@ -69,17 +100,19 @@ public static class WordBoundary
             pos = SkipForwardWhile(
                 snap,
                 pos,
-                cls => cls == CharClass.Whitespace || cls == CharClass.LineBreak
+                cls => cls == CharClass.Whitespace || cls == CharClass.LineBreak,
+                ref budget
             );
         }
         else
         {
             // 非空白 class の連続をスキップ → その先の空白/改行連続もスキップ
-            pos = SkipForwardWhile(snap, pos, cls => cls == start);
+            pos = SkipForwardWhile(snap, pos, cls => cls == start, ref budget);
             pos = SkipForwardWhile(
                 snap,
                 pos,
-                cls => cls == CharClass.Whitespace || cls == CharClass.LineBreak
+                cls => cls == CharClass.Whitespace || cls == CharClass.LineBreak,
+                ref budget
             );
         }
         return pos;
@@ -94,29 +127,100 @@ public static class WordBoundary
     /// 4. その class の後方連続をスキップ(左隣が同 class の間、左へ)
     /// 5. 到達位置を返す
     /// </remarks>
-    public static int PrevWordStart(TextSnapshot snap, int caret)
+    /// <param name="snap">走査対象のスナップショット。</param>
+    /// <param name="caret">走査開始位置。</param>
+    /// <param name="maxScan">
+    /// 1 呼び出しで進める最大 code point 数。上限に当たった位置で打ち切る(= 単語の途中で止まる)。
+    /// 上限なしは <see cref="NoScanLimit"/>。手順 2 の<b>最初の 1 歩も予算に数える</b>ので、
+    /// <c>maxScan</c> が 1 なら 1 code point 左へ移動した位置がそのまま返る。空白 run のスキップと
+    /// 単語 run のスキップを通した合計予算である。
+    /// </param>
+    public static int PrevWordStart(TextSnapshot snap, int caret, int maxScan)
     {
         if (caret <= 0)
             return 0;
+        int budget = maxScan;
         int pos = TextBoundary.PrevCodePoint(snap, caret);
+        budget--;
         // 左隣を空白/改行としてスキップ(後方=空白の直前まで)
-        while (pos > 0)
+        while (budget > 0 && pos > 0)
         {
             var cls = ClassOf(snap, pos);
             if (cls != CharClass.Whitespace && cls != CharClass.LineBreak)
                 break;
             pos = TextBoundary.PrevCodePoint(snap, pos);
+            budget--;
         }
         // 位置 pos の class を単語 class として、その連続をさらに左へ
         var wordCls = ClassOf(snap, pos);
-        while (pos > 0)
+        while (budget > 0 && pos > 0)
         {
             int prev = TextBoundary.PrevCodePoint(snap, pos);
             if (ClassOf(snap, prev) != wordCls)
                 break;
             pos = prev;
+            budget--;
         }
         return pos;
+    }
+
+    /// <summary>
+    /// <paramref name="pos"/> を含む単語の左端。ダブルクリック単語選択と SR の読み上げスパンが共有する。
+    /// </summary>
+    /// <remarks>
+    /// <b>規則は <see cref="PrevWordStart"/> の組み合わせで表現される</b>(新しい規則を発明しない)。
+    /// <c>pos + 1</c> を渡すことで「pos 自身を含むクラス連続の左端」になる。
+    /// 2026-08-04 に <c>InputRouter.PrevWordBoundary</c> から bit-perfect 移設した。
+    ///
+    /// pos が空白の上にあるときは左の空白 run を越えて<b>前の単語の頭</b>を返す(= スパンが
+    /// キャレットを含まない)。これは移設元からの現行仕様で、
+    /// <c>MouseInputTests.DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c> が固定している。
+    /// </remarks>
+    /// <param name="snap">走査対象のスナップショット。</param>
+    /// <param name="pos">単語の左端を求めたい位置。</param>
+    /// <param name="maxScan">
+    /// 1 呼び出しで進める最大 code point 数(<see cref="PrevWordStart"/> にそのまま渡る)。
+    /// 上限に当たった位置で打ち切る(= 単語の途中で止まる)。上限なしは <see cref="NoScanLimit"/>。
+    /// </param>
+    public static int WordStart(TextSnapshot snap, int pos, int maxScan)
+    {
+        if (pos <= 0)
+            return 0;
+        if (pos >= snap.CharLength)
+            return PrevWordStart(snap, pos, maxScan);
+        return PrevWordStart(snap, pos + 1, maxScan);
+    }
+
+    /// <summary>
+    /// <paramref name="pos"/> の word run の終端。末尾の空白は含めない。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="NextWordStart"/> は「単語末尾 + 空白列をスキップして次単語の頭」を返すため、
+    /// 返り値から左へ戻して空白/改行以外の最初の位置を求める。後方スキャンは
+    /// <c>nextWordStart &gt; pos</c> でガードするので pos より左には決して戻らない。
+    /// 2026-08-04 に <c>InputRouter.NextWordBoundary</c> から bit-perfect 移設した。
+    /// </remarks>
+    /// <param name="snap">走査対象のスナップショット。</param>
+    /// <param name="pos">word run の終端を求めたい位置。</param>
+    /// <param name="maxScan">
+    /// 1 呼び出しで進める最大 code point 数(<see cref="NextWordStart"/> にそのまま渡る)。
+    /// 上限に当たった位置で打ち切る(= 単語の途中で止まる)。上限なしは <see cref="NoScanLimit"/>。
+    /// 末尾空白の巻き戻しは <see cref="NextWordStart"/> が進んだ範囲の内側でしか動かないため、
+    /// 追加の予算を消費しない。
+    /// </param>
+    public static int WordEnd(TextSnapshot snap, int pos, int maxScan)
+    {
+        if (pos >= snap.CharLength)
+            return snap.CharLength;
+        int nextWordStart = NextWordStart(snap, pos, maxScan);
+        while (nextWordStart > pos)
+        {
+            char c = snap.GetChar(nextWordStart - 1);
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                break;
+            nextWordStart--;
+        }
+        return nextWordStart;
     }
 
     // ===== ヘルパ =====
@@ -143,11 +247,19 @@ public static class WordBoundary
         return CharClass.Other;
     }
 
-    /// <summary>pred が真の間、code-point 単位で右へ進む。</summary>
-    private static int SkipForwardWhile(TextSnapshot snap, int pos, Func<CharClass, bool> pred)
+    /// <summary>pred が真の間、code-point 単位で右へ進む。予算 <paramref name="budget"/> を消費する。</summary>
+    private static int SkipForwardWhile(
+        TextSnapshot snap,
+        int pos,
+        Func<CharClass, bool> pred,
+        ref int budget
+    )
     {
-        while (pos < snap.CharLength && pred(ClassOf(snap, pos)))
+        while (budget > 0 && pos < snap.CharLength && pred(ClassOf(snap, pos)))
+        {
             pos = TextBoundary.NextCodePoint(snap, pos);
+            budget--;
+        }
         return pos;
     }
 }
