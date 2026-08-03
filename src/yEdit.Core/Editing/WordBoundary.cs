@@ -218,7 +218,9 @@ public static class WordBoundary
     /// 「pos 自身を含むクラス連続の左端」を得る。</item>
     /// </list>
     /// 2026-08-04 に <c>InputRouter.PrevWordBoundary</c> から bit-perfect 移設した
-    /// (移設元の xmldoc は Task 2 で原本ごと消えるため、3 分岐の説明をここへ引き継いでいる)。
+    /// (移設元の xmldoc は Task 2 で原本ごと消えるため、3 分岐の説明をここへ引き継いでいる。
+    /// その原本は <c>EditorControl.Input.cs</c> から責務分離 Phase 3 Task 3c で InputRouter へ
+    /// 移されたもの。以後この 1 本が唯一の定義)。
     ///
     /// pos が空白の上にあるときは左の空白 run を越えて<b>前の単語の頭</b>を返す(= スパンが
     /// キャレットを含まない)。これは移設元からの現行仕様で、
@@ -244,13 +246,16 @@ public static class WordBoundary
     /// <paramref name="pos"/> の word run の終端。末尾の空白は含めない。
     /// </summary>
     /// <remarks>
-    /// <see cref="NextWordStart"/> は「単語末尾 + 空白列をスキップして次単語の頭」を返すため、
+    /// <see cref="NextWordStart"/> は<b>Ctrl+→ 用に</b>「単語末尾 + 空白列をスキップして次単語の頭」を
+    /// 返す設計。ダブルクリック単語選択と SR の読み上げスパンでは<b>末尾の空白を含めたくない</b>ため、
     /// 返り値から左へ戻して空白/改行以外の最初の位置を求める。後方スキャンは
     /// <c>nextWordStart &gt; pos</c> でガードするので pos より左には決して戻らない
     /// (= <c>WordEnd(pos) &gt;= pos</c> が常に成り立つ。これを破ると
     /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> が未対応の反転レンジを UIA へ出す。
     /// <c>WordEnd_OnWhitespaceRun_NeverReturnsBeforePos</c> が固定している)。
-    /// 2026-08-04 に <c>InputRouter.NextWordBoundary</c> から bit-perfect 移設した。
+    /// 2026-08-04 に <c>InputRouter.NextWordBoundary</c> から bit-perfect 移設した
+    /// (その原本は <c>EditorControl.Input.cs</c> から責務分離 Phase 3 Task 3c で InputRouter へ
+    /// 移されたもの。以後この 1 本が唯一の定義)。
     ///
     /// 巻き戻しの空白判定は <c>ClassOf</c> に寄せてある(literal の空白集合を第 2 の定義として
     /// 持たない)。将来 U+3000 を <see cref="CharClass.Whitespace"/> へ移した場合に、

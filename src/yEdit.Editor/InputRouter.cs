@@ -5,7 +5,6 @@
 // 各ハンドラは <see cref="InputContext"/> と KeyEventArgs / MouseEventArgs を受け取り、
 // ホスト側 (EditorControl) の public / internal API を叩く。移設した case body / mouse handler body は
 // 元の switch 分岐からロジック中身を bit-perfect に保つ(挙動不変)。
-using yEdit.Core.Buffers;
 using yEdit.Core.Editing;
 using yEdit.Core.Text;
 
@@ -517,53 +516,11 @@ internal sealed class InputRouter
             return;
         int target = ctx.Host.OffsetFromClientPoint(e.X, e.Y);
         var snap = ctx.Host.Buffer.Current;
-        int start = PrevWordBoundary(snap, target);
-        int end = NextWordBoundary(snap, target);
+        int start = WordBoundary.WordStart(snap, target, WordBoundary.NoScanLimit);
+        int end = WordBoundary.WordEnd(snap, target, WordBoundary.NoScanLimit);
         ctx.Host.SetSelectionAnchored(start, end);
         ctx.Caret.DesiredXpx = -1;
         ctx.Host.Buffer.BreakUndoCoalescing();
         ctx.Host.BringCaretIntoView();
-    }
-
-    // ===== word boundary helpers (for DoubleClick) =====
-
-    /// <summary>
-    /// target 位置を含む単語の先頭を返す(<see cref="HandleMouseDoubleClick"/> のヘルパ)。
-    /// - target &lt;= 0: 0
-    /// - target &gt;= CharLength(EOF): <see cref="WordBoundary.PrevWordStart"/>(CharLength) に委譲=
-    ///   末尾が空白なら空白を左スキップして直前の単語まで戻る=末尾に近い単語の頭を返す
-    /// - それ以外: <see cref="WordBoundary.PrevWordStart"/>(target+1) を呼ぶことで
-    ///   「target 自身を含む単語 class の連続の左端」を得る
-    /// EditorControl.Input.cs から Task 3c で bit-perfect 移設。
-    /// </summary>
-    private static int PrevWordBoundary(TextSnapshot snap, int target)
-    {
-        if (target <= 0)
-            return 0;
-        if (target >= snap.CharLength)
-            return WordBoundary.PrevWordStart(snap, target, WordBoundary.NoScanLimit);
-        return WordBoundary.PrevWordStart(snap, target + 1, WordBoundary.NoScanLimit);
-    }
-
-    /// <summary>
-    /// target 位置の word run の終端を返す(<see cref="HandleMouseDoubleClick"/> のヘルパ)。
-    /// <see cref="WordBoundary.NextWordStart"/> は Ctrl+→ 用に「単語末尾+空白列をスキップして次単語の頭」
-    /// を返す設計。ダブルクリック単語選択では末尾空白を含めたくないため、返り値から左に戻して空白/改行
-    /// 以外の最初の位置を求める。ただし後方スキャンは <c>nextWordStart &gt; target</c> でガードするため、
-    /// target 自身より左には決して戻らない。EditorControl.Input.cs から Task 3c で bit-perfect 移設。
-    /// </summary>
-    private static int NextWordBoundary(TextSnapshot snap, int target)
-    {
-        if (target >= snap.CharLength)
-            return snap.CharLength;
-        int nextWordStart = WordBoundary.NextWordStart(snap, target, WordBoundary.NoScanLimit);
-        while (nextWordStart > target)
-        {
-            char c = snap.GetChar(nextWordStart - 1);
-            if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
-                break;
-            nextWordStart--;
-        }
-        return nextWordStart;
     }
 }
