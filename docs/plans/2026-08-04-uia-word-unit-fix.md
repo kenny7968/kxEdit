@@ -1078,6 +1078,14 @@ cap の値は暫定。Task 6 の実測で確定させる。
 
 設計書 §3.3 の第 1 項。**値を決めるのはユーザー**。Claude は材料を出す。
 
+> **⚠ Task 6 到達まで `--wordunit` の §4.1 表を「F-3 が消えた」の証拠に使わないこと。**
+> Task 2 で `InputRouter` の private 2 本を削除した時点で、ベンチの `SelfCheckCandidateA`
+> (`GetMethod("PrevWordBoundary", NonPublic|Static)` の文字列反射)が null を引いて `NG` を返すように
+> なった。ベンチは NG を明示出力して `false` を返す作りなので沈黙して嘘はつかないが、
+> **§4.1 表の「ダブルクリック選択」列を担保する網はそこで死んでいる**。以後この列は
+> 「本物」ではなく「Core と逐語同一のコピー」を表示している = **同じ壊れ方をする参照**であり、
+> ずれを検出できない。Step 1 の差し替えで解消する。
+
 ### Step 1: ベンチを実装後の本物基準へ作り直す
 
 `--wordunit` は調査時の構成(現状実装 vs 候補 A 写経 vs 候補 B 写経)のままなので、
@@ -1251,6 +1259,13 @@ CLAUDE.md §3 工程 5。`src/` を 4 ファイル変更しており簡略化基
 - RPC スレッドと UI スレッドの分離が保たれているか(a11y 鉄則)
 
 指摘は 3 択で明示し、fixup commit で積む。
+
+**あわせて回収する doc 整合**(レビュー前に済ませてよい):
+
+- `tests/yEdit.Editor.Tests/MouseInputTests.cs:238,263` のコメントが、Task 2 で削除された
+  `InputRouter.PrevWordBoundary` / `NextWordBoundary` を参照している。**Task 2〜6 の間は
+  触ってはならない**(このファイルが無改修であることが挙動不変の一次証拠のため、コメントでも
+  触ると証拠が濁る)。ブランチ末尾のここで `WordBoundary.WordStart` / `WordEnd` へ読み替える。
 
 ### Step 2: 品質ゲート
 
