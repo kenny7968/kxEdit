@@ -23,6 +23,14 @@ if (args.Length > 0 && args[0] == "--largeline")
     return LargeLineBench.Run();
 }
 
+// 2026-08-03 UIA 単語単位調査 Task 1: --wordunit。UIA が SR へ返す単語スパンは
+// 「空白のみ区切り」の素朴実装で決まるため、Ctrl+←→ / ダブルクリック選択(文字クラス規則)と
+// ずれる。その規則差と、空白ゼロ長大行での全走査コストを採取する。GDI は通らない。
+if (args.Length > 0 && args[0] == "--wordunit")
+{
+    return WordUnitBench.Run();
+}
+
 // P4 Task 14: --ime サブコマンド。ATOK 実機検証(docs/plans/2026-07-06-p4-ime-checklist.md)
 // 用に、未確定色/下線を目視しやすい長文サンプルをメモリ上で生成して開いた状態から起動する。
 if (args.Length > 0 && args[0] == "--ime")
