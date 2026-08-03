@@ -6,7 +6,7 @@ using yEdit.Editor;
 namespace yEdit.Editor.Smoke;
 
 /// <summary>
-/// P2 Task 14 の GDI 実測ベンチ。offscreen Form + Show + Invalidate/Update を
+/// P2 Task 14 の GDI 実測ベンチ。画面内 Form + Show + Invalidate/Update を
 /// 1000 フレーム回して平均フレーム時間を測る。純レイアウトのベンチ
 /// (Core.Bench --layout)と対になる「実描画 GDI 経路」の計測。
 /// 目標: 平均 &lt; 16ms(60fps)。EXIT 0 で PASS・1 で FAIL。
@@ -33,7 +33,8 @@ internal static class GdiBench
             $"構築 {swBuild.Elapsed.TotalSeconds:F1}s / {snap.CharLength:N0} 文字 / {snap.LineCount:N0} 行"
         );
 
-        // WinForms アプリコンテキスト初期化(offscreen だが Show でハンドル生成 → Invalidate/Update が同期 paint)。
+        // WinForms アプリコンテキスト初期化(Show でハンドル生成 → Invalidate/Update が同期 paint。
+        // 画面内に置く理由は下記)。
         ApplicationConfiguration.Initialize();
         using var form = new Form
         {
@@ -43,11 +44,15 @@ internal static class GdiBench
         };
         using var editor = new EditorControl { Dock = DockStyle.Fill };
         form.Controls.Add(editor);
-        // ハンドル生成のため Show が必須(offscreen だと Invalidate/Update が no-op)。
-        // StartPosition=Manual + Location をオフスクリーンにしてユーザーの視界に極力入らないようにするが、
-        // 実測を止めないよう ShowInTaskbar=false で控えめに出す。
+        // ハンドル生成のため Show が必須(Show しないと Invalidate/Update が no-op)。
+        // 画面内に置くことが測定条件である: 完全に画面外 (-32000,-32000) のウィンドウは
+        // 可視領域が空になり、Update()(UpdateWindow)が WM_PAINT を配送しない
+        // = 描画していない値で 16ms ゲートを通してしまう
+        // (docs/plans/2026-08-02-large-line-resilience-design.md §2.3 で
+        //  同条件の paint が 1.0 ms → 33.2 ms に変わることを確認済み)。
+        // ShowInTaskbar=false でタスクバーには出さないが、ウィンドウ自体は見える。
         form.StartPosition = FormStartPosition.Manual;
-        form.Location = new Point(-32000, -32000);
+        form.Location = new Point(100, 100);
         form.ShowInTaskbar = false;
         form.Show();
         editor.SetSource(buffer);

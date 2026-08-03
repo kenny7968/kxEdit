@@ -1504,11 +1504,15 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
     /// - Visible=true: (X, Y) は「行番号マージン含む・_scrollX を引く前」の座標
     /// </summary>
     /// <remarks>
-    /// 折り返し ON 時は TopLine ～ 対象行までの各論理行に対して <c>LineLayout.Wrap</c>
-    /// を呼び直す(1 論理行ずつ GetText + Wrap)。Task 14 のベンチで顕在化するようなら
+    /// 折り返し ON 時は TopLine ～ 対象行までの各論理行に対して折り返しを計算し直す
+    /// (1 論理行ずつ GetText + Wrap)。Task 14 のベンチで顕在化するようなら
     /// Frame の再利用等で最適化する(Task 9 レビュー M-3 の申し送り)。
     /// Task 10 レビュー I-1 対応: 積み上げループ内で paintHeight 超えを検出したら早期退避する
     /// (100 万行のような巨大文書でキャレットが末尾方向にあるとき無駄な Wrap を避けるため)。
+    /// 2026-08-02 変更 B-2: どちらの Wrap も「その呼び出しで実際に必要な分」で打ち切る
+    /// (キャレット行は <see cref="LineLayout.WrapThroughOffset"/>・手前の行は
+    /// <see cref="LineLayout.WrapFirstSegments"/>)。打ち切り結果は完全な Wrap 結果の
+    /// prefix なので、返す座標・可視性は変わらない。根拠は本体のコメントを参照。
     /// </remarks>
     // Task 3d: UiaTextHostAdapter.ComputeBoundingRectangles / ComputeOffsetFromScreenPoint から
     // 呼び出すため internal 化 (元 private・呼び出し元は UI thread ドキュメントされている)。
@@ -1530,19 +1534,46 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
         int lineLen = lineEnd - lineStart;
         string lineText = lineLen == 0 ? string.Empty : snap.GetText(lineStart, lineLen);
         int maxWidthPx = _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
-        var segments = LineLayout.Wrap(lineText, maxWidthPx, _metrics);
-
         int caretInLine = offset - lineStart;
+
+        // 2026-08-02 変更 B-2: キャレットを含むセグメントが確定した時点で Wrap を打ち切る。
+        // 行末キャレットのときは打ち切れない(行末まで走らないと「含むセグメント」が決まらない)
+        // が、その場合のコストは変更 A(GdiCharMetrics のコードポイント幅メモ化)が受け持つ。
+        var wrapped = LineLayout.WrapThroughOffset(lineText, maxWidthPx, _metrics, caretInLine);
+        var segments = wrapped.Segments;
 
         // 対象がどの視覚セグメントに属するかを決める。
         // - 通常は「seg.OffsetInLine + seg.Length で終わる直前」まで
         // - 最終セグメントに限り「末尾ちょうど」も許容(EOL キャレット位置)
+        //
+        // EOL 分岐は「segments の最後の要素 = 論理行の最終セグメント」を仮定しており、
+        // 打ち切られている(ReachedLineEnd=false)ときその仮定は成り立たない。よって
+        // ReachedLineEnd を条件に足してあるが、これは防御ではなく「依存関係を明示する
+        // ドキュメント」である。実際:
+        //   - WrapThroughOffset は「covered > caretInLine」を厳密な不等号で保証するため、
+        //     打ち切り時は最後の要素で必ず caretInLine < segEnd が先に成立し
+        //     EOL 分岐には到達しない
+        //   - そもそも EOL 分岐は segIdx を segments.Count - 1(初期値と同じ)に
+        //     するだけなので、発火してもしなくても結果は変わらない
+        //     = ReachedLineEnd を外しても観測可能な挙動は変化しない(実証済み)
+        //
+        // 本当に load-bearing なのは LineLayout.WrapCore の
+        // 「segStart > minCoverOffset」の「>」1 文字の方。ここを「>=」に緩めると
+        // 「セグメント境界ちょうど」のキャレット(offset == 次セグメント先頭)が
+        // 打ち切りに巻き込まれ、次の視覚行へ降りずに 1 行「上」・前セグメント「末尾」
+        // (右端)に留まる。行末キャレットは segStart が line.Length に到達しないため
+        // 打ち切られず無傷=症状は行末ではなくセグメント境界に出る。
+        // この「>」は EditorControlWrapCaretTests(Editor 13 件)と
+        // LineLayoutPrefixTests(Core 5 件)が守っている。
         int segIdx = segments.Count - 1;
         for (int i = 0; i < segments.Count; i++)
         {
             var seg = segments[i];
             int segEnd = seg.OffsetInLine + seg.Length;
-            if (caretInLine < segEnd || (i == segments.Count - 1 && caretInLine == segEnd))
+            if (
+                caretInLine < segEnd
+                || (wrapped.ReachedLineEnd && i == segments.Count - 1 && caretInLine == segEnd)
+            )
             {
                 segIdx = i;
                 break;
@@ -1558,14 +1589,38 @@ public sealed partial class EditorControl : Control, yEdit.Accessibility.IUiaTex
 
         // TopLine の先頭視覚行を Y=0 として、対象視覚行までの積み上げ視覚行数を算出。
         // paintHeight を超えたら以降の Wrap は無駄なので早期退避(Task 10 I-1)。
+        //
+        // 2026-08-02 変更 B-2: 各行も「まだ意味のある視覚行数」までで打ち切って数える。
+        // 早期退避の条件 visualRowsBeforeThisLine * lineHeight >= paintHeight は、整数の
+        // 積み上げ数について「accumulated >= ceil(paintHeight / lineHeight)」と同値。
+        // よって積み上げの伸びをその ceil 値(=maxUsefulRows)で頭打ちにするのは厳密に正しい:
+        //   - 真の segs.Count が accumulated を maxUsefulRows 以上へ押し上げるなら、
+        //     打ち切っても accumulated == maxUsefulRows となり同じ分岐に入る
+        //   - 真の segs.Count が accumulated を maxUsefulRows 未満に留めるなら、
+        //     そもそも打ち切りが起きず値は正確
+        // この上限を 1 でも小さく取ると視覚行数を過小評価し、本来不可視の位置を可視として
+        // 返す(=行がずれた座標を返す)ので、ceil を floor や -1 に緩めてはならない。
         int visualRowsBeforeThisLine = 0;
+        int maxUsefulRows =
+            lineHeight > 0 ? (paintHeight + lineHeight - 1) / lineHeight : int.MaxValue;
         for (int line = _topLine; line < logicalLine; line++)
         {
             int lStart = snap.GetLineStart(line);
             int lEnd = snap.GetLineEnd(line, includeBreak: false);
             int lLen = lEnd - lStart;
             string lText = lLen == 0 ? string.Empty : snap.GetText(lStart, lLen);
-            var segs = LineLayout.Wrap(lText, maxWidthPx, _metrics);
+            // Math.Max(1, ...) は到達可能な生きた防御(外してはならない)。
+            // PaintHeightPx は 0 になり得る(フォーム最小化・レイアウト確定前・
+            // hscroll より低いペイン)。そのとき maxUsefulRows=0 → rowsNeeded=0 となり、
+            // WrapFirstSegments の ThrowIfNegativeOrZero が発火して
+            // PositionCaret / OnPaint / UIA 経路へ ArgumentOutOfRangeException が抜ける
+            // (打ち切り導入で新設された例外面。変更前の Wrap は投げなかった)。
+            // ループ継続中の通常ケースでは accumulated < maxUsefulRows が成り立つため
+            // rowsNeeded は 1 以上になる。
+            int rowsNeeded = maxUsefulRows - visualRowsBeforeThisLine;
+            var segs = LineLayout
+                .WrapFirstSegments(lText, maxWidthPx, _metrics, Math.Max(1, rowsNeeded))
+                .Segments;
             visualRowsBeforeThisLine += segs.Count;
             if (visualRowsBeforeThisLine * lineHeight >= paintHeight)
                 return (0, 0, false);
