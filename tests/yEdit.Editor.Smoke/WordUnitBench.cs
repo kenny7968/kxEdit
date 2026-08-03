@@ -133,8 +133,17 @@ internal static class WordUnitBench
 
     // ===== §4.2 コスト実測 =====
 
-    /// <summary>1 条件がこの秒数を超えたら、その kind の以降の行長をスキップする(--largeline と同じ流儀)。</summary>
-    private const double SkipThresholdSec = 30.0;
+    /// <summary>
+    /// 1 条件の<b>実経過</b>がこの秒数を超えたら、その kind の以降の行長をスキップする
+    /// (--largeline と同じ流儀)。
+    /// </summary>
+    /// <remarks>
+    /// --largeline の 30 秒より大きいのは、1 条件の実経過が「ウォームアップ 1 回 + 計測 3 回 ×
+    /// (start + end + prev)」= 表に出る 合計 ms の約 6 倍あるため。30 秒のままだと最長条件
+    /// (ascii 2M = 実測約 68 秒)で必ず発動し、しかもそれは各 kind の最後の行長なので
+    /// 「以降をスキップ」が空振りのまま出力に残る。全条件を採り切ることを優先する。
+    /// </remarks>
+    private const double SkipThresholdSec = 90.0;
 
     private static void PrintCostTable()
     {
@@ -158,6 +167,12 @@ internal static class WordUnitBench
                 var snap = buf.Current;
                 var host = (IUiaTextHost)ctrl;
 
+                // 打ち切り判定は「1 条件の実経過」で行う(LargeLineBench.cs:100 の totalSec と同基準)。
+                // 表に出る 合計 ms は best-of-3 の最小値どうしの和なので、実経過はその約 6 倍
+                // (ウォームアップ 1 回 + 計測 3 回 ×(start + end + prev))ある。
+                // 合計 ms を閾値と比べると実経過の 1/6 で判定してしまい、ガードが効かない。
+                var swCond = Stopwatch.StartNew();
+
                 sink += host.WordStart(snap.CharLength); // ウォームアップ(JIT・計測外)
                 sink += host.WordEnd(0);
                 sink += WordBoundary.PrevWordStart(snap, snap.CharLength);
@@ -167,6 +182,9 @@ internal static class WordUnitBench
                 double prevMs = BestOf3(() =>
                     sink += WordBoundary.PrevWordStart(snap, snap.CharLength)
                 );
+
+                swCond.Stop(); // Console 出力は計測外(LargeLineBench も測定部だけを見ている)
+                double condSec = swCond.Elapsed.TotalSeconds;
                 double totalMs = startMs + endMs;
 
                 // PrevWordStart は jamix ではクラス境界で数文字止まりになり ms が 0 付近へ落ちる。
@@ -176,10 +194,10 @@ internal static class WordUnitBench
                     $"| {kind} | {len:N0} | {startMs:F1} | {endMs:F1} | **{totalMs:F1}** | {prevMs:F3} | {totalMs / prevMs:F2}x |"
                 );
 
-                if (totalMs / 1000.0 > SkipThresholdSec)
+                if (condSec > SkipThresholdSec)
                 {
                     Console.WriteLine(
-                        $"（{totalMs / 1000.0:F1}s > {SkipThresholdSec}s のため {kind} の以降の行長をスキップ）"
+                        $"（実経過 {condSec:F1}s > {SkipThresholdSec}s のため {kind} の以降の行長をスキップ）"
                     );
                     break;
                 }
@@ -226,7 +244,7 @@ internal static class WordUnitBench
     /// <item>
     ///   <term>cjk</term>
     ///   <description>U+3042 から 40 種。<b>全て Hiragana クラス</b>なので ascii と同じく単一クラス。
-    ///   同上。</description>
+    ///   同上(生成規則・シードとも <c>LargeLineBench.MakeSingleLine</c> と同一)。</description>
     /// </item>
     /// <item>
     ///   <term>jamix</term>
@@ -239,7 +257,11 @@ internal static class WordUnitBench
     private static string MakeSingleLine(int chars, string kind)
     {
         var sb = new StringBuilder(chars);
-        var r = new Random(20260803);
+        // LargeLineBench.MakeSingleLine(20260802)/ Core.Bench の MakeSingleLine(20260802)と同一シード。
+        // ascii / cjk の fixture が literally 同一になり、既存実測との前後比較が成立する。
+        // Core.Bench/Program.cs:233-234 の「2 つのベンチが対であることが設計の前提なので、
+        // 片方だけ変えないこと」に従う。jamix は本調査で追加した新 kind なので取り決めの対象外。
+        var r = new Random(20260802);
         while (sb.Length < chars)
         {
             switch (kind)
