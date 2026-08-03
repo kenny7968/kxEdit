@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using yEdit.Accessibility;
 using yEdit.Core.Buffers;
 using yEdit.Core.Editing;
+using yEdit.Core.Text;
 
 namespace yEdit.Editor.Smoke;
 
@@ -15,6 +17,7 @@ namespace yEdit.Editor.Smoke;
 /// <list type="number">
 /// <item>その規則差が実際にどうずれるか(§4.1)</item>
 /// <item>空白ゼロ長大行で素朴実装が行頭まで全走査するコスト(§4.2)</item>
+/// <item>修正候補 A / B を当てたときのコスト(§4.3)</item>
 /// </list>
 /// を採取する。調査用のため判定ゲートは持たない(常に EXIT 0)。
 /// </summary>
@@ -28,12 +31,145 @@ internal static class WordUnitBench
 {
     public static int Run()
     {
+        // 判定ゲートを持たない方針(常に EXIT 0)なので返り値は捨てる。
+        // NG 行が出力に残ることが警告になる。
+        _ = SelfCheck();
         PrintDivergenceTable();
         PrintCostTable();
+        PrintCandidateCostTable();
 
         Console.WriteLine();
         Console.WriteLine("(調査用ベンチのため判定ゲートなし) EXIT 0");
         return 0;
+    }
+
+    // ===== SelfCheck: 候補の写経が本物と一致するか =====
+    // 候補 A も候補 B も src の private 実装の写経である(候補 A = InputRouter の
+    // private static ヘルパ・候補 B = UiaTextHostAdapter の private static 素朴実装)。
+    // 写経がズレていると「候補の効果」ではなく「写経のバグ」を測ることになるため、
+    // 毎回本物と突き合わせる。<b>反射でメンバーが見つからないときに黙って PASS しないこと。</b>
+    // 「照合したつもりで何も照合していない」は本リポジトリで過去に踏んだ失敗パターンである。
+
+    /// <summary>候補 A / 候補 B の写経を本物と照合する。片方でも NG なら false。</summary>
+    private static bool SelfCheck()
+    {
+        Console.WriteLine("## SelfCheck(候補の写経 vs 本物)");
+        Console.WriteLine();
+        bool a = SelfCheckCandidateA();
+        bool b = SelfCheckCandidateB();
+        Console.WriteLine();
+        return a && b;
+    }
+
+    /// <summary>
+    /// 候補 A(<see cref="DoubleClickWordStart"/> / <see cref="DoubleClickWordEnd"/>)が
+    /// <c>InputRouter.PrevWordBoundary</c> / <c>NextWordBoundary</c> と完全一致することを確認する。
+    /// </summary>
+    /// <remarks>
+    /// <c>InputRouter</c> は <c>internal sealed</c>・両ヘルパは <c>private static</c> なので反射で叩く
+    /// (<c>yEdit.Editor.Smoke</c> は InternalsVisibleTo 対象 = yEdit.Editor.csproj:19)。
+    /// 型名 / メソッド名が変わったら **NG として報告する**(見つからないことを PASS にしない)。
+    /// </remarks>
+    private static bool SelfCheckCandidateA()
+    {
+        var type = typeof(EditorControl).Assembly.GetType("yEdit.Editor.InputRouter");
+#pragma warning disable S3011 // reason: 照合対象が private static ヘルパのため反射以外に本物を叩く手段がない。調査ベンチ限定・読み取りのみ(App 層のテスト群も同じ手法を使っている)
+        var prev = type?.GetMethod(
+            "PrevWordBoundary",
+            BindingFlags.NonPublic | BindingFlags.Static
+        );
+        var next = type?.GetMethod(
+            "NextWordBoundary",
+            BindingFlags.NonPublic | BindingFlags.Static
+        );
+#pragma warning restore S3011
+
+        if (type is null || prev is null || next is null)
+        {
+            Console.WriteLine(
+                "SelfCheck 候補A: **NG(照合できていない)** — 反射で本物が見つからない: "
+                    + $"type={(type is null ? "**null**" : type.FullName)} / "
+                    + $"PrevWordBoundary={(prev is null ? "**null**" : "found")} / "
+                    + $"NextWordBoundary={(next is null ? "**null**" : "found")}。"
+                    + "InputRouter の型名かヘルパ名が変わった可能性がある。"
+                    + "**候補 A の数値は本物と一致する保証がない = 無効。**"
+            );
+            return false;
+        }
+
+        bool ok = true;
+        foreach (var (name, text) in Fixtures)
+        {
+            var snap = TextBuffer.FromString(text).Current;
+            for (int pos = 0; pos <= snap.CharLength; pos++)
+            {
+                int realStart = InvokeBoundary(prev, snap, pos);
+                int realEnd = InvokeBoundary(next, snap, pos);
+                int mineStart = DoubleClickWordStart(snap, pos);
+                int mineEnd = DoubleClickWordEnd(snap, pos);
+                if (realStart != mineStart || realEnd != mineEnd)
+                {
+                    Console.WriteLine(
+                        $"SelfCheck 候補A **NG**: {name} pos={pos} "
+                            + $"start {realStart}/{mineStart} end {realEnd}/{mineEnd}"
+                    );
+                    ok = false;
+                }
+            }
+        }
+
+        Console.WriteLine(
+            ok
+                ? "SelfCheck 候補A: OK(InputRouter.PrevWordBoundary / NextWordBoundary と一致)"
+                : "SelfCheck 候補A: **NG**"
+        );
+        return ok;
+    }
+
+    /// <summary>反射で得た <c>(TextSnapshot, int) -&gt; int</c> を呼ぶ。</summary>
+    private static int InvokeBoundary(MethodInfo m, TextSnapshot snap, int pos) =>
+        m.Invoke(null, [snap, pos]) as int?
+        ?? throw new InvalidOperationException($"{m.Name} が int を返さなかった");
+
+    /// <summary>
+    /// cap 無制限の <see cref="CappedWordStart"/> / <see cref="CappedWordEnd"/> が
+    /// 本番実装(<c>UiaTextHostAdapter.WordBoundary_WordStart / _WordEnd</c>)と
+    /// 完全一致することを確認する。
+    /// </summary>
+    private static bool SelfCheckCandidateB()
+    {
+        bool ok = true;
+        foreach (var (name, text) in Fixtures)
+        {
+            using var ctrl = new EditorControl();
+            var buf = TextBuffer.FromString(text);
+            ctrl.SetSource(buf);
+            var snap = buf.Current;
+            var host = (IUiaTextHost)ctrl;
+
+            for (int pos = 0; pos <= snap.CharLength; pos++)
+            {
+                int realStart = host.WordStart(pos);
+                int capStart = CappedWordStart(snap, pos, int.MaxValue);
+                int realEnd = host.WordEnd(pos);
+                int capEnd = CappedWordEnd(snap, pos, int.MaxValue);
+                if (realStart != capStart || realEnd != capEnd)
+                {
+                    Console.WriteLine(
+                        $"SelfCheck 候補B **NG**: {name} pos={pos} "
+                            + $"start {realStart}/{capStart} end {realEnd}/{capEnd}"
+                    );
+                    ok = false;
+                }
+            }
+        }
+
+        Console.WriteLine(
+            ok
+                ? "SelfCheck 候補B: OK(cap 無制限で UiaTextHostAdapter の素朴実装と一致)"
+                : "SelfCheck 候補B: **NG**"
+        );
+        return ok;
     }
 
     // ===== §4.1 ずれの採取 =====
@@ -131,6 +267,41 @@ internal static class WordUnitBench
         return nextWordStart;
     }
 
+    // ===== §4.3 候補 B: 走査上限キャップ =====
+    // 素朴実装(UiaTextHostAdapter.cs:529-556)に歩数上限を足しただけの候補。
+    // 「写経 + 改変」なので、cap 無制限で本物と一致することを SelfCheckCandidateB で毎回確認する。
+
+    /// <summary>キャップ付き <c>WordStart</c>。cap 歩を超えたらそこで打ち切る。</summary>
+    private static int CappedWordStart(TextSnapshot snap, int pos, int cap)
+    {
+        if (pos <= 0)
+            return 0;
+        int p = pos;
+        for (int steps = 0; p > 0 && steps < cap; steps++)
+        {
+            int prev = TextBoundary.PrevCodePoint(snap, p);
+            char pc = snap.GetChar(prev);
+            if (char.IsWhiteSpace(pc) || pc == '\r' || pc == '\n')
+                break;
+            p = prev;
+        }
+        return p;
+    }
+
+    /// <summary>キャップ付き <c>WordEnd</c>。cap 歩を超えたらそこで打ち切る。</summary>
+    private static int CappedWordEnd(TextSnapshot snap, int pos, int cap)
+    {
+        int p = pos;
+        for (int steps = 0; p < snap.CharLength && steps < cap; steps++)
+        {
+            char c = snap.GetChar(p);
+            if (char.IsWhiteSpace(c) || c == '\r' || c == '\n')
+                break;
+            p = TextBoundary.NextCodePoint(snap, p);
+        }
+        return p;
+    }
+
     // ===== §4.2 コスト実測 =====
 
     /// <summary>
@@ -211,6 +382,131 @@ internal static class WordUnitBench
                 + "(片道走査どうしの比になっていない)。ascii / cjk は単一クラスの連続で"
                 + "両者が同じ距離を歩くため、そこでの約 2x が `ExpandToEnclosingUnit(Word)` の"
                 + "片道 2 回分を表す。"
+        );
+        Console.WriteLine();
+        Console.WriteLine($"(sink={sink})");
+    }
+
+    // ===== §4.3 候補比較 =====
+
+    /// <summary>候補 B の走査上限。1,000 文字で単語を打ち切る。</summary>
+    private const int Cap = 1000;
+
+    /// <summary>
+    /// 現状 / 候補 A / 候補 B の <c>ExpandToEnclosingUnit(Word)</c> 相当コストを同じ表に並べる。
+    /// </summary>
+    /// <remarks>
+    /// <b>3 者とも同じ形で測る</b>: <c>start = WordStart(pos)</c> → <c>end = WordEnd(start)</c>
+    /// (<c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の呼び順)。
+    /// <c>WordEnd</c> に <c>pos</c> をそのまま渡すと、<c>pos = CharLength</c> のとき
+    /// 候補 A / B とも先頭ガードで即 return し<b>何も測らない</b>ので注意
+    /// (実装計画 Task 2 Step 3 のコード片はこの誤りを含んでいた)。
+    /// </remarks>
+    private static void PrintCandidateCostTable()
+    {
+        Console.WriteLine();
+        Console.WriteLine($"## §4.3 候補比較(cap={Cap:N0}・空白ゼロの単一長大行)");
+        Console.WriteLine();
+        Console.WriteLine(
+            "測定は 3 者とも `start = WordStart(行末)` → `end = WordEnd(start)` の形"
+                + "(`WordEnd` に行末をそのまま渡すと候補 A / B は先頭ガードで即 return し何も測らない)。"
+        );
+        Console.WriteLine();
+        Console.WriteLine(
+            $"| kind | chars | 現状 合計 ms | 候補A(クラス規則) ms | 候補B(cap={Cap}) ms | 現状/候補A | 現状/候補B |"
+        );
+        Console.WriteLine("|---|---|---|---|---|---|---|");
+
+        long sink = 0;
+        var spanRows = new List<string>();
+
+        foreach (string kind in new[] { "ascii", "cjk", "jamix" })
+        {
+            foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
+            {
+                using var ctrl = new EditorControl();
+                var buf = TextBuffer.FromString(MakeSingleLine(len, kind));
+                ctrl.SetSource(buf);
+                var snap = buf.Current;
+                var host = (IUiaTextHost)ctrl;
+                int pos = snap.CharLength;
+
+                var swCond = Stopwatch.StartNew();
+
+                // ウォームアップ(JIT・計測外)。ここで得た start を end の起点に使う。
+                int curStart = host.WordStart(pos);
+                int aStart = DoubleClickWordStart(snap, pos);
+                int bStart = CappedWordStart(snap, pos, Cap);
+                int curEnd = host.WordEnd(curStart);
+                int aEnd = DoubleClickWordEnd(snap, aStart);
+                int bEnd = CappedWordEnd(snap, bStart, Cap);
+                sink += curStart + aStart + bStart + curEnd + aEnd + bEnd;
+
+                double curMs =
+                    BestOf3(() => sink += host.WordStart(pos))
+                    + BestOf3(() => sink += host.WordEnd(curStart));
+                double aMs =
+                    BestOf3(() => sink += DoubleClickWordStart(snap, pos))
+                    + BestOf3(() => sink += DoubleClickWordEnd(snap, aStart));
+                double bMs =
+                    BestOf3(() => sink += CappedWordStart(snap, pos, Cap))
+                    + BestOf3(() => sink += CappedWordEnd(snap, bStart, Cap));
+
+                swCond.Stop(); // Console 出力は計測外
+                double condSec = swCond.Elapsed.TotalSeconds;
+
+                // 候補 A / B の ms は F3。jamix の候補 A は 0.00x ms へ落ちるため F1 だと
+                // 「0.0」と表示されたうえで倍率だけ 6 桁になり、表の中で矛盾して見える
+                // (§4.2 の PrevWordStart 列と同じ理由)。
+                Console.WriteLine(
+                    $"| {kind} | {len:N0} | {curMs:F1} | {aMs:F3} | {bMs:F3} | "
+                        + $"{curMs / aMs:F1}x | {curMs / bMs:F0}x |"
+                );
+
+                // スパンの実態(コストではなく「SR が何を 1 単語として読むことになるか」)。
+                // 行末からの展開に加え、行の中央からの展開も採る = 候補 B の非対称性を見るため。
+                int mid = snap.CharLength / 2;
+                int bMidStart = CappedWordStart(snap, mid, Cap);
+                int bMidEnd = CappedWordEnd(snap, bMidStart, Cap);
+                spanRows.Add(
+                    $"| {kind} | {len:N0} | {curEnd - curStart:N0} | {aEnd - aStart:N0} | "
+                        + $"{bEnd - bStart:N0} | [{bMidStart:N0},{bMidEnd:N0}) = {bMidEnd - bMidStart:N0} | "
+                        + $"{(len + Cap - 1) / Cap:N0} |"
+                );
+
+                if (condSec > SkipThresholdSec)
+                {
+                    Console.WriteLine(
+                        $"（実経過 {condSec:F1}s > {SkipThresholdSec}s のため {kind} の以降の行長をスキップ）"
+                    );
+                    break;
+                }
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "注: `現状/候補B` は候補 B が cap で定数時間になるため倍率が桁違いに大きくなる。"
+                + "**候補 A は ascii / cjk(単一クラスの長大連続)では 1x 前後にしかならない** — "
+                + "これが「候補 A だけでは足りない」ことの根拠である。逆に jamix では"
+                + "クラス境界で数文字止まりになるため候補 A が効く。"
+        );
+
+        Console.WriteLine();
+        Console.WriteLine("### 候補 B がスパンをどう切り詰めるか");
+        Console.WriteLine();
+        Console.WriteLine(
+            "| kind | chars | 現状 span | 候補A span | 候補B span(行末から) | 候補B span(中央 pos から) | 候補B の分割数 |"
+        );
+        Console.WriteLine("|---|---|---|---|---|---|---|");
+        foreach (string row in spanRows)
+            Console.WriteLine(row);
+        Console.WriteLine();
+        Console.WriteLine(
+            $"注: 分割数 = ceil(chars / {Cap:N0}) = 行頭から順に読ませたときに SR が受け取る「単語」の個数。"
+                + "中央 pos の列は候補 B の副作用を示す = `WordStart(pos)` が `pos - cap` を返し "
+                + "`WordEnd` がそこから cap 歩進むため、スパンが **pos の手前で終わり caret 位置の文字を含まない**。"
+                + "現状実装は行全体を返すため必ず含んでいた。Task 4 の判断材料。"
         );
         Console.WriteLine();
         Console.WriteLine($"(sink={sink})");
