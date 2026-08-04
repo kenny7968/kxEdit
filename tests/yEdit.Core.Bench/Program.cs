@@ -160,7 +160,11 @@ if (charAccessMode)
         for (int i = 0; i < Samples; i++)
             positions[i] = rng.Next(lo, s.CharLength);
         for (int w = 0; w < 200; w++)
-            caSink += WordBoundary.PrevWordStart(s, positions[w % Samples]); // ウォームアップ
+            caSink += WordBoundary.PrevWordStart(
+                s,
+                positions[w % Samples],
+                WordBoundary.NoScanLimit
+            ); // ウォームアップ
 
         var ms = new double[Samples];
         for (int i = 0; i < Samples; i++)
@@ -169,7 +173,7 @@ if (charAccessMode)
             for (int r = 0; r < Repeats; r++)
             {
                 var sw = Stopwatch.StartNew();
-                caSink += WordBoundary.PrevWordStart(s, positions[i]);
+                caSink += WordBoundary.PrevWordStart(s, positions[i], WordBoundary.NoScanLimit);
                 sw.Stop();
                 best = Math.Min(best, sw.Elapsed.TotalMilliseconds);
             }
@@ -330,23 +334,31 @@ if (largeLineMode)
 
     // --- F-5 の実測: 空白・改行を含まない長大トークンでの単語ナビ ---
     // 既存 --characcess は MakeWordDoc(空白・改行あり)を使うため、区切りが無い場合の
-    // 最悪ケースを測っていない。WordBoundary.PrevWordStart は空白を探して 1 文字ずつ
-    // 走査するので、区切りが 1 つも無いと行頭まで全走査する。
-    // 同じ構造が UIA 側にもあり(UiaTextHostAdapter.WordBoundary_WordStart / _WordEnd)、
-    // TextRangeProviderV2.ExpandToEnclosingUnit(TextUnit.Word) は WordStart と WordEnd を
-    // 両方呼ぶため SR の単語単位読み 1 回あたりのコストは概ねこの 2 倍になる。
+    // 最悪ケースを測っていない。上限なし(NoScanLimit)の WordBoundary.PrevWordStart は
+    // 同一クラスの連続を 1 文字ずつ走査するので、ascii 一色だと行頭まで全走査する。
+    // 同じ構造は UIA の単語スパンにもある: TextRangeProviderV2.ExpandToEnclosingUnit(
+    // TextUnit.Word) が WordStart と WordEnd を両方呼ぶため、SR の単語単位読み 1 回あたりの
+    // コストは概ねこの 2 倍になる。
+    // 2026-08-04: 本番 3 経路(SR の読み上げ / Ctrl+←→ / ダブルクリック単語選択)は
+    // WordBoundary.DefaultMaxScan を渡すようになったので、ここで測っているのは
+    // 「上限を入れなかった場合」の反実仮想である(上限つきの実測と cap 掃引は
+    // yEdit.Editor.Smoke --wordunit 側。docs/plans/2026-08-04-uia-word-unit-fix.md Task 6)。
     Console.WriteLine();
     Console.WriteLine("F-5: 空白なし長大トークンの単語ナビ");
     Console.WriteLine("chars,prevWordStartMs");
     foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
     {
         var tokSnap = TextBuffer.FromString(MakeSingleLine(len, "ascii")).Current;
-        llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength); // ウォームアップ
+        llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength, WordBoundary.NoScanLimit); // ウォームアップ
         double tokBest = double.MaxValue; // 3 回の最小値(既存 --characcess の流儀)
         for (int r = 0; r < 3; r++)
         {
             var tokSw = Stopwatch.StartNew();
-            llSink += WordBoundary.PrevWordStart(tokSnap, tokSnap.CharLength);
+            llSink += WordBoundary.PrevWordStart(
+                tokSnap,
+                tokSnap.CharLength,
+                WordBoundary.NoScanLimit
+            );
             tokSw.Stop();
             tokBest = Math.Min(tokBest, tokSw.Elapsed.TotalMilliseconds);
         }
@@ -390,10 +402,18 @@ if (largeLineMode)
         );
     }
     for (int w = 0; w < 50; w++)
-        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - w); // ウォームアップ
+        f6Sink += WordBoundary.PrevWordStart(
+            typedSnap,
+            typedSnap.CharLength - 1 - w,
+            WordBoundary.NoScanLimit
+        ); // ウォームアップ
     var f6NavSw = Stopwatch.StartNew();
     for (int i = 0; i < 200; i++)
-        f6Sink += WordBoundary.PrevWordStart(typedSnap, typedSnap.CharLength - 1 - i * 10);
+        f6Sink += WordBoundary.PrevWordStart(
+            typedSnap,
+            typedSnap.CharLength - 1 - i * 10,
+            WordBoundary.NoScanLimit
+        );
     f6NavSw.Stop();
     Console.WriteLine($"  PrevWordStart × 200: {f6NavSw.Elapsed.TotalMilliseconds / 200:F4} ms/回");
 

@@ -1,4 +1,5 @@
 using System.Reflection;
+using yEdit.Core.Editing;
 
 namespace yEdit.Editor.Tests;
 
@@ -123,6 +124,49 @@ public class KeyboardNavigationTests
                 c.SetCaretCharOffset(11);
                 SendKey(c, Keys.Left | Keys.Control);
                 Assert.Equal(6, c.CaretCharOffset); // "world" の頭
+            }
+        });
+
+    /// <summary>
+    /// 2026-08-04 F-5(仕様変更): 空白ゼロの単一クラス長大行では、Ctrl+→ が行末まで走らず
+    /// <c>WordBoundary.DefaultMaxScan</c> 歩でキャレットが単語 run の途中に止まる。
+    /// </summary>
+    /// <remarks>
+    /// 修正前は 1 回の Ctrl+← / Ctrl+→ が UI スレッドを約 1.4 秒占有していた
+    /// (docs/plans/2026-08-03-uia-word-unit-design.md §2.4)。文字クラス規則(F-3 修正)は
+    /// 単一クラスの長大連続には効かないため上限が別途要る。上限に当たると単語の途中で
+    /// 止まるのは<b>意図的</b>。cap は SR の読み上げスパン(<c>UiaTextHostAdapter</c>)・
+    /// ダブルクリック単語選択(<c>InputRouter.HandleMouseDoubleClick</c>)と共有する。
+    /// </remarks>
+    [Fact]
+    public void CtrlRight_OnHugeSingleClassLine_StopsAtScanLimit() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 500_000));
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                SendKey(c, Keys.Right | Keys.Control);
+                Assert.Equal(WordBoundary.DefaultMaxScan, c.CaretCharOffset);
+            }
+        });
+
+    /// <summary>
+    /// <see cref="CtrlRight_OnHugeSingleClassLine_StopsAtScanLimit"/> の対称形(Ctrl+←)。
+    /// 窓は <c>[caret - maxScan, caret]</c>(<c>WordBoundary</c> の xmldoc の表)。
+    /// </summary>
+    [Fact]
+    public void CtrlLeft_OnHugeSingleClassLine_StopsAtScanLimit() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 500_000));
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(500_000);
+                SendKey(c, Keys.Left | Keys.Control);
+                Assert.Equal(500_000 - WordBoundary.DefaultMaxScan, c.CaretCharOffset);
             }
         });
 

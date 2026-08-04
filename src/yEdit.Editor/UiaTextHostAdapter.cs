@@ -487,13 +487,31 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return VisualSegments.FindContaining(segs, offsetInLine).Segment;
     }
 
+    // 2026-08-04: 単語系 4 経路は走査上限つき (WordBoundary.DefaultMaxScan)。空白ゼロの
+    // 単一クラス長大行 (ascii 500K) では上限なしの WordStart + WordEnd が 1 回の読み上げで
+    // 約 2.8 秒かかり、それを RPC スレッドで焼く=SR の発話が数秒返らない
+    // (docs/plans/2026-08-03-uia-word-unit-design.md §2.4)。文字クラス規則 (F-3 修正) は
+    // 単一クラスの長大連続には効かないため、上限が別途要る。上限に当たると SR は
+    // 単語 run の一部だけを読む = 意図的な仕様変更。
+    // cap は InputRouter の Ctrl+←→ / ダブルクリック単語選択と必ず同じ値を使うこと
+    // (分けると同じ位置で「見える選択」と「聞くスパン」が食い違い、F-3 の再導入になる)。
+    //
+    // Math.Clamp は NextChar / PrevChar 側と同じく削らないこと: WordBoundary の範囲外契約も
+    // 非対称で、WordStart は pos > CharLength で、WordEnd は pos < 0 で
+    // ArgumentOutOfRangeException になる(UIA クライアントは任意 offset を渡せる=
+    // RPC スレッドへ例外が漏れる)。網は UiaTextHostAdapterClampTests
+    // .WordMembers_OutOfRangeOffset_ClampInsteadOfThrowing(2026-08-04 レビュー Important-2)。
     int IUiaTextHost.WordStart(int offset)
     {
         var snap = _bufferSnapshot;
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return WordBoundary_WordStart(snap, o);
+        return yEdit.Core.Editing.WordBoundary.WordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
+        );
     }
 
     int IUiaTextHost.WordEnd(int offset)
@@ -502,7 +520,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return WordBoundary_WordEnd(snap, o);
+        return yEdit.Core.Editing.WordBoundary.WordEnd(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
+        );
     }
 
     int IUiaTextHost.NextWordStart(int offset)
@@ -511,7 +533,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return yEdit.Core.Editing.WordBoundary.NextWordStart(snap, o);
+        return yEdit.Core.Editing.WordBoundary.NextWordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
+        );
     }
 
     int IUiaTextHost.PrevWordStart(int offset)
@@ -520,39 +546,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (snap is null)
             return 0;
         int o = Math.Clamp(offset, 0, snap.CharLength);
-        return yEdit.Core.Editing.WordBoundary.PrevWordStart(snap, o);
-    }
-
-    // WordStart/WordEnd は Core WordBoundary に直接メンバがないため、
-    // 「offset を含む単語の左/右端(空白でない連続の左/右端)」を素朴実装する
-    // (計画書 §5-5: v1 の TextNavigation.WordStart と同じ流儀=空白区切りだけ)。
-    private static int WordBoundary_WordStart(TextSnapshot snap, int pos)
-    {
-        if (pos <= 0)
-            return 0;
-        int p = pos;
-        while (p > 0)
-        {
-            int prev = TextBoundary.PrevCodePoint(snap, p);
-            char pc = snap.GetChar(prev);
-            if (char.IsWhiteSpace(pc) || pc == '\r' || pc == '\n')
-                break;
-            p = prev;
-        }
-        return p;
-    }
-
-    private static int WordBoundary_WordEnd(TextSnapshot snap, int pos)
-    {
-        int p = pos;
-        while (p < snap.CharLength)
-        {
-            char c = snap.GetChar(p);
-            if (char.IsWhiteSpace(c) || c == '\r' || c == '\n')
-                break;
-            p = TextBoundary.NextCodePoint(snap, p);
-        }
-        return p;
+        return yEdit.Core.Editing.WordBoundary.PrevWordStart(
+            snap,
+            o,
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
+        );
     }
 
     System.Windows.Rect IUiaTextHost.BoundingRectangle

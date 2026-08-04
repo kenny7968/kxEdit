@@ -57,8 +57,18 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
                 break;
             case TextUnit.Word:
             case TextUnit.Format:
+                // 2026-08-04: WordEnd の起点は _start ではなく pos(キャレット位置)。
+                // 旧起点 (_start) だと、pos が空白 run の上にあるとき WordStart が run を
+                // 飛び越えて左の単語まで戻り、WordEnd(_start) がその単語末で止まるため、
+                // スパンがキャレットから cap 文字ぶん離れる。pos 起点なら走査の窓が
+                // [pos-(cap-1), pos+cap] とキャレットを中心に据わり、これは構造的に起きない。
+                // 典拠 2026-08-03-uia-word-unit-design.md §2.5 の候補 B 欠陥 1 /
+                // 2026-08-04-uia-word-unit-fix.md Task 4 §3(導出はそちら)。
+                // 「キャレット中心」が指すのは<走査の窓>であってスパンの包含ではない
+                // = WordBoundary クラスの <remarks>「窓についてよくある誤読」(2) が正本。
+                // 網は UiaWordUnitExpandTests.ExpandToEnclosingUnit_Word_NeverProducesReversedRange。
                 _start = host.WordStart(pos);
-                _end = host.WordEnd(_start);
+                _end = host.WordEnd(pos);
                 if (_end == _start)
                     _end = host.NextChar(_start);
                 break;
@@ -72,6 +82,16 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
                 _end = len;
                 break;
         }
+        // 2026-08-04 最終レビュー 脆弱性パス V-2: 反転レンジを UIA へ出さないための最終ガード。
+        // 単一スナップショット内では host 側の不変条件(WordStart(pos) <= pos <= WordEnd(pos) 等)
+        // が成り立つので no-op。効くのは跨スナップショットの競合で、host.WordStart(pos) と
+        // host.WordEnd(pos) は別々の RPC 呼び出しなので、その間に UI スレッドが文書を縮めると
+        // _end < _start になり得る(実測 _start=773, _end=2)。この形は旧実装でも同じで
+        // 本ブランチ由来ではないが、NeverProducesReversedRange が「反転しない」を不変条件として
+        // 主張している以上コードを主張へ合わせる。兄弟の MoveEndpointByUnit /
+        // MoveEndpointByRange は元から同じ 1 行を持っており、ここだけが持っていなかった。
+        if (_end < _start)
+            _end = _start;
     }
 
     public ITextRangeProvider FindAttribute(int attribute, object value, bool backward) => null!;

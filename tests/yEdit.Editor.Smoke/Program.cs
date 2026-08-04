@@ -23,6 +23,17 @@ if (args.Length > 0 && args[0] == "--largeline")
     return LargeLineBench.Run();
 }
 
+// 2026-08-03 UIA 単語単位調査 Task 1 で新設し、2026-08-04 の修正 Task 6 で作り直した
+// --wordunit。調査時代は「UIA の単語スパン(空白のみ区切り)が Ctrl+←→ / ダブルクリック選択
+// (文字クラス規則)とずれる」ことの採取が目的だったが、その素朴実装は修正 Task 3 で消えた。
+// 現在は (1) SR の読み上げスパンとダブルクリック単語選択が一致することの確認、
+// (2) 空白ゼロ長大行での「上限なし」対「本番 cap」のコスト差、(3) cap 掃引、
+// (4) 現実テキストのクラス run 長 を採る(WordUnitBench のクラス doc が正本)。GDI は通らない。
+if (args.Length > 0 && args[0] == "--wordunit")
+{
+    return WordUnitBench.Run();
+}
+
 // P4 Task 14: --ime サブコマンド。ATOK 実機検証(docs/plans/2026-07-06-p4-ime-checklist.md)
 // 用に、未確定色/下線を目視しやすい長文サンプルをメモリ上で生成して開いた状態から起動する。
 if (args.Length > 0 && args[0] == "--ime")

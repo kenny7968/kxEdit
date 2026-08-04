@@ -54,10 +54,35 @@ public interface IUiaTextHost
     /// </summary>
     int LineEnd(int offset);
 
-    /// <summary>offset を含む単語の左端(Core WordBoundary 委譲)。</summary>
+    /// <summary>
+    /// offset を含む単語の左端(Core WordBoundary 委譲)。単語は<b>文字クラス規則</b>
+    /// (Latin / Digit / Hiragana / Katakana / Han / Other 等)で区切られる=空白区切りではない。
+    /// <b>非空白 run については</b>「同一クラスの連続 = 1 単語」。
+    /// </summary>
+    /// <remarks>
+    /// Whitespace / LineBreak クラスは<b>単語を成さない</b>。空白 run の上での挙動
+    /// (返り値が offset を含まないこと・走査上限の窓の単位と意味)は
+    /// <c>yEdit.Core.Editing.WordBoundary</c> クラスの <c>&lt;remarks&gt;</c>
+    /// 「窓についてよくある誤読」が正本。ここでは UIA 層に固有の帰結だけを書く:
+    /// 同じ offset を <see cref="WordEnd"/> へ渡すと offset がそのまま返るため、
+    /// 両者を組むと<b>空スパンになりうる</b>(例: <c>"    hello"</c> の offset=0 は 0 / 0)。
+    /// 空スパンは <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の
+    /// <see cref="NextChar"/> フォールバックが 1 文字へ膨らませる。
+    ///
+    /// <b>同じ offset を渡した場合に限り</b>、<see cref="WordEnd"/> と対でダブルクリック単語選択と
+    /// 同じスパンになる(目に見える選択と SR が読むスパンが一致する)。2026-08-04 Task 4 で
+    /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> が両者へ同じ offset を渡すようになったので、
+    /// 空白の上でもダブルクリックと一致する(<c>"ab    cd"</c> の offset=4 は両方 <c>[0,4)</c>。
+    /// Task 4 以前は UIA だけ <c>[0,2)</c> だった)。
+    /// </remarks>
     int WordStart(int offset);
 
-    /// <summary>offset を含む単語の右端(Core WordBoundary 委譲)。</summary>
+    /// <summary>
+    /// offset を含む単語の右端(Core WordBoundary 委譲・<see cref="WordStart"/> と同じ文字クラス規則)。
+    /// <b>末尾の空白は含まない</b>(単語の直後に続く空白 run は返り値の外)。
+    /// offset が空白 / 改行の上にあるときは offset をそのまま返す
+    /// (<c>WordEnd(offset) &gt;= offset</c> は不変条件=反転レンジを UIA へ出さないため)。
+    /// </summary>
     int WordEnd(int offset);
 
     /// <summary>Ctrl+→ 相当の「次の単語の先頭」。EOF なら TextLength。</summary>

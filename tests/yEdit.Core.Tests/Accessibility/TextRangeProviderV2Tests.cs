@@ -146,6 +146,48 @@ public class TextRangeProviderV2Tests
         Assert.Equal("hello", r.GetText(int.MaxValue));
     }
 
+    /// <summary>
+    /// 2026-08-04 Task 4: <c>ExpandToEnclosingUnit(Word)</c> が host に何を尋ね、
+    /// それを<b>どう合成するか</b>(<c>WordStart</c> + <c>WordEnd</c>、縮退したら
+    /// <c>NextChar</c> フォールバック)を固定する。
+    /// </summary>
+    /// <remarks>
+    /// <b>名前が「起点がキャレットに固定されている」と主張しないのは意図的</b>
+    /// (2026-08-04 最終レビュー Minor-2)。下の stub host では anchored-at-caret と
+    /// anchored-at-start を<b>原理的に区別できない</b>ので、名乗れるのは合成の形までである。
+    ///
+    /// <b>本テストは起点変更の差を検出しない</b>(実測で確認済み=変更前後とも全 3 ケース緑)。
+    /// 上の <c>InMemoryHost</c> は空白区切りの素朴実装で、原理的に判別できないため:
+    /// <c>WordStart(pos)</c> が <c>_start &lt; pos</c> を返すのは <c>[_start, pos)</c> が
+    /// <b>すべて非空白</b>のときに限られるので、<c>WordEnd(_start)</c> は必ずその連続を
+    /// 走り抜けて <c>WordEnd(pos)</c> と同じ位置に着く。<c>_start == pos</c> なら自明に同じ。
+    /// よって任意の text / pos で両者は一致する。
+    ///
+    /// 判別できる網は Editor 層の end-to-end 側
+    /// (<c>UiaWordUnitExpandTests</c>=本物の Core 規則 × 本物のホスト)に置いてある。
+    /// ここは「Provider が host の <c>WordStart</c> / <c>WordEnd</c> / <c>NextChar</c> を
+    /// どう組むか」の形だけを押さえる役割に留まる。
+    ///
+    /// <c>"hello    world"</c> pos=7 が <c>" "</c> になるのは stub の規則ゆえ:
+    /// pos の左隣も空白なので <c>WordStart(7) == 7</c>、<c>WordEnd(7) == 7</c> で縮退し、
+    /// <c>NextChar</c> フォールバックが 1 文字ぶんの空白を返す。
+    /// </remarks>
+    [Theory]
+    [InlineData("hello world", 3, "hello")]
+    [InlineData("hello world", 8, "world")]
+    [InlineData("hello    world", 7, " ")] // 空白 run の内側 = 縮退 → NextChar フォールバック
+    public void ExpandToEnclosingUnit_Word_ComposesWordStartWordEndWithNextCharFallback(
+        string text,
+        int pos,
+        string expected
+    )
+    {
+        var p = MakeProvider(text);
+        var r = new TextRangeProviderV2(p, pos, pos);
+        r.ExpandToEnclosingUnit(TextUnit.Word);
+        Assert.Equal(expected, r.GetText(int.MaxValue));
+    }
+
     [Fact]
     public void ExpandToEnclosingUnit_Line_ExcludesLineBreak()
     {
