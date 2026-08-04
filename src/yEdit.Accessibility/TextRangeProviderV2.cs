@@ -58,13 +58,22 @@ internal sealed class TextRangeProviderV2 : ITextRangeProvider
             case TextUnit.Word:
             case TextUnit.Format:
                 // 2026-08-04: WordEnd の起点は _start ではなく pos。
-                // 走査上限が入ると WordStart(pos) は最大 cap 歩しか戻らないため、
-                // _end = WordEnd(_start) だと _start + cap = pos で終わり、スパンが
-                // キャレット位置を含まなくなる(2026-08-03-uia-word-unit-design.md §2.5 の
-                // 候補 B 欠陥 1)。pos 起点なら窓が [pos-cap, pos+cap] とキャレット中心になり、
-                // 欠陥 1 は構造的に起きない。
-                // 反転レンジを UIA へ出さないことは host 側の
-                // WordStart(pos) <= pos <= WordEnd(pos) が担保する。
+                // 走査上限が入ると WordStart(pos) の窓は [pos-(cap-1), pos](左だけ 1 狭い)
+                // なので、_end = WordEnd(_start) だと最遠でも _start + cap = pos + 1 で終わる。
+                // 欠陥が牙をむくのは pos が空白 run の上にあるとき:WordStart が run を
+                // 飛び越えて左の単語まで戻り、WordEnd(_start) はその単語末で止まるため、
+                // スパンがキャレットから遠く離れた数文字になる
+                // (実測 cap=256・'a'x2000 + ' 'x2000 + 'b'x2000 の pos=3000 で
+                //  旧起点 [2745, 2746) = キャレットの 255 文字左に 1 文字だけ。
+                //  単一クラス run では [2245, 2501) とキャレット文字を含むので害が見えない)。
+                // 典拠 2026-08-03-uia-word-unit-design.md §2.5 の候補 B 欠陥 1。
+                // pos 起点なら窓が [pos-(cap-1), pos+cap] とキャレット中心になり、欠陥 1 は
+                // 構造的に起きない。ただし「キャレット中心」なのは<走査の窓>であって
+                // スパンの包含ではない: 空白 run の上では WordEnd(pos) == pos なので
+                // スパン [_start, pos) はキャレット位置の文字を含まない。担保されるのは
+                // _start <= pos <= _end まで(反転レンジを UIA へ出さないことも含む)で、
+                // その根拠は host 側の WordStart(pos) <= pos <= WordEnd(pos)。
+                // 網は UiaWordUnitExpandTests.ExpandToEnclosingUnit_Word_NeverProducesReversedRange。
                 _start = host.WordStart(pos);
                 _end = host.WordEnd(pos);
                 if (_end == _start)

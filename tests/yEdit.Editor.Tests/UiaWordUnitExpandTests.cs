@@ -37,6 +37,16 @@ public class UiaWordUnitExpandTests
     // 行頭インデント。WordStart(0) == WordEnd(0) == 0 で縮退し、NextChar フォールバックが
     // 空白 1 文字を返す経路。pos == _start なので起点変更では動かない。
     [InlineData("    hello", 0, " ")]
+    // ---- 以下 3 行は Task 4 仕様レビュー Important-2 で追加(変化する族を 1 行ずつ代表させる)。
+    // 行頭インデントの run 2 文字目以降。左に単語が無いので _start は 0 のまま伸びる。
+    // host レベルの WordStart/WordEnd を見る EditorControlUiaHostTests の
+    // ("    hello", 2) → [0,2) と対になる(あちらは offset・こちらは文字列)。
+    [InlineData("    hello", 2, "  ")]
+    // EOF(末尾が空白 run)。Task 4 前は "ab" で末尾空白が落ちていた。
+    [InlineData("ab   ", 5, "ab   ")]
+    // ★ 改行を含むスパン = Task 4 で生じた新種。Task 4 前のスパンは改行を跨げなかった。
+    // ダブルクリック単語選択とは一致するので設計方針とは整合するが、SR 可視の挙動変更である。
+    [InlineData("a\r\nb  \n  c", 7, "b  \n")]
     public void ExpandToEnclosingUnit_Word_ReturnsCharClassSpan(
         string text,
         int pos,
@@ -59,16 +69,25 @@ public class UiaWordUnitExpandTests
     }
 
     /// <summary>
-    /// スパンが反転しない(<c>_end &gt;= _start</c>)ことを、Task 5 で cap が入る前の
-    /// 本物のホストで押さえる。反転レンジは UIA 側で未定義動作になるため
-    /// <c>GetText</c> が空文字列で潰れて見えない=長さで直接見る。
+    /// 全 pos で <c>_start &lt;= pos &lt;= _end</c>(=窓がキャレットに固定されている)ことを、
+    /// Task 5 で cap が入る前の本物のホストで押さえる。反転レンジは UIA 側で未定義動作になるが
+    /// <c>GetText</c> では空文字列に潰れて見えないため、オフセットを直接見る。
     /// </summary>
     /// <remarks>
-    /// 起点を <c>pos</c> にした以上、不変条件の担保は host 側の
+    /// <b>「キャレット中心」なのは走査の窓であって、スパンの包含ではない。</b>
+    /// pos が空白 run の上にあると <c>WordStart</c> は左の単語の頭へ戻り、
+    /// <c>WordEnd(pos) == pos</c> なのでスパンは <c>[_start, pos)</c> =
+    /// <b>キャレット位置の文字を含まない</b>(<c>"ab    cd"</c> pos=4 の <c>"ab  "</c> が実例)。
+    /// 担保されるのは <c>_start &lt;= pos &lt;= _end</c> までである。ゆえに下の assert は
+    /// <c>pos &lt;= end</c> であって <c>pos &lt; end</c> ではない(<c>&lt;</c> にすると空白 run で落ちる)。
+    ///
+    /// 起点を <c>pos</c> にした以上、この不変条件の担保は host 側の
     /// <c>WordStart(pos) &lt;= pos &lt;= WordEnd(pos)</c> に移った
     /// (<c>WordBoundary.WordEnd</c> の xmldoc が根拠。Core 側は
     /// <c>WordEnd_OnWhitespaceRun_NeverReturnsBeforePos</c> が固定している)。
     /// ここでは Provider を通した形で、空白 run / 行頭 / EOF / 改行を含む全 pos を総当りする。
+    /// Task 5 で cap を入れると窓が <c>[pos-(cap-1), pos+cap]</c> へ狭まるが、
+    /// 本テストはその後も同じ形で成立していなければならない(= リスク R2 の網)。
     /// </remarks>
     [Theory]
     [InlineData("ab    cd")]
@@ -104,6 +123,10 @@ public class UiaWordUnitExpandTests
                     TextPatternRangeEndpoint.Start
                 );
                 Assert.True(end >= start, $"reversed range at pos={pos}: [{start}, {end})");
+                Assert.True(
+                    start <= pos && pos <= end,
+                    $"window not anchored at caret pos={pos}: [{start}, {end})"
+                );
             }
         });
     }
