@@ -182,13 +182,15 @@ namespace yEdit.Core.Search;
 /// <list type="bullet">
 ///   <item>照合条件は有効(<see cref="TextSearcher.IsValid"/>=true)であることが保証される。
 ///     無効時の短絡は <see cref="SnapshotSearcher"/> 側が持つため、実装で再度ガードしない。</item>
-///   <item>位置引数は呼び出し前に <see cref="SnapshotSearcher"/> が
-///     snap の範囲へクランプ済み。実装で再クランプしても無害だが必須ではない。</item>
 ///   <item>オフセットは全て UTF-16 コード単位。</item>
 /// </list>
 /// </remarks>
 internal interface ISnapshotSearchStrategy
 {
+    // 注: ここに書く契約は「Task 5 適用後の最終形(=弱い保証)」で書くこと。
+    // 当初案にあった「位置引数はクランプ済み」という bullet は G-2 の発覚により削除した
+    // (Task 5 で FindPrev だけクランプが外れるため、強い保証で書くと嘘になる)。
+    // 引数ごとの保証の強さは Task 2 レビュー I-1 の表を参照。
     /// <summary>snap 全体のヒット件数。</summary>
     int Count(TextSnapshot snap);
 
@@ -695,6 +697,32 @@ public 6 メソッドは次の形に揃える(`IsValid` の短絡と位置引数
 **既存の意味論ベースの境界テストは残すこと。** 直接観測へ置き換えるのではなく二重に張る
 (型が正しくても委譲先を書き間違えれば、意味論テストだけが捕まえる)。
 
+**さらに: 閾値超経路の `FindPrev(snap, CharLength + 1)` テストを足すこと(Task 2 レビュー由来)**
+
+Task 1 で足した `FindPrev_BeforePastEnd_is_not_clamped_below_threshold` は `Make(...)` =
+**閾値以下経路専用**で、閾値超経路には `before > CharLength` を叩くテストが 1 本も無い。
+
+Task 2 レビューアの実測: `LiteralWindowSearchStrategy.FindPrev` 冒頭の
+`before = Math.Min(before, snap.CharLength);` を**行ごと削除しても現在は全緑**である
+(ファサード側のクランプがまだ残っているため)。**Task 5 でファサード側を外した瞬間に、
+この行は load-bearing になるのに無防備**になる。
+
+`MakeLarge` を使った以下を追加してから、ファサードのクランプを外すこと:
+
+```csharp
+    [Fact]
+    public void FindPrev_BeforePastEnd_is_clamped_above_threshold()
+    {
+        // 閾値超経路は before を CharLength でクランプする(閾値以下経路との非対称は意図的)。
+        // Task 5 でファサードのクランプを外した後、この網が戦略側のクランプを守る。
+        var snap = Snap("ab XY ab");
+        var s = MakeLarge("ab", matchCase: true, threshold: 4, window: 6);
+        Assert.Equal(s.FindPrev(snap, snap.CharLength), s.FindPrev(snap, snap.CharLength + 100));
+    }
+```
+
+期待値は実挙動から導出し、根拠を説明できること。
+
 **Step 4: ビルドとテスト**
 
 ```powershell
@@ -1039,7 +1067,20 @@ description に必ず含めること:
 - レビュー経緯(2 パス + 指摘の 3 択処理)
 - 申し送り S-1 / S-2 / S-3(設計 §8)
 - 精密化 1(Dismissed へ差し替えた理由)と精密化 2(境界テストが無かった事実)
+- **計画からの逸脱**(CLAUDE.md §2 は文書化を必須としている)— 下記「実施記録」を参照
 - 後続テーマ C → B → E(設計 §11)
+
+---
+
+## 実施記録(計画からの逸脱)
+
+CLAUDE.md §2「意図的な挙動変更・計画からの逸脱は、設計書または PR description に必ず文書化する」に従い、
+実装中に生じた計画との差をここへ追記していく。**PR description へ転記すること。**
+
+| # | Task | 逸脱 | 理由 |
+|---|---|---|---|
+| D-1 | 2 | `SnapshotSearcher._windowSize` フィールドを削除し、ctor 引数を直接戦略へ渡す形にした(計画 Task 2 Step 3 はフィールド保持を指示していた) | フィールドにすると ctor でしか読まれなくなり、SonarAnalyzer **S1450**(`Remove the field and declare it as a local variable`)が `-warnaserror` でビルドを落とす。挙動は同一(`ArgumentOutOfRangeException.ThrowIfNegativeOrZero` の実行順も従来どおり戦略構築より前)。テスト側に reflection 参照が無いことは grep 確認済み |
+| D-2 | 2 | 計画の `ISnapshotSearchStrategy` 案にあった「位置引数は呼び出し前に `SnapshotSearcher` が snap の範囲へクランプ済み」という契約 bullet を**採用しなかった** | **この記述は Task 5 で偽になる。** G-2(`FindPrev` のクランプはファサードへ集約できない)の発覚後、計画の Task 2/3/5 は修正したが、インターフェース案の bullet を直し忘れていた=**計画側のバグ**。実装者が正しく落とした。代わりに引数ごとの保証を表で書く(Task 2 レビュー I-1・弱い保証で書くことで Task 5 後も書き直し不要になる) |
 
 ---
 

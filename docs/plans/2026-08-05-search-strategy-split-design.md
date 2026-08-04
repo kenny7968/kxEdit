@@ -281,6 +281,12 @@ G-2 の仕様により「次を検索」の後にダイアログは**自らを H
 | S-2 | 閾値 32M chars を境に**意味論の異なる 2 エンジンが無言で切り替わる**構造そのもの(改行跨ぎ不可 / アンカーの行束縛 / WholeWord が ASCII 判定) | 是正は挙動変更を伴い、別テーマの企画になる |
 | S-3 | `GrepController.cs:97` の `new TextSearcher(opts).IsValid` — 検証のためだけに生成して捨てている | 本 PR のスコープ(grep 非対象)の外 |
 
+> **追記(2026-08-05・Task 2 fixup 実施時)**: 実装中に発見した申し送りを 1 件足す。
+>
+> | ID | 内容 | 理由 |
+> |---|---|---|
+> | S-4 | **リポジトリ全体の XML doc 腐り**。本リポジトリは `GenerateDocumentationFile` が無効なため **cref 切れが機械検出されない**。`-p:GenerateDocumentationFile=true -p:TreatWarningsAsErrors=false` の一時ビルドで棚卸ししたところ、`SnapshotSearcher.cs` のクラス doc に `ThresholdChars` / `WindowSize`(実体は `DefaultThresholdChars` / `DefaultWindowSize`)、`TextFileService.cs` に cref 3 件、`SafeLinkExtension.cs:125-129` に **XML そのものが壊れた CS1570 が 6 件**。 | 本 PR は `SnapshotSearcher.cs` の 2 件のみ Task 5 のクラス doc 書き直しで回収し、残りは別テーマ。**手法(`GenerateDocumentationFile=true` の一時ビルドで doc 腐りを棚卸しする)自体が再利用価値を持つ** |
+
 ## 9. L5 実機 SR 検証
 
 **必要**。`SearchController` は `IAnnouncer` 経由で SR 発声するため SR 経路に触れる
