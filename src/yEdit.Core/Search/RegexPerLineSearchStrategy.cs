@@ -74,9 +74,12 @@ internal sealed class RegexPerLineSearchStrategy : ISnapshotSearchStrategy
         // 文書長超の before をここでクランプする(理由と反例は ISnapshotSearchStrategy の契約表)。
         // 現在はファサード側(SnapshotSearcher.FindPrev)にも同じクランプがあり二重だが、
         // Task 5 でファサード側が外れるとこの 1 行が唯一の防御になる。「重複だから」で消さないこと。
+        // 以降 before は (0, CharLength] に収まるが、両端の出所は分かれている:
+        //   下限 (before > 0) = ファサード SnapshotSearcher.FindPrev の `if (before <= 0) return null;`
+        //     — この行では保証しない。
+        //   上限 (before <= CharLength) = 直下のクランプ。Task 5 でファサード側が外れても残る。
         before = Math.Min(before, snap.CharLength);
 
-        // before は既に (0, CharLength] にクランプ済み
         int startLine = snap.GetLineIndexOfChar(before - 1);
         {
             int ls = snap.GetLineStart(startLine);
@@ -126,6 +129,13 @@ internal sealed class RegexPerLineSearchStrategy : ISnapshotSearchStrategy
                     ordinal = total;
                     found = true;
                 }
+                // ゼロ幅ヒットの前進ガード。regex 行単位経路では `a*` 等が実際に Length=0 の
+                // ヒットを返すため Math.Max(1, ...) は生きたガードであり、m.Length へ落とすと
+                // off が進まず無限ループする。網 =
+                // Locate_RegexZeroWidthHits_terminates_and_counts_above_threshold
+                // ([Fact(Timeout = 10000)] 付き。実測でこの変異は 10.3 秒でタイムアウト FAIL する)。
+                // リテラル戦略の同型の式は plen >= 1 が保証されるため実質デッドで、非対称である。
+                // 「3 経路が同じ形だから」で束ねないこと。
                 off = m.Start + Math.Max(1, m.Length);
                 if (off > lineText.Length)
                     break;
