@@ -334,11 +334,15 @@ if (largeLineMode)
 
     // --- F-5 の実測: 空白・改行を含まない長大トークンでの単語ナビ ---
     // 既存 --characcess は MakeWordDoc(空白・改行あり)を使うため、区切りが無い場合の
-    // 最悪ケースを測っていない。WordBoundary.PrevWordStart は空白を探して 1 文字ずつ
-    // 走査するので、区切りが 1 つも無いと行頭まで全走査する。
-    // 同じ構造が UIA 側にもあり(UiaTextHostAdapter.WordBoundary_WordStart / _WordEnd)、
-    // TextRangeProviderV2.ExpandToEnclosingUnit(TextUnit.Word) は WordStart と WordEnd を
-    // 両方呼ぶため SR の単語単位読み 1 回あたりのコストは概ねこの 2 倍になる。
+    // 最悪ケースを測っていない。上限なし(NoScanLimit)の WordBoundary.PrevWordStart は
+    // 同一クラスの連続を 1 文字ずつ走査するので、ascii 一色だと行頭まで全走査する。
+    // 同じ構造は UIA の単語スパンにもある: TextRangeProviderV2.ExpandToEnclosingUnit(
+    // TextUnit.Word) が WordStart と WordEnd を両方呼ぶため、SR の単語単位読み 1 回あたりの
+    // コストは概ねこの 2 倍になる。
+    // 2026-08-04: 本番 3 経路(SR の読み上げ / Ctrl+←→ / ダブルクリック単語選択)は
+    // WordBoundary.DefaultMaxScan を渡すようになったので、ここで測っているのは
+    // 「上限を入れなかった場合」の反実仮想である(上限つきの実測と cap 掃引は
+    // yEdit.Editor.Smoke --wordunit 側。docs/plans/2026-08-04-uia-word-unit-fix.md Task 6)。
     Console.WriteLine();
     Console.WriteLine("F-5: 空白なし長大トークンの単語ナビ");
     Console.WriteLine("chars,prevWordStartMs");
