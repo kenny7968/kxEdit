@@ -241,6 +241,25 @@ internal interface ISnapshotSearchStrategy
 4. `ReplaceInRange` のシグネチャ差の吸収 — 移動元は `(snap, start, end, replacement)` で
    **end を受けていた**。インターフェースは `(snap, start, length, replacement)` なので、
    メソッド冒頭で `int end = start + length;` を置き、以降の本体は無変更にする
+5. **`FindPrev` の冒頭に `before = Math.Min(before, snap.CharLength);` を置く**
+   (下記の注を読むこと)
+
+> **`FindPrev` のクランプについて(Task 1 レビュー G-2)**
+>
+> 現行のファサードは `Math.Min(before, snap.CharLength)` を**閾値超経路にしか掛けていない**
+> (`SnapshotSearcher.cs:106`)。閾値以下経路は生の `before` を `TextSearcher` へ渡している(`:103`)。
+> この差は実挙動に出る:
+>
+> ```
+> パターン b*(useRegex) / 文書 "ab"(CharLength=2)/ 閾値以下経路
+>   FindPrev(snap, 3) → MatchSpan { Start = 2, Length = 0 }
+>   FindPrev(snap, 2) → MatchSpan { Start = 1, Length = 1 }
+> ```
+>
+> したがって **`FindPrev` のクランプはファサードへ集約できない**(集約すると挙動変更になる)。
+> クランプを必要とする 2 つの戦略が**自分で行う**形にし、材質化戦略は生の値を使う。
+> この段階ではファサード側もまだクランプしているので二重になるが、`Math.Min` は冪等なので無害。
+> Task 5 でファサード側を外す。
 
 ```csharp
 using System.Text;
@@ -317,6 +336,8 @@ Task 2 と同じ手順を regex 側に行う。
 `-warnaserror` 下で警告になる)。
 
 `ReplaceInRange` は Task 2 と同じく冒頭で `int end = start + length;` を置いて本体を無変更にする。
+`FindPrev` も Task 2 と同じく冒頭へ `before = Math.Min(before, snap.CharLength);` を置く
+(理由は Task 2 の注を参照 — このクランプはファサードへ集約できない)。
 
 ```csharp
 using System.Text;
@@ -590,12 +611,11 @@ public 6 メソッドは次の形に揃える(`IsValid` の短絡と位置引数
         return StrategyFor(snap).FindNext(snap, from);
     }
 
-    public MatchSpan? FindPrev(TextSnapshot snap, int before)
-    {
-        if (!IsValid || before <= 0)
-            return null;
-        return StrategyFor(snap).FindPrev(snap, Math.Min(before, snap.CharLength));
-    }
+    // Math.Min(before, snap.CharLength) を<b>ここへ集約してはいけない</b>(Task 1 レビュー G-2)。
+    // 閾値以下経路は生の before を TextSearcher へ渡すのが現行挙動で、文書長を超える before と
+    // ゼロ幅ヒットの組み合わせで結果が変わる。クランプは必要とする 2 戦略が自分で行う。
+    public MatchSpan? FindPrev(TextSnapshot snap, int before) =>
+        IsValid && before > 0 ? StrategyFor(snap).FindPrev(snap, before) : null;
 
     public (int Ordinal, int Total)? Locate(TextSnapshot snap, MatchSpan span) =>
         IsValid ? StrategyFor(snap).Locate(snap, span) : null;
@@ -647,7 +667,35 @@ public 6 メソッドは次の形に揃える(`IsValid` の短絡と位置引数
 /// </summary>
 ```
 
-**Step 3: ビルドとテスト**
+**Step 3: `StrategyFor` を `internal` にして戦略選択を直接固定する(Task 1 レビュー S-2)**
+
+`src/yEdit.Core/yEdit.Core.csproj:12` に `InternalsVisibleTo("yEdit.Core.Tests")` が既にあるので、
+`StrategyFor` を `internal` にすればテストから戦略型を直接 assert できる。
+
+これまでの境界テストは「改行跨ぎ regex がヒットするか」という**意味論的帰結**で経路を観測していた。
+これは間接観測で、将来 `RegexPerLineSearchStrategy` が改行跨ぎを拾えるようになると
+**境界が反転していても緑のまま黙って無力化する**。型を直接見れば意味論に依存しない。
+
+`tests/yEdit.Core.Tests/Search/SnapshotSearcherTests.cs` へ追加:
+
+```csharp
+    [Theory]
+    [InlineData(5, false, typeof(MaterializedSearchStrategy))] // 境界ちょうど = 閾値以下
+    [InlineData(4, false, typeof(LiteralWindowSearchStrategy))]
+    [InlineData(4, true, typeof(RegexPerLineSearchStrategy))]
+    [InlineData(5, true, typeof(MaterializedSearchStrategy))] // 境界ちょうどは regex でも材質化
+    public void StrategyFor_selects_expected_strategy(int threshold, bool useRegex, Type expected)
+    {
+        var snap = Snap("ab\ncd"); // CharLength == 5
+        var s = MakeLarge("b", useRegex: useRegex, matchCase: true, threshold: threshold, window: 6);
+        Assert.IsType(expected, s.StrategyFor(snap));
+    }
+```
+
+**既存の意味論ベースの境界テストは残すこと。** 直接観測へ置き換えるのではなく二重に張る
+(型が正しくても委譲先を書き間違えれば、意味論テストだけが捕まえる)。
+
+**Step 4: ビルドとテスト**
 
 ```powershell
 dotnet build yEdit.sln -c Release -warnaserror
@@ -656,10 +704,10 @@ dotnet test tests/yEdit.Core.Tests -c Release --no-build --filter "FullyQualifie
 
 Expected: **PASS**。
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```powershell
-git add src/yEdit.Core/Search/SnapshotSearcher.cs
+git add src/yEdit.Core/Search/SnapshotSearcher.cs tests/yEdit.Core.Tests/Search/SnapshotSearcherTests.cs
 git commit -m "refactor(core): SnapshotSearcher を戦略セレクタ + ファサードへ畳む"
 ```
 
@@ -943,9 +991,16 @@ CLAUDE.md §3 工程 5 / §4。**パスごとに独立した別エージェン�
 
 | # | 変異 | 期待して赤になるテスト |
 |---|---|---|
-| 1 | `StrategyFor` の `<=` → `<` | `AtExactThreshold_uses_below_path_not_above` |
-| 2 | `TextOf` の `ReferenceEquals` を常に true に | `DifferentSnapshot_rematerializes` / `EditedBuffer_yields_new_snapshot_and_fresh_results` |
-| 3 | `StrategyFor` の `_opts.UseRegex` を反転 | `ReplacementAt_RegexAboveThreshold_expands_groups_per_line` |
+| 1 | `StrategyFor` の `<=` → `<` | `AtExactThreshold_uses_below_path_not_above` + `StrategyFor_selects_expected_strategy` |
+| 2 | `StrategyFor` の `<=` → `<=` の右辺 +1 | `OneCharAboveThreshold_uses_above_path` + `StrategyFor_selects_expected_strategy` |
+| 3 | `TextOf` の `ReferenceEquals` を常に true に | `DifferentSnapshot_rematerializes` / `EditedBuffer_yields_new_snapshot_and_fresh_results` |
+| 4 | `StrategyFor` の `_opts.UseRegex` を反転 | `ReplacementAt_RegexAboveThreshold_expands_groups_per_line` + `StrategyFor_selects_expected_strategy` |
+| 5 | `LiteralWindowSearchStrategy.FindPrev` 冒頭の `Math.Min` を削除 | 閾値超の `FindPrev` 系(削除して**緑のままなら網が無い**ので、その場で網を足すこと) |
+
+**G-2 の確認を別途行うこと**: `SnapshotSearcher.FindPrev` が `before` を**クランプせずに**戦略へ
+渡していること(クランプはファサードではなく `LiteralWindow` / `RegexPerLine` の各戦略が持つ)。
+ここをファサードへ集約すると、文書長を超える `before` とゼロ幅ヒットの組み合わせで
+閾値以下経路の挙動が変わる(Task 1 レビュー G-2)。`FindPrev_BeyondLength_...` のテストが網。
 
 各変異のあと **必ず `dotnet build` してから** テストを流すこと(`--no-build` で変異前バイナリを叩く事故を避ける)。
 
@@ -993,7 +1048,8 @@ description に必ず含めること:
 - [ ] 既存テスト 4 本のうち 2 本は完全無変更、2 本は追加のみ(Task 8 Step 3 で機械確認)
 - [ ] `dotnet build -warnaserror` が 0 warning
 - [ ] 全 3 層のテストが緑
-- [ ] ミューテーション 3 件が全て kill された
+- [ ] ミューテーション 5 件が全て kill された(#5 は「網が無ければその場で足す」)
+- [ ] `FindPrev` のクランプがファサードではなく各戦略側にある(G-2)
 - [ ] `pre-merge-check.ps1` が EXIT 0
 - [ ] L5 実機 SR 検証 8 項目が PASS
 - [ ] PR description に申し送りと「性能数値を書かない」判断が記載されている
