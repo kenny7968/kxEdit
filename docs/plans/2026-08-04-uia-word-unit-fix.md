@@ -1242,6 +1242,17 @@ dotnet run --project tests/yEdit.Editor.Smoke -c Release -- --wordunit | Out-Fil
 2. cap 掃引表が単調でない箇所があっても驚かない(格子位相の影響。設計書 §2.5 の欠陥 2)
 3. 最長 run 表で、コード / ドキュメントの実測値が cap 候補とどう並ぶか
 
+### Step 3.5: 較正で踏んではいけない罠(Task 5 レビューで判明)
+
+- **`maxScan` は code point 数であって char 数ではない。** 走査**回数**は cap で頭打ちだが、
+  **スパン幅は非 BMP で最大 4×cap char** まで伸びる(実測: 絵文字 run で cap=256 のとき幅 1022)。
+  「SR が 1 回に読む最大文字数 = 2×cap」と誤読しないこと。
+- **cap 打ち切りは空白 run の途中でも起きる。** `WordStart` が空白の上に着地する状態は
+  上限なしの走査では決して生じない。L5 で「空白の連続を読んだとき」の体感を見る(項目 12)。
+- **cap を上げると全 pos 総当りテストが二次で効く。** `Host_WordSpan_UnderScanLimit_AlwaysContainsCaret` は
+  fixture 長 ≈ `7 × cap` を全 pos 走るため、cap 4096 では約 30 秒になる見込み。
+  大きい cap を採る場合は fixture 長に上限を設けるか pos をサンプリングする。
+
 ### Step 4: ユーザーへ提示して cap を確定する
 
 次の 3 点を並べて提示し、**ユーザーの承認を得る**。
@@ -1349,6 +1360,7 @@ Expected: 全 Check が OK。`word-sim.ps1` は `prelude ABC abc 123 tail` を�
 | 8 | 全角空白を含む行(`今日　は`)で全角空白の上へ移動 | 全角空白そのものが読まれる(修正前は前の単語 `今日` を読んでいた) |
 | 9 | 空白ゼロ 500K 行(ascii)でダブルクリック → Ctrl+C → 別タブへ貼り付け | **cap で切り詰められた内容がコピーされる**。3 経路で唯一データが欠ける経路なので、切り詰めが許容できるか / cap 値が妥当かを晴眼の視点で判断する |
 | 10 | **インデントされたコード行**(例 `    hello`・`ab    cd`)で、空白の上へ ← → で移動して読ませる | **英文でも変わる位置**(Task 3 レビューで発覚)。修正前は「キャレット直下の空白 1 個」、修正後は「前の単語」を読む。`ab    cd` の pos=4 では**キャレットの 2 桁左の `ab` が読まれる**。ダブルクリック単語選択と同じ規則なので設計としては一貫しているが、**SR 利用者にとって自然かは実機でしか判断できない** |
+| 12 | **長い空白の連続**(cap を超える長さ)をダブルクリック / SR で読む | **cap 打ち切りは空白 run の途中でも起きる**(Task 5 レビューで判明)。上限なしの走査では決して生じない状態なので、体感を見ておく |
 | 11 | **行末の空白の上**(例 `abc  ` の末尾側)や、**空行を挟んだ位置**へ移動して読ませる | **改行を含むスパンが返りうる**(Task 4 レビューで発覚)。旧実装のスパンは改行を跨げなかったが、新実装は跨ぐ(`"a\r\nb  \n  c"` の pos=7 で `"b  \n"` が返る)。NVDA がこれをどう読むか(改行を読み上げるか・行をまたいで読むか・沈黙するか)は**実機でしか分からない**。PR #35 の L5 で見つかった E-1(折り返し ON の ↓ で「ブランク」)と紛らわしいので、**修正前後の両方で同じ操作を試して差分を見る**こと |
 
 **測るのは `Process.Responding` ではなく発話までの実時間**(設計書 §2.4 の申し送り)。
@@ -1405,7 +1417,8 @@ PR description(日本語)に必ず書くこと:
 
 - [ ] `WordBoundary` に `WordStart` / `WordEnd` / `maxScan` が入り、`src/` から
       単語走査の私有実装が消えている(`rg -n "WordBoundary_WordStart|PrevWordBoundary" src/` が空)
-- [ ] `rg -n "NoScanLimit" src/` が空(本番経路は全て `DefaultMaxScan`)
+- [ ] `rg -n "NoScanLimit" src/ -g '!**/WordBoundary.cs'` が空(本番経路は全て `DefaultMaxScan`。
+      定義ファイル自身の `const` 宣言と xmldoc の `<see cref>` は残る)
 - [ ] `IUiaTextHost.WordStart` / `WordEnd` の xmldoc が事実と一致している
 - [ ] `MouseInputTests` のダブルクリック 2 件が**無改修**で緑
 - [ ] 空白ゼロ 500K 行で `WordStart` / `WordEnd` / `NextWordStart` / `PrevWordStart` が
