@@ -235,7 +235,7 @@ public class MouseInputTests
     public void DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun() =>
         Sta.Run(() =>
         {
-            // 現状仕様(Task 12 レビュー I-1 で明文化・NextWordBoundary の xmldoc 参照):
+            // 現状仕様(Task 12 レビュー I-1 で明文化・WordBoundary.WordEnd の xmldoc 参照):
             // 空白位置ダブルクリックは「前単語頭 + target 位置までの空白 run の一部」を選択する
             // 非対称仕様(Notepad 近似・VS Code の空白 run 単独選択への変更要否は
             // Task 14 smoke / P7 実機検証で判断)。
@@ -260,8 +260,11 @@ public class MouseInputTests
                 SendMouseDoubleClick(c, x: midX, y: pt6.Y + 2);
                 var (s, en) = c.GetSelectionCharRange();
                 // 期待: 選択開始は前単語頭(0)、終了は空白 run の内側(5 超え・world=9 未満)。
-                // 具体: midX の PxToOffset → 7 → PrevWordBoundary(7)=0 / NextWordBoundary(7)=7 →
+                // 具体: midX の PxToOffset → 7 → WordBoundary.WordStart(7)=0 / WordEnd(7)=7 →
                 //       selection [0, 7) = "hello  "(2 spaces 含む)。
+                // 2026-08-04: 規則の実装は InputRouter の private 2 本から Core の
+                // WordBoundary.WordStart / WordEnd へ bit-perfect 移設した(本ブランチ Task 1〜2)。
+                // このテストが無改修のまま緑であることが、その移設の挙動不変の一次証拠である。
                 Assert.Equal(0, s);
                 Assert.InRange(en, 6, 8); // world 頭(=9)未満・"hello"末(=5)より右
             }
