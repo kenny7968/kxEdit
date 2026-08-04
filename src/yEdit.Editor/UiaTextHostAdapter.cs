@@ -495,6 +495,12 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // 単語 run の一部だけを読む = 意図的な仕様変更。
     // cap は InputRouter の Ctrl+←→ / ダブルクリック単語選択と必ず同じ値を使うこと
     // (分けると同じ位置で「見える選択」と「聞くスパン」が食い違い、F-3 の再導入になる)。
+    //
+    // Math.Clamp は NextChar / PrevChar 側と同じく削らないこと: WordBoundary の範囲外契約も
+    // 非対称で、WordStart は pos > CharLength で、WordEnd は pos < 0 で
+    // ArgumentOutOfRangeException になる(UIA クライアントは任意 offset を渡せる=
+    // RPC スレッドへ例外が漏れる)。網は UiaTextHostAdapterClampTests
+    // .WordMembers_OutOfRangeOffset_ClampInsteadOfThrowing(2026-08-04 レビュー Important-2)。
     int IUiaTextHost.WordStart(int offset)
     {
         var snap = _bufferSnapshot;

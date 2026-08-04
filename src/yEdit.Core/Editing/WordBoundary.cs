@@ -75,7 +75,13 @@ internal enum CharClass
 /// <see cref="WordStart"/> だけ 1 狭いのは <see cref="PrevWordStart"/> へ <c>pos + 1</c> を渡すため=
 /// 最初の 1 歩が pos へ戻るのに消費される。cap の較正時にこの 1 のズレが効く。
 ///
-/// <b>窓の表の単位は code point 数であって char オフセットではない。</b> 引数 <c>pos</c> /
+/// <b>窓についてよくある誤読 2 つは、この節が正本である。</b>
+/// <c>TextRangeProviderV2</c> / <c>IUiaTextHost.WordStart</c> / <c>UiaWordUnitExpandTests</c> /
+/// <c>EditorControlUiaHostTests</c> は 1 行でここを参照するだけにしてある(2026-08-04 の
+/// 最終レビュー Minor-3: 同じ説明が 4〜5 箇所へ写されていて、規則が変わったとき
+/// 食い違う形になっていた)。規則を変えるときはここを直すこと。
+///
+/// <b>(1) 窓の単位は code point 数であって char オフセットではない。</b> 引数 <c>pos</c> /
 /// <c>caret</c> と返り値は char オフセットなので、非 BMP(サロゲートペア)の run では
 /// <b>char オフセットでの窓幅が最大 2 倍になる</b>。したがって
 /// <c>WordStart(pos)</c>〜<c>WordEnd(pos)</c> のスパンは、ASCII / BMP で
@@ -84,13 +90,28 @@ internal enum CharClass
 /// 「SR が 1 回に読む最大文字数 = 2 × cap」と読まないこと — 頭打ちになるのは
 /// <b>走査回数</b>であって、スパンの char 幅ではない。
 ///
+/// <b>(2)「窓がキャレット中心」なのは「走査」であって、スパンの包含ではない。</b>
+/// <see cref="WordStart"/>(pos) と <see cref="WordEnd"/>(pos) へ<b>同じ pos</b> を渡せば
+/// 走査の窓は <c>[pos - (maxScan - 1), pos + maxScan]</c> とキャレットを中心に据わる。
+/// だが返るスパンが pos の文字を含むとは限らない: pos が空白 run の上にあると
+/// <see cref="WordStart"/> は左の空白 run を越えて前の単語の頭まで戻り、
+/// <see cref="WordEnd"/> は pos をそのまま返すので、スパン <c>[start, pos)</c> は
+/// <b>キャレット位置の文字を含まない</b>(<c>"ab    cd"</c> の pos=4 → <c>"ab  "</c> が実例)。
+/// 担保されるのは <c>WordStart(pos) &lt;= pos &lt;= WordEnd(pos)</c> まで=
+/// <b>反転レンジは出さない</b>ことである。
+///
 /// 上限に当たったかどうかは呼び出し側が <c>end - pos == maxScan</c> で判定できる
 /// (誤検出は run 長がちょうど cap のときのみ)。ゆえに <c>out bool truncated</c> は足さない。
 ///
 /// 将来オーバーロードを足す場合、既定値は <see cref="NoScanLimit"/> ではなく
-/// <see cref="DefaultMaxScan"/> 側にすること。ただし「本番呼び出しに <c>NoScanLimit</c> が
-/// 残っていない」ことを見る <c>rg -n "NoScanLimit" src/</c> ゲートは<b>既定値が無いから</b>
-/// 成立している(既定値を入れると呼び出し側に文字列が現れず、ゲートが素通りする)。
+/// <see cref="DefaultMaxScan"/> 側にすること。<b>引数を省略可能にすると、新しい呼び出しが
+/// 黙って上限なしになる</b>のを止められなくなる。「本番経路に <c>NoScanLimit</c> が
+/// 残っていない」ことは <c>rg -n "NoScanLimit" src/ -g '!**/WordBoundary.cs'</c> が
+/// 空になることで確認する(定義ファイル自身の <c>const</c> 宣言と xmldoc の参照を除外しないと、
+/// 修正が正しく入っていても<b>このファイルの doc だけで数 hit して空にならない</b>)。
+/// ただし<b>これは自動ゲートではない</b> — <c>tools/</c> にも <c>.github/</c> にも
+/// この検査は無い。実体は docs/plans/2026-08-04-uia-word-unit-fix.md の
+/// 完了条件(DoD)にある手動チェック 1 行である。
 /// </remarks>
 public static class WordBoundary
 {
@@ -107,6 +128,16 @@ public static class WordBoundary
     /// (<c>InputRouter</c>)の 3 経路が<b>同じ値</b>を渡す(片方だけ広げると F-3 の再導入になる)。
     /// </summary>
     /// <remarks>
+    /// <b>名前の <c>Default</c> は「経路ごとに変えてよい既定値」の意味ではない。</b>
+    /// 上の 3 経路は<b>必ず同じ値</b>を渡さなければならず、片方だけ別の cap にすることは
+    /// 許されない(同じ位置で「目に見える選択」と「SR が聞くスパン」が食い違う=
+    /// このブランチが直した F-3 の再導入になる)。「本番経路に別 cap を渡す呼び出しを
+    /// 足さない」ことがこの定数の契約である。<c>Default</c> なのは、将来
+    /// 「意図的に上限を外す / 変える理由がある特殊な呼び出し」が現れたときに
+    /// <see cref="NoScanLimit"/> や明示値を渡す余地を残しているという意味に留まる。
+    /// 2026-08-04 の最終レビュー Minor-6 で改名も検討したが、実装計画・設計書・テストを
+    /// 巻き込む churn に見合わないと判断して<b>この注記で受容した</b>。
+    ///
     /// <b>128 は 2026-08-04 の実測から選び、ユーザー承認を得て確定した値</b>である。採取は
     /// <c>tests/yEdit.Editor.Smoke --wordunit</c>(<c>WordUnitBench</c>)、経緯と生データは
     /// docs/plans/2026-08-04-uia-word-unit-fix.md Task 6。
@@ -120,12 +151,27 @@ public static class WordBoundary
     /// <see cref="WordEnd"/>)が最悪位相 1.28 ms / 典型位相 0.06 ms、Ctrl+← 1 回
     /// (<see cref="PrevWordStart"/>)が最悪位相 0.67 ms。上限なしだと同じ操作が 2,785 ms かかる。
     ///
+    /// <b>上の ms は「ファイル読み込み直後のバッファ」の値で、編集中のバッファを代表していない。</b>
+    /// <c>AppendBuffer</c> 由来 piece(大きめの貼り付け直後など)では <c>TextChunk.CharToByte</c> の
+    /// 線形走査が効いて同じ expand 1 回が<b>約 17 倍の 22.5 ms</b> になる(2026-08-04 最終レビュー
+    /// 脆弱性パス V-3 の実測)。同条件の上限なしは 3,101 ms なので、これは本 cap による悪化ではなく
+    /// <b>138 倍の改善</b>である。ブロック長 64KB で頭打ちになるため、行長に比例して伸び続けはしない。
+    ///
     /// <b>現実のテキストでは cap はそもそも効かない。</b> クラス境界が数文字ごとに来るので
     /// 走査は cap に達する前に止まる(ベンチの jamix 行が cap 32〜4096 で ms もスパン幅も
     /// 不変であることで実証)。cap が効くのは空白ゼロ単一クラス長大行という病的条件だけである。
     ///
     /// <b>これ以上大きくしない理由</b>: 病的行で SR が 1 単語として読む長さは
     /// <c>2 * cap - 1</c> code point になる。128 なら 255 で、256 にすると 511 = 発話が倍長くなる。
+    ///
+    /// <b>許容範囲は [64, 256]</b>。<c>WordBoundaryTests.DefaultMaxScan_StaysWithinCalibratedRange</c>
+    /// がこの範囲を固定している(値そのものではなく上の 2 つの推論を符号化したもの。
+    /// <c>Assert.Equal(128, …)</c> は定数のミラーで無価値なので置かない)。下限 64 は
+    /// <b>単語らしさ側</b>の帰結=実測した現実のテキストの最長クラス run が 57 code point で、
+    /// 64 を下回ると普通の文章で切り詰めが起きはじめる。上限 256 は<b>速度側 / 発話長</b>の帰結=
+    /// 256 で発話が <c>2 * cap - 1 = 511</c> code point になり、これ以上は病的行での
+    /// 1 単語が長すぎる。範囲を動かすなら、先に <c>--wordunit</c> で採り直して
+    /// この 2 つの根拠を書き換えること。
     ///
     /// 上限に当たると単語の途中で切れる = SR は run の一部だけを読み、キャレットも run の
     /// 途中で止まる。これは「500K 文字を 1 単語として読ませない」ための意図的な打ち切りである。
@@ -212,9 +258,14 @@ public static class WordBoundary
         Debug.Assert(maxScan >= 1, MaxScanContract, nameof(maxScan));
         if (caret <= 0)
             return 0;
-        int budget = maxScan;
+        // 手順 2(最初の 1 歩)ぶんを先に引いた予算。`budget = maxScan; budget--;` と書くと
+        // maxScan == int.MinValue のとき unchecked で int.MaxValue へ化けて上限が消える
+        // (実測: 'a' x 200,000 の caret=100,000 が 0 を返して 964 ms。cap=128 なら 0.5 ms)。
+        // 上限の導入自体が DoS 対策なので、特定の入力値でそれが無効化される形は残さない。
+        // maxScan >= 1 では maxScan - 1 と完全に等価・0 以下はすべて「1 歩も走らない」に収束する
+        // (2026-08-04 最終レビュー 脆弱性パス V-1)。
+        int budget = maxScan > 0 ? maxScan - 1 : 0;
         int pos = TextBoundary.PrevCodePoint(snap, caret);
-        budget--;
         // 左隣を空白/改行としてスキップ(後方=空白の直前まで)
         while (budget > 0 && pos > 0)
         {
@@ -259,6 +310,20 @@ public static class WordBoundary
     /// pos が空白の上にあるときは左の空白 run を越えて<b>前の単語の頭</b>を返す(= スパンが
     /// キャレットを含まない)。これは移設元からの現行仕様で、
     /// <c>MouseInputTests.DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c> が固定している。
+    /// 詳細はクラス <c>&lt;remarks&gt;</c> の「窓についてよくある誤読」(2) を参照。
+    ///
+    /// <b>窓が左だけ 1 狭い(<c>[pos - (maxScan - 1), pos]</c>)のを対称化しない理由</b>
+    /// (2026-08-04 Task 1 品質レビューで次の 2 案とも棄却した。最終レビュー Minor-7 で記録):
+    /// <list type="number">
+    /// <item>内部で <c>PrevWordStart(snap, pos + 1, maxScan + 1)</c> を渡す案 →
+    /// <see cref="NoScanLimit"/> == <c>int.MaxValue</c> のとき <c>maxScan + 1</c> が
+    /// <c>int.MinValue</c> へオーバーフローする。</item>
+    /// <item><see cref="PrevWordStart"/> の最初の 1 歩を無料にする案 → 今度は
+    /// <see cref="PrevWordStart"/> 自身が <c>maxScan + 1</c> 歩戻るようになり、
+    /// <see cref="NextWordStart"/> との対称が壊れる。Ctrl+← / Ctrl+→ は同じ cap で交互に
+    /// 使われるので、<b>そちらの対称の方が観測されやすい</b>。</item>
+    /// </list>
+    /// よって 1 のズレは受容し、cap の較正時に勘定へ入れる(クラス <c>&lt;remarks&gt;</c> の窓の表)。
     /// </remarks>
     /// <param name="snap">走査対象のスナップショット。</param>
     /// <param name="pos">

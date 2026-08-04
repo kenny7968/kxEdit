@@ -60,12 +60,14 @@ public interface IUiaTextHost
     /// <b>非空白 run については</b>「同一クラスの連続 = 1 単語」。
     /// </summary>
     /// <remarks>
-    /// Whitespace / LineBreak クラスは<b>単語を成さない</b>。offset が空白 / 改行の上にあるときは
-    /// 左の空白 run を越えて<b>前の単語の頭</b>を返す(= 返り値が offset を含まない)。同じ offset を
-    /// <see cref="WordEnd"/> へ渡すと offset がそのまま返るため、両者を組むと<b>空スパンになりうる</b>
-    /// (例: <c>"    hello"</c> の offset=0 は 0 / 0)。空スパンは
-    /// <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の <see cref="NextChar"/> フォールバックが
-    /// 1 文字へ膨らませる。
+    /// Whitespace / LineBreak クラスは<b>単語を成さない</b>。空白 run の上での挙動
+    /// (返り値が offset を含まないこと・走査上限の窓の単位と意味)は
+    /// <c>yEdit.Core.Editing.WordBoundary</c> クラスの <c>&lt;remarks&gt;</c>
+    /// 「窓についてよくある誤読」が正本。ここでは UIA 層に固有の帰結だけを書く:
+    /// 同じ offset を <see cref="WordEnd"/> へ渡すと offset がそのまま返るため、
+    /// 両者を組むと<b>空スパンになりうる</b>(例: <c>"    hello"</c> の offset=0 は 0 / 0)。
+    /// 空スパンは <c>TextRangeProviderV2.ExpandToEnclosingUnit</c> の
+    /// <see cref="NextChar"/> フォールバックが 1 文字へ膨らませる。
     ///
     /// <b>同じ offset を渡した場合に限り</b>、<see cref="WordEnd"/> と対でダブルクリック単語選択と
     /// 同じスパンになる(目に見える選択と SR が読むスパンが一致する)。2026-08-04 Task 4 で

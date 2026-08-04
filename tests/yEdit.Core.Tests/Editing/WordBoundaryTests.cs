@@ -285,4 +285,66 @@ public class WordBoundaryTests
         Assert.Equal(14, prev);
         Assert.Equal(10, snap.CharLength - prev); // 消費した総歩数 = maxScan
     }
+
+    /// <summary>
+    /// <c>maxScan &lt;= 0</c> は契約違反だが、<b>どの値でも上限が消えてはならない</b>。
+    /// とくに <c>int.MinValue</c>。
+    /// </summary>
+    /// <remarks>
+    /// 2026-08-04 最終レビュー 脆弱性パス V-1 の網。修正前の
+    /// <c>int budget = maxScan; budget--;</c> は <c>int.MinValue - 1</c> が unchecked で
+    /// <c>int.MaxValue</c> へ化けるため、<c>maxScan = int.MinValue</c> のときだけ
+    /// <b>実質無制限</b>になっていた(実測: <c>'a'</c> × 200,000 の
+    /// <c>PrevWordStart(snap, 100_000, int.MinValue)</c> が 0 を返して 964 ms)。
+    /// 上限の導入自体が DoS 対策なので、この形は残せない。
+    ///
+    /// 期待値は「最初の 1 歩ぶんだけ動いて止まる」= <c>maxScan &lt;= 0</c> の全値で同じ。
+    /// これが成り立つと、<c>maxScan &gt;= 1</c> 側は <c>maxScan - 1</c> と算術的に等価
+    /// (既存の上限テスト群が固定している)なので、修正は縮退側だけを変えたことになる。
+    ///
+    /// <c>maxScan &lt;= 0</c> は <c>Debug.Assert</c> の契約違反でもあるが、ビルド / CI /
+    /// ローカルゲートはすべて Release 構成(<c>Debug.Assert</c> は消える)なので発火しない。
+    /// </remarks>
+    [Theory]
+    [InlineData(int.MinValue)] // ← 修正前はここだけが上限を失っていた
+    [InlineData(-7)]
+    [InlineData(-1)]
+    [InlineData(0)]
+    public void MaxScan_NonPositive_NeverRemovesScanLimit(int maxScan)
+    {
+        var snap = S(new string('a', 5000));
+
+        // PrevWordStart: 最初の 1 歩だけ左へ動いて止まる(修正前の int.MinValue は 0 = 行頭)。
+        Assert.Equal(3999, WordBoundary.PrevWordStart(snap, 4000, maxScan));
+        // WordStart は PrevWordStart(pos + 1) 委譲なので、その 1 歩が pos へ戻って終わる。
+        Assert.Equal(4000, WordBoundary.WordStart(snap, 4000, maxScan));
+        // 前方側は元から縮退していた(予算を先に引かないため)= 1 歩も進まない。
+        Assert.Equal(1000, WordBoundary.NextWordStart(snap, 1000, maxScan));
+        Assert.Equal(1000, WordBoundary.WordEnd(snap, 1000, maxScan));
+    }
+
+    /// <summary>
+    /// <see cref="WordBoundary.DefaultMaxScan"/> が較正した根拠の範囲に収まっていること。
+    /// </summary>
+    /// <remarks>
+    /// 2026-08-04 最終レビュー Minor-1 の網。全 assert が <c>DefaultMaxScan</c> を
+    /// シンボル参照する設計(これ自体は正しい)のため、値を 128 → 129 に変えても 1910 件が
+    /// 全緑だった=<b>較正した値が何にも固定されていなかった</b>。
+    ///
+    /// <c>Assert.Equal(128, DefaultMaxScan)</c> は定数の純粋なミラーで無価値なので置かない。
+    /// 代わりに<b>文書化済みの推論をそのまま符号化</b>する:
+    /// <list type="bullet">
+    /// <item><b>下限 64</b> — 実測した現実のテキスト(リポジトリ内 6 本)の最長クラス run が
+    /// 57 code point。これを下回ると普通の文章で切り詰めが起きはじめる。</item>
+    /// <item><b>上限 256</b> — 病的行で SR が 1 単語として読む長さは <c>2 * cap - 1</c>
+    /// code point。256 だと 511 文字で、発話が長くなりすぎる。</item>
+    /// </list>
+    /// 範囲を動かすときは <c>tests/yEdit.Editor.Smoke --wordunit</c> で採り直し、
+    /// <see cref="WordBoundary.DefaultMaxScan"/> の xmldoc の根拠ごと書き換えること。
+    /// </remarks>
+    [Fact]
+    public void DefaultMaxScan_StaysWithinCalibratedRange()
+    {
+        Assert.InRange(WordBoundary.DefaultMaxScan, 64, 256);
+    }
 }

@@ -147,10 +147,15 @@ public class TextRangeProviderV2Tests
     }
 
     /// <summary>
-    /// 2026-08-04 Task 4: <c>ExpandToEnclosingUnit(Word)</c> が host に何を尋ねるかを固定する。
-    /// 実装は <c>WordEnd</c> の起点に <c>_start</c> ではなく <c>pos</c>(キャレット位置)を渡す。
+    /// 2026-08-04 Task 4: <c>ExpandToEnclosingUnit(Word)</c> が host に何を尋ね、
+    /// それを<b>どう合成するか</b>(<c>WordStart</c> + <c>WordEnd</c>、縮退したら
+    /// <c>NextChar</c> フォールバック)を固定する。
     /// </summary>
     /// <remarks>
+    /// <b>名前が「起点がキャレットに固定されている」と主張しないのは意図的</b>
+    /// (2026-08-04 最終レビュー Minor-2)。下の stub host では anchored-at-caret と
+    /// anchored-at-start を<b>原理的に区別できない</b>ので、名乗れるのは合成の形までである。
+    ///
     /// <b>本テストは起点変更の差を検出しない</b>(実測で確認済み=変更前後とも全 3 ケース緑)。
     /// 上の <c>InMemoryHost</c> は空白区切りの素朴実装で、原理的に判別できないため:
     /// <c>WordStart(pos)</c> が <c>_start &lt; pos</c> を返すのは <c>[_start, pos)</c> が
@@ -171,7 +176,7 @@ public class TextRangeProviderV2Tests
     [InlineData("hello world", 3, "hello")]
     [InlineData("hello world", 8, "world")]
     [InlineData("hello    world", 7, " ")] // 空白 run の内側 = 縮退 → NextChar フォールバック
-    public void ExpandToEnclosingUnit_Word_SpanIsAnchoredAtCaret(
+    public void ExpandToEnclosingUnit_Word_ComposesWordStartWordEndWithNextCharFallback(
         string text,
         int pos,
         string expected

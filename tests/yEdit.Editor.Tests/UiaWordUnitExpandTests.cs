@@ -74,12 +74,10 @@ public class UiaWordUnitExpandTests
     /// <c>GetText</c> では空文字列に潰れて見えないため、オフセットを直接見る。
     /// </summary>
     /// <remarks>
-    /// <b>「キャレット中心」なのは走査の窓であって、スパンの包含ではない。</b>
-    /// pos が空白 run の上にあると <c>WordStart</c> は左の単語の頭へ戻り、
-    /// <c>WordEnd(pos) == pos</c> なのでスパンは <c>[_start, pos)</c> =
-    /// <b>キャレット位置の文字を含まない</b>(<c>"ab    cd"</c> pos=4 の <c>"ab  "</c> が実例)。
-    /// 担保されるのは <c>_start &lt;= pos &lt;= _end</c> までである。ゆえに下の assert は
-    /// <c>pos &lt;= end</c> であって <c>pos &lt; end</c> ではない(<c>&lt;</c> にすると空白 run で落ちる)。
+    /// 「キャレット中心」なのは走査の窓であってスパンの包含ではない
+    /// (正本 = <c>yEdit.Core.Editing.WordBoundary</c> クラスの <c>&lt;remarks&gt;</c>
+    /// 「窓についてよくある誤読」(2))。ゆえに下の assert は <c>pos &lt;= end</c> であって
+    /// <c>pos &lt; end</c> ではない(<c>&lt;</c> にすると空白 run で落ちる)。
     ///
     /// 起点を <c>pos</c> にした以上、この不変条件の担保は host 側の
     /// <c>WordStart(pos) &lt;= pos &lt;= WordEnd(pos)</c> に移った

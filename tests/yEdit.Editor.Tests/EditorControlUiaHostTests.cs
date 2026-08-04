@@ -390,12 +390,11 @@ public class EditorControlUiaHostTests
     /// 空白 run / 改行 / <b>非 BMP の長い run</b> を含めるのは、末尾空白の巻き戻し(<c>WordEnd</c>)と
     /// サロゲート歩進が切り詰めと同時に効く位置を通すため。
     ///
-    /// <b>窓の幅は code point 数で数える。</b> <c>maxScan</c> の単位は code point であって
-    /// char オフセットではないので、<c>end - start</c>(char 差)は非 BMP run では最大 2 倍
-    /// (= <c>4 * cap</c> 相当)まで伸びる。実測(<b>cap 確定前の暫定値 256 で採取</b>=
-    /// fixture が cap 比例なので現在の 128 では位置も幅も半分になる): 絵文字 run の中央で
-    /// <c>[1490, 2512)</c> = 1022 char = 511 code point = <c>2 * cap - 1</c>。
-    /// char 差で <c>&lt;= 4 * cap</c> と
+    /// <b>窓の幅は code point 数で数える</b>(<c>maxScan</c> の単位。正本 =
+    /// <c>WordBoundary</c> クラスの <c>&lt;remarks&gt;</c>「窓についてよくある誤読」(1))。
+    /// 実測(<b>cap 確定前の暫定値 256 で採取</b>= fixture が cap 比例なので現在の 128 では
+    /// 位置も幅も半分になる): 絵文字 run の中央で <c>[1490, 2512)</c> = 1022 char =
+    /// 511 code point = <c>2 * cap - 1</c>。ここで char 差の <c>&lt;= 4 * cap</c> へ
     /// 緩めると<b>予算そのものの倍化(ASCII で <c>4 * cap - 1</c>)を素通しする</b>ため、
     /// 単位を揃えて締める方を選んだ。
     /// </remarks>
