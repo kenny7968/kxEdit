@@ -333,4 +333,77 @@ public class SnapshotSearcherTests
         var above = MakeLarge("1234", matchCase: true, threshold: 4, window: 6);
         Assert.Equal(below.FindNext(snap, 0), above.FindNext(snap, 0));
     }
+
+    // ==============================
+    // 閾値境界 (CharLength == thresholdChars ちょうど)
+    // ==============================
+
+    [Fact]
+    public void AtExactThreshold_uses_below_path_not_above()
+    {
+        // 契約: IsLarge は `CharLength > thresholdChars`。ちょうど一致は「閾値以下」= 材質化経路。
+        // 経路差が観測できる形として改行跨ぎ regex を使う(材質化経路だけがヒットする)。
+        // このテストが無いと `>` → `>=` の変異が既存テストを全て生き延びる
+        // (空文書だけが境界に当たるが、空文書は両経路とも同じ値を返すため差が出ない)。
+        var snap = Snap("ab\ncd"); // CharLength == 5
+        Assert.Equal(5, snap.CharLength);
+
+        var s = MakeLarge(@"b\nc", useRegex: true, matchCase: true, threshold: 5, window: 6);
+
+        // 閾値以下経路 = 文書全体をひとつの入力として regex 適用 → 改行を跨いでヒットする
+        Assert.Equal(new MatchSpan(1, 3), s.FindNext(snap, 0));
+        Assert.Equal(1, s.Count(snap));
+    }
+
+    [Fact]
+    public void OneCharAboveThreshold_uses_above_path()
+    {
+        // 境界の反対側。閾値 +1 文字で行単位経路へ切り替わり、改行跨ぎは取れなくなる。
+        // AtExactThreshold_uses_below_path_not_above と対で境界を挟む。
+        var snap = Snap("ab\ncd"); // CharLength == 5
+        var s = MakeLarge(@"b\nc", useRegex: true, matchCase: true, threshold: 4, window: 6);
+
+        Assert.Null(s.FindNext(snap, 0));
+        Assert.Equal(0, s.Count(snap));
+    }
+
+    // ==============================
+    // 閾値以下の端点入力 (既存は閾値超しか固定していない)
+    // ==============================
+
+    [Fact]
+    public void FindNext_ClampsNegativeFrom_below_threshold()
+    {
+        var snap = Snap("ab ab ab");
+        var s = Make("ab", matchCase: true);
+        Assert.Equal(new MatchSpan(0, 2), s.FindNext(snap, -5));
+    }
+
+    [Fact]
+    public void FindNext_PastEnd_returns_null_below_threshold()
+    {
+        var snap = Snap("ab");
+        var s = Make("ab", matchCase: true);
+        Assert.Null(s.FindNext(snap, snap.CharLength + 1));
+    }
+
+    [Fact]
+    public void FindPrev_AtOrBeforeZero_returns_null_below_threshold()
+    {
+        var snap = Snap("ab ab");
+        var s = Make("ab", matchCase: true);
+        Assert.Null(s.FindPrev(snap, 0));
+        Assert.Null(s.FindPrev(snap, -3));
+    }
+
+    [Fact]
+    public void ReplaceInRange_ClampsOutOfRangeArgs_below_threshold()
+    {
+        var snap = Snap("ab_ab");
+        var s = Make("ab", matchCase: true);
+        // start が負・length が文書長を超える → 文書全体へクランプされる
+        var (frag, count) = s.ReplaceInRange(snap, -10, 999, "X");
+        Assert.Equal("X_X", frag);
+        Assert.Equal(2, count);
+    }
 }
