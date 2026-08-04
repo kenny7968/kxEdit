@@ -3,6 +3,7 @@ using System.Windows.Forms;
 using Xunit;
 using yEdit.Accessibility;
 using yEdit.Core.Buffers;
+using yEdit.Core.Editing;
 using yEdit.Editor;
 
 namespace yEdit.Editor.Tests;
@@ -315,6 +316,113 @@ public class EditorControlUiaHostTests
             IUiaTextHost host = ctrl;
             Assert.Equal(start, host.WordStart(pos));
             Assert.Equal(end, host.WordEnd(pos));
+        });
+    }
+
+    /// <summary>
+    /// 2026-08-04 F-5: 空白ゼロの単一クラス長大行で、UIA の単語走査が行全体を舐めない。
+    /// 修正前は WordStart(500K) が必ず 0 を返し、1 回の読み上げに約 2.8 秒かかっていた
+    /// (2026-08-03-uia-word-unit-design.md §2.4)。文字クラス規則(Task 3)は単一クラスの
+    /// 長大連続には効かないので、上限が別途要る。
+    /// </summary>
+    [Fact]
+    public void Host_WordSpan_OnHugeSingleClassLine_IsBoundedAndContainsCaret()
+    {
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString(new string('a', 500_000)));
+            IUiaTextHost host = ctrl;
+            const int Pos = 250_000;
+
+            int start = host.WordStart(Pos);
+            int end = host.WordEnd(Pos);
+
+            Assert.True(start > 0, $"start={start} = 行頭まで走っている(上限が効いていない)");
+            Assert.True(end < 500_000, $"end={end} = 行末まで走っている(上限が効いていない)");
+            // Task 4 で expand の窓をキャレット中心にしたので、切り詰めてもスパンは pos を含む。
+            Assert.True(start <= Pos, $"start={start} が pos を超えている");
+            Assert.True(Pos < end, $"end={end} が pos を含んでいない");
+            // 窓は [pos-(cap-1), pos+cap] = 高々 cap の 2 倍。
+            Assert.True(
+                end - start <= 2 * WordBoundary.DefaultMaxScan,
+                $"窓が広すぎる: [{start}, {end}) = {end - start} 文字 (cap={WordBoundary.DefaultMaxScan})"
+            );
+        });
+    }
+
+    /// <summary>移動側(UIA Move / Ctrl+←→)にも同じ上限が効いていること。</summary>
+    /// <remarks>
+    /// <c>PrevWordStart</c> の期待値に <c>- 1</c> が要るのは、最初の 1 歩(caret から左へ 1)も
+    /// 予算に数えるため(<c>WordBoundary</c> の xmldoc の窓の表を参照)。
+    /// </remarks>
+    [Fact]
+    public void Host_WordNavigation_OnHugeSingleClassLine_IsBounded()
+    {
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString(new string('a', 500_000)));
+            IUiaTextHost host = ctrl;
+
+            int next = host.NextWordStart(0);
+            Assert.True(
+                next <= WordBoundary.DefaultMaxScan,
+                $"next={next} = 上限 {WordBoundary.DefaultMaxScan} を超えて走っている"
+            );
+            // 反対側の縛り。これが無いと「一切動かない(0 を返す)」実装も上の assert を通る。
+            Assert.True(next > 0, $"next={next} = キャレットが進んでいない");
+
+            int prev = host.PrevWordStart(500_000);
+            Assert.True(
+                prev >= 500_000 - WordBoundary.DefaultMaxScan - 1,
+                $"prev={prev} = 上限 {WordBoundary.DefaultMaxScan} を超えて走っている"
+            );
+            Assert.True(prev < 500_000, $"prev={prev} = キャレットが戻っていない");
+        });
+    }
+
+    /// <summary>
+    /// 2026-08-04 F-5 リスク R2 の網: 上限が実際に噛む長さの行で、<b>全 pos</b> について
+    /// <c>WordStart(pos) &lt;= pos &lt;= WordEnd(pos)</c>(= 反転レンジなし・窓はキャレットを含む)。
+    /// </summary>
+    /// <remarks>
+    /// <c>UiaWordUnitExpandTests.ExpandToEnclosingUnit_Word_NeverProducesReversedRange</c> は
+    /// 同じ不変条件を Provider 経由で総当りするが、fixture が短く<b>上限に一度も当たらない</b>。
+    /// こちらは cap(256)を確実に越える run を混ぜて「切り詰めが不変条件を壊さない」ことを見る。
+    /// 空白 run / 改行 / 非 BMP を含めるのは、末尾空白の巻き戻し(<c>WordEnd</c>)と
+    /// サロゲート歩進が切り詰めと同時に効く位置を通すため。
+    /// </remarks>
+    [Fact]
+    public void Host_WordSpan_UnderScanLimit_AlwaysContainsCaret()
+    {
+        Sta.Run(() =>
+        {
+            int cap = WordBoundary.DefaultMaxScan;
+            string text =
+                new string('a', cap * 2)
+                + new string(' ', cap + 5)
+                + new string('あ', cap * 2)
+                + "\r\n"
+                + new string('1', cap + 3)
+                + "a\U0001F600b"
+                + new string('\t', cap + 1)
+                + "end";
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString(text));
+            IUiaTextHost host = ctrl;
+
+            for (int pos = 0; pos <= host.TextLength; pos++)
+            {
+                int start = host.WordStart(pos);
+                int end = host.WordEnd(pos);
+                Assert.True(start <= pos, $"pos={pos}: start={start} が pos を超えた");
+                Assert.True(end >= pos, $"pos={pos}: end={end} = 反転レンジ");
+                Assert.True(
+                    end - start <= 2 * cap,
+                    $"pos={pos}: 窓が広すぎる [{start}, {end}) = {end - start} (cap={cap})"
+                );
+            }
         });
     }
 

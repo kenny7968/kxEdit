@@ -155,8 +155,12 @@ internal sealed class InputRouter
     {
         var snap = ctx.Host.Buffer!.Current;
         bool ctrl = (e.Modifiers & Keys.Control) != 0;
+        // 2026-08-04: 走査上限つき。空白ゼロの単一クラス長大行(ascii 500K)では
+        // 上限なしの PrevWordStart が UI スレッドを約 1.4 秒占有する
+        // (docs/plans/2026-08-03-uia-word-unit-design.md §2.4)。上限に当たると
+        // キャレットは単語 run の途中で止まる = 意図的な仕様変更。
         int target = ctrl
-            ? WordBoundary.PrevWordStart(snap, ctx.Caret.Caret, WordBoundary.NoScanLimit)
+            ? WordBoundary.PrevWordStart(snap, ctx.Caret.Caret, WordBoundary.DefaultMaxScan)
             : NavigationCommands.MoveLeftChar(snap, ctx.Caret.Caret);
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
@@ -166,8 +170,11 @@ internal sealed class InputRouter
     {
         var snap = ctx.Host.Buffer!.Current;
         bool ctrl = (e.Modifiers & Keys.Control) != 0;
+        // 2026-08-04: 走査上限つき。理由は HandleLeft と同じ(空白ゼロの単一クラス長大行で
+        // 上限なしの NextWordStart が UI スレッドを占有する)。cap は SR の読み上げスパン
+        // (UiaTextHostAdapter)とダブルクリック単語選択と必ず同じ値を使うこと。
         int target = ctrl
-            ? WordBoundary.NextWordStart(snap, ctx.Caret.Caret, WordBoundary.NoScanLimit)
+            ? WordBoundary.NextWordStart(snap, ctx.Caret.Caret, WordBoundary.DefaultMaxScan)
             : NavigationCommands.MoveRightChar(snap, ctx.Caret.Caret);
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
@@ -516,8 +523,11 @@ internal sealed class InputRouter
             return;
         int target = ctx.Host.OffsetFromClientPoint(e.X, e.Y);
         var snap = ctx.Host.Buffer.Current;
-        int start = WordBoundary.WordStart(snap, target, WordBoundary.NoScanLimit);
-        int end = WordBoundary.WordEnd(snap, target, WordBoundary.NoScanLimit);
+        // 2026-08-04: 走査上限つき。Ctrl+←→ / SR の読み上げスパン(UiaTextHostAdapter)と
+        // 同じ cap を使う。ここだけ広げたくなるが(唯一データが欠ける経路なので)、分けると
+        // 同じ位置で「見える選択」と「聞くスパン」が食い違い、F-3 の再導入になる。
+        int start = WordBoundary.WordStart(snap, target, WordBoundary.DefaultMaxScan);
+        int end = WordBoundary.WordEnd(snap, target, WordBoundary.DefaultMaxScan);
         ctx.Host.SetSelectionAnchored(start, end);
         ctx.Caret.DesiredXpx = -1;
         ctx.Host.Buffer.BreakUndoCoalescing();

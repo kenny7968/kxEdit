@@ -487,6 +487,14 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return VisualSegments.FindContaining(segs, offsetInLine).Segment;
     }
 
+    // 2026-08-04: 単語系 4 経路は走査上限つき (WordBoundary.DefaultMaxScan)。空白ゼロの
+    // 単一クラス長大行 (ascii 500K) では上限なしの WordStart + WordEnd が 1 回の読み上げで
+    // 約 2.8 秒かかり、それを RPC スレッドで焼く=SR の発話が数秒返らない
+    // (docs/plans/2026-08-03-uia-word-unit-design.md §2.4)。文字クラス規則 (F-3 修正) は
+    // 単一クラスの長大連続には効かないため、上限が別途要る。上限に当たると SR は
+    // 単語 run の一部だけを読む = 意図的な仕様変更。
+    // cap は InputRouter の Ctrl+←→ / ダブルクリック単語選択と必ず同じ値を使うこと
+    // (分けると同じ位置で「見える選択」と「聞くスパン」が食い違い、F-3 の再導入になる)。
     int IUiaTextHost.WordStart(int offset)
     {
         var snap = _bufferSnapshot;
@@ -496,7 +504,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return yEdit.Core.Editing.WordBoundary.WordStart(
             snap,
             o,
-            yEdit.Core.Editing.WordBoundary.NoScanLimit
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
         );
     }
 
@@ -509,7 +517,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return yEdit.Core.Editing.WordBoundary.WordEnd(
             snap,
             o,
-            yEdit.Core.Editing.WordBoundary.NoScanLimit
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
         );
     }
 
@@ -522,7 +530,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return yEdit.Core.Editing.WordBoundary.NextWordStart(
             snap,
             o,
-            yEdit.Core.Editing.WordBoundary.NoScanLimit
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
         );
     }
 
@@ -535,7 +543,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return yEdit.Core.Editing.WordBoundary.PrevWordStart(
             snap,
             o,
-            yEdit.Core.Editing.WordBoundary.NoScanLimit
+            yEdit.Core.Editing.WordBoundary.DefaultMaxScan
         );
     }
 
