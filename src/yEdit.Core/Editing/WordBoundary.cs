@@ -103,14 +103,38 @@ public static class WordBoundary
 
     /// <summary>
     /// 単語走査の既定上限(code point 数)。1 回の呼び出しがこの歩数を超えて走らない。
-    /// SR の読み上げスパン(<c>UiaTextHostAdapter</c>)と Ctrl+←→(<c>InputRouter</c>)の両方が使う。
+    /// SR の読み上げスパン(<c>UiaTextHostAdapter</c>)・Ctrl+←→ / ダブルクリック単語選択
+    /// (<c>InputRouter</c>)の 3 経路が<b>同じ値</b>を渡す(片方だけ広げると F-3 の再導入になる)。
     /// </summary>
     /// <remarks>
-    /// 値の根拠は docs/plans/2026-08-04-uia-word-unit-fix.md Task 6 の実測。
+    /// <b>128 は 2026-08-04 の実測から選び、ユーザー承認を得て確定した値</b>である。採取は
+    /// <c>tests/yEdit.Editor.Smoke --wordunit</c>(<c>WordUnitBench</c>)、経緯と生データは
+    /// docs/plans/2026-08-04-uia-word-unit-fix.md Task 6。
+    ///
+    /// <b>単語らしさ側</b>: リポジトリ内の実ファイル 6 本(日本語散文 2・C# コード・yml・
+    /// csproj・README)で最長のクラス run は <b>57 code point</b> = 設計書中に引用された C# 識別子
+    /// <c>DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c>。128 はその約 2.2 倍で、
+    /// 6 本すべてで切り詰め 0 件だった(64 でも 0 件だが最長 run に対する余裕が 12% しかない)。
+    ///
+    /// <b>速度側</b>: 空白ゼロ・単一クラスの 500K 行で expand 1 回(<see cref="WordStart"/> +
+    /// <see cref="WordEnd"/>)が最悪位相 1.28 ms / 典型位相 0.06 ms、Ctrl+← 1 回
+    /// (<see cref="PrevWordStart"/>)が最悪位相 0.67 ms。上限なしだと同じ操作が 2,785 ms かかる。
+    ///
+    /// <b>現実のテキストでは cap はそもそも効かない。</b> クラス境界が数文字ごとに来るので
+    /// 走査は cap に達する前に止まる(ベンチの jamix 行が cap 32〜4096 で ms もスパン幅も
+    /// 不変であることで実証)。cap が効くのは空白ゼロ単一クラス長大行という病的条件だけである。
+    ///
+    /// <b>これ以上大きくしない理由</b>: 病的行で SR が 1 単語として読む長さは
+    /// <c>2 * cap - 1</c> code point になる。128 なら 255 で、256 にすると 511 = 発話が倍長くなる。
+    ///
     /// 上限に当たると単語の途中で切れる = SR は run の一部だけを読み、キャレットも run の
     /// 途中で止まる。これは「500K 文字を 1 単語として読ませない」ための意図的な打ち切りである。
+    ///
+    /// <b>ms の絶対値は参考値</b>(同一マシンでも負荷で 2 倍振れる)。壁時計は cap に単純比例せず
+    /// <c>TextChunk</c> の格子内走査の<b>位相</b>で数倍振れる(掃引して決めたのはこのため)ので、
+    /// 主張は倍率と「何に比例するか」の側に置くこと。
     /// </remarks>
-    public const int DefaultMaxScan = 256; // Task 6 で確定させる暫定値
+    public const int DefaultMaxScan = 128;
 
     /// <summary>
     /// <c>maxScan &gt;= 1</c> 契約違反の <c>Debug.Assert</c> メッセージ。
