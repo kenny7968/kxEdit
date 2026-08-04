@@ -8,10 +8,20 @@ namespace yEdit.Core.Search;
 /// <c>windowSize</c> のウィンドウ + パターン長 -1 の overlap で走査する。
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>選択の前提</b>: この戦略は <c>UseRegex == false</c> のときだけ選ばれる。
+/// <see cref="SearchOptions.UseRegex"/> は読まない=true を渡してもパターンはリテラル扱いになる。
+/// </para>
+/// <para>
 /// <b>壊れる契約</b>(<see cref="SnapshotSearcher"/> の要約表も参照):
 /// <see cref="SearchOptions.WholeWord"/> はエンジン内蔵の Unicode <c>\b</c> ではなく
 /// ASCII 単純判定(<see cref="IsWordChar"/>)= 全角英数境界で
 /// 材質化経路と差が出うる。
+/// </para>
+/// <para>
+/// <b>差異がここに集中する理由</b>: 3 戦略で唯一 <see cref="TextSearcher"/> を経由せず
+/// <see cref="SearchOptions"/> から照合意味論を再実装するため(他 2 戦略は TextSearcher に委譲する)。
+/// </para>
 /// </remarks>
 internal sealed class LiteralWindowSearchStrategy : ISnapshotSearchStrategy
 {
@@ -62,6 +72,10 @@ internal sealed class LiteralWindowSearchStrategy : ISnapshotSearchStrategy
             return null;
 
         var cmp = GetLiteralComparison();
+        // plen*2 は下限調整ではなくループ終端の不変条件。前進量 = windowSize - overlap
+        // = windowSize - (plen-1) が必ず正である必要があり、windowSize >= 2*plen がそれを保証する。
+        // ファサードの ThrowIfNegativeOrZero は windowSize > 0 しか見ない(windowSize=1 / plen=3 が
+        // 通ってしまう)ので、ここが唯一の防御。internal ctor から直接構築される経路でも効く。
         int windowSize = Math.Max(_windowSize, plen * 2);
         int overlap = Math.Max(0, plen - 1);
         int pos = from;
@@ -92,9 +106,10 @@ internal sealed class LiteralWindowSearchStrategy : ISnapshotSearchStrategy
 
     public MatchSpan? FindPrev(TextSnapshot snap, int before)
     {
-        // 文書長超の before はここでクランプする。閾値以下(材質化)経路は生の before を
-        // TextSearcher へ渡す=ゼロ幅ヒットの有無で結果が変わるため、クランプはファサードへ
-        // 集約できない。クランプを必要とする戦略が自分で持つ。
+        // 文書長超の before をここでクランプする。理由と反例は ISnapshotSearchStrategy の
+        // 契約表を参照(材質化経路は生の before を使うのが現行挙動なのでファサードへ集約できない)。
+        // 注意: 現在はファサード側(SnapshotSearcher.FindPrev)にも同じクランプがあり二重だが、
+        // Task 5 でファサード側が外れるとこの 1 行が唯一の防御になる。「重複だから」で消さないこと。
         before = Math.Min(before, snap.CharLength);
 
         string pattern = _opts.Pattern;
@@ -103,6 +118,7 @@ internal sealed class LiteralWindowSearchStrategy : ISnapshotSearchStrategy
             return null;
 
         var cmp = GetLiteralComparison();
+        // plen*2 の意図は FindNext の注を参照(ループ終端の不変条件であり下限調整ではない)。
         int windowSize = Math.Max(_windowSize, plen * 2);
         int overlap = Math.Max(0, plen - 1);
         // ヒット開始が before-1 まで、ヒット終端は before+overlap まで拡張して読み込む必要がある

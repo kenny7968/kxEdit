@@ -44,7 +44,6 @@ public sealed class SnapshotSearcher
     private readonly TextSearcher _inner;
     private readonly int _thresholdChars;
 
-    // 窓サイズは戦略側が保持する(ファサードは構築時に渡すだけ=フィールド化しない)。
     private readonly LiteralWindowSearchStrategy _literal;
 
     /// <summary>照合条件から SnapshotSearcher を構築する。IsValid/Error は内側 <see cref="TextSearcher"/> と同一。</summary>
@@ -62,6 +61,7 @@ public sealed class SnapshotSearcher
         _opts = options;
         _inner = new TextSearcher(options);
         _thresholdChars = thresholdChars;
+        // (_windowSize フィールドは持たない: 窓サイズはここで戦略へ渡し、以後は戦略側が保持する)
         _literal = new LiteralWindowSearchStrategy(options, windowSize);
     }
 
