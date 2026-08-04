@@ -58,7 +58,7 @@ internal enum CharClass
 /// 消費される。契約は <c>maxScan &gt;= 1</c>(各 API 冒頭の <c>Debug.Assert</c> で検証)。
 /// 上限なしは <see cref="NoScanLimit"/>。<b>予算を使い切ったらその位置でそのまま返す</b>
 /// (単語の途中でも切る=SR は run の一部だけを読み、キャレットも run の途中で止まる)。
-/// 各 API が触れる窓:
+/// 各 API が触れる窓(<b>単位は code point 数</b>。下の表の <c>maxScan</c> も同じ):
 ///
 /// <list type="table">
 /// <listheader><term>API</term><description>窓</description></listheader>
@@ -74,6 +74,15 @@ internal enum CharClass
 ///
 /// <see cref="WordStart"/> だけ 1 狭いのは <see cref="PrevWordStart"/> へ <c>pos + 1</c> を渡すため=
 /// 最初の 1 歩が pos へ戻るのに消費される。cap の較正時にこの 1 のズレが効く。
+///
+/// <b>窓の表の単位は code point 数であって char オフセットではない。</b> 引数 <c>pos</c> /
+/// <c>caret</c> と返り値は char オフセットなので、非 BMP(サロゲートペア)の run では
+/// <b>char オフセットでの窓幅が最大 2 倍になる</b>。したがって
+/// <c>WordStart(pos)</c>〜<c>WordEnd(pos)</c> のスパンは、ASCII / BMP で
+/// <c>2 * maxScan - 1</c> char、非 BMP 一色で最大 <c>4 * maxScan - 2</c> char まで伸びる
+/// (実測: 絵文字 run・<c>maxScan = 256</c> で 1022 char)。cap の較正で
+/// 「SR が 1 回に読む最大文字数 = 2 × cap」と読まないこと — 頭打ちになるのは
+/// <b>走査回数</b>であって、スパンの char 幅ではない。
 ///
 /// 上限に当たったかどうかは呼び出し側が <c>end - pos == maxScan</c> で判定できる
 /// (誤検出は run 長がちょうど cap のときのみ)。ゆえに <c>out bool truncated</c> は足さない。

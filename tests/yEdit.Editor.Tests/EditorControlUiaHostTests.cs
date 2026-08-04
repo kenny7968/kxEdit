@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Windows.Forms;
 using Xunit;
 using yEdit.Accessibility;
@@ -343,18 +344,26 @@ public class EditorControlUiaHostTests
             // Task 4 で expand の窓をキャレット中心にしたので、切り詰めてもスパンは pos を含む。
             Assert.True(start <= Pos, $"start={start} が pos を超えている");
             Assert.True(Pos < end, $"end={end} が pos を含んでいない");
-            // 窓は [pos-(cap-1), pos+cap] = 高々 cap の 2 倍。
+            // 窓の幅は code point 数で数える(maxScan の単位。char オフセット差ではない)。
+            // 詳細は Host_WordSpan_UnderScanLimit_AlwaysContainsCaret の remarks を参照。
+            int width = CodePointCount(host, start, end);
             Assert.True(
-                end - start <= 2 * WordBoundary.DefaultMaxScan,
-                $"窓が広すぎる: [{start}, {end}) = {end - start} 文字 (cap={WordBoundary.DefaultMaxScan})"
+                width <= 2 * WordBoundary.DefaultMaxScan,
+                $"窓が広すぎる: [{start}, {end}) = {width} code point (cap={WordBoundary.DefaultMaxScan})"
             );
         });
     }
 
     /// <summary>移動側(UIA Move / Ctrl+←→)にも同じ上限が効いていること。</summary>
     /// <remarks>
-    /// <c>PrevWordStart</c> の期待値に <c>- 1</c> が要るのは、最初の 1 歩(caret から左へ 1)も
-    /// 予算に数えるため(<c>WordBoundary</c> の xmldoc の窓の表を参照)。
+    /// 厳密比較にしてあるのは、<b>SR 経路だけ別の cap にする改変</b>を殺すため
+    /// (不等号だと <c>cap / 4</c> のような縮小変異が素通りし、それは「同じ位置で見える選択と
+    /// 聞くスパンが違う」= F-3 の再導入にあたる)。予算の off-by-one も同時に殺す。
+    ///
+    /// <c>PrevWordStart</c> の期待値に <c>- 1</c> の緩みは<b>要らない</b>。窓が
+    /// <c>[caret - maxScan, caret]</c> ちょうどになるのは、手順 2 の最初の 1 歩
+    /// (caret から左へ 1)を<b>予算に数えるから</b>である(数えない実装なら 1 広がる)。
+    /// <c>WordBoundary</c> の xmldoc の窓の表と一致する。
     /// </remarks>
     [Fact]
     public void Host_WordNavigation_OnHugeSingleClassLine_IsBounded()
@@ -365,20 +374,8 @@ public class EditorControlUiaHostTests
             ctrl.SetSource(TextBuffer.FromString(new string('a', 500_000)));
             IUiaTextHost host = ctrl;
 
-            int next = host.NextWordStart(0);
-            Assert.True(
-                next <= WordBoundary.DefaultMaxScan,
-                $"next={next} = 上限 {WordBoundary.DefaultMaxScan} を超えて走っている"
-            );
-            // 反対側の縛り。これが無いと「一切動かない(0 を返す)」実装も上の assert を通る。
-            Assert.True(next > 0, $"next={next} = キャレットが進んでいない");
-
-            int prev = host.PrevWordStart(500_000);
-            Assert.True(
-                prev >= 500_000 - WordBoundary.DefaultMaxScan - 1,
-                $"prev={prev} = 上限 {WordBoundary.DefaultMaxScan} を超えて走っている"
-            );
-            Assert.True(prev < 500_000, $"prev={prev} = キャレットが戻っていない");
+            Assert.Equal(WordBoundary.DefaultMaxScan, host.NextWordStart(0));
+            Assert.Equal(500_000 - WordBoundary.DefaultMaxScan, host.PrevWordStart(500_000));
         });
     }
 
@@ -389,9 +386,16 @@ public class EditorControlUiaHostTests
     /// <remarks>
     /// <c>UiaWordUnitExpandTests.ExpandToEnclosingUnit_Word_NeverProducesReversedRange</c> は
     /// 同じ不変条件を Provider 経由で総当りするが、fixture が短く<b>上限に一度も当たらない</b>。
-    /// こちらは cap(256)を確実に越える run を混ぜて「切り詰めが不変条件を壊さない」ことを見る。
-    /// 空白 run / 改行 / 非 BMP を含めるのは、末尾空白の巻き戻し(<c>WordEnd</c>)と
+    /// こちらは cap を確実に越える run を混ぜて「切り詰めが不変条件を壊さない」ことを見る。
+    /// 空白 run / 改行 / <b>非 BMP の長い run</b> を含めるのは、末尾空白の巻き戻し(<c>WordEnd</c>)と
     /// サロゲート歩進が切り詰めと同時に効く位置を通すため。
+    ///
+    /// <b>窓の幅は code point 数で数える。</b> <c>maxScan</c> の単位は code point であって
+    /// char オフセットではないので、<c>end - start</c>(char 差)は非 BMP run では最大 2 倍
+    /// (= <c>4 * cap</c> 相当)まで伸びる。実測: 絵文字 run の中央で <c>[1490, 2512)</c> =
+    /// 1022 char = 511 code point = <c>2 * cap - 1</c>。char 差で <c>&lt;= 4 * cap</c> と
+    /// 緩めると<b>予算そのものの倍化(ASCII で <c>4 * cap - 1</c>)を素通しする</b>ため、
+    /// 単位を揃えて締める方を選んだ。
     /// </remarks>
     [Fact]
     public void Host_WordSpan_UnderScanLimit_AlwaysContainsCaret()
@@ -405,7 +409,7 @@ public class EditorControlUiaHostTests
                 + new string('あ', cap * 2)
                 + "\r\n"
                 + new string('1', cap + 3)
-                + "a\U0001F600b"
+                + string.Concat(Enumerable.Repeat("\U0001F600", cap * 2))
                 + new string('\t', cap + 1)
                 + "end";
             using var ctrl = new EditorControl();
@@ -418,12 +422,31 @@ public class EditorControlUiaHostTests
                 int end = host.WordEnd(pos);
                 Assert.True(start <= pos, $"pos={pos}: start={start} が pos を超えた");
                 Assert.True(end >= pos, $"pos={pos}: end={end} = 反転レンジ");
+                int width = CodePointCount(host, start, end);
                 Assert.True(
-                    end - start <= 2 * cap,
-                    $"pos={pos}: 窓が広すぎる [{start}, {end}) = {end - start} (cap={cap})"
+                    width <= 2 * cap,
+                    $"pos={pos}: 窓が広すぎる [{start}, {end}) = {width} code point (cap={cap})"
                 );
             }
         });
+    }
+
+    /// <summary>
+    /// <c>[start, end)</c> の code point 数 = <c>maxScan</c> の単位。
+    /// 端がサロゲートペアの中間に落ちた場合、その孤立サロゲートは 1 と数える(実際の
+    /// code point 数以下になる=上限 assert としては安全側)。
+    /// </summary>
+    private static int CodePointCount(IUiaTextHost host, int start, int end)
+    {
+        string s = host.GetTextRange(start, end - start);
+        int n = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                i++;
+            n++;
+        }
+        return n;
     }
 
     [Fact]
