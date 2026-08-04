@@ -1432,3 +1432,55 @@ PR description(日本語)に必ず書くこと:
 - [ ] **L5 実機検証(NVDA)完了**。特に項目 2(見える選択と聞くスパンの一致)と
       項目 6(発話までの実時間の前後比較)
 - [ ] PR description に挙動変更 3 点・cap の根拠・スコープ外・申し送りが書かれている
+
+---
+
+## 実施記録(2026-08-04・実装完了時の追記)
+
+本節は策定時スナップショット(CLAUDE.md §8)への**実施記録の追記**である。上の本文は書き換えていない。
+
+### 本文と食い違っている点
+
+- **Task 4 Step 1 のテスト名** `ExpandToEnclosingUnit_Word_SpanIsAnchoredAtCaret` は、
+  最終レビュー Minor-2 の指摘により
+  `ExpandToEnclosingUnit_Word_ComposesWordStartWordEndWithNextCharFallback` 相当へ**改名した**。
+  理由: stub host では anchored-at-caret と anchored-at-start を**原理的に区別できない**
+  (ミューテーションで実証済み)ため、旧名は観測できない性質を主張していた。
+  本文中の `--filter "FullyQualifiedName~SpanIsAnchoredAtCaret"` は**実行しても 0 件**になる。
+- **Task 4 Step 3 のコメント例**は cap=256 時の実測値で書かれていたが、出荷値は 128。
+  最終レビュー Minor-4 により本番コードのコメントからは数値を落とした(下記に転記する)。
+
+### 候補 B の欠陥 1 の実像(cap=256 時・最終レビューで採取)
+
+設計書 §2.5 は欠陥 1 を「キャレット位置の手前で終わる」と説明していたが、**run の種類で実像が違う**。
+
+| run の種類 | fixture | 旧起点 `WordEnd(_start)` の結果 |
+|---|---|---|
+| 単一クラス | `'a'×5000`・pos=2500 | `[2245, 2501)` = **キャレット文字を含む**(欠陥は牙をむかない) |
+| 空白 | `'a'×2000 + ' '×2000 + 'b'×2000`・pos=3000 | `[2745, 2746)` = **キャレットの 255 文字左に 1 文字だけ** |
+
+**欠陥 1 が実際に問題になるのは空白 run である。** 設計書 §2.5 の例(単一クラス run)では
+上限を入れてもキャレットは含まれたままなので、あの例だけを見ると修正の必要性が伝わらない。
+
+### 最終ブランチレビュー 2 パスの結果
+
+- **コード品質パス**: ✅ 承認。指定 3 + 追加 3 のミューテーションを実施し、
+  **`DefaultMaxScan` の値(128→129)** と **Adapter の `Math.Clamp` 除去**の 2 つが生存 → 網を追加
+- **脆弱性パス**: ✅ 承認。Critical / High ゼロ。`maxScan == int.MinValue` で上限が消える
+  (`budget--` の unchecked underflow)を実証 → 1 行で修正
+
+### 申し送り(将来回収)
+
+- **cap の較正値はファイル読み込み直後のバッファのもの。** `AppendBuffer` 由来 piece
+  (大きめの貼り付け直後)では `TextChunk.CharToByte` の線形走査が効いて **約 17 倍(22.5 ms)**になる。
+  上限なしなら 3,101 ms なので本ブランチによる悪化ではない(138 倍改善)が、
+  Ctrl+←→ の autorepeat では 30 Hz 予算 33 ms の 68% を使う。
+  根治は `TextSnapshot.GetChar` 側(既知の申し送り)。
+- **`NoScanLimit` を `internal` 化する**(本番から「上限なし」を表現できなくする)。
+  `yEdit.Editor.Tests` / `yEdit.Editor.Smoke` への `InternalsVisibleTo` 追加が要る。
+- **`ClassOf` の U+3000 を Whitespace 扱いにするか**(設計書 §3.3・本ブランチではスコープ外)。
+- **`ClassOf` を改変すると Ctrl+←→ の境界が変わるのにテストが赤くならない**(2026-07-31 由来の既存申し送り)。
+  `maxScan` 導入で走査経路が増えた分、回収価値は上がっている。
+- **`DefaultMaxScan` の名前**。最終品質レビューが `SharedWordScanLimit` 系を提案した
+  (`Default` は「経路ごとに変えてよい」を連想させるが、要求は逆で 3 経路が必ず同じ値)。
+  改名 churn に見合わないと判断し、定数の xmldoc に不変条件を明記する形で受容した。
