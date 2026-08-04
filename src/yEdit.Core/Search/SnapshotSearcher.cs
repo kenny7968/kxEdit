@@ -1,4 +1,3 @@
-using System.Text;
 using yEdit.Core.Buffers;
 
 namespace yEdit.Core.Search;
@@ -45,6 +44,7 @@ public sealed class SnapshotSearcher
     private readonly int _thresholdChars;
 
     private readonly LiteralWindowSearchStrategy _literal;
+    private readonly RegexPerLineSearchStrategy _regexPerLine;
 
     /// <summary>照合条件から SnapshotSearcher を構築する。IsValid/Error は内側 <see cref="TextSearcher"/> と同一。</summary>
     public SnapshotSearcher(SearchOptions options)
@@ -63,6 +63,8 @@ public sealed class SnapshotSearcher
         _thresholdChars = thresholdChars;
         // (_windowSize フィールドは持たない: 窓サイズはここで戦略へ渡し、以後は戦略側が保持する)
         _literal = new LiteralWindowSearchStrategy(options, windowSize);
+        // regex 戦略は内側 TextSearcher を共有する(必ず _inner 代入の後で構築すること)。
+        _regexPerLine = new RegexPerLineSearchStrategy(_inner);
     }
 
     /// <summary>照合条件が有効(正規表現を構築できた)か。</summary>
@@ -78,7 +80,7 @@ public sealed class SnapshotSearcher
             return 0;
         if (!IsLarge(snap))
             return _inner.Count(Materialize(snap));
-        return _opts.UseRegex ? CountRegexPerLine(snap) : _literal.Count(snap);
+        return _opts.UseRegex ? _regexPerLine.Count(snap) : _literal.Count(snap);
     }
 
     /// <summary>from 以降で最初のヒット(折り返しなし)。無効なら null。</summary>
@@ -92,7 +94,7 @@ public sealed class SnapshotSearcher
             from = 0;
         if (from > snap.CharLength)
             return null;
-        return _opts.UseRegex ? FindNextRegexPerLine(snap, from) : _literal.FindNext(snap, from);
+        return _opts.UseRegex ? _regexPerLine.FindNext(snap, from) : _literal.FindNext(snap, from);
     }
 
     /// <summary>開始位置(Index)が before より厳密に前にある最後のヒットを返す(折り返しなし)。</summary>
@@ -105,7 +107,7 @@ public sealed class SnapshotSearcher
         if (before <= 0)
             return null;
         int b = Math.Min(before, snap.CharLength);
-        return _opts.UseRegex ? FindPrevRegexPerLine(snap, b) : _literal.FindPrev(snap, b);
+        return _opts.UseRegex ? _regexPerLine.FindPrev(snap, b) : _literal.FindPrev(snap, b);
     }
 
     /// <summary>span を全ヒット中の何件目か(1始まり, total)。span がヒットでなければ null。</summary>
@@ -115,7 +117,7 @@ public sealed class SnapshotSearcher
             return null;
         if (!IsLarge(snap))
             return _inner.Locate(Materialize(snap), span);
-        return _opts.UseRegex ? LocateRegexPerLine(snap, span) : _literal.Locate(snap, span);
+        return _opts.UseRegex ? _regexPerLine.Locate(snap, span) : _literal.Locate(snap, span);
     }
 
     /// <summary>
@@ -128,7 +130,7 @@ public sealed class SnapshotSearcher
         if (!IsLarge(snap))
             return _inner.ReplacementAt(Materialize(snap), span, replacement);
         return _opts.UseRegex
-            ? ReplacementAtRegexPerLine(snap, span, replacement)
+            ? _regexPerLine.ReplacementAt(snap, span, replacement)
             : _literal.ReplacementAt(snap, span, replacement);
     }
 
@@ -151,181 +153,11 @@ public sealed class SnapshotSearcher
         if (!IsLarge(snap))
             return _inner.ReplaceInRange(Materialize(snap), start, length, replacement);
         return _opts.UseRegex
-            ? ReplaceInRangeRegexPerLine(snap, s, end, replacement)
+            ? _regexPerLine.ReplaceInRange(snap, s, end - s, replacement)
             : _literal.ReplaceInRange(snap, s, end - s, replacement);
     }
 
     private bool IsLarge(TextSnapshot snap) => snap.CharLength > _thresholdChars;
 
     private static string Materialize(TextSnapshot snap) => snap.GetText(0, snap.CharLength);
-
-    // ==============================
-    // Regex 行単位(閾値超)
-    // ==============================
-
-    private int CountRegexPerLine(TextSnapshot snap)
-    {
-        int total = 0;
-        for (int line = 0; line < snap.LineCount; line++)
-        {
-            string lineText = ReadLine(snap, line);
-            total += _inner.Count(lineText);
-        }
-        return total;
-    }
-
-    private MatchSpan? FindNextRegexPerLine(TextSnapshot snap, int from)
-    {
-        int startLine = snap.GetLineIndexOfChar(from);
-        // 起点行: from の行内 offset から検索
-        {
-            int ls = snap.GetLineStart(startLine);
-            int le = snap.GetLineEnd(startLine, includeBreak: false);
-            int lineLen = le - ls;
-            int offset = Math.Max(0, from - ls);
-            if (offset <= lineLen)
-            {
-                string lineText = snap.GetText(ls, lineLen);
-                var h = _inner.FindNext(lineText, offset);
-                if (h is { } m)
-                    return new MatchSpan(ls + m.Start, m.Length);
-            }
-        }
-        for (int line = startLine + 1; line < snap.LineCount; line++)
-        {
-            int ls = snap.GetLineStart(line);
-            int le = snap.GetLineEnd(line, includeBreak: false);
-            string lineText = snap.GetText(ls, le - ls);
-            var h = _inner.FindNext(lineText, 0);
-            if (h is { } m)
-                return new MatchSpan(ls + m.Start, m.Length);
-        }
-        return null;
-    }
-
-    private MatchSpan? FindPrevRegexPerLine(TextSnapshot snap, int before)
-    {
-        // before は既に (0, CharLength] にクランプ済み
-        int startLine = snap.GetLineIndexOfChar(before - 1);
-        {
-            int ls = snap.GetLineStart(startLine);
-            int le = snap.GetLineEnd(startLine, includeBreak: false);
-            int lineLen = le - ls;
-            int limit = Math.Min(lineLen, before - ls); // 行内 [0, limit) の最終ヒット
-            if (limit > 0)
-            {
-                string lineText = snap.GetText(ls, lineLen);
-                var h = _inner.FindPrev(lineText, limit);
-                if (h is { } m)
-                    return new MatchSpan(ls + m.Start, m.Length);
-            }
-        }
-        for (int line = startLine - 1; line >= 0; line--)
-        {
-            int ls = snap.GetLineStart(line);
-            int le = snap.GetLineEnd(line, includeBreak: false);
-            int lineLen = le - ls;
-            string lineText = snap.GetText(ls, lineLen);
-            var h = _inner.FindPrev(lineText, lineLen + 1); // 行内全体を対象
-            if (h is { } m)
-                return new MatchSpan(ls + m.Start, m.Length);
-        }
-        return null;
-    }
-
-    private (int, int)? LocateRegexPerLine(TextSnapshot snap, MatchSpan span)
-    {
-        int total = 0,
-            ordinal = 0;
-        bool found = false;
-        for (int line = 0; line < snap.LineCount; line++)
-        {
-            int ls = snap.GetLineStart(line);
-            int le = snap.GetLineEnd(line, includeBreak: false);
-            string lineText = snap.GetText(ls, le - ls);
-            int off = 0;
-            while (true)
-            {
-                var h = _inner.FindNext(lineText, off);
-                if (h is not { } m)
-                    break;
-                total++;
-                if (ls + m.Start == span.Start && m.Length == span.Length)
-                {
-                    ordinal = total;
-                    found = true;
-                }
-                off = m.Start + Math.Max(1, m.Length);
-                if (off > lineText.Length)
-                    break;
-            }
-        }
-        return found ? (ordinal, total) : null;
-    }
-
-    private string? ReplacementAtRegexPerLine(TextSnapshot snap, MatchSpan span, string replacement)
-    {
-        if (span.Start < 0 || span.Start + span.Length > snap.CharLength)
-            return null;
-        int line = snap.GetLineIndexOfChar(span.Start);
-        int ls = snap.GetLineStart(line);
-        int le = snap.GetLineEnd(line, includeBreak: false);
-        // 行を跨ぐ span は行単位契約により対象外
-        if (span.Start + span.Length > le)
-            return null;
-        string lineText = snap.GetText(ls, le - ls);
-        var lineSpan = new MatchSpan(span.Start - ls, span.Length);
-        return _inner.ReplacementAt(lineText, lineSpan, replacement);
-    }
-
-    private (string Fragment, int Count) ReplaceInRangeRegexPerLine(
-        TextSnapshot snap,
-        int start,
-        int end,
-        string replacement
-    )
-    {
-        var sb = new StringBuilder();
-        int count = 0;
-        int startLine = snap.GetLineIndexOfChar(start);
-        int endLine = end == 0 ? 0 : snap.GetLineIndexOfChar(end - 1);
-
-        for (int line = startLine; line <= endLine; line++)
-        {
-            int ls = snap.GetLineStart(line);
-            int le = snap.GetLineEnd(line, includeBreak: false);
-            int lineLen = le - ls;
-
-            // 契約: Fragment は [start, end) の中身のみ(範囲外文字を混入させない)。
-            // 行の範囲内 substring [rangeInLineStart, rangeInLineEnd) を _inner に投げると、
-            // 内部 ReplaceInRange が「行内 substring の中身+範囲内ヒットの置換」だけを返してくれる。
-            int rangeInLineStart = Math.Max(0, start - ls);
-            int rangeInLineEnd = Math.Min(lineLen, end - ls);
-
-            string lineText = snap.GetText(ls, lineLen);
-            var (frag, cnt) = _inner.ReplaceInRange(
-                lineText,
-                rangeInLineStart,
-                rangeInLineEnd - rangeInLineStart,
-                replacement
-            );
-            sb.Append(frag);
-            count += cnt;
-
-            // 行末の改行文字(あれば)を復元(最終行=改行なし)。range が break の途中で
-            // 終わるケース(選択終端が CRLF の間など)は end で切り詰める(壊れる契約許容だが安全側)。
-            int breakLen = snap.GetLineEnd(line, includeBreak: true) - le;
-            int emit = Math.Min(breakLen, Math.Max(0, end - le));
-            if (emit > 0)
-                sb.Append(snap.GetText(le, emit));
-        }
-        return (sb.ToString(), count);
-    }
-
-    private static string ReadLine(TextSnapshot snap, int line)
-    {
-        int ls = snap.GetLineStart(line);
-        int le = snap.GetLineEnd(line, includeBreak: false);
-        return snap.GetText(ls, le - ls);
-    }
 }
