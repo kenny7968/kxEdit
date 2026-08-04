@@ -245,6 +245,9 @@ internal interface ISnapshotSearchStrategy
    メソッド冒頭で `int end = start + length;` を置き、以降の本体は無変更にする
 5. **`FindPrev` の冒頭に `before = Math.Min(before, snap.CharLength);` を置く**
    (下記の注を読むこと)
+6. `Locate` の戻り型を `(int, int)?` → `(int Ordinal, int Total)?` にする
+   (タプル要素名がインターフェースと一致していないと CS8141。メタデータのみで挙動影響ゼロ。
+   Task 3 レビューで「5 点の列挙から漏れていた 6 点目」として指摘された)
 
 > **`FindPrev` のクランプについて(Task 1 レビュー G-2)**
 >
@@ -402,6 +405,12 @@ git commit -m "refactor(core): 閾値超 regex 照合を RegexPerLineSearchStrat
 - Create: `src/yEdit.Core/Search/MaterializedSearchStrategy.cs`
 - Create: `tests/yEdit.Core.Tests/Search/MaterializedSearchStrategyTests.cs`
 - Modify: `src/yEdit.Core/Search/SnapshotSearcher.cs`
+
+> **作業環境の注意(Task 3 実施時に判明)**: Git Bash の `sed -i` は CRLF ファイルを
+> **LF に書き換える**(`.gitattributes` は `* text=auto eol=crlf`)。範囲抽出で移動する手法を採るなら、
+> **commit 前に `dotnet csharpier format` を明示実行**して CRLF に戻すこと
+> (`.csharpierrc.json` は `"endOfLine": "crlf"`)。入れ忘れても pre-commit フックが直すが、
+> その場合フックが再ステージした内容を自分で検証していない状態になる。
 
 **Step 1: 失敗するテストを書く**
 
@@ -723,6 +732,41 @@ Task 2 レビューアの実測: `LiteralWindowSearchStrategy.FindPrev` 冒頭�
 
 期待値は実挙動から導出し、根拠を説明できること。
 
+**さらに: 2 戦略の `FindPrev` クランプを戦略レベルで直接叩くこと(Task 3 レビュー N-1)**
+
+Task 3 レビューアが実測: **`LiteralWindowSearchStrategy` / `RegexPerLineSearchStrategy` の
+どちらの `FindPrev` クランプ行を削除しても、現在は Search 81 件が全緑**である
+(ファサードが先にクランプするため)。両クランプのコメントは
+「Task 5 でファサード側が外れるとこの 1 行が唯一の防御になる」と宣言しているのに、
+**その昇格の瞬間に網が無い**。
+
+`yEdit.Core.csproj:12` の `InternalsVisibleTo("yEdit.Core.Tests")` により、戦略を直接構築できる。
+`new LiteralWindowSearchStrategy(...)` と `new RegexPerLineSearchStrategy(...)` の両方について
+`FindPrev(snap, CharLength + 1)` を直接叩くテストを足すこと。上のファサード経由テストは
+literal 経路しか通らないので、**2 戦略ぶん必要**。
+
+**前進ガードの非対称は 3 対 3 ではなく 3 対 1(Task 3 fixup で判明)**
+
+統合を検討するときに必ず踏む地雷なので先に書いておく。`Math.Max(1, ...)` の出現数は:
+
+| 戦略 | 箇所 | 生死 |
+|---|---|---|
+| `LiteralWindowSearchStrategy` | **3 箇所**(`Count` / `Locate` / `ReplaceInRange`) | **全て実質デッド**(`plen == 0` は早期 return するため下流で `plen >= 1` が保証される) |
+| `RegexPerLineSearchStrategy` | **1 箇所**(`Locate` のみ) | **生きている**(網 = `Locate_RegexZeroWidthHits_...`) |
+
+regex 側の `Count` は `_inner.Count` へ、`ReplaceInRange` は `_inner.ReplaceInRange` へ委譲しており
+自前の歩進ループを持たない。したがって「同じ形の式が両戦略に 3 つずつある」という見え方は誤りで、
+**リテラル側 3 箇所は変異させても永久に kill されない**(テストを増やしても無意味=真にデッド)。
+最終レビューのミューテーションでリテラル側が生存しても、それは欠陥ではなく戦略分離により
+保証が閉じた結果である、と説明できること。
+
+**さらに: `RegexPerLineSearchStrategy` のクラス doc に「選択の前提」節を足す(N-2)**
+
+`LiteralWindowSearchStrategy` には Task 2 fixup で「この戦略は `UseRegex == false` のときだけ
+選ばれる」という節が入ったが、regex 側に対応物が無い。`RegexPerLineSearchStrategy` は
+`TextSearcher` へ丸投げするため `UseRegex=false` の options で構築しても壊れないが、
+選択規則が暗黙の前提になっている。1 文足して 3 戦略の doc を対称にすること。
+
 **Step 4: ビルドとテスト**
 
 ```powershell
@@ -958,6 +1002,20 @@ git commit -m "refactor(app): SearchController が照合条件ごとに searcher
 
 ## Task 8: 仕上げ(整形・全層テスト・自己レビュー)
 
+**Step 0: 削除済みシンボルを指すコメントの一括棚卸し(Task 3 申し送り S-C)**
+
+Task 2〜4 で `*LiteralWindow` / `*RegexPerLine` / `Materialize` という private メソッド名が消える。
+テスト側のコメントがこれらを参照したまま残るため、まとめて現行 API 名へ読み替える。
+各タスクは「`tests/` 無変更」の制約下で進めたので、ここが唯一の回収点になる。
+
+```powershell
+rg -n "RegexPerLine|LiteralWindow|Materialize" tests/
+```
+
+ヒットしたコメントを現行のクラス名(`RegexPerLineSearchStrategy` 等)へ読み替える。
+**コメントのみ。テストのロジックは触らない。**
+先例: ブランチ外の commit `3aaade1`「削除済みシンボルを指すコメントを Core の現行 API へ読み替える」。
+
 **Step 1: 整形**
 
 ```powershell
@@ -1080,6 +1138,7 @@ CLAUDE.md §2「意図的な挙動変更・計画からの逸脱は、設計書�
 | # | Task | 逸脱 | 理由 |
 |---|---|---|---|
 | D-1 | 2 | `SnapshotSearcher._windowSize` フィールドを削除し、ctor 引数を直接戦略へ渡す形にした(計画 Task 2 Step 3 はフィールド保持を指示していた) | フィールドにすると ctor でしか読まれなくなり、SonarAnalyzer **S1450**(`Remove the field and declare it as a local variable`)が `-warnaserror` でビルドを落とす。挙動は同一(`ArgumentOutOfRangeException.ThrowIfNegativeOrZero` の実行順も従来どおり戦略構築より前)。テスト側に reflection 参照が無いことは grep 確認済み |
+| D-3 | 3 | `SnapshotSearcher.cs` から `using System.Text;` を削除した(**「本体は一切変えない」の許容範囲を超える任意変更**) | `StringBuilder` の唯一の利用者 `ReplaceInRangeRegexPerLine` が転出して未使用になったための衛生的削除。挙動影響ゼロ。**⚠ 当初「SonarAnalyzer S1128 が `-warnaserror` で落とすので必然」と記録したが、これは事実誤認だった**(Task 3 レビューで判明)。`using` を戻して Debug / Release / ソリューション全体をビルドしても **0 警告 0 エラー**。アナライザ自体は生きており(未読 private フィールドの探針で `error S4487` が出る)、**S1128 だけが有効化されていない**。原因は `Directory.Build.props:8` の `<EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>` と S1128 非有効の組み合わせ。**このリポジトリでは未使用 using はビルドを落とさない** |
 | D-2 | 2 | 計画の `ISnapshotSearchStrategy` 案にあった「位置引数は呼び出し前に `SnapshotSearcher` が snap の範囲へクランプ済み」という契約 bullet を**採用しなかった** | **この記述は Task 5 で偽になる。** G-2(`FindPrev` のクランプはファサードへ集約できない)の発覚後、計画の Task 2/3/5 は修正したが、インターフェース案の bullet を直し忘れていた=**計画側のバグ**。実装者が正しく落とした。代わりに引数ごとの保証を表で書く(Task 2 レビュー I-1・弱い保証で書くことで Task 5 後も書き直し不要になる) |
 
 ---
