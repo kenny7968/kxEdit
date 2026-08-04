@@ -350,9 +350,17 @@ public class SnapshotSearcherTests
 
         var s = MakeLarge(@"b\nc", useRegex: true, matchCase: true, threshold: 5, window: 6);
 
-        // 閾値以下経路 = 文書全体をひとつの入力として regex 適用 → 改行を跨いでヒットする
-        Assert.Equal(new MatchSpan(1, 3), s.FindNext(snap, 0));
+        // 閾値以下経路 = 文書全体をひとつの入力として regex 適用 → 改行を跨いでヒットする。
+        // 6 つのディスパッチ箇所すべてを個別に押さえる(1 経路だけ条件を書き損じても
+        // 検出できるようにする)。
         Assert.Equal(1, s.Count(snap));
+        Assert.Equal(new MatchSpan(1, 3), s.FindNext(snap, 0));
+        Assert.Equal(new MatchSpan(1, 3), s.FindPrev(snap, 5));
+        Assert.Equal((1, 1), s.Locate(snap, new MatchSpan(1, 3)));
+        Assert.Equal("X", s.ReplacementAt(snap, new MatchSpan(1, 3), "X"));
+        var (frag, count) = s.ReplaceInRange(snap, 0, 5, "X");
+        Assert.Equal("aXd", frag); // "ab\ncd" の [1,4) が置換される
+        Assert.Equal(1, count);
     }
 
     [Fact]
@@ -363,8 +371,48 @@ public class SnapshotSearcherTests
         var snap = Snap("ab\ncd"); // CharLength == 5
         var s = MakeLarge(@"b\nc", useRegex: true, matchCase: true, threshold: 4, window: 6);
 
-        Assert.Null(s.FindNext(snap, 0));
+        // 否定 assert だけだと「正しく見つからない」と「パターンが壊れて何も動いていない」を
+        // 区別できないため、まず照合条件が生きていることを確かめる。
+        Assert.True(s.IsValid);
+
+        // 閾値超経路は 6 API すべてで改行跨ぎヒットを返さない。
         Assert.Equal(0, s.Count(snap));
+        Assert.Null(s.FindNext(snap, 0));
+        Assert.Null(s.FindPrev(snap, 5));
+        Assert.Null(s.Locate(snap, new MatchSpan(1, 3)));
+        Assert.Null(s.ReplacementAt(snap, new MatchSpan(1, 3), "X"));
+        var (frag, count) = s.ReplaceInRange(snap, 0, 5, "X");
+        Assert.Equal("ab\ncd", frag); // 置換ゼロ=元の範囲がそのまま返る(改行も復元される)
+        Assert.Equal(0, count);
+    }
+
+    // ==============================
+    // ゼロ幅ヒット (a* / \b / (?=...) 系) の網
+    // ==============================
+
+    [Fact(Timeout = 10000)]
+    public async Task Locate_RegexZeroWidthHits_terminates_and_counts_above_threshold()
+    {
+        // 閾値超 regex 経路の LocateRegexPerLine は行内を FindNext で歩進するため、
+        // ゼロ幅ヒットで前進しないと無限ループになる(TextSearcher の契約=呼び出し側が
+        // max(1, Length) 分進める)。前進ロジックを壊すとハングするので Timeout を付ける。
+        // xUnit v2 の Timeout は async テストにしか適用できない
+        // ("Tests marked with Timeout are only supported for async tests")ため、
+        // 中身は同期のまま Task.Yield() で async 化している。
+        await Task.Yield();
+
+        var snap = Snap("a\nb"); // CharLength == 3 / 行 0 = "a" (ls=0) / 行 1 = "b" (ls=2)
+        var s = MakeLarge("a*", useRegex: true, matchCase: true, threshold: 2, window: 4);
+        Assert.True(s.IsValid);
+
+        // 行 0 "a": off=0 → (0,1) / off=1 → (1,0) / off=2 > 行長 1 で打ち切り = 2 件
+        // 行 1 "b": off=0 → (0,0) / off=1 → (1,0) / off=2 > 行長 1 で打ち切り = 2 件
+        // → total = 4。行内 offset は行頭 ls を足して絶対位置になる。
+        Assert.Equal((1, 4), s.Locate(snap, new MatchSpan(0, 1))); // 行 0 の "a"
+        Assert.Equal((2, 4), s.Locate(snap, new MatchSpan(1, 0))); // 行 0 の行末ゼロ幅
+        Assert.Equal((3, 4), s.Locate(snap, new MatchSpan(2, 0))); // 行 1 の行頭ゼロ幅
+        Assert.Equal((4, 4), s.Locate(snap, new MatchSpan(3, 0))); // 行 1 の行末ゼロ幅
+        Assert.Null(s.Locate(snap, new MatchSpan(2, 1))); // ヒットでない span
     }
 
     // ==============================
@@ -394,6 +442,25 @@ public class SnapshotSearcherTests
         var s = Make("ab", matchCase: true);
         Assert.Null(s.FindPrev(snap, 0));
         Assert.Null(s.FindPrev(snap, -3));
+    }
+
+    [Fact]
+    public void FindPrev_BeforePastEnd_is_not_clamped_below_threshold()
+    {
+        // 現行仕様: 閾値以下経路は before を生のまま TextSearcher へ渡す
+        // (Math.Min(before, CharLength) のクランプは閾値超経路にしか掛かっていない)。
+        // ゼロ幅ヒットを生むパターンでは「文書長超の before」と「文書長ちょうどの before」で
+        // 結果が変わるため、位置引数のクランプをファサードへ集約すると挙動が変わる。
+        // その挙動差をここで凍結する。
+        var snap = Snap("ab"); // CharLength == 2
+        var s = Make("b*", useRegex: true, matchCase: true);
+        Assert.True(s.IsValid);
+
+        // "ab" 上の b* のヒットは (0,0) / (1,1) / (2,0) の 3 件。
+        // before = CharLength + 1 → 文書末尾のゼロ幅ヒット (2,0) まで到達する
+        Assert.Equal(new MatchSpan(2, 0), s.FindPrev(snap, snap.CharLength + 1));
+        // before = CharLength → Start=2 は「厳密に前」でないので対象外 → 直前の "b" を返す
+        Assert.Equal(new MatchSpan(1, 1), s.FindPrev(snap, snap.CharLength));
     }
 
     [Fact]
