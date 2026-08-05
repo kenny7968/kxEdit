@@ -387,6 +387,34 @@ public class SnapshotSearcherTests
     }
 
     // ==============================
+    // 戦略選択を「型」で直接固定する
+    // ==============================
+    //
+    // 上の AtExactThreshold_... / OneCharAboveThreshold_... は「改行跨ぎ regex がヒットするか」
+    // という意味論的帰結で経路を観測している=間接観測なので、将来 regex 戦略の行単位制約が
+    // 変われば、境界が反転していても緑のまま黙って無力化する。そこで選択規則そのものを
+    // 型で固定する網を重ねる。逆に、型が正しくても委譲先を書き間違えれば意味論テストだけが
+    // 捕まえるので、どちらも消さないこと。
+
+    [Theory]
+    [InlineData(5, false, typeof(MaterializedSearchStrategy))] // 境界ちょうど = 閾値以下
+    [InlineData(4, false, typeof(LiteralWindowSearchStrategy))]
+    [InlineData(4, true, typeof(RegexPerLineSearchStrategy))]
+    [InlineData(5, true, typeof(MaterializedSearchStrategy))] // 境界ちょうどは regex でも材質化
+    public void StrategyFor_selects_expected_strategy(int threshold, bool useRegex, Type expected)
+    {
+        var snap = Snap("ab\ncd"); // CharLength == 5
+        var s = MakeLarge(
+            "b",
+            useRegex: useRegex,
+            matchCase: true,
+            threshold: threshold,
+            window: 6
+        );
+        Assert.IsType(expected, s.StrategyFor(snap));
+    }
+
+    // ==============================
     // ゼロ幅ヒット (a* / \b / (?=...) 系) の網
     // ==============================
 

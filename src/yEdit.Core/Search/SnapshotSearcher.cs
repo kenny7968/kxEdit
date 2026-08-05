@@ -83,66 +83,53 @@ public sealed class SnapshotSearcher
     /// <summary>無効な場合の理由(空パターンや不正な正規表現)。有効なら null。</summary>
     public string? Error => _inner.Error;
 
+    /// <summary>snap のサイズと照合条件から戦略を選ぶ(分岐はこの 1 箇所だけ)。</summary>
+    /// <remarks>
+    /// 閾値超の 2 戦略は snapshot 非依存なので ctor で 1 個ずつ作って使い回す。
+    /// 閾値判定は「ちょうど一致は閾値以下(材質化経路)」。<c>&lt;</c> にすると
+    /// 閾値ちょうどの文書の意味論が変わる = 挙動変更になる
+    /// (<c>AtExactThreshold_uses_below_path_not_above</c> が固定)。
+    /// </remarks>
+    internal ISnapshotSearchStrategy StrategyFor(TextSnapshot snap) =>
+        snap.CharLength <= _thresholdChars ? _materialized
+        : _opts.UseRegex ? _regexPerLine
+        : _literal;
+
     /// <summary>snap 全体のヒット件数。無効なら 0。</summary>
-    public int Count(TextSnapshot snap)
-    {
-        if (!IsValid)
-            return 0;
-        if (!IsLarge(snap))
-            return _materialized.Count(snap);
-        return _opts.UseRegex ? _regexPerLine.Count(snap) : _literal.Count(snap);
-    }
+    public int Count(TextSnapshot snap) => IsValid ? StrategyFor(snap).Count(snap) : 0;
 
     /// <summary>from 以降で最初のヒット(折り返しなし)。無効なら null。</summary>
     public MatchSpan? FindNext(TextSnapshot snap, int from)
     {
         if (!IsValid)
             return null;
-        if (!IsLarge(snap))
-            return _materialized.FindNext(snap, from);
         if (from < 0)
             from = 0;
         if (from > snap.CharLength)
             return null;
-        return _opts.UseRegex ? _regexPerLine.FindNext(snap, from) : _literal.FindNext(snap, from);
+        return StrategyFor(snap).FindNext(snap, from);
     }
 
     /// <summary>開始位置(Index)が before より厳密に前にある最後のヒットを返す(折り返しなし)。</summary>
-    public MatchSpan? FindPrev(TextSnapshot snap, int before)
-    {
-        if (!IsValid)
-            return null;
-        if (!IsLarge(snap))
-            return _materialized.FindPrev(snap, before);
-        if (before <= 0)
-            return null;
-        int b = Math.Min(before, snap.CharLength);
-        return _opts.UseRegex ? _regexPerLine.FindPrev(snap, b) : _literal.FindPrev(snap, b);
-    }
+    /// <remarks>
+    /// <c>Math.Min(before, snap.CharLength)</c> を<b>ここへ集約してはいけない</b>。
+    /// 閾値以下経路は生の before を <see cref="TextSearcher"/> へ渡すのが現行挙動で、
+    /// 文書長を超える before とゼロ幅ヒットの組み合わせで結果が変わる
+    /// (パターン <c>b*</c> / 文書 <c>"ab"</c> で <c>FindPrev(3)</c> は <c>(2,0)</c>・
+    /// <c>FindPrev(2)</c> は <c>(1,1)</c>)。上限クランプは必要とする 2 戦略が自分で持つ。
+    /// </remarks>
+    public MatchSpan? FindPrev(TextSnapshot snap, int before) =>
+        IsValid && before > 0 ? StrategyFor(snap).FindPrev(snap, before) : null;
 
     /// <summary>span を全ヒット中の何件目か(1始まり, total)。span がヒットでなければ null。</summary>
-    public (int Ordinal, int Total)? Locate(TextSnapshot snap, MatchSpan span)
-    {
-        if (!IsValid)
-            return null;
-        if (!IsLarge(snap))
-            return _materialized.Locate(snap, span);
-        return _opts.UseRegex ? _regexPerLine.Locate(snap, span) : _literal.Locate(snap, span);
-    }
+    public (int Ordinal, int Total)? Locate(TextSnapshot snap, MatchSpan span) =>
+        IsValid ? StrategyFor(snap).Locate(snap, span) : null;
 
     /// <summary>
     /// span が実際のヒットなら置換文字列を返す(正規表現は $1 等展開・リテラルは素のまま)。違えば null。
     /// </summary>
-    public string? ReplacementAt(TextSnapshot snap, MatchSpan span, string replacement)
-    {
-        if (!IsValid)
-            return null;
-        if (!IsLarge(snap))
-            return _materialized.ReplacementAt(snap, span, replacement);
-        return _opts.UseRegex
-            ? _regexPerLine.ReplacementAt(snap, span, replacement)
-            : _literal.ReplacementAt(snap, span, replacement);
-    }
+    public string? ReplacementAt(TextSnapshot snap, MatchSpan span, string replacement) =>
+        IsValid ? StrategyFor(snap).ReplacementAt(snap, span, replacement) : null;
 
     /// <summary>
     /// [start, start+length) に完全に収まるヒットだけ置換し、その範囲の置換後断片と件数を返す。
@@ -156,21 +143,15 @@ public sealed class SnapshotSearcher
         string replacement
     )
     {
+        // 材質化経路の引数形を他 2 戦略と揃えて (s, end - s) を渡す。生の (start, length) を渡す
+        // 旧実装と結果は同一: TextSearcher.ReplaceInRange は s' = Clamp(s, 0, L) /
+        // end' = Clamp(s + (end - s), s, L) を再度行うが、下の 2 行で 0 <= s <= end <= L
+        // (L = 材質化長 = snap.CharLength) が成り立つため両方とも冪等(s' == s / end' == end)。
+        // 網 = ReplaceInRange_ClampsOutOfRangeArgs_below_threshold。
         int s = Math.Clamp(start, 0, snap.CharLength);
         int end = Math.Clamp(start + length, s, snap.CharLength);
         if (!IsValid)
             return (snap.GetText(s, end - s), 0);
-        // 材質化経路の引数形を他 2 戦略と揃えて (s, end - s) を渡す。生の (start, length) を渡す
-        // 旧実装と結果は同一: TextSearcher.ReplaceInRange は s' = Clamp(s, 0, L) /
-        // end' = Clamp(s + (end - s), s, L) を再度行うが、上の 2 行で 0 <= s <= end <= L
-        // (L = 材質化長 = snap.CharLength) が成り立つため両方とも冪等(s' == s / end' == end)。
-        // 網 = ReplaceInRange_ClampsOutOfRangeArgs_below_threshold。
-        if (!IsLarge(snap))
-            return _materialized.ReplaceInRange(snap, s, end - s, replacement);
-        return _opts.UseRegex
-            ? _regexPerLine.ReplaceInRange(snap, s, end - s, replacement)
-            : _literal.ReplaceInRange(snap, s, end - s, replacement);
+        return StrategyFor(snap).ReplaceInRange(snap, s, end - s, replacement);
     }
-
-    private bool IsLarge(TextSnapshot snap) => snap.CharLength > _thresholdChars;
 }
