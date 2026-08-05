@@ -158,7 +158,8 @@ public sealed class SnapshotSearcher
     /// <summary>
     /// [start, start+length) に完全に収まるヒットだけ置換し、その範囲の置換後断片と件数を返す。
     /// 範囲外・境界をまたぐヒットは対象外。start/length は snap 範囲へクランプする。
-    /// 閾値超でも Fragment を string で組み立てる=大容量 ReplaceAll での真の OOM 回避は P7 送り(設計書§2-8 許容)。
+    /// 閾値超でも Fragment を string で組み立てる=大容量 ReplaceAll での真の OOM 回避は未対応
+    /// (設計 2026-08-05 §8 S-1。旧表記「P7 送り」)。
     /// </summary>
     public (string Fragment, int Count) ReplaceInRange(
         TextSnapshot snap,

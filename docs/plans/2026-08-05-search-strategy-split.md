@@ -1087,6 +1087,26 @@ Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパ
 > `DropSearcher()` を購読する。`CloseActiveTab` の「明示更新ブロック」に相乗りさせる案は
 > `FileController` の 3 経路を取りこぼすので**採らない**。
 
+> **【訂正】保持窓の上限は約 160MB(最終脆弱性パス 1-2)**
+>
+> 本書はこれまで「背後の文書バイトは最大 512MB(`TextBuffer.MaxTotalBytes`)」と書いてきたが**誤り**。
+> 材質化戦略が選ばれるのは `CharLength <= 32M chars` のときだけで、
+> **閾値超の文書は窓照合 / 行照合=キャッシュを一切持たない**(両戦略とも snapshot 非依存の無状態)。
+>
+> | 内訳 | 上限 |
+> |---|---|
+> | 材質化 string(32M chars × 2B) | 64MB |
+> | ピン留めされる UTF-8 バイト(UTF-8 は最大 3B/UTF-16 単位) | 約 96MB |
+> | **合計** | **約 160MB・単一スロット** |
+>
+> 512MB のファイルはそもそもキャッシュ対象外。安全側の過大評価だったが、記録は正確な方がよい。
+>
+> **あわせて: ピーク使用量はむしろ下がっている。** 旧 `Find()` は `FindNext` → `Locate` で
+> 2 回材質化しており、**64MB の string が 2 本同時に生存する瞬間**があった(1 本目は GC 待ちのゴミ)。
+> 新実装は 1 本を使い回すのでピークが下がる。`ResolveSearcher` も `_searcher = new SnapshotSearcher(opts)`
+> で旧参照を先に落としてから使うため、条件変更時のピークも二重化しない。
+> **定常保持 +64MB / ピーク −64MB の交換**である(実測はしていないので PR に数値は書かない)。
+
 > **保持されるのは string だけではない(Task 4 レビュー S-G の精密化)**
 >
 > `_cachedSnapshot` は `TextSnapshot` → ピース木 → `TextChunk` のバイト配列**全体**をピン留めする。
@@ -1307,8 +1327,33 @@ description に必ず含めること:
 |---|---|---|---|
 | A-1 | 7 | **同一タブ内のバッファ差し替えは破棄トリガに掛からない。** `FileController` の開き直し(`:209`)・保存失敗ロールバック(`:450`)・セッション/バックアップ復元(`:548 / 776 / 801`)・EOL 変換(`:389-395`)は、タブを切り替えずにバッファ参照ごと入れ替えるため `ActiveDocumentChanged` が発火しない。旧バッファがキャッシュにピン留めされ続ける | **キャッシュの正しさには影響しない**(参照同一性で必ず再材質化される)。純粋に保持量の問題で、影響は「次に検索するまで」に限られる。`FileController` から検索キャッシュへ手を伸ばす結合を新設するほうが害が大きい。必要になれば `doc.ClearCsvCache()`(`FileController.cs:203`)と同じ場所に 1 行足せる |
 | A-2 | 7 | **破棄トリガ (iii) `Dismissed` は支配的フローでは一度も発火しない。** G-2 により検索モードでは「次を検索」成功時・Enter 成功時にダイアログが自分を Hide するため、`Ctrl+F → 入力 → Enter → 以後 F3` という最も普通の流れでユーザーが閉じる操作をする機会が無い | 仕様どおり。(iii) は「あれば効く」保険であり、常用フローの実効トリガは (i) 照合条件の変化 と (ii) 文書切替/クローズ。だからこそ (ii) の穴(I-1)を塞ぐことが重要 |
+| A-7 | 4 | **`TextOf` の代入順の不変条件に網が無い**(最終品質パス S-1 / 変異 M17)。`_cachedText` を先・`_cachedSnapshot` を後にする順序は例外安全上の要件だが、**入れ替えても 1954 件全緑**。コメントは危険性を正しく書いている。**この危険は本 PR で新規に生じたもの**(main はキャッシュを持たないため stale の窓が原理的に存在しなかった) | 発火条件が「`GetText` の例外」= 実質 OOM のみで、網を張るには `TextSnapshot` に投げさせるシームが要る。コストに見合わない。**コメントが既に理由を書いているので読者が網の存在を誤認する危険は低い**。A-5 と同じ「網が無いことを知っている状態を残す」扱い |
+| A-8 | 7 | **`Find` / `ReplaceOne` / `ReplaceAll` が `CurrentOptions()` を 2 回計算する**(最終品質パス S-2)。null ガードで 1 回、`ResolveSearcher()` 内でもう 1 回。`FindReplaceDialog.Pattern` は `TextBox.Text`(Win32 `WM_GETTEXT`)なので完全な無償ではない | 欠陥ではない(単一スレッド UI で 2 回の値は必ず一致し、main が行っていた**毎回の `Regex` 再コンパイルが消えている**ので総コストは大幅減)。`ResolveSearcher(SearchOptions opts)` の形にすれば「2 回の値が同じ」が構造的に保証されるが、**D-6 で `UpdateCount` だけ引数なし版が必要になった経緯**があり、統一するとかえって分岐が増える |
+| A-9 | 7 | **`internal` seam が `yEdit.Editor`(production アセンブリ)からも可視**(最終脆弱性パス 3-4)。`yEdit.Core.csproj:16` に `<InternalsVisibleTo Include="yEdit.Editor" />` がある。将来 Editor 側が `RegexPerLineSearchStrategy.FindPrev(snap, 0)` を直接呼ぶと `GetLineIndexOfChar(-1)` で例外になる(ファサードの `before > 0` が唯一の下限防御のため) | **現状 `yEdit.Editor` は一切使っていない**(grep 確認済み)。設計書 §3 が「`Core.Tests` から単体テストできる」としか書いていなかったのは記述の不足で、実害は無い |
 | A-5 | 7 | **`Dismissed` 購読の配置に網が無い。** `SearchController.cs:81` の `_view.Dismissed += ...` を `if` ブロックの**外**へ出す変異が、App.Tests 460 件全緑のまま**生存する**(レビューアが独立に実測)。コメントが「外に出すと Ctrl+F のたびに多重購読してハンドラが単調増加する」と明記しているのに、それを守らせるテストがない | 実害は「同一ビューへの購読が Ctrl+F のたびに 1 本増える」だけで、`DropSearcher` が冪等なので機能は壊れない(寿命もビューと同じ)。網を張るには fake に購読回数カウンタの seam が要り、コストに見合わない。**「ここには網が無い」ことを知っている状態を残す**(§7.6 の裏返しで、網が無い箇所を把握していることも同じ資産) |
-| A-6 | 7 | **`DocumentClosed` は `_lastHit` / `_selectionScope` をリセットしない。** アクティブタブを閉じて `TabControl.Selected` が発火しなかった場合、この 2 つが旧文書由来のまま残る | **Task 7 以前からの性質**で、直すと**挙動変更**になる。実害はほぼ無い(`_lastHit` は「選択範囲が直前ヒットと完全一致」のときだけ効き、`_selectionScope` は `ReplaceAll(InSelection)` の範囲指定だが `fragment` は新文書のスナップショットから作られクランプもされるので内容破壊は起きない)。将来 `DocumentClosed` で 3 つまとめてリセットする形に揃えるかは別テーマ |
+| A-6 | 7 | **`DocumentClosed` は `_lastHit` / `_selectionScope` をリセットしない。** アクティブタブを閉じて `TabControl.Selected` が発火しなかった場合、この 2 つが旧文書由来のまま残る | **Task 7 以前からの性質**(main と挙動同一)。**⚠ 受容理由を訂正**(下記) |
+
+> **【訂正】A-6 の受容理由が片側でしか成立しない(最終脆弱性パス §6)**
+>
+> 当初「`fragment` は新文書のスナップショットから作られ**クランプもされるので内容破壊は起きない**」と
+> 書いたが、**これは「新文書が旧スコープより短い場合」にだけ正しい**。逆の場合はクランプが何もしない。
+>
+> **到達シナリオ**:
+> 1. 巨大な文書 A で範囲 `[500000, 600000)` を選択し「選択範囲のみ(&S)」を ON にする
+> 2. **アクティブタブ** A を閉じる。`MainForm.cs:952-954` 自身が「選択タブ削除時の `TabControl.Selected`
+>    発火は WinForms の仕様上保証されない」と明記しており、発火しなければ `_selectionScope = null` が走らない
+> 3. 新アクティブ文書 B の長さが 600000 以上
+> 4. チェックを付けたまま「すべて置換」を押す
+>
+> → `rangeStart = 500000 / rangeLen = 100000` は **B の中で完全に正当な範囲**なのでクランプは何もしない。
+> **ユーザーが一度も選択していない B の `[500000, 600000)` に「すべて置換」が実行され、
+> 「N 件置換しました」と発声される。**
+>
+> **影響の限界**: クラッシュしない(`EditorControl.ReplaceCharRange` の `SnapAndClamp` が両端を丸める)・
+> バイト列の捏造や無関係データの混入は起きない(`fragment` は B のスナップショット由来)・Undo で戻せる。
+>
+> **本ブランチ由来ではない**(main も同一)。ただし本ブランチが `DocumentClosed` を新設して
+> 「閉じた」を初めて観測可能にしたため、**修正コストが 1 行**になっている。
 | A-4 | 6/7 | **G-2 で隠れたまま検索をやめると `Dismissed` は永久に発火しない。** 隠れたダイアログには Escape も閉じるボタンも × も届かないため、「F3 連打をやめただけ」では (iii) が来ない。解放は (i) 照合条件の変化 /(ii) 文書切替・クローズ / アプリ終了頼みになる。**設計書 §5.3 が「キャッシュが最も効く場面」と呼ぶ経路が、そのまま「破棄トリガが届かない場面」でもある**(§5.3 の議論は可視クローズを前提にしており、この経路に触れていなかった) | 保持量は**アクティブ文書 1 本ぶんで上限が付く**ため受容。加えて「オーナー(MainForm)ごと閉じるときも `Dismissed` は発火しない」(`CloseReason` が `FormOwnerClosing` / `ApplicationExitCall` になり `base.OnFormClosing` へ落ちる)が、これはプロセス終了=一括解放なので破棄トリガとして不要 |
 | A-3 | 5 | **`_materialized` フィールドを interface 型へ一般化しない。** 「畳んだついでに 3 フィールドを `ISnapshotSearchStrategy[]` へ」といった整理をしない | Task 7 で解放(`Reset()`)が必要になったとき、具象型のまま保持していれば interface を汚さずに呼べる。一般化すると退路が消える。なお「1 つだけが状態を持つ」非対称を型に出さない判断自体は正しい(呼び出し側から観測不能な差であり、型に出す唯一の形 `Reset()` / `IDisposable` は 2 実装に空実装を強いる) |
 
@@ -1320,6 +1365,7 @@ CLAUDE.md §2「意図的な挙動変更・計画からの逸脱は、設計書�
 | # | Task | 逸脱 | 理由 |
 |---|---|---|---|
 | D-1 | 2 | `SnapshotSearcher._windowSize` フィールドを削除し、ctor 引数を直接戦略へ渡す形にした(計画 Task 2 Step 3 はフィールド保持を指示していた) | フィールドにすると ctor でしか読まれなくなり、SonarAnalyzer **S1450**(`Remove the field and declare it as a local variable`)が `-warnaserror` でビルドを落とす。挙動は同一(`ArgumentOutOfRangeException.ThrowIfNegativeOrZero` の実行順も従来どおり戦略構築より前)。テスト側に reflection 参照が無いことは grep 確認済み |
+| D-7 | 5 | **`FindPrev` の下限ガードを畳んだ結果、`before <= 0` では材質化も照合も走らなくなった**(最終脆弱性パス 3-3 が発見・未記録だった) | 旧実装は材質化経路について `before <= 0` の短絡より**手前**で `_inner.FindPrev(Materialize(snap), before)` に入っていた。新実装はファサードで `before > 0` を全経路に課す。**戻り値は同値**(`TextSearcher.FindPrev` は `m.Index >= before` で break するので `before <= 0` は必ず null)だが、**副作用が違う**: 旧は文書全体を材質化(最大 64MB)して照合を走らせるため `RegexMatchTimeoutException` を投げえたが、新は即 null。到達経路は「文書先頭(`selStart == 0`)で Shift+F3」で、病的パターンのとき発声が「検索式が複雑すぎます」→「これ以上見つかりません」に変わる。**方向は安全側**(例外が減り無駄な材質化も消える)だが、挙動不変を掲げる以上は記録する |
 | D-6 | 7 | `UpdateCount` の null 判定を `CurrentOptions()` から `ResolveSearcher()` の結果へ移した(計画は「`opts` のローカルはそのまま残す」と指示していた) | **計画どおりだと `ResolveSearcher` 内の `DropSearcher()` が到達不能な死にコードになる。** 各メソッドが先に `if (opts is null) return;` で早期 return するため、4 呼び出し側すべてで到達しない。不変条件 3(検索語を空にしたら破棄)のテストが赤くなって発覚した。条件は `CurrentOptions() is null` と**同値**でステータス表示の挙動は不変(既存 `UpdateCount_*` テスト全緑)。残り 3 メソッドは指示どおり `opts` を残した(CSV ガードより後で解決する順序を保存するため) |
 | D-5 | 5 | B-1 の網に、指示された `FindPrev(snap, CharLength + 100)` に加えて **`int.MaxValue` のアサートを追加**した | **指示された値ではリテラル戦略の `Math.Min` を消しても差が出ない**(kill できない)。リテラル `FindPrev` で `before` が効くのは `end = Math.Min(before + overlap, CharLength)` と `absStart < before` の 2 箇所だけで、どちらも `CharLength` で頭打ちになるため。差が出るのは `before + overlap` が int を溢れて `end` が負になり `while (end > 0)` が回らなくなるときだけ。`CharLength + 100` のアサートは意味論の凍結として残し、実際に kill できる `int.MaxValue` を足した。**regex 側は `CharLength + 100` でも殺せる**(`before - 1` が `GetLineIndexOfChar` へ直接渡り範囲外例外)= 防御の質が非対称 |
 | D-4 | 4 | `MaterializedSearchStrategy` の doc から、計画にあった「同じ idiom を `TextBuffer.Modified` が既に採用している」という記述を**精密化**した。あわせて `ReplaceInRange` 内のコメント位置を `if` の上へ移した | **計画の記述が不正確だった。** `TextBuffer.Modified`(`TextBuffer.cs:46`)は `ReferenceEquals(_current.Root, _savedRoot)` で**スナップショットではなくピース木のルート参照**を比べており、「同じ idiom」だと同一の参照を比べていると読める。帰結も併記した=**Undo で同じルートへ戻ると新しい `TextSnapshot` インスタンスになるため、キャッシュは無駄に作り直すが古い本文を返すことはない(誤りは安全な側にしか倒れない)**。コメント位置は、このリポジトリが単文 `if` に brace を付けない様式のため |
