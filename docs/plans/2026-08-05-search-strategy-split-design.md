@@ -297,6 +297,34 @@ G-2 の仕様により「次を検索」の後にダイアログは**自らを H
 > **一般化**: 「指摘は鵜呑みにしない」(CLAUDE.md §4)は、指摘の妥当性だけでなく
 > **指摘が持ってきた検出手段(テストコード)の有効性**にも適用すること。
 > 指摘が正しくても、提示された網が機能するとは限らない。
+>
+> ### 7.6 網は「意図が言う場所」ではなく「コードが実際に分岐する場所」に置く
+>
+> 本ブランチで**同じ失敗が 3 度**起きた。いずれも「指摘・指示は正しいのに、添えられたテストが
+> 対象の変異を殺せない」形である。
+>
+> | # | Task | 指示された網 | 殺せなかった理由 |
+> |---|---|---|---|
+> | 1 | 1 | 閾値境界に空文書(`threshold: 0`)を使う既存テスト | 空文書は**両経路とも同じ値**(`0` / `null` / `("", 0)`)を返すので差が出ない |
+> | 2 | 4 | 6 API を順に叩いて材質化回数の**合計**が 1 であること | 迂回は回数を**減らす**だけ。次の API が埋めるので合計は 1 のまま |
+> | 3 | 5 | 閾値超 `FindPrev(snap, CharLength + 100)` | リテラル戦略では `before` の効き先が `Math.Min(before + overlap, CharLength)` と `absStart < before` の 2 箇所だけで、**どちらも `CharLength` で頭打ち**。差が出るのは `before + overlap` が int を溢れるときだけ |
+> | 4 | 5 fixup | (既存テストが網になっていると思われていた 2 件) | `FindNext_PastEnd_returns_null_above_threshold` は `from == CharLength` **ちょうど**で、ガード条件(厳密超え `>`)に当たらない。`FindPrev_LiteralAboveThreshold_matches_below` の `Assert.Null(above.FindPrev(snap, 0))` は**リテラル戦略**なので `before = 0` でも `end = Min(0 + overlap, L)` が小さく `while (end > 0)` が空回りして null を返すだけ=**例外にならない**(壊れるのは regex 戦略だけ) |
+>
+> 4 番の教訓は独立に言う価値がある: **「同じ形の assert が既にある」は「網がある」を意味しない。**
+> 引数の値が境界の**どちら側か**、経路が**どの戦略か**まで一致していなければ、
+> 見た目が同じ assert でも別の変異を見ている。
+>
+> **共通の構造**: テストを「意図(この行は文書長超の before をクランプする)」から書くと、
+> **コードが実際に値を区別する領域**を外す。3 番の例では、クランプの意図は「文書長超の丸め込み」
+> だが、**観測可能な唯一の効果はオーバーフロー防止**だった。
+>
+> **手順として**: 網を書いたら**必ずその場で対象の変異を入れて赤くなることを確認する**。
+> 赤くならなければ、網が悪いか、守っているつもりのものが実は別物である。
+> 後者なら**コメントの記述も実態に合わせて直す**(意図と実効果がずれたまま残ると、
+> 次に読む人が同じ誤解をする)。
+>
+> 3 番はメモリーの `maxScan == int.MinValue` で上限が消える件と同型で、
+> 「**クランプを外しても普通の値では全緑**」という危険な形である。
 
 ## 8. 申し送り
 
@@ -312,6 +340,8 @@ G-2 の仕様により「次を検索」の後にダイアログは**自らを H
 >
 > | ID | 内容 | 理由 |
 > |---|---|---|
+> | S-6 | **CLAUDE.md の環境ノートへ追記する候補**: Windows PowerShell 5.1 の `Get-Content` は既定が ANSI 読みで、**日本語コメントを含むファイルを比較すると全ファイルが差分ありと誤検出される**(Task 5 fixup で実際に踏んだ)。差分検証には `git diff -I'^\s*///'` や `git cat-file blob` + ハッシュ比較を使うこと。既存の「ログ出力は UTF-8 を明示する」ノートと同種の落とし穴 | 本 PR のスコープ外(CLAUDE.md はプロジェクト全体の規範文書)。別途 docs 変更として起票 |
+> | S-5 | **`main` の Core テストが Debug 構成で 4 件赤**(本ブランチ無関係・**Task 2 / 3 / 5 の 3 レビューが独立に報告**)。`WordBoundaryTests.MaxScan_NonPositive_NeverRemovesScanLimit`(maxScan: 0 / -1 / -7 / `int.MinValue`)が `WordBoundary.cs:258` の `Debug.Fail`(「maxScan は 1 以上でなければならない(0 以下は未規定=正規化しない)」)で落ちる。**テストは「非正の maxScan では上限を外さない」と主張し、実装は同じ入力を「未規定」として拒否しており、契約が食い違っている**。merge-base `40aa4f5` で再現確認済み | 本 PR のスコープ外。`Debug.Fail` は Release で消えるため **Release では全緑**で、`tools/pre-merge-check.ps1`(Release)も CI も素通りする=これまで表面化しなかった。PR #36(UIA 単語単位・`maxScan == int.MinValue` で上限が消える件)の後始末として**別途トリアージすること** |
 > | S-4 | **リポジトリ全体の XML doc 腐り**。本リポジトリは `GenerateDocumentationFile` が無効なため **cref 切れが機械検出されない**。`-p:GenerateDocumentationFile=true -p:TreatWarningsAsErrors=false` の一時ビルドで棚卸ししたところ、`SnapshotSearcher.cs` のクラス doc に `ThresholdChars` / `WindowSize`(実体は `DefaultThresholdChars` / `DefaultWindowSize`)、`TextFileService.cs` に cref 3 件、`SafeLinkExtension.cs:125-129` に **XML そのものが壊れた CS1570 が 6 件**。 | 本 PR は `SnapshotSearcher.cs` の 2 件のみ Task 5 のクラス doc 書き直しで回収し、残りは別テーマ。**手法(`GenerateDocumentationFile=true` の一時ビルドで doc 腐りを棚卸しする)自体が再利用価値を持つ** |
 
 ## 9. L5 実機 SR 検証

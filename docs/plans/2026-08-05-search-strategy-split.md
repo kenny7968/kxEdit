@@ -1125,8 +1125,12 @@ Task 2〜4 で `*LiteralWindow` / `*RegexPerLine` / `Materialize` という priv
 各タスクは「`tests/` 無変更」の制約下で進めたので、ここが唯一の回収点になる。
 
 ```powershell
-rg -n "RegexPerLine|LiteralWindow|Materialize" tests/
+rg -n "RegexPerLine|LiteralWindow|Materialize|IsLarge" tests/
 ```
+
+**既知のヒット(Task 5 実装者の申告)**: `tests/yEdit.Core.Tests/Search/SnapshotSearcherTests.cs`
+の `:270 / :286 / :344` に、Task 5 で削除した `IsLarge` を指すコメントが 3 箇所残っている。
+各タスクは「既存テスト無変更」の制約下で進めたため、ここが回収点。
 
 ヒットしたコメントを現行のクラス名(`RegexPerLineSearchStrategy` 等)へ読み替える。
 **コメントのみ。テストのロジックは触らない。**
@@ -1265,6 +1269,7 @@ CLAUDE.md §2「意図的な挙動変更・計画からの逸脱は、設計書�
 | # | Task | 逸脱 | 理由 |
 |---|---|---|---|
 | D-1 | 2 | `SnapshotSearcher._windowSize` フィールドを削除し、ctor 引数を直接戦略へ渡す形にした(計画 Task 2 Step 3 はフィールド保持を指示していた) | フィールドにすると ctor でしか読まれなくなり、SonarAnalyzer **S1450**(`Remove the field and declare it as a local variable`)が `-warnaserror` でビルドを落とす。挙動は同一(`ArgumentOutOfRangeException.ThrowIfNegativeOrZero` の実行順も従来どおり戦略構築より前)。テスト側に reflection 参照が無いことは grep 確認済み |
+| D-5 | 5 | B-1 の網に、指示された `FindPrev(snap, CharLength + 100)` に加えて **`int.MaxValue` のアサートを追加**した | **指示された値ではリテラル戦略の `Math.Min` を消しても差が出ない**(kill できない)。リテラル `FindPrev` で `before` が効くのは `end = Math.Min(before + overlap, CharLength)` と `absStart < before` の 2 箇所だけで、どちらも `CharLength` で頭打ちになるため。差が出るのは `before + overlap` が int を溢れて `end` が負になり `while (end > 0)` が回らなくなるときだけ。`CharLength + 100` のアサートは意味論の凍結として残し、実際に kill できる `int.MaxValue` を足した。**regex 側は `CharLength + 100` でも殺せる**(`before - 1` が `GetLineIndexOfChar` へ直接渡り範囲外例外)= 防御の質が非対称 |
 | D-4 | 4 | `MaterializedSearchStrategy` の doc から、計画にあった「同じ idiom を `TextBuffer.Modified` が既に採用している」という記述を**精密化**した。あわせて `ReplaceInRange` 内のコメント位置を `if` の上へ移した | **計画の記述が不正確だった。** `TextBuffer.Modified`(`TextBuffer.cs:46`)は `ReferenceEquals(_current.Root, _savedRoot)` で**スナップショットではなくピース木のルート参照**を比べており、「同じ idiom」だと同一の参照を比べていると読める。帰結も併記した=**Undo で同じルートへ戻ると新しい `TextSnapshot` インスタンスになるため、キャッシュは無駄に作り直すが古い本文を返すことはない(誤りは安全な側にしか倒れない)**。コメント位置は、このリポジトリが単文 `if` に brace を付けない様式のため |
 | D-3 | 3 | `SnapshotSearcher.cs` から `using System.Text;` を削除した(**「本体は一切変えない」の許容範囲を超える任意変更**) | `StringBuilder` の唯一の利用者 `ReplaceInRangeRegexPerLine` が転出して未使用になったための衛生的削除。挙動影響ゼロ。**⚠ 当初「SonarAnalyzer S1128 が `-warnaserror` で落とすので必然」と記録したが、これは事実誤認だった**(Task 3 レビューで判明)。`using` を戻して Debug / Release / ソリューション全体をビルドしても **0 警告 0 エラー**。アナライザ自体は生きており(未読 private フィールドの探針で `error S4487` が出る)、**S1128 だけが有効化されていない**。原因は `Directory.Build.props:8` の `<EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>` と S1128 非有効の組み合わせ。**このリポジトリでは未使用 using はビルドを落とさない** |
 | D-2 | 2 | 計画の `ISnapshotSearchStrategy` 案にあった「位置引数は呼び出し前に `SnapshotSearcher` が snap の範囲へクランプ済み」という契約 bullet を**採用しなかった** | **この記述は Task 5 で偽になる。** G-2(`FindPrev` のクランプはファサードへ集約できない)の発覚後、計画の Task 2/3/5 は修正したが、インターフェース案の bullet を直し忘れていた=**計画側のバグ**。実装者が正しく落とした。代わりに引数ごとの保証を表で書く(Task 2 レビュー I-1・弱い保証で書くことで Task 5 後も書き直し不要になる) |
