@@ -48,7 +48,11 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
     private TextSnapshot? _cachedSnapshot;
     private string _cachedText = string.Empty;
 
-    /// <summary>テスト観測用: 実際に材質化した回数。キャッシュが効いていることを assert 化する seam。</summary>
+    /// <summary>
+    /// テスト観測用: 実際に材質化した回数。キャッシュが効いていることを assert 化する seam。
+    /// <b>消さないこと</b>: <c>Cache_holds_at_most_one_snapshot</c> が「保持は最大 1 本」を
+    /// 検証する唯一の手段であり、結果値からは辞書実装(多スロット)と区別できない。
+    /// </summary>
     internal int MaterializeCountForTest { get; private set; }
 
     internal MaterializedSearchStrategy(TextSearcher inner) => _inner = inner;

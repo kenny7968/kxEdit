@@ -11,7 +11,9 @@ namespace yEdit.Core.Search;
 /// <b>実装者への契約</b>:
 /// <list type="bullet">
 ///   <item>照合条件は有効(<see cref="TextSearcher.IsValid"/>=true)であることが保証される。
-///     無効時の短絡は <see cref="SnapshotSearcher"/> 側が持つため、実装で再度ガードしない。</item>
+///     無効時の短絡は <see cref="SnapshotSearcher"/> 側が持つため、実装で再度ガードする必要はない
+///     (置いてもよい=<see cref="LiteralWindowSearchStrategy"/> は <c>plen == 0</c> を再ガードしている。
+///     リテラルでは <c>IsValid == false ⇔ Pattern が空</c>なので契約上このガードはデッド)。</item>
 ///   <item>オフセットは全て UTF-16 コード単位。</item>
 ///   <item><b>インスタンスは複数の <see cref="TextSnapshot"/> にまたがって再利用される</b>
 ///     (ファサードが構築時に 1 個作り、以後すべての呼び出しで使い回す)。
