@@ -792,6 +792,16 @@ regex 側の `Count` は `_inner.Count` へ、`ReplaceInRange` は `_inner.Repla
 最終レビューのミューテーションでリテラル側が生存しても、それは欠陥ではなく戦略分離により
 保証が閉じた結果である、と説明できること。
 
+**中間状態の注記は 2 箇所ではなく 4 箇所(Task 4 品質レビュー S-2)**
+
+下の 2 箇所に加え、**「現在はファサード側にも同じクランプがあり二重だが」という記述が
+さらに 2 箇所**ある(`LiteralWindowSearchStrategy.cs:111-112` / `RegexPerLineSearchStrategy.cs:75-76`)。
+Task 5 でファサードのクランプが外れると、この「二重だが」は**偽になる**(後半の
+「唯一の防御になる」は真になる)。チェックリストを字義どおり追うと 2 箇所しか直らない。
+
+**救い**: 4 箇所すべてが `Task 5` というリテラルを含む。**Task 5 を閉じる前に必ず
+`rg "Task 5" src/yEdit.Core/Search/` で全件を洗うこと。**
+
 **Task 5 完了時に消すべき「中間状態の注記」2 箇所(Task 4 fixup 申し送り)**
 
 Task 4 fixup で、「契約表の `FindNext` / `FindPrev` の 2 行は中間状態では材質化戦略に適用されない」
@@ -991,7 +1001,12 @@ Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパ
     {
         var opts = CurrentOptions();
         if (opts is null)
+        {
+            // Task 4 品質レビュー I-3: 検索語を空にしたら保持中の searcher(とキャッシュ)を落とす。
+            // 素の `return null;` だと _searcher に触れないため、空にしても保持が続く。
+            DropSearcher();
             return null;
+        }
         if (_searcher is null || _searcherOptions != opts)
         {
             _searcher = new SnapshotSearcher(opts);
@@ -1030,6 +1045,24 @@ Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパ
         };
 ```
 
+> **【設計変更】`ActiveDocumentChanged` はタブクローズで発火しない(Task 4 品質レビュー I-1)**
+>
+> 当初「発火するか確認し、しないなら別途手当てする」と書いたが、**答えはリポジトリ内に既にあった**。
+> `MainForm.cs:954` に「選択タブ削除時の `TabControl.Selected` 発火は WinForms の仕様上保証されない」
+> という注記があり、`DocumentManager.ActiveDocumentChanged` の唯一の発火源はその `_tabs.Selected`
+> (`DocumentManager.cs:20,161`)。したがって**トリガ (ii) はタブを閉じる経路を覆わない**。
+>
+> `TryClose`(`DocumentManager.cs:113-122`)は `doc.Editor.Dispose()` まで済ませるのに、
+> 材質化キャッシュは閉じた文書の `TextSnapshot` → ピース木 → `TextChunk` を掴んだままになる。
+>
+> - 最後の 1 枚を閉じる場合は `MainForm.CloseActiveTab` が `Close()`(アプリ終了)へ抜けるので無害
+> - 問題は**複数タブのうち 1 枚を閉じる**ケース
+> - `TryClose` の呼び出し元は `MainForm.cs:947` のほか `FileController.cs:132 / 145 / 661`
+>
+> **対応**: `DocumentManager` に `DocumentClosed` イベントを足し、`SearchController` が
+> `DropSearcher()` を購読する。`CloseActiveTab` の「明示更新ブロック」に相乗りさせる案は
+> `FileController` の 3 経路を取りこぼすので**採らない**。
+
 > **保持されるのは string だけではない(Task 4 レビュー S-G の精密化)**
 >
 > `_cachedSnapshot` は `TextSnapshot` → ピース木 → `TextChunk` のバイト配列**全体**をピン留めする。
@@ -1058,6 +1091,12 @@ Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパ
             _view.Dismissed += (_, _) => DropSearcher();
         }
 ```
+
+**`SnapshotSearcher` のクラス doc を更新すること(Task 4 fixup 申し送り)**
+
+`SnapshotSearcher` のクラス doc に「利用者は `SearchController` の 4 箇所のみで、いずれも
+UI スレッド」と書いてある(Task 4 品質レビュー I-4 でスレッド非安全を明記した際の記述)。
+**本タスクで searcher が長寿命化すると、まさにこの doc が効く場面になる。** 更新漏れに注意。
 
 **Step 4: テストが通ることを確認**
 
@@ -1203,9 +1242,20 @@ description に必ず含めること:
 - 申し送り S-1 / S-2 / S-3(設計 §8)
 - 精密化 1(Dismissed へ差し替えた理由)と精密化 2(境界テストが無かった事実)
 - **計画からの逸脱**(CLAUDE.md §2 は文書化を必須としている)— 下記「実施記録」を参照
+- **受容した指摘**(下記「受容した指摘」節)
 - 後続テーマ C → B → E(設計 §11)
 
 ---
+
+## 受容した指摘(CLAUDE.md §4 の ②「PR description に記載して受容」)
+
+修正せず受け入れると判断したもの。**PR description へ転記すること。**
+
+| ID | Task | 内容 | 受容の理由 |
+|---|---|---|---|
+| A-1 | 7 | **同一タブ内のバッファ差し替えは破棄トリガに掛からない。** `FileController` の開き直し(`:209`)・保存失敗ロールバック(`:450`)・セッション/バックアップ復元(`:548 / 776 / 801`)・EOL 変換(`:389-395`)は、タブを切り替えずにバッファ参照ごと入れ替えるため `ActiveDocumentChanged` が発火しない。旧バッファがキャッシュにピン留めされ続ける | **キャッシュの正しさには影響しない**(参照同一性で必ず再材質化される)。純粋に保持量の問題で、影響は「次に検索するまで」に限られる。`FileController` から検索キャッシュへ手を伸ばす結合を新設するほうが害が大きい。必要になれば `doc.ClearCsvCache()`(`FileController.cs:203`)と同じ場所に 1 行足せる |
+| A-2 | 7 | **破棄トリガ (iii) `Dismissed` は支配的フローでは一度も発火しない。** G-2 により検索モードでは「次を検索」成功時・Enter 成功時にダイアログが自分を Hide するため、`Ctrl+F → 入力 → Enter → 以後 F3` という最も普通の流れでユーザーが閉じる操作をする機会が無い | 仕様どおり。(iii) は「あれば効く」保険であり、常用フローの実効トリガは (i) 照合条件の変化 と (ii) 文書切替/クローズ。だからこそ (ii) の穴(I-1)を塞ぐことが重要 |
+| A-3 | 5 | **`_materialized` フィールドを interface 型へ一般化しない。** 「畳んだついでに 3 フィールドを `ISnapshotSearchStrategy[]` へ」といった整理をしない | Task 7 で解放(`Reset()`)が必要になったとき、具象型のまま保持していれば interface を汚さずに呼べる。一般化すると退路が消える。なお「1 つだけが状態を持つ」非対称を型に出さない判断自体は正しい(呼び出し側から観測不能な差であり、型に出す唯一の形 `Reset()` / `IDisposable` は 2 実装に空実装を強いる) |
 
 ## 実施記録(計画からの逸脱)
 
