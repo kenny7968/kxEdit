@@ -473,4 +473,58 @@ public class SnapshotSearcherTests
         Assert.Equal("X_X", frag);
         Assert.Equal(2, count);
     }
+
+    // ==============================
+    // 閾値超経路の FindPrev: 文書長超の before は「戦略側の」クランプが受け止める
+    // ==============================
+    //
+    // ファサード SnapshotSearcher.FindPrev は before の上限をクランプしない(下限
+    // before > 0 だけを見る)。閾値以下経路が生の before を必要とするためで、その理由と
+    // 反例は FindPrev_BeforePastEnd_is_not_clamped_below_threshold と
+    // ISnapshotSearchStrategy の契約表にある。結果として閾値超の 2 戦略は
+    // それぞれ自分で Math.Min(before, snap.CharLength) を持っており、そこが唯一の防御になる。
+    // 以下 2 件はその 1 行を戦略ごとに固定する網である(ファサード経由で叩く=本番の呼ばれ方)。
+
+    [Fact]
+    public void FindPrev_BeforePastEnd_is_clamped_by_literal_strategy_above_threshold()
+    {
+        var snap = Snap("ab XY ab XY ab"); // CharLength == 14 / 最後の "ab" は index 12
+        Assert.Equal(14, snap.CharLength);
+        var s = MakeLarge("ab", matchCase: true, threshold: 4, window: 6);
+
+        // 基準: before = 文書長ちょうど。
+        var atEnd = s.FindPrev(snap, snap.CharLength);
+        Assert.Equal(new MatchSpan(12, 2), atEnd);
+
+        // (a) 文書長超でも同じ結果になる = クランプの意味論。
+        Assert.Equal(atEnd, s.FindPrev(snap, snap.CharLength + 100));
+
+        // (b) クランプの有無を実際に区別できるのはこの assert だけである。
+        //     リテラル窓照合で before が効くのは
+        //       end = Math.Min(before + overlap, CharLength)  … CharLength で頭打ち
+        //       absStart < before                             … absStart <= CharLength - plen
+        //     の 2 箇所しかなく、CharLength をわずかに超える before では結果が変わらない。
+        //     差が出るのは before + overlap が int を溢れるときで、クランプを外すと end が
+        //     負値になり while (end > 0) が一度も回らずに null が返る。
+        Assert.Equal(new MatchSpan(12, 2), s.FindPrev(snap, int.MaxValue));
+    }
+
+    [Fact]
+    public void FindPrev_BeforePastEnd_is_clamped_by_regex_strategy_above_threshold()
+    {
+        var snap = Snap("ab XY\nab XY\nab"); // CharLength == 14 / 行 2 = "ab" (行頭 12)
+        Assert.Equal(14, snap.CharLength);
+        var s = MakeLarge("a.", useRegex: true, matchCase: true, threshold: 4, window: 6);
+        Assert.True(s.IsValid);
+
+        var atEnd = s.FindPrev(snap, snap.CharLength);
+        Assert.Equal(new MatchSpan(12, 2), atEnd);
+
+        // regex 行単位経路はクランプを外すと即座に落ちる: before - 1 をそのまま
+        // TextSnapshot.GetLineIndexOfChar へ渡しており、pos > CharLength は
+        // ArgumentOutOfRangeException になる。よってリテラル側と違い、
+        // 「文書長 + 100」でもクランプの有無を区別できる。
+        Assert.Equal(atEnd, s.FindPrev(snap, snap.CharLength + 100));
+        Assert.Equal(new MatchSpan(12, 2), s.FindPrev(snap, int.MaxValue));
+    }
 }
