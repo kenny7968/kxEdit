@@ -43,6 +43,7 @@ public sealed class SnapshotSearcher
     private readonly TextSearcher _inner;
     private readonly int _thresholdChars;
 
+    private readonly MaterializedSearchStrategy _materialized;
     private readonly LiteralWindowSearchStrategy _literal;
     private readonly RegexPerLineSearchStrategy _regexPerLine;
 
@@ -63,7 +64,8 @@ public sealed class SnapshotSearcher
         _thresholdChars = thresholdChars;
         // (_windowSize フィールドは持たない: 窓サイズはここで戦略へ渡し、以後は戦略側が保持する)
         _literal = new LiteralWindowSearchStrategy(options, windowSize);
-        // regex 戦略は内側 TextSearcher を共有する(必ず _inner 代入の後で構築すること)。
+        // 材質化戦略・regex 戦略は内側 TextSearcher を共有する(必ず _inner 代入の後で構築すること)。
+        _materialized = new MaterializedSearchStrategy(_inner);
         _regexPerLine = new RegexPerLineSearchStrategy(_inner);
     }
 
@@ -79,7 +81,7 @@ public sealed class SnapshotSearcher
         if (!IsValid)
             return 0;
         if (!IsLarge(snap))
-            return _inner.Count(Materialize(snap));
+            return _materialized.Count(snap);
         return _opts.UseRegex ? _regexPerLine.Count(snap) : _literal.Count(snap);
     }
 
@@ -89,7 +91,7 @@ public sealed class SnapshotSearcher
         if (!IsValid)
             return null;
         if (!IsLarge(snap))
-            return _inner.FindNext(Materialize(snap), from);
+            return _materialized.FindNext(snap, from);
         if (from < 0)
             from = 0;
         if (from > snap.CharLength)
@@ -103,7 +105,7 @@ public sealed class SnapshotSearcher
         if (!IsValid)
             return null;
         if (!IsLarge(snap))
-            return _inner.FindPrev(Materialize(snap), before);
+            return _materialized.FindPrev(snap, before);
         if (before <= 0)
             return null;
         int b = Math.Min(before, snap.CharLength);
@@ -116,7 +118,7 @@ public sealed class SnapshotSearcher
         if (!IsValid)
             return null;
         if (!IsLarge(snap))
-            return _inner.Locate(Materialize(snap), span);
+            return _materialized.Locate(snap, span);
         return _opts.UseRegex ? _regexPerLine.Locate(snap, span) : _literal.Locate(snap, span);
     }
 
@@ -128,7 +130,7 @@ public sealed class SnapshotSearcher
         if (!IsValid)
             return null;
         if (!IsLarge(snap))
-            return _inner.ReplacementAt(Materialize(snap), span, replacement);
+            return _materialized.ReplacementAt(snap, span, replacement);
         return _opts.UseRegex
             ? _regexPerLine.ReplacementAt(snap, span, replacement)
             : _literal.ReplacementAt(snap, span, replacement);
@@ -150,14 +152,17 @@ public sealed class SnapshotSearcher
         int end = Math.Clamp(start + length, s, snap.CharLength);
         if (!IsValid)
             return (snap.GetText(s, end - s), 0);
+        // 材質化経路の引数形を他 2 戦略と揃えて (s, end - s) を渡す。生の (start, length) を渡す
+        // 旧実装と結果は同一: TextSearcher.ReplaceInRange は s' = Clamp(s, 0, L) /
+        // end' = Clamp(s + (end - s), s, L) を再度行うが、上の 2 行で 0 <= s <= end <= L
+        // (L = 材質化長 = snap.CharLength) が成り立つため両方とも冪等(s' == s / end' == end)。
+        // 網 = ReplaceInRange_ClampsOutOfRangeArgs_below_threshold。
         if (!IsLarge(snap))
-            return _inner.ReplaceInRange(Materialize(snap), start, length, replacement);
+            return _materialized.ReplaceInRange(snap, s, end - s, replacement);
         return _opts.UseRegex
             ? _regexPerLine.ReplaceInRange(snap, s, end - s, replacement)
             : _literal.ReplaceInRange(snap, s, end - s, replacement);
     }
 
     private bool IsLarge(TextSnapshot snap) => snap.CharLength > _thresholdChars;
-
-    private static string Materialize(TextSnapshot snap) => snap.GetText(0, snap.CharLength);
 }
