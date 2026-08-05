@@ -745,6 +745,38 @@ Task 3 レビューアが実測: **`LiteralWindowSearchStrategy` / `RegexPerLine
 `FindPrev(snap, CharLength + 1)` を直接叩くテストを足すこと。上のファサード経由テストは
 literal 経路しか通らないので、**2 戦略ぶん必要**。
 
+**材質化戦略に届く位置引数は「完全に未正規化」(Task 4 申し送り S-F)**
+
+Task 5 最大の地雷。ファサードの材質化分岐は**すべてのクランプ・早期 return より手前**にある:
+
+```csharp
+if (!IsLarge(snap))
+    return _materialized.FindNext(snap, from);   // ← ここで返る
+if (from < 0) from = 0;                          // ← 材質化経路は通らない
+if (from > snap.CharLength) return null;
+```
+
+つまり `ISnapshotSearchStrategy` の契約表は、**Task 4 時点では 4 行中 2 行が材質化戦略に
+当てはまらない**(正規化しているのは委譲先の `TextSearcher` 自身)。
+
+> **訂正(Task 4 レビュー Important-1)**: 当初ここへ「**1 つも当てはまらない**」と書いたが誤り。
+> `ReplaceInRange` のクランプ(`SnapshotSearcher.cs:151-152`)だけは元から材質化分岐より**手前**にあり、
+> **Task 4 が `(s, end - s)` へ統一したことで、この行は既に真**になっている。
+> `span` の行は「未検証」= 何も保証していないので破りようがなく、自明に真。
+> **当てはまらないのは `FindNext` の `from` と `FindPrev` の `before` の 2 行だけ**。
+
+契約表は「Task 5 適用後の最終形」で書いてあるので、**残る 2 行も Task 5 で畳んだ瞬間に真になる**。
+それまでは doc がコードより先行している状態(ブランチ内に閉じるので main には出ない)。
+
+畳むときの具体的な帰結:
+
+| 正規化 | 前へ出せるか | 根拠 |
+|---|---|---|
+| `FindNext` の `from < 0 → 0` / `from > CharLength → null` | **出せる** | `TextSearcher.FindNext` が同じことをしている(`TextSearcher.cs:68-71`)。`text.Length == snap.CharLength` |
+| `FindPrev` の `before <= 0 → null` | **出せる** | `TextSearcher.FindPrev` は `m.Index >= before` で break するので `before <= 0` は必ず null |
+| `FindPrev` の `Math.Min(before, CharLength)` | **出せない** | 出すと材質化経路の挙動が変わる(反例: `b*` / `"ab"` で `FindPrev(3)`=`(2,0)` / `FindPrev(2)`=`(1,1)`) |
+| `ReplaceInRange` の `Math.Clamp` | **出せる** | `TextSearcher.ReplaceInRange` の再クランプが冪等(Task 4 で `(s, end - s)` へ統一済み) |
+
 **前進ガードの非対称は 3 対 3 ではなく 3 対 1(Task 3 fixup で判明)**
 
 統合を検討するときに必ず踏む地雷なので先に書いておく。`Math.Max(1, ...)` の出現数は:
@@ -759,6 +791,24 @@ regex 側の `Count` は `_inner.Count` へ、`ReplaceInRange` は `_inner.Repla
 **リテラル側 3 箇所は変異させても永久に kill されない**(テストを増やしても無意味=真にデッド)。
 最終レビューのミューテーションでリテラル側が生存しても、それは欠陥ではなく戦略分離により
 保証が閉じた結果である、と説明できること。
+
+**Task 5 完了時に消すべき「中間状態の注記」2 箇所(Task 4 fixup 申し送り)**
+
+Task 4 fixup で、「契約表の `FindNext` / `FindPrev` の 2 行は中間状態では材質化戦略に適用されない」
+という**同じ事実を 2 箇所に**書いた(意図的 — 契約側から読む人と実装側から読む人の両方が引っかかるように):
+
+1. `ISnapshotSearchStrategy` の契約表**直後**の注記
+2. `MaterializedSearchStrategy` の第 3 para の箇条書き
+
+**Task 5 でファサードを畳むと 2 行とも真になるので、両方まとめて消すこと。**
+片方だけ消すと再び片肺の記述が残る。
+
+**`MaterializeCountForTest` seam を消さないこと(同上)**
+
+`Cache_holds_at_most_one_snapshot`(A→B→A で `MaterializeCountForTest == 3`)は、
+**「保持は最大 1 本」を守る唯一の網**である。結果値からは辞書実装と区別できない
+(辞書なら 2 になるが、検索結果自体は同じ)。ファサードを畳む際にこの観測 seam を
+消したくなっても消さないこと。
 
 **さらに: `RegexPerLineSearchStrategy` のクラス doc に「選択の前提」節を足す(N-2)**
 
@@ -914,6 +964,14 @@ dotnet build yEdit.sln -c Release -warnaserror
 Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパイルは通る。
 `MakeFixture` が無ければコンパイルエラー → ヘルパ名を実体に合わせて修正してから進む)。
 
+> **キャッシュの保持量について(Task 4 申し送り S-G)**
+>
+> `MaterializedSearchStrategy` はスナップショットとその全文 string を**最大 1 本ずつ強参照**で保持する。
+> `SnapshotSearcher` が長寿命なら、最後に検索した文書の本文(と背後のピース木)がその間解放されない。
+> **本タスクで `SearchController` が searcher を保持するようになるので、ここが効いてくる。**
+> だからこそ下の破棄トリガ 3 つ((i) 照合条件の変化 /(ii) 文書切替 /(iii) Dismissed)が要る。
+> 破棄が漏れると「検索を終えた後も文書 1 本ぶんが生き続ける」ことになる。
+
 **Step 3: 実装する**
 
 フィールドを足す:
@@ -971,6 +1029,25 @@ Expected: **FAIL**(`RaiseDismissed` は Task 6 で入っているのでコンパ
                 UpdateCount();
         };
 ```
+
+> **保持されるのは string だけではない(Task 4 レビュー S-G の精密化)**
+>
+> `_cachedSnapshot` は `TextSnapshot` → ピース木 → `TextChunk` のバイト配列**全体**をピン留めする。
+> string は最大 64MB(閾値 32M chars)だが、**背後の文書バイトは最大 512MB**
+> (`TextBuffer.MaxTotalBytes`)。破棄トリガが漏れると「**閉じたタブの文書がまるごと生き残る**」形になる。
+>
+> したがってトリガ (ii) は**タブを閉じた場合、とりわけ最後のタブを閉じて文書ゼロになる場合を含むこと**。
+> `ActiveDocumentChanged` がその経路で発火するかを実際に確認し、発火しないなら別途手当てすること。
+> 戦略側に `Reset()` 相当(`_cachedSnapshot = null; _cachedText = string.Empty;`)を足して
+> searcher 経由で叩く形が素直。
+
+> **キャッシュは投機ではない — 今日の本番経路で既に load-bearing(Task 4 レビュー Important-2)**
+>
+> `SearchController.ReplaceOne` は **1 個の searcher を編集前 `snap` と編集後 `snap2` の両方に使う**
+> (`:186/200/206` と `:228/237`)。つまり「searcher が複数スナップショットにまたがる」状況は
+> **Task 7 を待たずに既に存在する**。参照同一性による無効化を壊す変異(「一度材質化したら二度と
+> 無効化しない」)は、`App.Tests.SearchControllerTests.ReplaceOne_*` の 3 件が実際に検出する。
+> **PR description に書く価値のある事実**(キャッシュ導入が投機的な作り込みではないことの根拠)。
 
 `Open` でビューを生成する箇所に Dismissed 購読を足す:
 
@@ -1138,6 +1215,7 @@ CLAUDE.md §2「意図的な挙動変更・計画からの逸脱は、設計書�
 | # | Task | 逸脱 | 理由 |
 |---|---|---|---|
 | D-1 | 2 | `SnapshotSearcher._windowSize` フィールドを削除し、ctor 引数を直接戦略へ渡す形にした(計画 Task 2 Step 3 はフィールド保持を指示していた) | フィールドにすると ctor でしか読まれなくなり、SonarAnalyzer **S1450**(`Remove the field and declare it as a local variable`)が `-warnaserror` でビルドを落とす。挙動は同一(`ArgumentOutOfRangeException.ThrowIfNegativeOrZero` の実行順も従来どおり戦略構築より前)。テスト側に reflection 参照が無いことは grep 確認済み |
+| D-4 | 4 | `MaterializedSearchStrategy` の doc から、計画にあった「同じ idiom を `TextBuffer.Modified` が既に採用している」という記述を**精密化**した。あわせて `ReplaceInRange` 内のコメント位置を `if` の上へ移した | **計画の記述が不正確だった。** `TextBuffer.Modified`(`TextBuffer.cs:46`)は `ReferenceEquals(_current.Root, _savedRoot)` で**スナップショットではなくピース木のルート参照**を比べており、「同じ idiom」だと同一の参照を比べていると読める。帰結も併記した=**Undo で同じルートへ戻ると新しい `TextSnapshot` インスタンスになるため、キャッシュは無駄に作り直すが古い本文を返すことはない(誤りは安全な側にしか倒れない)**。コメント位置は、このリポジトリが単文 `if` に brace を付けない様式のため |
 | D-3 | 3 | `SnapshotSearcher.cs` から `using System.Text;` を削除した(**「本体は一切変えない」の許容範囲を超える任意変更**) | `StringBuilder` の唯一の利用者 `ReplaceInRangeRegexPerLine` が転出して未使用になったための衛生的削除。挙動影響ゼロ。**⚠ 当初「SonarAnalyzer S1128 が `-warnaserror` で落とすので必然」と記録したが、これは事実誤認だった**(Task 3 レビューで判明)。`using` を戻して Debug / Release / ソリューション全体をビルドしても **0 警告 0 エラー**。アナライザ自体は生きており(未読 private フィールドの探針で `error S4487` が出る)、**S1128 だけが有効化されていない**。原因は `Directory.Build.props:8` の `<EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>` と S1128 非有効の組み合わせ。**このリポジトリでは未使用 using はビルドを落とさない** |
 | D-2 | 2 | 計画の `ISnapshotSearchStrategy` 案にあった「位置引数は呼び出し前に `SnapshotSearcher` が snap の範囲へクランプ済み」という契約 bullet を**採用しなかった** | **この記述は Task 5 で偽になる。** G-2(`FindPrev` のクランプはファサードへ集約できない)の発覚後、計画の Task 2/3/5 は修正したが、インターフェース案の bullet を直し忘れていた=**計画側のバグ**。実装者が正しく落とした。代わりに引数ごとの保証を表で書く(Task 2 レビュー I-1・弱い保証で書くことで Task 5 後も書き直し不要になる) |
 
