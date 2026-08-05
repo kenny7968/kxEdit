@@ -267,8 +267,8 @@ public class SnapshotSearcherTests
     [Fact]
     public void EmptySnapshot_does_not_throw_and_yields_no_hits()
     {
-        // 空 snap は CharLength=0 なので閾値 0 でも IsLarge=false=下位経路。
-        // 空 snap を上位経路で扱うことはそもそもありえない(threshold は非負)。
+        // 空 snap は CharLength=0 なので閾値 0 でも `CharLength <= threshold`=材質化戦略(閾値以下経路)。
+        // 空 snap を閾値超経路で扱うことはそもそもありえない(threshold は非負)。
         // 本テストは全 API が空 snap に対して例外を投げないことを確認する。
         var snap = Snap("");
         var s = MakeLarge("ab", threshold: 0, window: 4);
@@ -283,7 +283,8 @@ public class SnapshotSearcherTests
     [Fact]
     public void MinimalNonEmptySnapshot_uses_above_path_with_zero_threshold_and_does_not_throw()
     {
-        // 最小の non-empty snap で「上位経路が確実に走る」ことを確認(threshold=0 → 1>0 で IsLarge=true)。
+        // 最小の non-empty snap で「閾値超経路が確実に走る」ことを確認
+        // (threshold=0 → CharLength 1 > 0 なので StrategyFor は閾値超戦略を返す)。
         var snap = Snap("a");
         var s = MakeLarge("z", threshold: 0, window: 4);
         Assert.Equal(0, s.Count(snap));
@@ -341,9 +342,9 @@ public class SnapshotSearcherTests
     [Fact]
     public void AtExactThreshold_uses_below_path_not_above()
     {
-        // 契約: IsLarge は `CharLength > thresholdChars`。ちょうど一致は「閾値以下」= 材質化経路。
+        // 契約: StrategyFor の閾値判定は `CharLength <= thresholdChars`。ちょうど一致は「閾値以下」= 材質化経路。
         // 経路差が観測できる形として改行跨ぎ regex を使う(材質化経路だけがヒットする)。
-        // このテストが無いと `>` → `>=` の変異が既存テストを全て生き延びる
+        // このテストが無いと `<=` → `<` の変異が既存テストを全て生き延びる
         // (空文書だけが境界に当たるが、空文書は両経路とも同じ値を返すため差が出ない)。
         var snap = Snap("ab\ncd"); // CharLength == 5
         Assert.Equal(5, snap.CharLength);
@@ -421,7 +422,7 @@ public class SnapshotSearcherTests
     [Fact(Timeout = 10000)]
     public async Task Locate_RegexZeroWidthHits_terminates_and_counts_above_threshold()
     {
-        // 閾値超 regex 経路の LocateRegexPerLine は行内を FindNext で歩進するため、
+        // 閾値超 regex 経路の RegexPerLineSearchStrategy.Locate は行内を FindNext で歩進するため、
         // ゼロ幅ヒットで前進しないと無限ループになる(TextSearcher の契約=呼び出し側が
         // max(1, Length) 分進める)。前進ロジックを壊すとハングするので Timeout を付ける。
         // xUnit v2 の Timeout は async テストにしか適用できない
