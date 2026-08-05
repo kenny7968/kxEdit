@@ -57,7 +57,7 @@ public sealed class FindReplaceDialog : Form, IFindReplaceView
         };
         _replaceOne.Click += (_, _) => _cb.ReplaceOne();
         _replaceAll.Click += (_, _) => _cb.ReplaceAll();
-        _close.Click += (_, _) => Hide();
+        _close.Click += (_, _) => HideByUser();
         _pattern.TextChanged += (_, _) => _cb.UpdateCount();
         _matchCase.CheckedChanged += (_, _) => _cb.UpdateCount();
         _wholeWord.CheckedChanged += (_, _) => _cb.UpdateCount();
@@ -71,6 +71,15 @@ public sealed class FindReplaceDialog : Form, IFindReplaceView
     public bool WholeWord => _wholeWord.Checked;
     public bool UseRegex => _useRegex.Checked;
     public bool InSelection => _inSelection.Checked;
+
+    public event EventHandler? Dismissed;
+
+    /// <summary>ユーザー終了経路の Hide(G-2 の自動 Hide とは区別して Dismissed を発火する)。</summary>
+    private void HideByUser()
+    {
+        Hide();
+        Dismissed?.Invoke(this, EventArgs.Empty);
+    }
 
     private void FocusPattern()
     {
@@ -105,7 +114,7 @@ public sealed class FindReplaceDialog : Form, IFindReplaceView
         switch (keyData)
         {
             case Keys.Escape:
-                Hide();
+                HideByUser();
                 return true;
             case Keys.F3:
                 _cb.FindNext();
@@ -126,7 +135,7 @@ public sealed class FindReplaceDialog : Form, IFindReplaceView
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
-            Hide();
+            HideByUser();
             return;
         }
         base.OnFormClosing(e);

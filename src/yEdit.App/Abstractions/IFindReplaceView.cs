@@ -37,4 +37,15 @@ public interface IFindReplaceView
 
     /// <summary>従来の Open 手順を 1 メソッドに集約: 非表示なら Show(owner)し、常に Activate→検索語フォーカス。</summary>
     void ShowAndFocus(IWin32Window owner);
+
+    /// <summary>
+    /// ユーザーが検索を終えた(閉じるボタン / Escape / タイトルバーの×)。
+    /// <para>
+    /// <b>G-2 の自動 Hide では発火しない。</b> 「次を検索」成功後にダイアログが自らを
+    /// Hide するのは一時退避であって終了ではなく、その後も F3 で検索は続く。
+    /// したがって購読側は <see cref="Visible"/> を終了判定に使ってはならない
+    /// (発生源でしか区別できない)。
+    /// </para>
+    /// </summary>
+    event EventHandler? Dismissed;
 }
