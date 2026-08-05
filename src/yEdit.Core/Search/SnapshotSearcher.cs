@@ -90,9 +90,17 @@ public sealed class SnapshotSearcher
     /// <summary>無効な場合の理由(空パターンや不正な正規表現)。有効なら null。</summary>
     public string? Error => _inner.Error;
 
-    /// <summary>snap のサイズと照合条件から戦略を選ぶ(分岐はこの 1 箇所だけ)。</summary>
+    /// <summary>
+    /// snap のサイズと照合条件から戦略を選ぶ(分岐はこの 1 箇所だけ)。
+    /// <b>private ではなく internal なのはテスト都合</b>=選ばれた戦略を「型」で直接 assert する
+    /// <c>StrategyFor_selects_expected_strategy</c> の網がこの可視性に依存している。
+    /// 意味論的帰結からの間接観測(改行跨ぎ regex がヒットするか等)だけでは、戦略側の制約が
+    /// 将来変わったときに境界の反転を黙って見逃すため、<c>private</c> へ縮めないこと。
+    /// </summary>
     /// <remarks>
-    /// 閾値超の 2 戦略は snapshot 非依存なので ctor で 1 個ずつ作って使い回す。
+    /// 3 戦略とも ctor で 1 個ずつ作って使い回す。閾値超の 2 戦略は snapshot 非依存で、
+    /// 材質化戦略だけが snapshot 依存の状態(材質化キャッシュ)を持つが、
+    /// スナップショット参照の同一性で無効化するので同じく使い回せる。
     /// 閾値判定は「ちょうど一致は閾値以下(材質化経路)」。<c>&lt;</c> にすると
     /// 閾値ちょうどの文書の意味論が変わる = 挙動変更になる
     /// (<c>AtExactThreshold_uses_below_path_not_above</c> が固定)。

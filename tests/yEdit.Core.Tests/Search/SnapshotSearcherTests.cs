@@ -555,4 +555,64 @@ public class SnapshotSearcherTests
         Assert.Equal(atEnd, s.FindPrev(snap, snap.CharLength + 100));
         Assert.Equal(new MatchSpan(12, 2), s.FindPrev(snap, int.MaxValue));
     }
+
+    // ==============================
+    // ファサードの位置引数ガード = 3 経路共通の単一防御点
+    // ==============================
+    //
+    // StrategyFor へ分岐を畳んだ結果、SnapshotSearcher.FindNext / FindPrev の位置引数ガードは
+    // 3 経路すべてが通る唯一の防御になった。以下 2 件はそのうち「閾値超 regex 経路だけが
+    // 例外で落ちる」2 つのガードを固定する網である。
+    //
+    // 既存テストではこの 2 つを観測できない理由:
+    //   - FindNext_PastEnd_returns_null_above_threshold は from == CharLength ちょうどで、
+    //     ガード条件(`from > CharLength` = 厳密に超える)に当たらない。
+    //   - FindPrev_LiteralAboveThreshold_matches_below の Assert.Null(above.FindPrev(snap, 0))
+    //     はリテラル戦略。リテラル窓照合は before=0 でも end = Min(0 + overlap, L) が小さく
+    //     ループが空回りして null を返すだけで、例外にならない=防御の有無を区別できない。
+    // どちらも実測で「ガードを消しても 93 件全緑」だったため、ここで塞ぐ。
+
+    [Fact]
+    public void FindPrev_AtZero_does_not_throw_above_threshold_regex()
+    {
+        // 本番トリガ: SearchController の「前を検索」は before = selStart をそのまま渡すため、
+        // キャレットが文書先頭にあれば before == 0 が日常的に来る。
+        // 閾値超 regex 戦略はこの値を受け取れない: Math.Min(0, L) = 0 の後
+        // GetLineIndexOfChar(before - 1) = GetLineIndexOfChar(-1) となり、
+        // TextSnapshot が ArgumentOutOfRangeException を投げる。
+        // よってファサード SnapshotSearcher.FindPrev の `before > 0` が唯一の防御である。
+        var snap = Snap("ab XY\nab XY\nab"); // CharLength == 14
+        var s = MakeLarge("a.", useRegex: true, matchCase: true, threshold: 4, window: 6);
+        Assert.True(s.IsValid);
+        // 経路の固定: 材質化へ落ちるとこの防御は観測できなくなる(材質化戦略は before=0 でも
+        // TextSearcher が素直に null を返すだけ)。
+        Assert.IsType<RegexPerLineSearchStrategy>(s.StrategyFor(snap));
+        // 対照: before > 0 では同じ条件で実際にヒットする=パターンが死んでいないことの確認。
+        Assert.Equal(new MatchSpan(0, 2), s.FindPrev(snap, 2));
+
+        Assert.Null(s.FindPrev(snap, 0));
+    }
+
+    [Fact]
+    public void FindNext_PastEndByOne_does_not_throw_above_threshold_regex()
+    {
+        // 本番トリガ: SearchController の「次を検索」は直前ヒットの続きを
+        // from = h.Start + Math.Max(1, h.Length) で計算するため、文書末尾のゼロ幅ヒット
+        // (regex a* / \b 等)の直後は from == CharLength + 1 になる。
+        // 閾値超 regex 戦略はこの値を受け取れない: GetLineIndexOfChar(from) が
+        // pos > CharLength で ArgumentOutOfRangeException を投げる。
+        // よってファサード SnapshotSearcher.FindNext の `from > snap.CharLength` が唯一の防御である。
+        var snap = Snap("ab\ncd"); // CharLength == 5
+        Assert.Equal(5, snap.CharLength);
+        var s = MakeLarge("a*", useRegex: true, matchCase: true, threshold: 4, window: 6);
+        Assert.True(s.IsValid);
+        Assert.IsType<RegexPerLineSearchStrategy>(s.StrategyFor(snap));
+        // 対照: 文書末尾のゼロ幅ヒットが実在し、その Start + Math.Max(1, Length) が
+        // ちょうど CharLength + 1 になる=上の本番トリガが机上の空論でないことの確認。
+        var tail = s.FindNext(snap, snap.CharLength);
+        Assert.Equal(new MatchSpan(5, 0), tail);
+        Assert.Equal(snap.CharLength + 1, tail!.Value.Start + Math.Max(1, tail.Value.Length));
+
+        Assert.Null(s.FindNext(snap, snap.CharLength + 1));
+    }
 }
