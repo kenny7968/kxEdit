@@ -174,6 +174,40 @@ public class DocumentManagerTests
             Assert.True(doc.Page.IsDisposed);
         });
 
+    // DocumentClosed は「閉じた文書に紐づく保持(SearchController の材質化キャッシュ=
+    // 文書 1 本ぶんのバイト列)を解放させる」ための唯一の通知源。ActiveDocumentChanged は
+    // 選択タブ削除で発火が保証されず、非アクティブタブのクローズでは切替自体が起きない。
+
+    [Fact]
+    public void TryClose_ConfirmAccepted_RaisesDocumentClosed_WithClosedDocument() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            _ = host.Docs.CreateNew(); // 残すタブ(最後の 1 枚を閉じる場合と区別する)
+            var doc = host.Docs.CreateNew();
+            var closed = new List<Document>();
+            host.Docs.DocumentClosed += (_, d) => closed.Add(d);
+
+            Assert.True(host.Docs.TryClose(doc, _ => true));
+
+            Assert.Equal(new[] { doc }, closed); // 閉じた当人が 1 回だけ渡る
+        });
+
+    [Fact]
+    public void TryClose_ConfirmRejected_DoesNotRaiseDocumentClosed() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            int closed = 0;
+            host.Docs.DocumentClosed += (_, _) => closed++;
+
+            Assert.False(host.Docs.TryClose(doc, _ => false)); // 保存確認でキャンセル
+
+            Assert.Equal(0, closed); // 生きている文書のキャッシュを落とさない
+            Assert.Contains(doc, host.Docs.Documents);
+        });
+
     // ===== SelectNext 巡回 / SelectAt 範囲外 no-op =====
 
     [Fact]
