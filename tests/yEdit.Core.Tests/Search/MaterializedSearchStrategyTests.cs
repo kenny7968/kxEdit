@@ -52,4 +52,23 @@ public class MaterializedSearchStrategyTests
         Assert.Equal(2, s.Count(buffer.Current));
         Assert.Equal(2, s.MaterializeCountForTest);
     }
+
+    [Fact]
+    public void Cache_holds_at_most_one_snapshot()
+    {
+        // 「保持は常に最大 1 本」を固定する網。A → B → A と叩くと、単一スロット実装では
+        // B の材質化で A のエントリが押し出されるので、A に戻った 3 回目で再材質化が起きる=3。
+        // Dictionary<TextSnapshot, string> のような多スロット実装だと A が残り 3 回目が
+        // キャッシュヒットになるので 2 になる。つまりこの assert が 3 であることだけが
+        // 「複数本を抱え込んでいない(= 古い本文が居座らない)」を区別する。
+        var s = Make("ab");
+        var a = TextBuffer.FromString("ab").Current;
+        var b = TextBuffer.FromString("ab ab").Current;
+
+        Assert.Equal(1, s.Count(a));
+        Assert.Equal(2, s.Count(b));
+        Assert.Equal(1, s.Count(a)); // 押し出された A を読み直す(結果自体は不変)
+
+        Assert.Equal(3, s.MaterializeCountForTest);
+    }
 }

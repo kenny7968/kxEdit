@@ -32,6 +32,12 @@ namespace yEdit.Core.Search;
 ///     <description><b>未検証</b>。負値・範囲外がそのまま来る(<see cref="MatchSpan"/> は検証を持たない)</description></item>
 /// </list>
 /// <para>
+/// <b>この表はファサードを畳んだ後(Task 5 完了時)の姿</b>。それまでの中間状態では、
+/// 材質化戦略に <see cref="FindNext"/> / <see cref="FindPrev"/> の 2 行が適用されない
+/// (ファサードの材質化分岐が該当のクランプ・早期 return より手前にあるため)。
+/// 詳細は <see cref="MaterializedSearchStrategy"/> のクラス doc を参照。
+/// </para>
+/// <para>
 /// <b><see cref="FindPrev"/> だけ上限が未保証な理由</b>: 材質化戦略は生の before を
 /// <see cref="TextSearcher.FindPrev"/> へ渡すのが現行挙動であり、CharLength 超の before と
 /// ゼロ幅ヒットの組み合わせで観測可能な差になる(パターン <c>b*</c> / 文書 <c>"ab"</c> で

@@ -22,11 +22,21 @@ namespace yEdit.Core.Search;
 /// 保持するのは常に最大 1 本で、スナップショットが変われば古い文字列は参照が切れる。
 /// </para>
 /// <para>
-/// <b>位置引数は正規化されていない</b>(<see cref="ISnapshotSearchStrategy"/> の契約表が
-/// 保証している範囲より弱い)。ファサードの材質化分岐はすべてのクランプ・早期 return より
-/// <b>手前</b>にあり、呼び出し側の生の値がそのまま届く。正規化は委譲先の
-/// <see cref="TextSearcher"/> 自身が行い、それが現行挙動である
-/// (例: <see cref="TextSearcher.FindNext"/> は from を自前でクランプする)。
+/// <b>位置引数の正規化は引数ごとに違う</b>=<see cref="ISnapshotSearchStrategy"/> の契約表より
+/// 弱い引数と、契約表どおりの引数が混在する(Task 5 でファサードを畳めば表に揃う)。
+/// </para>
+/// <list type="bullet">
+///   <item><see cref="FindNext"/> の from と <see cref="FindPrev"/> の before は
+///     <b>生のまま</b>届く。ファサードの材質化分岐が from のクランプ・
+///     <c>before &lt;= 0</c> の早期 return より<b>手前</b>にあるため、
+///     before は<b>下限すら保証されない</b>。正規化するのは委譲先の
+///     <see cref="TextSearcher"/> 自身で、それが現行挙動である
+///     (例: <see cref="TextSearcher.FindNext"/> は from を自前でクランプする)。</item>
+///   <item><see cref="ReplaceInRange"/> の start / length <b>だけは例外</b>で、
+///     ファサードが <c>(s, end - s)</c> へ正規化した値を渡す=契約表どおりに保証される。
+///     この形へ揃えた理由は <see cref="SnapshotSearcher.ReplaceInRange"/> のコメントを参照。</item>
+/// </list>
+/// <para>
 /// Task 5 でファサードの三重分岐を畳むときに、クランプをこの戦略の手前へ移すと
 /// <see cref="FindPrev"/> の挙動が変わる(下記)。
 /// </para>
@@ -48,6 +58,9 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
     {
         if (ReferenceEquals(_cachedSnapshot, snap))
             return _cachedText;
+        // 代入順は text が先・snapshot が後(入れ替えないこと)。逆順だと GetText が
+        // 例外を投げたときに _cachedSnapshot だけ新しくなり、次回の参照同一性ヒットで
+        // 古い本文を新しいスナップショットのものとして返す stale の窓が開く。
         _cachedText = snap.GetText(0, snap.CharLength);
         _cachedSnapshot = snap;
         MaterializeCountForTest++;
