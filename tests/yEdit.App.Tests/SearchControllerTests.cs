@@ -689,4 +689,164 @@ public class SearchControllerTests
             Assert.Equal("正規表現が正しくありません", host.Announcer.Said[^1]);
             Assert.Equal("abc", doc.Editor.Text);
         });
+
+    // ===== searcher の保持と破棄(照合条件ごとに 1 本を使い回す) =====
+    // 保持/破棄は結果値からは観測できない(作り直しても同じ答えを返す)ため、
+    // SearchController.SearcherForTest の参照同一性で観測する。
+    // 保持が壊れると打鍵のたびに Regex 再コンパイル+材質化のやり直しになり、
+    // 破棄が漏れると材質化キャッシュ(TextSnapshot → ピース木 → バイト配列の強参照)が
+    // 閉じた文書をピン留めし続ける。両方向を固定する。
+
+    [Fact]
+    public void Searcher_IsReused_WhileMatchConditionUnchanged() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind(); // Open 内の UpdateCount で 1 本目を解決
+            var first = host.Search.SearcherForTest;
+            Assert.NotNull(first);
+
+            host.Search.UpdateCount(); // 打鍵ごとの件数更新(条件は同じ)
+            Assert.True(host.Search.FindNext());
+            Assert.True(host.Search.FindNext());
+
+            Assert.Same(first, host.Search.SearcherForTest); // 条件が変わらない限り作り直さない
+        });
+
+    [Fact]
+    public void Searcher_IsRecreated_WhenMatchConditionChanges() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("ABC abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            var first = host.Search.SearcherForTest;
+            Assert.NotNull(first);
+            Assert.Equal("2 件", host.View.Status); // MatchCase=false: ABC も数える
+
+            host.View.MatchCase = true; // チェックボックス操作 → UpdateCount
+            host.Search.UpdateCount();
+
+            var second = host.Search.SearcherForTest;
+            Assert.NotNull(second);
+            Assert.NotSame(first, second); // 条件が変われば作り直す(参照同一性)
+            Assert.Equal("1 件", host.View.Status); // 使い回すと "2 件" のまま=結果でも固定する
+        });
+
+    [Fact]
+    public void Searcher_IsDropped_WhenPatternBecomesEmpty() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            Assert.NotNull(host.Search.SearcherForTest);
+
+            host.View.Pattern = ""; // 検索語を消す打鍵(条件が無効になる)
+            host.Search.UpdateCount();
+
+            Assert.Null(host.Search.SearcherForTest); // 素の early return だと保持が続いてしまう
+        });
+
+    [Fact]
+    public void Searcher_IsDropped_OnActiveDocumentChanged() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            var first = host.Search.SearcherForTest;
+            Assert.NotNull(first);
+
+            _ = host.NewDoc("abc"); // 文書切替(表示中なので直後の UpdateCount で新しい 1 本が立つ)
+
+            Assert.NotNull(host.Search.SearcherForTest);
+            Assert.NotSame(first, host.Search.SearcherForTest); // 旧文書のキャッシュごと捨てる
+        });
+
+    [Fact]
+    public void Searcher_IsDropped_OnDocumentClosed() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc1 = host.NewDoc("abc"); // 閉じる対象
+            _ = host.NewDoc("abc"); // アクティブのまま=クローズで文書切替を起こさない
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            var first = host.Search.SearcherForTest;
+            Assert.NotNull(first);
+            int activeChanged = 0;
+            host.Docs.ActiveDocumentChanged += (_, _) => activeChanged++;
+
+            Assert.True(host.Docs.TryClose(doc1, _ => true)); // 非アクティブタブのクローズ
+
+            // 切替が起きていないことまで固定する(起きていると破棄の出所が DocumentClosed か
+            // ActiveDocumentChanged か区別できず、DocumentClosed 削除の変異を殺せない)。
+            Assert.Equal(0, activeChanged);
+            Assert.Null(host.Search.SearcherForTest); // 閉じた文書をピン留めしない
+        });
+
+    [Fact]
+    public void Searcher_IsDropped_OnDismissed_AndRebuiltOnNextSearch() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            Assert.NotNull(host.Search.SearcherForTest);
+
+            host.View.RaiseDismissed(); // ユーザーが検索を終えた(閉じる/Escape/×)
+            Assert.Null(host.Search.SearcherForTest);
+
+            host.View.RaiseDismissed(); // 冪等(Escape → 再表示 → また Escape)
+            Assert.Null(host.Search.SearcherForTest);
+
+            Assert.True(host.Search.FindNext()); // 破棄しても検索は壊れない(次の操作で作り直す)
+            Assert.NotNull(host.Search.SearcherForTest);
+        });
+
+    [Fact]
+    public void Searcher_IsDropped_WhenViewIsRecreated() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            var first = host.Search.SearcherForTest;
+            Assert.NotNull(first);
+
+            host.View.IsDisposed = true; // owner ごと破棄された等(この経路では Dismissed が来ない)
+            host.Search.OpenFind(); // ビュー再生成=新しいダイアログセッション
+
+            Assert.Equal(2, host.FactoryCalls);
+            Assert.NotSame(first, host.Search.SearcherForTest); // 前セッションの保持を持ち越さない
+        });
+
+    [Fact]
+    public void Searcher_SurvivesG2Hide_AcrossRepeatedFindNext() =>
+        Sta.Run(() =>
+        {
+            // 本設計の核: 「非表示」は破棄トリガではない(G-2 の一時退避と終了は
+            // 発生源でしか区別できないので、Dismissed だけを破棄トリガに使う)。
+            using var host = new Host();
+            host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            Assert.True(host.Search.FindNext());
+            var searcher = host.Search.SearcherForTest;
+            Assert.NotNull(searcher);
+
+            host.View.Visible = false; // G-2 の自動 Hide(RaiseDismissed ではない)
+            Assert.True(host.Search.FindNext()); // 非表示のまま F3 連打
+            Assert.True(host.Search.FindNext());
+
+            Assert.Same(searcher, host.Search.SearcherForTest); // キャッシュは生きたまま
+        });
 }
