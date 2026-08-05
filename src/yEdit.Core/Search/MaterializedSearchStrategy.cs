@@ -22,23 +22,23 @@ namespace yEdit.Core.Search;
 /// 保持するのは常に最大 1 本で、スナップショットが変われば古い文字列は参照が切れる。
 /// </para>
 /// <para>
-/// <b>位置引数の正規化は引数ごとに違う</b>=<see cref="ISnapshotSearchStrategy"/> の契約表より
-/// 弱い引数と、契約表どおりの引数が混在する(Task 5 でファサードを畳めば表に揃う)。
+/// <b>選択の前提</b>: この戦略は <c>CharLength &lt;= 閾値</c> のときだけ選ばれる。
+/// 閾値以下ならパターン種別(<see cref="SearchOptions.UseRegex"/>)は問わない。
 /// </para>
-/// <list type="bullet">
-///   <item><see cref="FindNext"/> の from と <see cref="FindPrev"/> の before は
-///     <b>生のまま</b>届く。ファサードの材質化分岐が from のクランプ・
-///     <c>before &lt;= 0</c> の早期 return より<b>手前</b>にあるため、
-///     before は<b>下限すら保証されない</b>。正規化するのは委譲先の
-///     <see cref="TextSearcher"/> 自身で、それが現行挙動である
-///     (例: <see cref="TextSearcher.FindNext"/> は from を自前でクランプする)。</item>
-///   <item><see cref="ReplaceInRange"/> の start / length <b>だけは例外</b>で、
-///     ファサードが <c>(s, end - s)</c> へ正規化した値を渡す=契約表どおりに保証される。
-///     この形へ揃えた理由は <see cref="SnapshotSearcher.ReplaceInRange"/> のコメントを参照。</item>
-/// </list>
 /// <para>
-/// Task 5 でファサードの三重分岐を畳むときに、クランプをこの戦略の手前へ移すと
-/// <see cref="FindPrev"/> の挙動が変わる(下記)。
+/// <b>位置引数は <see cref="ISnapshotSearchStrategy"/> の契約表どおりに届く</b>。
+/// 表のうちこの戦略にとって効くのは <see cref="FindPrev"/> の before で、
+/// 下限(<c>&gt; 0</c>)は保証されるが<b>上限は保証されない</b>=文書長超がそのまま来る。
+/// この戦略はそれをクランプせずに <see cref="TextSearcher"/> へ渡すのが現行挙動であり、
+/// そこが閾値超の 2 戦略との意図的な非対称である(理由と反例は契約表・詳細は
+/// <see cref="FindPrev"/> の doc)。
+/// </para>
+/// <para>
+/// なお <see cref="TextSearcher"/> 自身も位置引数を自前で正規化する
+/// (例: <see cref="TextSearcher.FindNext"/> は from をクランプする)ため、
+/// ファサードの正規化と二重になっている箇所がある。<b>等価</b>=
+/// 材質化長は常に <see cref="TextSnapshot.CharLength"/> に一致するので、
+/// 前段で正規化済みの値に対して後段のクランプは冪等になる。
 /// </para>
 /// </remarks>
 internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy

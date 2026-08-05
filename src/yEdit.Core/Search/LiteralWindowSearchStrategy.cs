@@ -9,11 +9,12 @@ namespace yEdit.Core.Search;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>選択の前提</b>: この戦略は <c>UseRegex == false</c> のときだけ選ばれる。
+/// <b>選択の前提</b>: この戦略は <c>CharLength &gt; 閾値</c> かつ <c>UseRegex == false</c> の
+/// ときだけ選ばれる。
 /// <see cref="SearchOptions.UseRegex"/> は読まない=true を渡してもパターンはリテラル扱いになる。
 /// </para>
 /// <para>
-/// <b>壊れる契約</b>(<see cref="SnapshotSearcher"/> の要約表も参照):
+/// <b>壊れる契約</b>(<see cref="SnapshotSearcher"/> の選択規則表も参照):
 /// <see cref="SearchOptions.WholeWord"/> はエンジン内蔵の Unicode <c>\b</c> ではなく
 /// ASCII 単純判定(<see cref="IsWordChar"/>)= 全角英数境界で
 /// 材質化経路と差が出うる。
@@ -108,8 +109,14 @@ internal sealed class LiteralWindowSearchStrategy : ISnapshotSearchStrategy
     {
         // 文書長超の before をここでクランプする。理由と反例は ISnapshotSearchStrategy の
         // 契約表を参照(材質化経路は生の before を使うのが現行挙動なのでファサードへ集約できない)。
-        // 注意: 現在はファサード側(SnapshotSearcher.FindPrev)にも同じクランプがあり二重だが、
-        // Task 5 でファサード側が外れるとこの 1 行が唯一の防御になる。「重複だから」で消さないこと。
+        // この 1 行が上限の唯一の防御である=ファサード SnapshotSearcher.FindPrev は
+        // 上限をクランプしない。網 =
+        // FindPrev_BeforePastEnd_is_clamped_by_literal_strategy_above_threshold。
+        // ただしこの戦略で差が観測できるのは int の桁溢れだけである点に注意:
+        // before が効くのは直下の end 計算と absStart < before の 2 箇所しかなく、
+        // end は CharLength で頭打ち・absStart は必ず CharLength - plen 以下なので、
+        // CharLength をわずかに超える before では結果が変わらない。クランプを外すと
+        // before + overlap が溢れて end が負値になり、ループが一度も回らず null が返る。
         before = Math.Min(before, snap.CharLength);
 
         string pattern = _opts.Pattern;

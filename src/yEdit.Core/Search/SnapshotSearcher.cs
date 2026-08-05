@@ -4,12 +4,38 @@ namespace yEdit.Core.Search;
 
 /// <summary>
 /// P6 Task 11: <see cref="TextSnapshot"/> ベースの検索/置換ファサード。
-/// 内部で 64MB 閾値(<see cref="ThresholdChars"/>=UTF-16 で 32M chars)により
-/// 全文 string 材質化 vs 窓照合を切り替える。
+/// 実際の照合は 3 つの <see cref="ISnapshotSearchStrategy"/> 実装が行い、本クラスは
+/// <see cref="StrategyFor"/> でそのうち 1 つを選んで丸ごと委譲する。
+/// 6 つの public メソッドが自分で行うのは <see cref="IsValid"/> の短絡と位置引数の正規化だけで、
+/// 経路の分岐は <see cref="StrategyFor"/> の 1 箇所に集約されている。
 /// <para>
-/// 閾値以下は <see cref="TextSearcher"/> にそのまま委譲=既存挙動 100% 一致。
-/// 閾値超はリテラル=窓照合(<see cref="WindowSize"/> ウィンドウ + パターン長 overlap)、
-/// regex=行単位適用。
+/// <b>選択規則</b>(<c>L</c> = <see cref="TextSnapshot.CharLength"/> ・
+/// <c>T</c> = 閾値。既定は <see cref="DefaultThresholdChars"/> = 32M chars ≒ 64MB):
+/// </para>
+/// <list type="table">
+///   <listheader><term>条件</term><description>選ばれる戦略</description></listheader>
+///   <item><term><c>L &lt;= T</c>(<b>ちょうど一致は閾値以下側</b>)</term>
+///     <description><see cref="MaterializedSearchStrategy"/>=全文を材質化して
+///       <see cref="TextSearcher"/> へ委譲する。<b>意味論の「正」</b>であり、
+///       閾値二層化の前の挙動と 100% 一致する。</description></item>
+///   <item><term><c>L &gt; T</c> かつ <see cref="SearchOptions.UseRegex"/>=false</term>
+///     <description><see cref="LiteralWindowSearchStrategy"/>=材質化せず、
+///       ウィンドウ(既定 <see cref="DefaultWindowSize"/>)+ パターン長 -1 の overlap で走査する。
+///       </description></item>
+///   <item><term><c>L &gt; T</c> かつ <see cref="SearchOptions.UseRegex"/>=true</term>
+///     <description><see cref="RegexPerLineSearchStrategy"/>=1 行ずつ切り出して
+///       <see cref="TextSearcher"/> へ適用し、行頭オフセットを足して文書座標へ戻す。</description></item>
+/// </list>
+/// <para>
+/// <b>壊れる契約(設計書§2-8 許容範囲)</b>: 閾値超の 2 戦略は材質化経路と意味論が食い違う
+/// (改行跨ぎ・regex アンカー・WholeWord の Unicode 差)。
+/// <b>内訳はそれぞれの戦略クラスの remarks が正</b>で、ここには複製しない
+/// (二重管理にすると必ず片方が腐る)。呼び出し側が閾値の両側で厳密に同一の挙動を
+/// 必要とするなら、選ばれうる戦略の remarks を読むこと。
+/// </para>
+/// <para>
+/// <b>戦略に依らず残る制約</b>: <see cref="ReplaceInRange"/> は閾値超でも置換後 Fragment を
+/// string で組み立てる。大容量 ReplaceAll での真の OOM 回避は未対応のまま(設計書 §8 S-1)。
 /// </para>
 /// <para>
 /// <b>スレッドセーフではない</b>=1 インスタンスは単一スレッドからのみ使うこと。
@@ -18,25 +44,6 @@ namespace yEdit.Core.Search;
 /// (この性質は材質化戦略の抽出で入った=それ以前は不変フィールドのみだった)。
 /// 現時点の利用者は <c>SearchController</c> の 4 箇所のみで、いずれも UI スレッドから呼ばれる。
 /// 件数更新などをバックグラウンドへ逃がすなら、スレッドごとに別インスタンスを持つこと。
-/// </para>
-/// <para>
-/// <b>壊れる契約(設計書§2-8 許容範囲)</b>:
-/// <list type="bullet">
-///   <item>閾値超 &amp; regex は「改行を跨ぐパターンは絶対にヒットしない」
-///     (行単位で <see cref="TextSearcher"/> に委譲するため)。</item>
-///   <item>P7 I-5 追記: 閾値超 &amp; regex アンカー(<c>^</c> / <c>$</c> /
-///     <c>\A</c> / <c>\Z</c> / <c>\G</c>)は「文書の先頭/末尾」ではなく
-///     「行の先頭/末尾」に anchor される(閾値以下の <see cref="TextSearcher"/>
-///     は文書全体をひとつの入力として扱うため、閾値境界でアンカー挙動が変わる)。
-///     行単位マッチという性質上の必然=呼び出し側が閾値超と閾値以下で厳密に
-///     同一挙動を必要とするなら regex アンカーは使わない設計にすること
-///     (<c>SnapshotSearcherRegexAnchorTests</c> が挙動を凍結)。</item>
-///   <item>閾値超 &amp; WholeWord はエンジン内蔵の Unicode \b ではなく
-///     ASCII 単純判定(<see cref="LiteralWindowSearchStrategy"/> の IsWordChar)=
-///     全角英数境界で差異が出うる。</item>
-///   <item>閾値超 &amp; <see cref="ReplaceInRange"/> は依然として置換後 Fragment を
-///     string で組み立てる(大容量 ReplaceAll での真の OOM 回避は P7 送り)。</item>
-/// </list>
 /// </para>
 /// </summary>
 public sealed class SnapshotSearcher

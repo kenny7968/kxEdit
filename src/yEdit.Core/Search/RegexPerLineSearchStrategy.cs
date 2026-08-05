@@ -8,7 +8,15 @@ namespace yEdit.Core.Search;
 /// <see cref="TextSearcher"/> に適用し、行頭オフセットを足して文書座標へ戻す。
 /// </summary>
 /// <remarks>
-/// <b>壊れる契約</b>(<see cref="SnapshotSearcher"/> の要約表も参照):
+/// <para>
+/// <b>選択の前提</b>: この戦略は <c>CharLength &gt; 閾値</c> かつ <c>UseRegex == true</c> の
+/// ときだけ選ばれる。パターンの解釈は委譲先の <see cref="TextSearcher"/> が構築時の
+/// <see cref="SearchOptions"/> から決めるため、この戦略自身は
+/// <see cref="SearchOptions"/> を持たない。
+/// </para>
+/// <para>
+/// <b>壊れる契約</b>(<see cref="SnapshotSearcher"/> の選択規則表も参照):
+/// </para>
 /// <list type="bullet">
 ///   <item>改行を跨ぐパターンは絶対にヒットしない。</item>
 ///   <item>アンカー(<c>^</c> / <c>$</c> / <c>\A</c> / <c>\Z</c> / <c>\G</c>)は
@@ -72,12 +80,14 @@ internal sealed class RegexPerLineSearchStrategy : ISnapshotSearchStrategy
     public MatchSpan? FindPrev(TextSnapshot snap, int before)
     {
         // 文書長超の before をここでクランプする(理由と反例は ISnapshotSearchStrategy の契約表)。
-        // 現在はファサード側(SnapshotSearcher.FindPrev)にも同じクランプがあり二重だが、
-        // Task 5 でファサード側が外れるとこの 1 行が唯一の防御になる。「重複だから」で消さないこと。
+        // この 1 行が上限の唯一の防御である=ファサード SnapshotSearcher.FindPrev は
+        // 上限をクランプしない。外すと直下の before - 1 が TextSnapshot.GetLineIndexOfChar の
+        // 範囲外になり ArgumentOutOfRangeException で落ちる。網 =
+        // FindPrev_BeforePastEnd_is_clamped_by_regex_strategy_above_threshold。
         // 以降 before は (0, CharLength] に収まるが、両端の出所は分かれている:
-        //   下限 (before > 0) = ファサード SnapshotSearcher.FindPrev の `if (before <= 0) return null;`
+        //   下限 (before > 0) = ファサード SnapshotSearcher.FindPrev の `before > 0` 条件。
         //     — この行では保証しない。
-        //   上限 (before <= CharLength) = 直下のクランプ。Task 5 でファサード側が外れても残る。
+        //   上限 (before <= CharLength) = 直下のクランプ。
         before = Math.Min(before, snap.CharLength);
 
         int startLine = snap.GetLineIndexOfChar(before - 1);
