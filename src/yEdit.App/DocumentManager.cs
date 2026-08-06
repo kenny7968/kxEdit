@@ -54,6 +54,13 @@ public sealed class DocumentManager : IDisposable
     /// <summary>キー起因(Ctrl+Tab/Ctrl+1..9)のタブ切替時に発火。MainForm が Announcer でタブ名を読ませる。</summary>
     public event EventHandler<Document>? KeyBasedSwitch;
 
+    /// <summary>タブを閉じ切った直後に発火(閉じた Document を渡す)。購読側はその文書に
+    /// 紐づく保持(検索の材質化キャッシュ等)を解放する。
+    /// <b><see cref="ActiveDocumentChanged"/> では代用できない</b>: 選択タブ削除時の
+    /// <c>TabControl.Selected</c> 発火は WinForms の仕様上保証されず(MainForm.CloseActiveTab の注記)、
+    /// 非アクティブタブを閉じる経路ではそもそも切替が起きない。「閉じた」の唯一の通知源。</summary>
+    public event EventHandler<Document>? DocumentClosed;
+
     /// <summary>新しい空タブを生成しアクティブ化する。State の中身は呼び出し側が設定する。</summary>
     public Document CreateNew()
     {
@@ -118,6 +125,9 @@ public sealed class DocumentManager : IDisposable
         _tabs.TabPages.Remove(doc.Page);
         doc.Editor.Dispose();
         doc.Page.Dispose();
+        // 解放の後に通知する(購読側は「閉じた文書を掴んでいる参照を捨てる」だけで、
+        // 破棄済みの Editor/Page には触らない)。confirm 却下の早期 return では発火しない。
+        DocumentClosed?.Invoke(this, doc);
         return true;
     }
 

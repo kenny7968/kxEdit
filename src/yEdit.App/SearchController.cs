@@ -20,6 +20,15 @@ public sealed class SearchController
     private MatchSpan? _lastHit; // 直前に選択したヒット（ゼロ幅でも前進できるよう歩進に使う）
     private (int Start, int End)? _selectionScope; // 「選択範囲のみ」ON 時に捕捉した置換対象範囲
 
+    // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされ
+    // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)、MaterializedSearchStrategy の
+    // 材質化キャッシュも毎回捨てられる(打鍵ごとの UpdateCount で効く)。
+    // 保持する側の責任: キャッシュは TextSnapshot → ピース木 → バイト配列を強参照するため、
+    // 破棄トリガ(条件変化・文書切替・文書クローズ・ユーザーの検索終了)を漏らすと
+    // 閉じたタブの文書がまるごと生き残る。DropSearcher を呼ぶ経路を減らさないこと。
+    private SearchOptions? _searcherOptions;
+    private SnapshotSearcher? _searcher;
+
     public SearchController(
         DocumentManager docs,
         IWin32Window owner,
@@ -35,9 +44,13 @@ public sealed class SearchController
         {
             _lastHit = null; // 別文書の歩進状態を持ち越さない
             _selectionScope = null; // 別文書へ切替時は捕捉済みスコープも無効化
+            DropSearcher(); // 別文書の材質化キャッシュを持ち越さない(破棄トリガ ii-a)
             if (_view?.Visible == true)
                 UpdateCount(); // 表示中なら新アクティブで件数を更新
         };
+        // 破棄トリガ ii-b: タブクローズ。ActiveDocumentChanged は選択タブ削除で発火が保証されず、
+        // 非アクティブタブのクローズでは切替自体が起きないため、こちらが唯一の通知源。
+        _docs.DocumentClosed += (_, _) => DropSearcher();
     }
 
     private EditorControl? ActiveEditor => _docs.Active?.Editor;
@@ -52,6 +65,7 @@ public sealed class SearchController
     private void Open(bool replaceMode)
     {
         if (_view is null || _view.IsDisposed)
+        {
             _view = _viewFactory(
                 new FindReplaceCallbacks(
                     FindNext: FindNext,
@@ -62,6 +76,13 @@ public sealed class SearchController
                     InSelectionToggled: OnInSelectionToggled
                 )
             );
+            // 破棄トリガ iii。購読は生成の直後=この if の中に置くこと(外に出すと Ctrl+F の
+            // たびに多重購読してハンドラが単調増加する)。旧ビューごと捨てるので -= は要らない。
+            _view.Dismissed += (_, _) => DropSearcher();
+            // ビューを作り直す=前のダイアログのセッションは終わっている(閉じるボタン経由でない
+            // 破棄=owner ごとのクローズでは Dismissed が来ない)。新セッションを持ち越しゼロで始める。
+            DropSearcher();
+        }
         _view.SetMode(replaceMode);
         _view.ShowAndFocus(_owner); // 従来の「!Visible なら Show→Activate→FocusPattern」と同順(ビュー側に集約)
         UpdateCount();
@@ -75,19 +96,61 @@ public sealed class SearchController
         return new SearchOptions(d.Pattern, d.MatchCase, d.WholeWord, d.UseRegex);
     }
 
+    /// <summary>照合条件に対応する searcher を返す(条件が変われば作り直す)。条件が無効なら null。
+    /// <see cref="SearchOptions"/> は record なので <c>!=</c> は構造的比較になる。
+    /// <para>
+    /// 4 つの呼び出し側(UpdateCount / Find / ReplaceOne / ReplaceAll)は直前で
+    /// <see cref="CurrentOptions"/> の null を弾いているので、実際にここが null を返すことはない。
+    /// 呼び出し側の <c>is null</c> は nullable 解決のためのガードで、無効な正規表現の扱い
+    /// (<see cref="SnapshotSearcher.IsValid"/> が false)と同じ側へ倒してある。
+    /// </para></summary>
+    private SnapshotSearcher? ResolveSearcher()
+    {
+        var opts = CurrentOptions();
+        if (opts is null)
+        {
+            // 検索語を空にしたら保持中の searcher(とキャッシュ)を落とす。
+            // 素の `return null;` だと _searcher に触れないため、空にしても保持が続く。
+            DropSearcher();
+            return null;
+        }
+        if (_searcher is null || _searcherOptions != opts)
+        {
+            _searcher = new SnapshotSearcher(opts);
+            _searcherOptions = opts;
+        }
+        return _searcher;
+    }
+
+    /// <summary>保持中の searcher を捨てる(材質化キャッシュごと解放する)。
+    /// 冪等でなければならない=Dismissed は連続発火しうる(Escape → 再表示 → また Escape)。</summary>
+    private void DropSearcher()
+    {
+        _searcher = null;
+        _searcherOptions = null;
+    }
+
+    /// <summary>テスト観測用: 現在保持中の searcher(未解決なら null)。
+    /// 保持と破棄は<b>結果値からは観測できない</b>(作り直しても同じ答えを返す)ため、
+    /// 破棄トリガの網はこの参照同一性でしか書けない。実運用経路では参照しない。</summary>
+    internal SnapshotSearcher? SearcherForTest => _searcher;
+
     /// <summary>増分カウント（移動しない）。エラー/タイムアウトはステータスのみ更新（通知しない）。</summary>
     public void UpdateCount()
     {
         var d = _view;
         if (d is null)
             return;
-        var opts = CurrentOptions();
-        if (opts is null)
+        // 条件が無効(検索語が空)なら null。判定を CurrentOptions() で先に済ませてしまうと
+        // ResolveSearcher へ入らず、保持中の searcher が落ちない(検索語を消しても
+        // 文書 1 本ぶんのキャッシュが残る)ため、null 判定はここで解決結果に対して行う。
+        // 条件は CurrentOptions() の null 判定と同値=ステータスをクリアする従来挙動のまま。
+        var searcher = ResolveSearcher();
+        if (searcher is null)
         {
             d.SetStatus("");
             return;
         }
-        var searcher = new SnapshotSearcher(opts);
         if (!searcher.IsValid)
         {
             d.SetStatus("正規表現が正しくありません");
@@ -120,8 +183,8 @@ public sealed class SearchController
         var opts = CurrentOptions();
         if (ed is null || opts is null)
             return false;
-        var searcher = new SnapshotSearcher(opts);
-        if (!searcher.IsValid)
+        var searcher = ResolveSearcher();
+        if (searcher is null || !searcher.IsValid)
         {
             Announce("正規表現が正しくありません");
             return false;
@@ -183,8 +246,8 @@ public sealed class SearchController
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);
             return;
         }
-        var searcher = new SnapshotSearcher(opts);
-        if (!searcher.IsValid)
+        var searcher = ResolveSearcher();
+        if (searcher is null || !searcher.IsValid)
         {
             Announce("正規表現が正しくありません");
             return;
@@ -273,8 +336,8 @@ public sealed class SearchController
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);
             return;
         }
-        var searcher = new SnapshotSearcher(opts);
-        if (!searcher.IsValid)
+        var searcher = ResolveSearcher();
+        if (searcher is null || !searcher.IsValid)
         {
             Announce("正規表現が正しくありません");
             return;

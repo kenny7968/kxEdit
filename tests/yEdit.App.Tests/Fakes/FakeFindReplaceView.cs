@@ -34,4 +34,13 @@ public sealed class FakeFindReplaceView : IFindReplaceView
         ShowAndFocusCount++;
         Visible = true;
     }
+
+    public event EventHandler? Dismissed;
+
+    /// <summary>テストから「ユーザーが検索を終えた」を再現する(実ダイアログの閉じる/Escape/×相当)。</summary>
+    public void RaiseDismissed()
+    {
+        Visible = false;
+        Dismissed?.Invoke(this, EventArgs.Empty);
+    }
 }
