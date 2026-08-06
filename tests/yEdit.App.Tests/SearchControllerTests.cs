@@ -657,6 +657,95 @@ public class SearchControllerTests
         });
 
     [Fact]
+    public void ReplaceAll_InSelection_AfterEdit_RefusesStaleScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 後半の "abc" だけを選択
+            host.Search.OnInSelectionToggled(true); // [4,7) を捕捉
+
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 先頭へ挿入=捕捉位置が別の中身を指す
+
+            host.Search.ReplaceAll();
+
+            // 修正前はここで [4,7)=前半の "abc"(ユーザーが選択していない側)が置換され
+            // "QQQQX abc" + 「1 件置換しました」になっていた。
+            Assert.Equal("QQQQabc abc", doc.Editor.Text); // 一文字も書き換えない
+            Assert.Equal("選択範囲が変わりました。選択し直してください", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_UnchangedSnapshot_StillReplacesScopeOnly() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // 中央だけを捕捉する=prefix "abc " と suffix " abc" の両方を除外する fixture
+            // (全選択との区別。CLAUDE.md §4 のテスト設計の教訓)。
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true); // [4,7) を捕捉
+
+            host.Search.ReplaceAll(); // 編集を挟まない=スナップショットは同一
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // 前後の 2 件は残る
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_AfterBufferSwap_RefusesStaleScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(0, 3);
+            host.Search.OnInSelectionToggled(true); // [0,3) を捕捉
+
+            // 同一タブでバッファごと差し替え(開き直し・復元・EOL 変換の相当)。
+            // 文書切替イベントは起きないので ActiveDocumentChanged では捕まらない経路。
+            doc.Editor.Text = "abc zzz";
+
+            host.Search.ReplaceAll();
+
+            Assert.Equal("abc zzz", doc.Editor.Text); // 差し替え後の [0,3) は "abc" で一致するが置換しない
+            Assert.Equal("選択範囲が変わりました。選択し直してください", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_RetoggleAfterEdit_RecapturesScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true); // 古いスコープ
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 陳腐化させる
+
+            doc.Editor.SelectCharRange(8, 3); // "QQQQabc abc" の後半 "abc"
+            host.Search.OnInSelectionToggled(true); // 取り直す
+            host.Search.ReplaceAll();
+
+            Assert.Equal("QQQQabc X", doc.Editor.Text); // 取り直した範囲だけが置換される
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
     public void ReplaceAll_InCsvMode_IsBlocked() =>
         Sta.Run(() =>
         {
