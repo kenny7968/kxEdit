@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using yEdit.App.Speech;
+using yEdit.Core.Buffers;
 using yEdit.Core.Csv;
 using yEdit.Core.Search;
 using yEdit.Editor;
@@ -18,7 +19,16 @@ public sealed class SearchController
     private readonly Func<FindReplaceCallbacks, IFindReplaceView> _viewFactory;
     private IFindReplaceView? _view;
     private MatchSpan? _lastHit; // 直前に選択したヒット（ゼロ幅でも前進できるよう歩進に使う）
-    private (int Start, int End)? _selectionScope; // 「選択範囲のみ」ON 時に捕捉した置換対象範囲
+
+    // 「選択範囲のみ」ON 時に捕捉した置換対象範囲。捕捉元の TextSnapshot を一緒に持つ:
+    // 位置は絶対 char index なので、捕捉後に文書が編集されると同じ数値が別の中身を指す。
+    // 参照同一性で世代を見て、ずれていたら使わない。TextBuffer.Modified と同系だが、
+    // あちらはピース木の Root 比較、こちらはスナップショット参照比較(Root は internal で
+    // App から見えない)。ゆえに Undo で捕捉時と同一内容へ戻しても「陳腐化」と扱う=安全側。
+    // 保持は弱参照にする: 捕捉元が生きていれば必ず現在のスナップショットと同一なので判定は
+    // 変わらず、開き直し・復元・EOL 変換(ReplaceSource)で捨てられた旧バッファのピース木を
+    // ピン留めしない(下の searcher と同じ責任。回収済みなら陳腐化として拒否=安全側)。
+    private (WeakReference<TextSnapshot> Snap, int Start, int End)? _selectionScope;
 
     // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされ
     // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)、MaterializedSearchStrategy の
@@ -314,7 +324,7 @@ public sealed class SearchController
         if (on && ActiveEditor is { } ed)
         {
             var (s, e) = ed.GetSelectionCharRange();
-            _selectionScope = e > s ? (s, e) : null;
+            _selectionScope = e > s ? (Weak(ed.CurrentBuffer.Current), s, e) : null;
         }
         else
         {
@@ -356,6 +366,17 @@ public sealed class SearchController
                     Announce("選択範囲がありません");
                     return;
                 }
+                // 捕捉後に文書が編集されると、同じ char 位置が別の中身を指す。そのまま置換すると
+                // ユーザーが選択していない範囲を書き換えたうえ「N 件置換しました」と成功発声する
+                // (SR ユーザーには区別がつかない)。使わずに拒否する。
+                // TextSnapshot は編集のたびに新インスタンスになり、キャレット・選択の移動では
+                // 変わらない=「検索移動でクロバーされない」という捕捉方式の目的は壊れない。
+                if (!scope.Snap.TryGetTarget(out var captured) || !ReferenceEquals(captured, snap))
+                {
+                    _selectionScope = null; // 旧ピース木の参照を即手放す
+                    Announce("選択範囲が変わりました。選択し直してください");
+                    return;
+                }
                 rangeStart = scope.Start;
                 rangeLen = scope.End - scope.Start;
             }
@@ -377,6 +398,16 @@ public sealed class SearchController
                 return;
             }
             ed.ReplaceCharRange(rangeStart, rangeLen, fragment);
+            if (d.InSelection)
+                // 置換後の同じ領域を新世代で捕捉し直す。これが無いと「範囲を選んで語を変えながら
+                // 何度か置換する」ワークフローが 2 回目で拒否される(範囲は fragment の長さぶんに
+                // 伸縮する)。rangeStart は選択由来でサロゲート境界に乗っており、終端は
+                // 差し込んだ fragment の末尾なので、どちらも文字の途中を指さない。
+                _selectionScope = (
+                    Weak(ed.CurrentBuffer.Current),
+                    rangeStart,
+                    rangeStart + fragment.Length
+                );
             _lastHit = null;
             Announce($"{count} 件置換しました");
         }
@@ -385,6 +416,8 @@ public sealed class SearchController
             Announce("検索式が複雑すぎます");
         }
     }
+
+    private static WeakReference<TextSnapshot> Weak(TextSnapshot snap) => new(snap);
 
     /// <summary>MainForm 底部の通知 Label へ SR ライブ通知(Say 契約: 空は視覚クリアのみ・発声なし)。
     /// dialog が表示中なら dialog 内の視覚ステータスも更新して、置換結果の可視表示が
