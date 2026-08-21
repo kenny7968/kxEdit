@@ -337,9 +337,36 @@ Task 2 の対象は文字列定数だけだったため、`Yedit` / `YEDIT` を�
   メソッド名 `Ctor_PathUnderLocalAppDataYeditWebView2Preview` → `...LocalAppDataKxeditWebView2Preview`
 - `tests/kxEdit.Core.Tests/Buffer/FuzzTests.cs:11,44`
   環境変数名 `YEDIT_FUZZ_OPS` → `KXEDIT_FUZZ_OPS`
+- `tools/word-sim.ps1:15`
+  一時ファイル接頭辞 `yedit-word-sim-{guid}.txt` → `kxedit-word-sim-...`
 
 環境変数の改名は**開発者向け契約の変更**である。旧名を設定していた場合、エラーにはならず
 既定の反復回数で静かに走るだけなので気付きにくい。PR description に明記すること。
+
+**Step 0b: F-1 — 嘘をついているテスト名を直す**
+
+Task 2 の脆弱性レビューで見つかった**網の穴**(改名以前からの既存問題)。
+`PreviewNavigationPolicy` と `PreviewCspHeaderInjector` のホスト比較は
+`OrdinalIgnoreCase` だが、**どのテストもこれを pin していない**。
+`Uri.Host` は DNS ホストを常に小文字へ正規化するため、`Ordinal` に変えても
+結果が偶然一致して全緑のままになる(ミューテーション M3 / M2b が survive)。
+
+一方 `Uri.AbsolutePath` は大小を保持するので、同じテストの**パス段だけは**
+本当に守られている(M2 が kill)。つまり `UpperCase` を名乗るテストが実際に
+検証しているのはパス段のみ、という非対称がある。
+
+挙動は変えない。**名前とコメントを実態に合わせる**だけ:
+
+- `tests/kxEdit.App.Tests/PreviewNavigationPolicyTests.cs` の
+  `Classify_HttpsPreviewHost_UpperCase_ReturnsBlock` — 名前を
+  `Classify_HttpsPreviewHost_UpperCaseUrl_ReturnsBlock` へ改め、
+  「`Uri.Host` は正規化済みなのでホスト段の `OrdinalIgnoreCase` は defensive であり、
+  URL の大小では検証できない」旨のコメントを添える
+- `tests/kxEdit.App.Tests/PreviewCspHeaderInjectorTests.cs` の
+  `IsPreviewStylesheetRequest_UpperCaseHostAndPath_ReturnsTrue` — 同様に
+  実際に効いているのはパス段であることを明記する
+
+**テストの実装やアサーションは変えない**。名前とコメントだけである。
 
 **Files:**
 
@@ -387,8 +414,15 @@ Expected: 出力なし(本計画と設計書は既にコミット済みのため
   設定・バックアップ・セッション復元データの保存先が
   %AppData%\yEdit から %AppData%\kxEdit へ変わります。
   自動移行は行いません。旧フォルダの内容が必要な場合は手動でコピーしてください。
-  異常終了時の未保存バックアップが旧フォルダに残っている場合があります。
+
+  旧フォルダ %AppData%\yEdit には、異常終了時の未保存バックアップが
+  残っている場合があります。バックアップファイルには編集中だった文書の
+  本文が含まれます。中身を確認したうえで、不要であればフォルダごと
+  削除してください。新しい kxEdit はこのフォルダを参照も削除もしません。
 ```
+
+文面の根拠: Task 2 の脆弱性レビュー F-2。バックアップ JSON は**文書本文を含む**ため、
+単に「バックアップが残る」と書くだけでは機微情報の残留に気付けない。
 
 **Step 4: 残存確認**
 
@@ -502,6 +536,15 @@ CLAUDE.md §3 工程 5 に従い、**独立した別エージェントを 2 回�
 
 `docs/plans/2026-08-21-rename-to-kxedit-l5-checklist.md` を作り、設計書 §8 の 3 項目を実機 SR
 検証の手順として書き下す。最優先は **「NVDA が kxEdit をどう読むか」と「MyEdit と聞き分けられるか」**。
+
+加えて、改名でプレビューの仮想ホストが変わったため次の 1 項目を足す。
+
+4. **マークダウンプレビューで相対パスの画像が表示されること。**
+   Task 2 の脆弱性レビューが指摘した既存構成の疑義(本 PR 由来ではない): CSP の
+   `base-uri 'none'` と HTML の `<base href="https://kxedit.preview/">` が同居しており、
+   仕様上 `base-uri 'none'` は `<base>` を無効化するため相対パスが解決されない可能性がある。
+   改名とは無関係だが、ホスト名が変わった今が確認の好機である。
+   NG なら本 PR とは別課題として起票する(本 PR では直さない)。
 
 **Step 6: PR 作成**
 
