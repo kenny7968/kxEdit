@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-yEdit を Claude Code で開発する際のプロセス規範。誰が・どのセッションで作業しても
+kxEdit を Claude Code で開発する際のプロセス規範。誰が・どのセッションで作業しても
 同じ進め方になることを目的とする。
 
 **役割分担**: 環境構築・ビルド/テストコマンド・アーキテクチャは [README.md](./README.md)、
@@ -17,7 +17,7 @@ Lint/Format の詳細は [docs/lint-format-setup.md](./docs/lint-format-setup.md
 
 ## 2. プロジェクト原則(不変条件)
 
-- **晴眼・弱視ユーザーも第一級**。yEdit は SR(スクリーンリーダー)対応エディタだが全盲専用ではない。
+- **晴眼・弱視ユーザーも第一級**。kxEdit は SR(スクリーンリーダー)対応エディタだが全盲専用ではない。
   「SR の読み上げに効くか」を機能価値のゲート条件にしない。
 - **a11y 鉄則**:
   - UIA プロバイダは RPC スレッドから呼ばれる。RPC スレッドからエディタ内部(UI スレッド専有)に
@@ -79,13 +79,13 @@ superpowers プラグイン導入環境では各工程を対応スキルで実�
 
 | 層 | 内容 | 実行 |
 |----|------|------|
-| L1 | yEdit.Core.Tests | 自動(ゲート・CI) |
-| L2 | yEdit.Editor.Tests | 自動(ゲート・CI) |
-| L3 | yEdit.App.Tests | 自動(ゲート・CI) |
+| L1 | kxEdit.Core.Tests | 自動(ゲート・CI) |
+| L2 | kxEdit.Editor.Tests | 自動(ゲート・CI) |
+| L3 | kxEdit.App.Tests | 自動(ゲート・CI) |
 | L4 | 性能ゲート(Bench・bench.yml) | 手動 |
 | L5 | 実機 SR 検証(NVDA) | 手動・**自動化しない** |
 
-- **L5 が最終ゲート**。要否判定: SR 経路(`yEdit.Accessibility` / `EditorControl` の UIA 部 /
+- **L5 が最終ゲート**。要否判定: SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 /
   App の Speech 系)に触れる変更は必須。SR 経路不変の挙動不変リファクタは省略可。
   判定に迷ったら「必要」に倒してユーザーに実機検証を依頼する。
 - a11y 関連変更のマージ前・リリース前は `tools/sr-regression.ps1` を手動実行する(pwsh 推奨)。
@@ -119,7 +119,7 @@ superpowers プラグイン導入環境では各工程を対応スキルで実�
 - 「現在」を説明する文書(README / 本書 / tests/README.md / docs/lint-format-setup.md)だけが
   同期更新の対象。
 - 申し送り(follow-up)は設計書の申し送り節に記録し、将来タスクとして回収する。
-- `説明書/yEdit説明書.md` は**ユーザー編集版が正**。勝手に改稿しない(変更はユーザー校閲前提)。
+- `説明書/kxEdit説明書.md` は**ユーザー編集版が正**。勝手に改稿しない(変更はユーザー校閲前提)。
 
 ## 9. リリース・セキュリティ
 

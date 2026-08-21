@@ -1,5 +1,5 @@
 name: バグ報告
-description: yEdit の不具合を報告する
+description: kxEdit の不具合を報告する
 title: "[Bug] "
 labels: ["bug"]
 body:
@@ -35,7 +35,7 @@ body:
       label: 再現手順
       description: できるだけ具体的に、番号付きで記載してください。
       placeholder: |
-        1. yEdit を起動する
+        1. kxEdit を起動する
         2. `example.md` を開く
         3. Ctrl+F で検索ダイアログを開く
         4. ...
@@ -58,10 +58,10 @@ body:
       required: true
 
   - type: input
-    id: yedit-version
+    id: kxedit-version
     attributes:
-      label: yEdit のバージョン
-      description: ヘルプ → バージョン情報、または配布 zip のファイル名 (`yEdit-vX.Y.Z-win-x64.zip`) を確認してください。
+      label: kxEdit のバージョン
+      description: ヘルプ → バージョン情報、または配布 zip のファイル名 (`kxEdit-vX.Y.Z-win-x64.zip`) を確認してください。
       placeholder: 例) v1.2.3
     validations:
       required: true

@@ -1,4 +1,4 @@
-# yEdit
+# kxEdit
 
 スクリーンリーダー対応の Windows 用テキストエディタ。
 
@@ -10,7 +10,7 @@
 - **CSV モード**: CSV ファイルを表として移動しながら読み書き。
 - **禁則処理を意識した整形** など日本語テキスト編集向け配慮。
 
-エンドユーザ向けの使い方は [`説明書/yEdit説明書.md`](./説明書/yEdit説明書.md) を参照。
+エンドユーザ向けの使い方は [`説明書/kxEdit説明書.md`](./説明書/kxEdit説明書.md) を参照。
 
 ## 動作要件 (利用側)
 
@@ -18,7 +18,7 @@
 - [.NET 9 デスクトップランタイム](https://dotnet.microsoft.com/ja-jp/download/dotnet/9.0)
 - WebView2 ランタイム (マークダウンプレビューで使用。Windows 11 に標準搭載)
 
-配布物は GitHub Releases から `yEdit-vX.Y.Z-win-x64.zip` として取得可能 (zip 展開のみ、インストーラなし)。
+配布物は GitHub Releases から `kxEdit-vX.Y.Z-win-x64.zip` として取得可能 (zip 展開のみ、インストーラなし)。
 
 ## 技術スタック
 
@@ -42,10 +42,10 @@
 
 | Layer | Project | TargetFramework | 役割 |
 |-------|---------|-----------------|------|
-| App | `yEdit.App` | `net9.0-windows` (WinExe) | エントリポイント / WinForms UI / ダイアログ / コントローラ / SR 通知 |
-| Editor | `yEdit.Editor` | `net9.0-windows` | 自作 `EditorControl` (描画・キー入力・IME・キャレット・UIA テキスト提供) |
-| Accessibility | `yEdit.Accessibility` | `net9.0-windows` | UIA v2 プロバイダ (`TextControlProviderV2` / `TextRangeProviderV2` 等) |
-| Core | `yEdit.Core` | `net9.0` | テキストバッファ / レイアウト / 検索 / CSV / 設定 / IO / バックアップ (UI 非依存) |
+| App | `kxEdit.App` | `net9.0-windows` (WinExe) | エントリポイント / WinForms UI / ダイアログ / コントローラ / SR 通知 |
+| Editor | `kxEdit.Editor` | `net9.0-windows` | 自作 `EditorControl` (描画・キー入力・IME・キャレット・UIA テキスト提供) |
+| Accessibility | `kxEdit.Accessibility` | `net9.0-windows` | UIA v2 プロバイダ (`TextControlProviderV2` / `TextRangeProviderV2` 等) |
+| Core | `kxEdit.Core` | `net9.0` | テキストバッファ / レイアウト / 検索 / CSV / 設定 / IO / バックアップ (UI 非依存) |
 
 ```
 App  ──▶  Editor  ──▶  Accessibility
@@ -91,12 +91,12 @@ Lint / Format の詳細ルール (CSharpier の運用、アナライザ抑止方
 
 ```powershell
 # 全ビルド (警告=エラー)
-dotnet build yEdit.sln -c Release -warnaserror
+dotnet build kxEdit.sln -c Release -warnaserror
 
 # 個別プロジェクトのテスト
-dotnet test tests/yEdit.Core.Tests   -c Release --no-build
-dotnet test tests/yEdit.Editor.Tests -c Release --no-build
-dotnet test tests/yEdit.App.Tests    -c Release --no-build
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 ```
 
 `Category=LocalOnly` のテストは実 SR (NVDA 等) が必要なため、CI では除外している。ローカルでは `--filter` を外して実行可能。
@@ -119,13 +119,13 @@ CI (`ci.yml`) とほぼ同一のゲートだが、次の 2 点だけ異なる:
 ### 実行
 
 ```powershell
-dotnet run --project src/yEdit.App -c Release
+dotnet run --project src/kxEdit.App -c Release
 ```
 
 ## リポジトリ構成
 
 ```
-yEdit/
+kxEdit/
 ├── .config/dotnet-tools.json    CSharpier / Husky 版指定
 ├── .github/workflows/           CI (ci.yml / bench.yml / release.yml)
 ├── .husky/                      pre-commit フック定義
@@ -134,7 +134,7 @@ yEdit/
 ├── src/                         プロダクションコード (Core / Editor / Accessibility / App)
 ├── tests/                       テスト (Core / Editor / App + Smoke + Bench)
 ├── tools/                       pre-merge-check.ps1 等の運用スクリプト
-└── 説明書/yEdit説明書.md        エンドユーザ向けマニュアル (配布物同梱)
+└── 説明書/kxEdit説明書.md        エンドユーザ向けマニュアル (配布物同梱)
 ```
 
 ## リリース
