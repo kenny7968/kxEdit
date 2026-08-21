@@ -112,7 +112,8 @@ Expected: `const string needle = "yedit";`(**小文字のまま**)
 grep -rn 'yedit' src tests --include='*.cs' | wc -l
 ```
 
-Expected: 20 前後(Task 2 の対象)。**0 になっていたら小文字まで巻き込んだ事故**なので、
+Expected: **59 行 / 13 ファイル**(Task 2 の対象。2026-08-21 の実測値。当初「20 前後」と
+見積もっていたが約 3 倍だった)。**0 になっていたら小文字まで巻き込んだ事故**なので、
 `git checkout -- src tests` で戻してやり直す。
 
 **Step 4: sln を置換して改名**
@@ -244,13 +245,20 @@ git commit -m "refactor(all): 識別子・プロジェクト・CI を kxEdit へ
 - Test: `tests/kxEdit.App.Tests/PreviewNavigationPolicyTests.cs`
 - Modify: `tests/kxEdit.Core.Bench/Program.cs`(一時ファイル名の接頭辞)
 
+**注意: `sed -i` は CRLF を LF に潰す。** Task 1 で 342 ファイルを壊し、CSharpier ゲートで
+発覚して修復する羽目になった。`.gitattributes` の `* text=auto eol=crlf` と
+`.csharpierrc.json` の `"endOfLine": "crlf"` が CRLF を要求しているためである。
+置換後に必ず `dotnet csharpier format` を掛け、`git ls-files --eol` で対象が
+`i/lf w/crlf` になっていることを確認する(ODB が LF・作業ツリーが CRLF が**正常**)。
+
 **Step 1: 対象を数える**
 
 ```bash
 grep -rn 'yedit' src tests --include='*.cs' | wc -l
 ```
 
-Expected: Task 1 Step 3 と同じ件数
+Expected: **59**(Task 1 Step 3 と同じ件数)。上位は `MarkdownRendererTests.cs` 19 /
+`PreviewCspHeaderInjectorTests.cs` 11 / `PreviewNavigationPolicyTests.cs` 7
 
 **Step 2: 一括置換**
 
@@ -322,15 +330,27 @@ CLAUDE.md §3 の前倒し例外に従い、このタスクだけを対象に**�
 
 - Modify: `README.md` `CLAUDE.md` `SECURITY.md` `tests/README.md`
   `docs/lint-format-setup.md` `tools/README.md`
-- Modify: `.github/ISSUE_TEMPLATE/bug_report.yml`
+- Modify: `.github/ISSUE_TEMPLATE/*.yml`(`bug_report.yml` `feature_request.yml` `config.yml`)
+- Modify: `.editorconfig`(コメント内の旧パス参照 9 行)
+- Modify: `.gitattributes`(コメント 1 行)
 - Modify: `変更履歴.txt`
+
+`.editorconfig` と `.gitattributes` の `yEdit` はすべて `#` コメント内で、セクション
+ヘッダは glob なので**機能への影響はない**。ただし Task 5 Step 3 の残存確認 grep に
+引っかかるため、ここで回収する。
+
+**GitHub URL の扱い(要注意)**: `.github/ISSUE_TEMPLATE/` には
+`github.com/kenny7968/yEdit` を指す URL が 2 つある。これを新名へ書き換えると、
+**GitHub リポジトリ自体を改名するまで 404 になる**(GitHub のリダイレクトは
+旧名 → 新名の向きにしか効かない)。新名へ書き換えたうえで、**リポジトリ改名を
+マージ前の前提条件として PR description に明記する**(Task 5 Step 6)。
 
 **Step 1: 「現在」を説明する文書だけを置換**
 
 CLAUDE.md §8 が同期更新の対象と定めているのはこの範囲のみ。`docs/plans/` は含めない。
 
 ```bash
-sed -i 's/yEdit/kxEdit/g; s/yedit/kxedit/g' README.md CLAUDE.md SECURITY.md tests/README.md docs/lint-format-setup.md tools/README.md .github/ISSUE_TEMPLATE/bug_report.yml
+sed -i 's/yEdit/kxEdit/g; s/yedit/kxedit/g' README.md CLAUDE.md SECURITY.md tests/README.md docs/lint-format-setup.md tools/README.md .github/ISSUE_TEMPLATE/*.yml .editorconfig .gitattributes
 ```
 
 **Step 2: `docs/plans/` が無傷であることを確認**
@@ -437,11 +457,14 @@ Expected: 出力ディレクトリの DLL 構成が改名前と一致(名前の 
 **Step 3: 残存確認**
 
 ```bash
-grep -rn 'yEdit\|yedit' --exclude-dir=.git --exclude-dir=obj --exclude-dir=bin --exclude-dir=plans . | grep -v '変更履歴.txt' | grep -v 'check-no-local-paths.ps1'
+grep -rn 'yEdit\|yedit' --exclude-dir=.git --exclude-dir=obj --exclude-dir=bin --exclude-dir=plans . | grep -v '変更履歴.txt' | grep -v 'check-no-local-paths.ps1' | grep -v 'docs/report-pctalker-speech'
 ```
 
-Expected: 出力なし。`変更履歴.txt`(履歴として意図的に保存)と `check-no-local-paths.ps1`
-(両対応 regex として意図的に保持)のみが除外対象。
+Expected: 出力なし。意図的に旧名を残すのは次の 3 つだけ。
+
+- `変更履歴.txt` — 過去のリリースで実在した zip 名。書き換えると履歴が嘘になる
+- `tools/check-no-local-paths.ps1` — `yEdit|kxEdit` の両対応 regex
+- `docs/report-pctalker-speech/` — 過去の調査記録。`docs/plans/` と同じ扱いの歴史文書
 
 **Step 4: 最終ブランチレビュー(2 パス)**
 
@@ -469,9 +492,13 @@ git push -u origin feature/rename-to-kxedit
 
 PR description に必ず含める申し送り:
 
+- **マージ前の前提条件**: GitHub リポジトリ名を `kxEdit` へ変更すること。
+  `.github/ISSUE_TEMPLATE/` の URL が新名を指すため、改名前にマージすると
+  課題テンプレートのリンクが 404 になる
 - `%AppData%` は**移行しない**。既存ユーザーの設定は初期化され、異常終了時の未保存バックアップが
   旧フォルダに孤児として残る
-- GitHub リポジトリ名の変更とローカル作業ディレクトリの rename は**未実施**(ユーザー操作)
+- ローカル作業ディレクトリの rename は**未実施**(ユーザー操作)。
+  `tools/check-no-local-paths.ps1` が両対応 regex なので旧名のままでも検出は効く
 - バージョン番号を上げるかは**未決**(`v0.1.1` 据え置き / `v0.2.0`)
 - L5 実機 SR 検証の実施状況
 
