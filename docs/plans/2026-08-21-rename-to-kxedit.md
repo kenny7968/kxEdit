@@ -516,11 +516,27 @@ Expected: 出力ディレクトリの DLL 構成が改名前と一致(名前の 
 grep -rni 'yedit' --exclude-dir=.git --exclude-dir=obj --exclude-dir=bin --exclude-dir=plans . | grep -v '変更履歴.txt' | grep -v 'check-no-local-paths.ps1' | grep -v 'docs/report-pctalker-speech'
 ```
 
-Expected: 出力なし。意図的に旧名を残すのは次の 3 つだけ。
+Expected: 出力なし。意図的に旧名を残すのは次の **4 カテゴリ**だけ。
 
-- `変更履歴.txt` — 過去のリリースで実在した zip 名。書き換えると履歴が嘘になる
+- `変更履歴.txt` — 過去リリースの記述。後から改変すると履歴が嘘になる
 - `tools/check-no-local-paths.ps1` — `yEdit|kxEdit` の両対応 regex
+- `docs/plans/` — 策定時スナップショット(上の grep が `--exclude-dir=plans` で除外済み)
 - `docs/report-pctalker-speech/` — 過去の調査記録。`docs/plans/` と同じ扱いの歴史文書
+
+**この grep は一方向の網である。**置換漏れは捕まえるが、**過剰置換は原理的に捕まえない**
+(新名しか残らないため)。実際、最終レビューのコード品質パスが `DirtyEdit_` →
+`DirtkxEdit_` という部分文字列衝突を発見した。`Dirt` + `yEdit` の癒着で、
+アプリ名と無関係な識別子が壊れていた。
+
+過剰置換を捕まえる網は**置換前**に張る:
+
+```bash
+git grep -n -i -P '(?<=[A-Za-z])yedit' -- . ':!docs/plans'
+```
+
+英字に隣接する `yEdit` を列挙し、アプリ名を指すもの(改名対象)と
+偶然の部分一致(保護対象)を先に仕分けておく。置換後は鏡像の
+`(?<=[A-Za-z])kxedit` で確認する。
 
 **Step 4: 最終ブランチレビュー(2 パス)**
 
@@ -573,6 +589,7 @@ PR description に必ず含める申し送り:
 
 - `tools/pre-merge-check.ps1` が EXIT 0
 - テスト件数が Task 0 のベースラインと完全一致
-- Task 5 Step 3 の残存確認で `yEdit` / `yedit` が意図した 2 ファイル以外に出ない
+- Task 5 Step 3 の残存確認で `yEdit` / `yedit` が意図した 4 カテゴリ以外に出ない
+- 部分文字列衝突の確認(`(?<=[A-Za-z])kxedit`)で、アプリ名を指さない癒着が残っていない
 - 2 パスのレビュー指摘が fixup commit で解消済み
 - L5 チェックリストが作成され、ユーザーの実機検証を待てる状態

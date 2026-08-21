@@ -61,7 +61,7 @@ public class DocumentManagerTests
         });
 
     [Fact]
-    public void DirtkxEdit_OnActiveDocument_MarksLabel_AndRaisesActiveDirtyChanged() =>
+    public void DirtyEdit_OnActiveDocument_MarksLabel_AndRaisesActiveDirtyChanged() =>
         Sta.Run(() =>
         {
             using var host = new Host();
@@ -79,7 +79,7 @@ public class DocumentManagerTests
         });
 
     [Fact]
-    public void DirtkxEdit_OnInactiveDocument_MarksItsLabel_ButDoesNotRaiseActiveDirtyChanged() =>
+    public void DirtyEdit_OnInactiveDocument_MarksItsLabel_ButDoesNotRaiseActiveDirtyChanged() =>
         Sta.Run(() =>
         {
             using var host = new Host();

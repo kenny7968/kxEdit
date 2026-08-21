@@ -2,11 +2,11 @@
 # 対象は Windows / Git Bash / 混合スラッシュを網羅する 2 系統(いずれも
 # case-insensitive):
 #   - Windows ユーザーホーム下の任意 username を含む絶対パス -> %USERPROFILE%\ に置換
-#   - 本リポジトリ (kxEdit / 旧名 yEdit) の任意 drive 絶対パス           -> <repo>          に置換
+#   - 本リポジトリ (kxEdit / 旧名 yEdit) の任意 drive 絶対パス -> <repo> に置換
 #
 # 具体的な variant 例(いずれも検出対象):
 #   X:\Users\<name>\   X:/Users/<name>/   /x/Users/<name>/   (X は任意 drive)
-#   X:\src\kxEdit       X:/src/kxEdit       /x/src/kxEdit       (X は任意 drive)
+#   X:\src\kxEdit      X:/src/kxEdit      /x/src/kxEdit      (X は任意 drive)
 #   X:\src\yEdit       X:/src/yEdit       /x/src/yEdit       (旧名・改名途上の作業ディレクトリも検出)
 #
 # このスクリプト自身は regex に構造 literal (Users, kxEdit / yEdit 等) を含むため、
@@ -76,7 +76,7 @@ if ($violations.Count -gt 0) {
     Write-Output ''
     Write-Output '[no-local-paths] ローカルパスが検出されました。プレースホルダに置換してください:'
     Write-Output '  Windows/Git Bash 形式のユーザーホーム系 (X:\Users\<name>\ / X:/Users/<name>/ / /x/Users/<name>/ 等・X は任意 drive) -> %USERPROFILE%\'
-    Write-Output '  kxEdit / yEdit リポジトリの絶対パス (X:\src\kxEdit / X:/src/kxEdit / /x/src/kxEdit 等・X は任意 drive・旧名 yEdit も同様)                        -> <repo>'
+    Write-Output '  kxEdit リポジトリの絶対パス (X:\src\kxEdit / X:/src/kxEdit / /x/src/kxEdit 等・X は任意 drive・旧名 yEdit も同様) -> <repo>'
     Write-Output ''
     $violations | ForEach-Object { Write-Output ('  ' + $_) }
     Write-Output ''
