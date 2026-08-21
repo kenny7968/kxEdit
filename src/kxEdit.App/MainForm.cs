@@ -697,7 +697,7 @@ public sealed partial class MainForm : Form
             null,
             (_, _) =>
                 MessageBox.Show(
-                    "kxEdit v0.1.1",
+                    "kxEdit v0.2.0",
                     "バージョン情報",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
