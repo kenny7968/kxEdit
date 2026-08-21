@@ -142,6 +142,17 @@ kxEdit/
 タグ `v*` を push すると `.github/workflows/release.yml` が起動し、
 フレームワーク依存ビルド (win-x64) + 説明書を zip にまとめて GitHub Releases に自動アップロードする。
 
+**タグを打つ前に、次の 2 つをタグと同じバージョンに揃えた commit を積むこと。**
+揃っていないとリリース CI が最初のステップで失敗する。
+
+| 対象 | 内容 |
+|------|------|
+| `Directory.Build.props` の `<Version>` | バージョンの唯一の管理点。バージョン情報ダイアログの表示もここから来る |
+| `変更履歴.txt` の見出し | `## vX.Y.Z` 形式。zip に同梱されるため見出しだけ古いまま出荷されるのを防ぐ |
+
+配布物のアセンブリバージョンはタグから `-p:Version` で渡されるので、
+`Directory.Build.props` の値は開発ビルドの既定値として働く。
+
 ## 開発について
 
 本プロジェクトは [Claude Code](https://claude.com/claude-code) (Anthropic) + [superpowers プラグイン](https://github.com/obra/superpowers) を主要な実装手段として開発している。

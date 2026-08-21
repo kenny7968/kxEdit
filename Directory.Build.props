@@ -8,6 +8,13 @@
     <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
 
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- バージョンの唯一の管理点。CLAUDE.md §9 の「リリース前に表示バージョン更新
+         commit を積む」で触るのはこの 1 行だけ。
+         リリース時は release.yml が -p:Version でタグの値に上書きするため、
+         ここは開発ビルドの既定値として働く。
+         詳細: docs/plans/2026-08-22-assembly-version-design.md -->
+    <Version>0.2.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
