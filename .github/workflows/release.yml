@@ -28,6 +28,25 @@ jobs:
         with:
           dotnet-version: 9.0.x
 
+      # CLAUDE.md §9 は「リリース前に表示バージョン更新 commit を積む」と定める。
+      # 忘れたままタグを打つと、配布物は -p:Version でタグの値になる一方、
+      # リポジトリの Directory.Build.props だけが古いまま残る。ビルド前に落として
+      # 30 分のジョブを無駄にしない。
+      # (ローカルゲートに対応ステップは置かない。ローカルにはタグが無く比較対象が無いため)
+      - name: バージョン整合チェック(タグ と Directory.Build.props)
+        shell: pwsh
+        run: |
+          $props = Get-Content Directory.Build.props -Raw
+          if ($props -notmatch '<Version>([^<]+)</Version>') {
+            throw "Directory.Build.props に <Version> が見つかりません。"
+          }
+          $declared = $Matches[1].Trim()
+          $expected = $env:TAG.TrimStart('v')
+          if ($declared -ne $expected) {
+            throw "タグ $env:TAG と Directory.Build.props の <Version> ($declared) が一致しません。タグを打つ前にバージョン更新 commit を積んでください。"
+          }
+          Write-Output "バージョン整合 OK: $declared"
+
       # タグ直 push 時にも 0 警告ゲートが必ず走る形にする
       # (implicit build 経由の dotnet test は -warnaserror が伝播しないため素通り経路になっていた)。
       # ci.yml と対称形。以降のテスト 3 ステップは --no-build で二重ビルドを回避する。
