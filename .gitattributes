@@ -1,4 +1,4 @@
-# yEdit は Windows デスクトップアプリケーション → CRLF を既定にする。
+# kxEdit は Windows デスクトップアプリケーション → CRLF を既定にする。
 # 例外は POSIX sh で解釈されるファイルと husky.Net が管理するファイルのみ LF 強制。
 # 大量整形の renormalize commit は .git-blame-ignore-revs に登録済み。
 

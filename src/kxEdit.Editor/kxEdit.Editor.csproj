@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- UIA イベント発火・System.Windows.Rect のため UseWPF も有効化 -->
+    <UseWPF>true</UseWPF>
+    <!-- P4 Task 12: LOGFONT を Font.ToLogFont で pin できる blittable struct にするため
+         (`fixed char lfFaceName[32]`)。NativeMethods.LOGFONT 以外では unsafe を使わない。 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\kxEdit.Accessibility\kxEdit.Accessibility.csproj" />
+    <ProjectReference Include="..\kxEdit.Core\kxEdit.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- P2 Task 14 で追加予定の smoke 起動器から EditorControl の internal メンバに触れられるように -->
+    <InternalsVisibleTo Include="kxEdit.Editor.Smoke" />
+    <!-- P3 Task 8: テストから internal 診断 API (GetText) を叩けるようにする -->
+    <InternalsVisibleTo Include="kxEdit.Editor.Tests" />
+  </ItemGroup>
+</Project>

@@ -7,7 +7,7 @@
   powershell -File tools\pre-merge-check.ps1
 #>
 # テストプロジェクトを追加/削除する場合は 3 箇所同期: tools/pre-merge-check.ps1・.github/workflows/ci.yml・.github/workflows/release.yml
-# (sln 一括ステップ寄せは検討済みだが、dotnet test yEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持=2026-07-15 実測 sln 14s vs 個別合計 18s)
+# (sln 一括ステップ寄せは検討済みだが、dotnet test kxEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持=2026-07-15 実測 sln 14s vs 個別合計 18s)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
@@ -29,16 +29,16 @@ Invoke-Step 'CSharpier check (format verify)' {
     dotnet csharpier check $repoRoot
 }
 Invoke-Step 'Release ビルド(警告=エラー)' {
-    dotnet build (Join-Path $repoRoot 'yEdit.sln') -c Release -warnaserror
+    dotnet build (Join-Path $repoRoot 'kxEdit.sln') -c Release -warnaserror
 }
 Invoke-Step 'Core.Tests' {
-    dotnet test (Join-Path $repoRoot 'tests/yEdit.Core.Tests') -c Release --no-build
+    dotnet test (Join-Path $repoRoot 'tests/kxEdit.Core.Tests') -c Release --no-build
 }
 Invoke-Step 'Editor.Tests' {
-    dotnet test (Join-Path $repoRoot 'tests/yEdit.Editor.Tests') -c Release --no-build
+    dotnet test (Join-Path $repoRoot 'tests/kxEdit.Editor.Tests') -c Release --no-build
 }
 Invoke-Step 'App.Tests' {
-    dotnet test (Join-Path $repoRoot 'tests/yEdit.App.Tests') -c Release --no-build
+    dotnet test (Join-Path $repoRoot 'tests/kxEdit.App.Tests') -c Release --no-build
 }
 Write-Host 'OK: pre-merge チェック全通過' -ForegroundColor Green
 exit 0

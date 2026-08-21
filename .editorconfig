@@ -39,13 +39,13 @@ dotnet_diagnostic.CA1707.severity = none
 # CA1716(仮想メンバー/インターフェースの引数・メンバー名を予約語と重ねない) を disable する主因:
 #   - 検出対象は「他言語(主に VB.NET)から override/implement しづらくなる」ケース
 #     (例: 引数名 end / メソッド名 Error は VB.NET 予約語と競合)
-#   - yEdit は C# 単独プロジェクトで VB.NET 相互運用の予定なし=実害ゼロ
+#   - kxEdit は C# 単独プロジェクトで VB.NET 相互運用の予定なし=実害ゼロ
 #   - 既存の意味論的に自然な命名(IUiaTextHost.SetSelection の end / IUserPrompt.Error)を
 #     `endInclusive` / `ShowError` 等へ改名すると内部呼び出しの読みやすさが損なわれる
 dotnet_diagnostic.CA1716.severity = none
 
 # CA1711(型名に Enum / Delegate / Attribute / Flag などの suffix を付けない) を disable する主因:
-#   - yEdit.Core.Editing.ImeAttribute は IMM32 GCS_COMPATTR (Composition Attribute) の
+#   - kxEdit.Core.Editing.ImeAttribute は IMM32 GCS_COMPATTR (Composition Attribute) の
 #     属性バイト定数群を保持する static class=IME 属性ドメイン用語としての "Attribute" が正
 #   - 誤解(System.Attribute 派生と誤読される)を招く命名でも rename(例: ImeAttr / ImeCharAttribute)
 #     は既存 public API 破壊で見合わない
@@ -59,7 +59,7 @@ dotnet_diagnostic.S1135.severity = none
 dotnet_diagnostic.S125.severity = suggestion
 
 # S101(型名 PascalCase 命名規約違反) を disable する主因:
-#   - src/yEdit.Editor/NativeMethods.cs の POINT / RECT / LOGFONT / CANDIDATEFORM は
+#   - src/kxEdit.Editor/NativeMethods.cs の POINT / RECT / LOGFONT / CANDIDATEFORM は
 #     Win32 API 構造体(POINT/RECT/LOGFONT/CANDIDATEFORM)のミラー命名で
 #     interop 上で SDK ヘッダ名との 1:1 対応を保つのが慣例
 #   - rename すると Marshal 側の struct layout 認識には影響しないが、
@@ -69,17 +69,17 @@ dotnet_diagnostic.S125.severity = suggestion
 dotnet_diagnostic.S101.severity = none
 
 # S127(for ループ内で counter を意図的に変更) を disable する主因:
-#   - src/yEdit.Core/Buffer/TextBufferBuilder.cs の UTF-8 decode で
+#   - src/kxEdit.Core/Buffer/TextBufferBuilder.cs の UTF-8 decode で
 #     `for (int off = 0; off < len;) { …; off += step; }` の可変ステップループが
 #     マルチバイト境界処理の基本パターン(1〜4 byte を都度加算)
-#   - src/yEdit.Core/Text/KinsokuFormatter.cs (:213) の禁則整形でも同型の
+#   - src/kxEdit.Core/Text/KinsokuFormatter.cs (:213) の禁則整形でも同型の
 #     可変ステップ加算(surrogate pair を跨いだ前進 `i += len;`)が正当ユースケース
 #   - while ループへの機械変換は初期化/継続条件/更新式の 3 点セットを
 #     散逸させ、ループ不変条件の可読性を落とす
 dotnet_diagnostic.S127.severity = none
 
 # S1199(ネストした局所スコープブロック) を disable する主因:
-#   - src/yEdit.Core/Search/SnapshotSearcher.cs や tests/yEdit.Editor.Smoke/GdiBench.cs で
+#   - src/kxEdit.Core/Search/SnapshotSearcher.cs や tests/kxEdit.Editor.Smoke/GdiBench.cs で
 #     `{ … }` 局所スコープブロックを用いて一時変数の寿命を明示的に区切る
 #     C# の正当慣用句(using ブロックの外でも同種の隔離目的で使う)
 #   - method 抽出すると 1 箇所からのみ呼ばれる helper が乱立して読解負荷が増す
@@ -88,10 +88,10 @@ dotnet_diagnostic.S127.severity = none
 dotnet_diagnostic.S1199.severity = none
 
 # S3358(3 段以上の入れ子 ternary) を disable する主因:
-#   - src/yEdit.Core/Buffer/TextChunk.cs / TextBufferBuilder.cs の UTF-8 decode で
+#   - src/kxEdit.Core/Buffer/TextChunk.cs / TextBufferBuilder.cs の UTF-8 decode で
 #     `b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4` のように UTF-8 先頭バイト
 #     の範囲から後続バイト数を引くルックアップテーブル型 3-way chained ternary が定常パターン
-#   - src/yEdit.App/MainForm.cs (accesskey 選択) / CsvController.cs (clamp) 等でも
+#   - src/kxEdit.App/MainForm.cs (accesskey 選択) / CsvController.cs (clamp) 等でも
 #     連続する範囲判定を短く畳む慣例
 #   - if/else if/else へ機械展開すると本体 1 行の代入が 4〜6 行に膨らみ、
 #     lookup table としての一覧性が失われる
@@ -124,7 +124,7 @@ dotnet_diagnostic.CA1861.severity = none
 #     検査済み(S927 src 側は Task C-8 で個別修正)
 dotnet_diagnostic.S927.severity = none
 # S1215(GC.Collect の意図的呼出) を tests 限定で disable する主因:
-#   - Smoke bench harness の baseline 測定パス(tests/yEdit.Editor.Smoke/Program.cs
+#   - Smoke bench harness の baseline 測定パス(tests/kxEdit.Editor.Smoke/Program.cs
 #     の --bench-save 分岐)で GC.Collect() を意図的に呼び出す
 #   - production コードでは detect したい bug indicator なので src 側は
 #     警告のまま残す

@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: セキュリティ脆弱性の報告
-    url: https://github.com/kenny7968/yEdit/security/advisories/new
+    url: https://github.com/kenny7968/kxEdit/security/advisories/new
     about: セキュリティに関する問題は公開 Issue ではなく Private Security Advisory から報告してください (SECURITY.md 参照)。
   - name: 使い方・操作方法の質問
-    url: https://github.com/kenny7968/yEdit/blob/main/%E8%AA%AC%E6%98%8E%E6%9B%B8/yEdit%E8%AA%AC%E6%98%8E%E6%9B%B8.md
-    about: 基本的な使い方は同梱の説明書 (説明書/yEdit説明書.md) を参照してください。
+    url: https://github.com/kenny7968/kxEdit/blob/main/%E8%AA%AC%E6%98%8E%E6%9B%B8/kxEdit%E8%AA%AC%E6%98%8E%E6%9B%B8.md
+    about: 基本的な使い方は同梱の説明書 (説明書/kxEdit説明書.md) を参照してください。

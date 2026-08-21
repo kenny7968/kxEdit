@@ -8,7 +8,7 @@
 |---|---|---|
 | `pre-merge-check.ps1` | main マージ前のローカルゲート(CSharpier check + Release 0 警告 + 全テスト緑) | **main マージ前 必須** |
 | `sr-regression.ps1` | SR 呼び出しパターン回帰スイート。`verify-uia-editor.ps1` + `word-sim.ps1` を一括実行するアグリゲータ | a11y 系変更のマージ前 + リリース前 |
-| `verify-uia-editor.ps1` | `yEdit.Editor.Smoke --uia` を起動し、UIA クライアントとして TextPattern / GetSelection / RangeFromPoint の疎通を PASS/FAIL 判定 | 通常は `sr-regression.ps1` 経由で呼ばれる |
+| `verify-uia-editor.ps1` | `kxEdit.Editor.Smoke --uia` を起動し、UIA クライアントとして TextPattern / GetSelection / RangeFromPoint の疎通を PASS/FAIL 判定 | 通常は `sr-regression.ps1` 経由で呼ばれる |
 | `word-sim.ps1` | 同じく `--uia` 起動先に対し NVDA の TextUnit.Word 呼び出しパターン(Expand/Move span/MoveEndpointByUnit)6 ケースを再現 | 通常は `sr-regression.ps1` 経由で呼ばれる |
 
 ## §1 `pre-merge-check.ps1`
@@ -31,11 +31,11 @@ powershell -File tools\pre-merge-check.ps1
 
 ## §2 SR 呼び出しパターン回帰スイート(Phase 3)
 
-**a11y 関連変更**(`yEdit.Accessibility` / `EditorControl` の UIA 部 / Speech 系)のマージ前+リリース前に、UIA プロバイダが SR 呼び出しに正しく応答するかを一次スクリーニングする。**pre-merge には組み込まない**(UIA クライアントはフォアグラウンドのデスクトップセッションが必要で、常時実行に向かない)。
+**a11y 関連変更**(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / Speech 系)のマージ前+リリース前に、UIA プロバイダが SR 呼び出しに正しく応答するかを一次スクリーニングする。**pre-merge には組み込まない**(UIA クライアントはフォアグラウンドのデスクトップセッションが必要で、常時実行に向かない)。
 
 ### `sr-regression.ps1`(アグリゲータ・通常はこれだけ叩く)
 
-1. `yEdit.Editor.Smoke` を Release ビルド(1 回のみ)
+1. `kxEdit.Editor.Smoke` を Release ビルド(1 回のみ)
 2. `verify-uia-editor.ps1` を実行
 3. `word-sim.ps1` を実行
 
@@ -50,7 +50,7 @@ powershell -File tools\sr-regression.ps1
 
 ### `verify-uia-editor.ps1`(子スクリプト)
 
-`yEdit.Editor.Smoke --uia` を起動 → UIA クライアントとして `AutomationId="editor"` を掴む → TextPattern / GetSelection / RangeFromPoint の疎通を PASS/FAIL 判定。P5 Task 14 で導入。
+`kxEdit.Editor.Smoke --uia` を起動 → UIA クライアントとして `AutomationId="editor"` を掴む → TextPattern / GetSelection / RangeFromPoint の疎通を PASS/FAIL 判定。P5 Task 14 で導入。
 
 ### `word-sim.ps1`(子スクリプト)
 

@@ -2,12 +2,12 @@
 <#
 .SYNOPSIS
   Phase 3 SR 呼び出しパターン回帰スイート。UIA プロバイダに対する SR 側の呼び出しを
-  UIA クライアントとして再現し、a11y 関連変更(yEdit.Accessibility / EditorControl の UIA 部 /
+  UIA クライアントとして再現し、a11y 関連変更(kxEdit.Accessibility / EditorControl の UIA 部 /
   Speech 系)のマージ前+リリース前の一次スクリーニングとして使う。
   典拠: docs/plans/2026-07-13-test-strategy-phase3-sr-perf-design.md §1
 .DESCRIPTION
   実行内容:
-    1. yEdit.Editor.Smoke を Release ビルド(1 回のみ・子スクリプトが二重ビルドしない)
+    1. kxEdit.Editor.Smoke を Release ビルド(1 回のみ・子スクリプトが二重ビルドしない)
     2. verify-uia-editor.ps1 を実行(TextPattern/GetSelection/RangeFromPoint 疎通)
     3. word-sim.ps1 を実行(NVDA の TextUnit.Word 6 ケース)
 
@@ -30,7 +30,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$smokeExe = Join-Path $repoRoot 'tests\yEdit.Editor.Smoke\bin\Release\net9.0-windows\yEdit.Editor.Smoke.exe'
+$smokeExe = Join-Path $repoRoot 'tests\kxEdit.Editor.Smoke\bin\Release\net9.0-windows\kxEdit.Editor.Smoke.exe'
 
 # 子スクリプト実行に使う PowerShell を決定する。pwsh 優先(BOMless UTF-8 対応)。
 $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -54,8 +54,8 @@ function Invoke-Step {
 
 $fail = 0
 
-$rc = Invoke-Step 'Release ビルド(yEdit.Editor.Smoke)' {
-    dotnet build (Join-Path $repoRoot 'tests\yEdit.Editor.Smoke') -c Release
+$rc = Invoke-Step 'Release ビルド(kxEdit.Editor.Smoke)' {
+    dotnet build (Join-Path $repoRoot 'tests\kxEdit.Editor.Smoke') -c Release
 }
 if ($rc -ne 0) {
     Write-Host "NG: ビルド失敗 (exit $rc)" -ForegroundColor Red
