@@ -324,7 +324,22 @@ CLAUDE.md §3 の前倒し例外に従い、このタスクだけを対象に**�
 
 ---
 
-## Task 3: 文書・課題テンプレート・変更履歴
+## Task 3: 文書・課題テンプレート・変更履歴・陳腐化した識別子
+
+**Step 0: Task 2 が残した陳腐化識別子を回収**
+
+Task 2 の対象は文字列定数だけだったため、`Yedit` / `YEDIT` を含む識別子が 3 つ残っている。
+いずれも本体は既に新名を assert しており、**名前だけが嘘になっている**状態。
+
+- `tests/kxEdit.Core.Tests/Text/MarkdownRendererTests.cs:411`
+  メソッド名 `PreviewStylesheetPath_IsUnderYeditNamespace` → `...IsUnderKxeditNamespace`
+- `tests/kxEdit.App.Tests/PreviewUserDataFolderTests.cs:32`
+  メソッド名 `Ctor_PathUnderLocalAppDataYeditWebView2Preview` → `...LocalAppDataKxeditWebView2Preview`
+- `tests/kxEdit.Core.Tests/Buffer/FuzzTests.cs:11,44`
+  環境変数名 `YEDIT_FUZZ_OPS` → `KXEDIT_FUZZ_OPS`
+
+環境変数の改名は**開発者向け契約の変更**である。旧名を設定していた場合、エラーにはならず
+既定の反復回数で静かに走るだけなので気付きにくい。PR description に明記すること。
 
 **Files:**
 
@@ -456,8 +471,12 @@ Expected: 出力ディレクトリの DLL 構成が改名前と一致(名前の 
 
 **Step 3: 残存確認**
 
+**`-i` を必ず付ける。** Task 2 で全大文字の `YEDIT.PREVIEW` が 2 箇所見つかった。
+大文字小文字を区別する grep では `Yedit` / `YEDIT` を取りこぼし、
+「残存ゼロ」という嘘の安全宣言を作ってしまう。
+
 ```bash
-grep -rn 'yEdit\|yedit' --exclude-dir=.git --exclude-dir=obj --exclude-dir=bin --exclude-dir=plans . | grep -v '変更履歴.txt' | grep -v 'check-no-local-paths.ps1' | grep -v 'docs/report-pctalker-speech'
+grep -rni 'yedit' --exclude-dir=.git --exclude-dir=obj --exclude-dir=bin --exclude-dir=plans . | grep -v '変更履歴.txt' | grep -v 'check-no-local-paths.ps1' | grep -v 'docs/report-pctalker-speech'
 ```
 
 Expected: 出力なし。意図的に旧名を残すのは次の 3 つだけ。
