@@ -23,6 +23,10 @@ public static class VersionText
 
         string trimmed = informationalVersion.Trim();
         int plus = trimmed.IndexOf('+');
-        return plus >= 0 ? trimmed[..plus] : trimmed;
+        string core = plus >= 0 ? trimmed[..plus] : trimmed;
+
+        // 切り出した後にもう一度 Trim する。MSBuild は <Version> を複数行に整形しても
+        // 空白を保ったまま属性へ載せるため、外側だけ削ると "0.2.0\n    " が残りうる。
+        return core.Trim();
     }
 }

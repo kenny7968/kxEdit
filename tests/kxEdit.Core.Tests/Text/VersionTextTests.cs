@@ -50,6 +50,14 @@ public class VersionTextTests
         Assert.Equal("0.2.0", VersionText.FromInformationalVersion("  0.2.0+sha  "));
     }
 
+    [Fact]
+    public void WhitespaceBeforeThePlus_IsTrimmed()
+    {
+        // MSBuild は <Version> を複数行に整形しても空白を保ったまま属性へ載せる。
+        // 外側だけ Trim すると "0.9.9\n    " が表示に漏れる。
+        Assert.Equal("0.9.9", VersionText.FromInformationalVersion("\n      0.9.9\n    +sha"));
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
