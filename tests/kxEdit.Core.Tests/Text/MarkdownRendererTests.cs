@@ -4,7 +4,7 @@ namespace kxEdit.Core.Tests.Text;
 
 public class MarkdownRendererTests
 {
-    private const string Base = "https://yedit.preview/";
+    private const string Base = "https://kxedit.preview/";
 
     [Fact]
     public void Heading_becomes_h1() =>
@@ -36,7 +36,7 @@ public class MarkdownRendererTests
     [Fact]
     public void Base_href_is_injected() =>
         Assert.Contains(
-            "<base href=\"https://yedit.preview/\">",
+            "<base href=\"https://kxedit.preview/\">",
             MarkdownRenderer.Render("x", Base)
         );
 
@@ -75,7 +75,7 @@ public class MarkdownRendererTests
     {
         var html = MarkdownRenderer.Render("x", MarkdownRenderer.PreviewBaseHref);
         Assert.Contains("<html", html);
-        Assert.Contains("<base href=\"https://yedit.preview/\">", html);
+        Assert.Contains("<base href=\"https://kxedit.preview/\">", html);
     }
 
     [Fact]
@@ -243,9 +243,9 @@ public class MarkdownRendererTests
     {
         // image の src filter は本タスク scope 外 (CSP img-src で別途遮断済み)。
         // 通常の http(s) 画像は素通しされることを機械固定して scope 境界を明示する。
-        var html = MarkdownRenderer.Render("![alt](https://yedit.preview/img.png)", Base);
+        var html = MarkdownRenderer.Render("![alt](https://kxedit.preview/img.png)", Base);
         Assert.Contains("<img", html);
-        Assert.Contains("src=\"https://yedit.preview/img.png\"", html);
+        Assert.Contains("src=\"https://kxedit.preview/img.png\"", html);
     }
 
     [Fact]
@@ -311,8 +311,8 @@ public class MarkdownRendererTests
     //   - img-src から data: を削除 (MD-L-1)
     //   - base-uri/form-action/frame-ancestors/object-src/worker-src/manifest-src/connect-src
     //     を追加 (全て 'none')
-    //   - style-src から 'unsafe-inline' を削除し 'self' https://yedit.preview のみに
-    //   - <style>{Css}</style> を <link rel="stylesheet" href="/_yedit/styles.css"> へ外部化
+    //   - style-src から 'unsafe-inline' を削除し 'self' https://kxedit.preview のみに
+    //   - <style>{Css}</style> を <link rel="stylesheet" href="/_kxedit/styles.css"> へ外部化
     //     (実 file は PreviewCspHeaderInjector が virtual response で供給)
     // ---------------------------------------------------------------------
 
@@ -320,12 +320,12 @@ public class MarkdownRendererTests
     public void Meta_ImgSrc_Excludes_Data_Scheme()
     {
         // MD-L-1: img-src ディレクティブは存在するが data: は付かない。
-        // M-6 補正: 単純な "img-src https://yedit.preview data:" の substring 判定は
-        // "img-src https://yedit.preview 'self' data:" のような insertion mutation を
+        // M-6 補正: 単純な "img-src https://kxedit.preview data:" の substring 判定は
+        // "img-src https://kxedit.preview 'self' data:" のような insertion mutation を
         // 検出できないため、img-src ディレクティブ全体を切り出して data: が入らない
         // ことを regex で機械固定する。
         string html = MarkdownRenderer.Render("x", Base);
-        Assert.Contains("img-src https://yedit.preview", html);
+        Assert.Contains("img-src https://kxedit.preview", html);
         Assert.Matches(@"img-src\s+[^;]*?;", html);
         Assert.DoesNotMatch(@"img-src\s+[^;]*\bdata:", html);
     }
@@ -370,10 +370,10 @@ public class MarkdownRendererTests
     public void Document_LinksToStylesheet_ViaAbsolutePath()
     {
         // MD-M-2: inline <style> を撤去し <link> へ外部化。href は
-        // /_yedit/styles.css 固定 (先頭アンダースコアで .md フォルダ内のユーザ
+        // /_kxedit/styles.css 固定 (先頭アンダースコアで .md フォルダ内のユーザ
         // ファイル衝突をほぼゼロに)。
         string html = MarkdownRenderer.Render("x", Base);
-        Assert.Contains("<link rel=\"stylesheet\" href=\"/_yedit/styles.css\">", html);
+        Assert.Contains("<link rel=\"stylesheet\" href=\"/_kxedit/styles.css\">", html);
     }
 
     [Fact]
@@ -399,20 +399,20 @@ public class MarkdownRendererTests
         Assert.Contains("worker-src 'none'", csp);
         Assert.Contains("manifest-src 'none'", csp);
         Assert.Contains("connect-src 'none'", csp);
-        Assert.Contains("img-src https://yedit.preview", csp);
-        Assert.Contains("media-src https://yedit.preview", csp);
-        Assert.Contains("style-src 'self' https://yedit.preview", csp);
-        Assert.Contains("font-src https://yedit.preview data:", csp);
+        Assert.Contains("img-src https://kxedit.preview", csp);
+        Assert.Contains("media-src https://kxedit.preview", csp);
+        Assert.Contains("style-src 'self' https://kxedit.preview", csp);
+        Assert.Contains("font-src https://kxedit.preview data:", csp);
         Assert.DoesNotContain("'unsafe-inline'", csp);
-        Assert.DoesNotContain("img-src https://yedit.preview data:", csp);
+        Assert.DoesNotContain("img-src https://kxedit.preview data:", csp);
     }
 
     [Fact]
     public void PreviewStylesheetPath_IsUnderYeditNamespace()
     {
-        // /_yedit/styles.css は Injector の URL 判定と HTML link href の両方で参照される
+        // /_kxedit/styles.css は Injector の URL 判定と HTML link href の両方で参照される
         // single source of truth。名前空間 (先頭 _) を機械固定して衝突リスク回帰を防ぐ。
-        Assert.Equal("/_yedit/styles.css", MarkdownRenderer.PreviewStylesheetPath);
+        Assert.Equal("/_kxedit/styles.css", MarkdownRenderer.PreviewStylesheetPath);
     }
 
     [Fact]

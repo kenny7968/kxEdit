@@ -93,7 +93,7 @@ if (args.Length >= 2 && args[0] == "--bench-save")
     string inPath = args[1];
     string outPath = Path.Combine(
         Path.GetTempPath(),
-        "yedit-bench-save-" + Path.GetRandomFileName() + ".txt"
+        "kxedit-bench-save-" + Path.GetRandomFileName() + ".txt"
     );
     try
     {

@@ -382,7 +382,7 @@ public class TextRangeProviderV2Tests
         // rightmost needle 150000 は最初に訪問する chunk 内、leftmost needle 100 は最後に
         // 訪問する chunk 内。backward loop が右→左に走査していない (buggy 左→右) 場合は
         // 100 が返って test が落ちる = backward semantics を機械固定 (UIA-L-1 M-1 fixup)。
-        const string needle = "yedit";
+        const string needle = "kxedit";
         int leftAt = 100;
         int rightAt = 150_000;
         int totalLen = 200_000;

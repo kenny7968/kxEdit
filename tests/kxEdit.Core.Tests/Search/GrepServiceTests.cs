@@ -14,7 +14,7 @@ public class GrepServiceTests
 
         public TempDir()
         {
-            Root = Path.Combine(Path.GetTempPath(), "yedit_grep_" + Guid.NewGuid().ToString("N"));
+            Root = Path.Combine(Path.GetTempPath(), "kxedit_grep_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Root);
         }
 
@@ -301,7 +301,7 @@ public class GrepServiceTests
     {
         string missing = Path.Combine(
             Path.GetTempPath(),
-            "yedit_grep_missing_" + Guid.NewGuid().ToString("N")
+            "kxedit_grep_missing_" + Guid.NewGuid().ToString("N")
         );
         var outcome = GrepService.Search(Req(missing, "TARGET"));
         Assert.Empty(outcome.Hits);

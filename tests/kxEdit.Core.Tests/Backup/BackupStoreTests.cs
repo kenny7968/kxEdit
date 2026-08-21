@@ -11,7 +11,7 @@ public class BackupStoreTests
 
         public TempDir()
         {
-            Root = Path.Combine(Path.GetTempPath(), "yedit_bak_" + Guid.NewGuid().ToString("N"));
+            Root = Path.Combine(Path.GetTempPath(), "kxedit_bak_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Root);
         }
 
@@ -174,7 +174,7 @@ public class BackupStoreTests
     {
         string missing = Path.Combine(
             Path.GetTempPath(),
-            "yedit_bak_missing_" + Guid.NewGuid().ToString("N")
+            "kxedit_bak_missing_" + Guid.NewGuid().ToString("N")
         );
         Assert.Empty(BackupStore.LoadAll(missing));
     }
@@ -521,7 +521,7 @@ public class BackupStoreTests
     {
         var missing = Path.Combine(
             Path.GetTempPath(),
-            "yedit_bak_missing_" + Guid.NewGuid().ToString("N")
+            "kxedit_bak_missing_" + Guid.NewGuid().ToString("N")
         );
         Assert.Null(
             Record.Exception(() =>
@@ -675,7 +675,7 @@ public class BackupStoreTests
     {
         string missing = Path.Combine(
             Path.GetTempPath(),
-            "yedit_bak_missing_" + Guid.NewGuid().ToString("N")
+            "kxedit_bak_missing_" + Guid.NewGuid().ToString("N")
         );
         string target = Path.Combine(missing, "session-" + Guid.NewGuid().ToString("N"));
 

@@ -6,7 +6,7 @@ namespace kxEdit.Core.Text;
 public static class MarkdownRenderer
 {
     /// <summary>プレビュー用の仮想ホスト名（相対リソース解決の基準。App 側のマッピングと一致させる）。</summary>
-    public const string PreviewVirtualHost = "yedit.preview";
+    public const string PreviewVirtualHost = "kxedit.preview";
 
     /// <summary>プレビュー HTML の base href（PreviewVirtualHost への https URL）。</summary>
     public const string PreviewBaseHref = "https://" + PreviewVirtualHost + "/";
@@ -20,7 +20,7 @@ public static class MarkdownRenderer
     /// 実質ゼロに落とす (Google/Firebase 等の "_next"/"_app" 命名慣例に倣う)。
     /// </para>
     /// </summary>
-    public const string PreviewStylesheetPath = "/_yedit/styles.css";
+    public const string PreviewStylesheetPath = "/_kxedit/styles.css";
 
     /// <summary>
     /// MD-M-2 + MD-L-1: プレビュー CSP を single source of truth 化した文字列。
@@ -34,7 +34,7 @@ public static class MarkdownRenderer
     ///     manifest-src/connect-src</c> を全て <c>'none'</c> (fetch/submit/embed/worker 経路
     ///     を封鎖)</item>
     ///   <item>MD-L-1: <c>img-src</c> から <c>data:</c> を削除 (base64 SVG 埋め込み XSS 対策)</item>
-    ///   <item><c>style-src 'self' https://yedit.preview</c>: inline <c>&lt;style&gt;</c> 撤去
+    ///   <item><c>style-src 'self' https://kxedit.preview</c>: inline <c>&lt;style&gt;</c> 撤去
     ///     に伴い <c>'unsafe-inline'</c> を削除。<c>'self'</c> は data: URI 起点の
     ///     bootstrap でも動くよう保険で残す (HTTP header 側では preview 経由のみ有効)</item>
     ///   <item><c>font-src</c> の <c>data:</c> は保持 (@font-face の data URI 埋め込み対応)</item>

@@ -13,7 +13,7 @@ namespace kxEdit.App;
 /// 攻撃面(audit doc MD-M-1 / MD-M-5、および設計 doc
 /// <c>docs/plans/2026-07-22-preview-intra-nav-hardening-design.md</c> MD-H-1):
 /// <list type="bullet">
-///   <item>同梱 <c>https://yedit.preview/*.html</c>/<c>.svg</c> への in-frame 遷移を Block
+///   <item>同梱 <c>https://kxedit.preview/*.html</c>/<c>.svg</c> への in-frame 遷移を Block
 ///     (attacker フォルダ由来の CSP 未適用ドキュメントが same-origin でスクリプト実行するのを塞ぐ・MD-H-1)。</item>
 ///   <item>外部 http/https は in-frame ナビゲートさせず既定ブラウザへ逃がす
 ///     (プレビュー窓の title を保ったまま偽サイトが表示される phishing 防止)。</item>
@@ -29,7 +29,7 @@ public static class PreviewNavigationPolicy
     /// <summary>ナビゲーション分類。</summary>
     public enum Classification
     {
-        /// <summary>preview 内で許可 (about:blank のみ)。MD-H-1 以降 https://yedit.preview/* は Block。</summary>
+        /// <summary>preview 内で許可 (about:blank のみ)。MD-H-1 以降 https://kxedit.preview/* は Block。</summary>
         AllowIntra,
 
         /// <summary>既定ブラウザ/アプリで開く安全 scheme (http/https 非 preview, mailto)。</summary>
@@ -76,7 +76,7 @@ public static class PreviewNavigationPolicy
         return scheme switch
         {
             // https + preview 仮想ホストは全面 Block (MD-H-1)。
-            // yedit.preview は実ホストではないので LaunchExternal (既定ブラウザ起動) しても無意味。
+            // kxedit.preview は実ホストではないので LaunchExternal (既定ブラウザ起動) しても無意味。
             // preview 本体は NavigateToString (data: URI) 経由、CSS/画像は WebResourceRequested
             // のサブリソース経由で届くため、正当な top-level ナビゲーションがこのホストを対象にする
             // ことは無い。ここを AllowIntra にすると、攻撃者が .md と同梱した CSP 未適用の

@@ -310,7 +310,7 @@ if (largeLineMode)
     {
         foreach (int len in new[] { 100_000, 500_000, 2_000_000 })
         {
-            string tmp = Path.Combine(Path.GetTempPath(), $"yedit-largeline-{loadKind}-{len}.txt");
+            string tmp = Path.Combine(Path.GetTempPath(), $"kxedit-largeline-{loadKind}-{len}.txt");
 #pragma warning disable S6966 // reason: ベンチの top-level 非 async パス。計測対象は Load 側であり、fixture 書き出しの非同期化は測定に無関係
             File.WriteAllText(tmp, MakeSingleLine(len, loadKind), new UTF8Encoding(false));
 #pragma warning restore S6966

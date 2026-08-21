@@ -29,7 +29,7 @@ public class PreviewCspHeaderInjectorTests
     public void IsPreviewStylesheetRequest_ExactUrl_ReturnsTrue() =>
         Assert.True(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.css"
+                "https://kxedit.preview/_kxedit/styles.css"
             )
         );
 
@@ -41,7 +41,7 @@ public class PreviewCspHeaderInjectorTests
         // 気にしない (Windows FS 由来のパス比較と一致させる)。
         Assert.True(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "HTTPS://YEDIT.PREVIEW/_YEDIT/STYLES.CSS"
+                "HTTPS://KXEDIT.PREVIEW/_KXEDIT/STYLES.CSS"
             )
         );
     }
@@ -52,7 +52,7 @@ public class PreviewCspHeaderInjectorTests
         // キャッシュバスト等で ?v=1 が付いても path は変わらないため一致扱い。
         Assert.True(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.css?v=1"
+                "https://kxedit.preview/_kxedit/styles.css?v=1"
             )
         );
     }
@@ -64,7 +64,7 @@ public class PreviewCspHeaderInjectorTests
         // 挙動を機械固定して回帰保護。
         Assert.True(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.css#top"
+                "https://kxedit.preview/_kxedit/styles.css#top"
             )
         );
     }
@@ -74,13 +74,15 @@ public class PreviewCspHeaderInjectorTests
     {
         // preview 内の他リソース (画像等) は passthrough する契約なので false を返す必要がある。
         Assert.False(
-            PreviewCspHeaderInjector.IsPreviewStylesheetRequest("https://yedit.preview/photo.png")
+            PreviewCspHeaderInjector.IsPreviewStylesheetRequest("https://kxedit.preview/photo.png")
         );
     }
 
     [Fact]
     public void IsPreviewStylesheetRequest_PreviewRoot_ReturnsFalse() =>
-        Assert.False(PreviewCspHeaderInjector.IsPreviewStylesheetRequest("https://yedit.preview/"));
+        Assert.False(
+            PreviewCspHeaderInjector.IsPreviewStylesheetRequest("https://kxedit.preview/")
+        );
 
     [Fact]
     public void IsPreviewStylesheetRequest_HttpScheme_ReturnsFalse()
@@ -89,7 +91,7 @@ public class PreviewCspHeaderInjectorTests
         // Injector が偽装 CSS 応答を返さない (他ミドルウェアが処理する余地を残す)。
         Assert.False(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "http://yedit.preview/_yedit/styles.css"
+                "http://kxedit.preview/_kxedit/styles.css"
             )
         );
     }
@@ -97,10 +99,10 @@ public class PreviewCspHeaderInjectorTests
     [Fact]
     public void IsPreviewStylesheetRequest_OtherHost_ReturnsFalse()
     {
-        // 他ホストの同名 path (evil.com が /_yedit/styles.css を持っていても) は差し替えない。
+        // 他ホストの同名 path (evil.com が /_kxedit/styles.css を持っていても) は差し替えない。
         Assert.False(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://evil.com/_yedit/styles.css"
+                "https://evil.com/_kxedit/styles.css"
             )
         );
     }
@@ -128,7 +130,7 @@ public class PreviewCspHeaderInjectorTests
     public void IsPreviewStylesheetRequest_SuffixExtension_ReturnsFalse() =>
         Assert.False(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.css.txt"
+                "https://kxedit.preview/_kxedit/styles.css.txt"
             )
         );
 
@@ -136,7 +138,7 @@ public class PreviewCspHeaderInjectorTests
     public void IsPreviewStylesheetRequest_SuffixCharacter_ReturnsFalse() =>
         Assert.False(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.cssx"
+                "https://kxedit.preview/_kxedit/styles.cssx"
             )
         );
 
@@ -144,7 +146,7 @@ public class PreviewCspHeaderInjectorTests
     public void IsPreviewStylesheetRequest_PathPrefixMismatch_ReturnsFalse() =>
         Assert.False(
             PreviewCspHeaderInjector.IsPreviewStylesheetRequest(
-                "https://yedit.preview/_yedit/styles.css/extra"
+                "https://kxedit.preview/_kxedit/styles.css/extra"
             )
         );
 

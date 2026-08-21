@@ -118,7 +118,7 @@ public class OriginalPathValidatorTests
         // Rejected の理由にならない。reparse 検査ループが「leaf 不在」を握って通す契約を固定。
         var path = Path.Combine(
             Path.GetTempPath(),
-            "yedit_nonexistent_" + Guid.NewGuid().ToString("N") + ".txt"
+            "kxedit_nonexistent_" + Guid.NewGuid().ToString("N") + ".txt"
         );
         var status = OriginalPathValidator.Check(path, out var normalized);
         Assert.Equal(PathValidation.Ok, status);
@@ -131,7 +131,7 @@ public class OriginalPathValidatorTests
         // reparse 検査で親ディレクトリを root まで遡る際、不在パスに対して I/O 例外を握って
         // continue する契約を固定(NRE / InvalidOperationException を投げないこと)。
         var path =
-            @"C:\yedit_no_such_dir_"
+            @"C:\kxedit_no_such_dir_"
             + Guid.NewGuid().ToString("N")
             + @"\a\b\c\d\e\f\g\h\i\j\file.txt";
         var status = OriginalPathValidator.Check(path, out _);
@@ -150,8 +150,8 @@ public class OriginalPathValidatorTests
         // 環境依存スキップと同じく early return して pass 扱いにする
         // (テストは 1 件 skip 相当だが green のまま通る)。
         var guid = Guid.NewGuid().ToString("N");
-        var target = Path.Combine(Path.GetTempPath(), $"yedit_junc_target_{guid}");
-        var link = Path.Combine(Path.GetTempPath(), $"yedit_junc_link_{guid}");
+        var target = Path.Combine(Path.GetTempPath(), $"kxedit_junc_target_{guid}");
+        var link = Path.Combine(Path.GetTempPath(), $"kxedit_junc_link_{guid}");
 
         Directory.CreateDirectory(target);
         bool linkCreated = false;

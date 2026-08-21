@@ -8,7 +8,7 @@ namespace kxEdit.App.Tests;
 /// 分類ルール:
 ///   - null / 空 → Block
 ///   - about:blank (大小区別なし) → AllowIntra (NavigateToString の初回 origin)
-///   - https://yedit.preview/* (大小区別なし) → Block (MD-H-1: 同梱 .html/.svg の same-origin 実行防止)
+///   - https://kxedit.preview/* (大小区別なし) → Block (MD-H-1: 同梱 .html/.svg の same-origin 実行防止)
 ///   - http/https 非 preview → LaunchExternal (既定ブラウザへ逃がす)
 ///   - mailto → LaunchExternal
 ///   - file / ftp / data / javascript / vbscript / その他 → Block
@@ -52,14 +52,14 @@ public class PreviewNavigationPolicyTests
     public void Classify_HttpsPreviewHost_ReturnsBlock() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
-            PreviewNavigationPolicy.Classify("https://yedit.preview/foo/bar.md")
+            PreviewNavigationPolicy.Classify("https://kxedit.preview/foo/bar.md")
         );
 
     [Fact]
     public void Classify_HttpsPreviewHost_UpperCase_ReturnsBlock() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
-            PreviewNavigationPolicy.Classify("HTTPS://YEDIT.PREVIEW/x")
+            PreviewNavigationPolicy.Classify("HTTPS://KXEDIT.PREVIEW/x")
         );
 
     /// <summary>MD-H-1: 同梱 .html への in-frame 遷移 (相対リンク click) は Block。
@@ -68,7 +68,7 @@ public class PreviewNavigationPolicyTests
     public void Classify_HttpsPreviewHost_HtmlFile_ReturnsBlock() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
-            PreviewNavigationPolicy.Classify("https://yedit.preview/setup.html")
+            PreviewNavigationPolicy.Classify("https://kxedit.preview/setup.html")
         );
 
     /// <summary>MD-H-1: 同梱 .svg への in-frame 遷移も Block (svg 内 script の same-origin 実行防止)。</summary>
@@ -76,7 +76,7 @@ public class PreviewNavigationPolicyTests
     public void Classify_HttpsPreviewHost_SvgFile_ReturnsBlock() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
-            PreviewNavigationPolicy.Classify("https://yedit.preview/evil.svg")
+            PreviewNavigationPolicy.Classify("https://kxedit.preview/evil.svg")
         );
 
     [Fact]
@@ -95,13 +95,13 @@ public class PreviewNavigationPolicyTests
 
     /// <summary>
     /// http は preview として認めない (strict)。https 経由の VirtualHost マッピングだけを preview とする。
-    /// http://yedit.preview/... が誤って allow-intra 化されないことを機械固定。
+    /// http://kxedit.preview/... が誤って allow-intra 化されないことを機械固定。
     /// </summary>
     [Fact]
     public void Classify_HttpPreviewHost_ReturnsLaunchExternal() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.LaunchExternal,
-            PreviewNavigationPolicy.Classify("http://yedit.preview/")
+            PreviewNavigationPolicy.Classify("http://kxedit.preview/")
         );
 
     [Fact]
@@ -209,7 +209,7 @@ public class PreviewNavigationPolicyTests
     [Fact]
     public void IsBootstrap_HttpsPreview_ReturnsFalse() =>
         Assert.False(
-            PreviewNavigationPolicy.IsNavigateToStringBootstrapUri("https://yedit.preview/x")
+            PreviewNavigationPolicy.IsNavigateToStringBootstrapUri("https://kxedit.preview/x")
         );
 
     /// <summary>data:image/... 等の非 text/html data URI は bootstrap とみなさない

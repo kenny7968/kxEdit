@@ -178,7 +178,7 @@ public sealed class MarkdownPreviewForm : Form
         var cls = PreviewNavigationPolicy.Classify(e.Uri);
         if (cls == PreviewNavigationPolicy.Classification.AllowIntra)
         {
-            return; // 素通し (about:blank のみ。MD-H-1 で https://yedit.preview/* は Block)
+            return; // 素通し (about:blank のみ。MD-H-1 で https://kxedit.preview/* は Block)
         }
         e.Cancel = true;
         if (cls == PreviewNavigationPolicy.Classification.LaunchExternal)

@@ -91,7 +91,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // Phase 3 Task 3b で CaretController.DesiredXpx へ移譲(コメントは _caretCtrl 参照)。
 
     // Task 15: システムキャレットの太さ(px)。既定 2・ApplyAppearance で AppSettings.CaretWidth
-    // (1〜5)を反映。弱視のキャレット視認性要件(設計原則 yedit-sighted-users-first-class)。
+    // (1〜5)を反映。弱視のキャレット視認性要件(設計原則 kxedit-sighted-users-first-class)。
     private int _caretWidthPx = 2;
 
     // セルハイライト状態(HighlightCharRange で設定・ClearHighlight で null)。
@@ -1757,7 +1757,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _showLineNumbers = settings.ShowLineNumbers;
         _showWhitespace = settings.ShowWhitespace;
         _highlightCurrentLine = settings.HighlightCurrentLine;
-        // キャレット太さ(弱視のキャレット視認性・yedit-sighted-users-first-class)
+        // キャレット太さ(弱視のキャレット視認性・kxedit-sighted-users-first-class)
         _caretWidthPx = Math.Clamp(settings.CaretWidth, 1, 5);
         // WrapColumns の実値が変わったときだけ ScrollX をリセットする(フォント色だけ変更等で
         // 横スクロール位置が不用意にホームへ戻る副作用を避ける)。折り返し ON への遷移では
