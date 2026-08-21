@@ -36,7 +36,14 @@ public class PreviewCspHeaderInjectorTests
     [Fact]
     public void IsPreviewStylesheetRequest_UpperCaseHostAndPath_ReturnsTrue()
     {
-        // URL は case-insensitive (scheme/host は URI 仕様上大小区別なし、path は defensively 揃える)。
+        // 大文字で書かれた URL でも true になることを機械固定する。
+        // 注意 (F-1): 段ごとに「このテストで実際に検証できているもの」が異なる。
+        //   - scheme / host: Uri.Scheme と Uri.Host は常に小文字へ正規化されるため、実装側の
+        //     比較を Ordinal へ変えても結果が偶然一致し、このテストは緑のまま残る
+        //     (ミューテーションが survive する)。両者の OrdinalIgnoreCase は defensive layer。
+        //   - path: Uri.AbsolutePath は大小を保持する。よって path 段の OrdinalIgnoreCase
+        //     だけは本当に効いており、Ordinal へ変えるとこのテストが落ちる (kill される)。
+        // すなわち本テストが機械固定しているのは path 段の case-insensitive 比較である。
         // preview はローカル仮想ホストのみを対象とするため OS 依存の case sensitivity は
         // 気にしない (Windows FS 由来のパス比較と一致させる)。
         Assert.True(

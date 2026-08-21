@@ -55,8 +55,17 @@ public class PreviewNavigationPolicyTests
             PreviewNavigationPolicy.Classify("https://kxedit.preview/foo/bar.md")
         );
 
+    /// <summary>大文字で書かれた URL でも Block になることを機械固定する。
+    /// <para>
+    /// 注意 (F-1): このテストではホスト段の <c>OrdinalIgnoreCase</c> は検証できない。
+    /// <see cref="Uri.Host"/> は DNS ホストを常に小文字へ正規化するため、実装側の比較を
+    /// <c>Ordinal</c> へ変えても結果が偶然一致し、このテストは緑のまま残る
+    /// (ミューテーションが survive する)。<c>Uri.Scheme</c> も同様に常に小文字。
+    /// ホスト段の <c>OrdinalIgnoreCase</c> はあくまで defensive layer であり、
+    /// 本テストが実際に固定しているのは「大文字で書かれた URL でも Block」という入口の契約。
+    /// </para></summary>
     [Fact]
-    public void Classify_HttpsPreviewHost_UpperCase_ReturnsBlock() =>
+    public void Classify_HttpsPreviewHost_UpperCaseUrl_ReturnsBlock() =>
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
             PreviewNavigationPolicy.Classify("HTTPS://KXEDIT.PREVIEW/x")

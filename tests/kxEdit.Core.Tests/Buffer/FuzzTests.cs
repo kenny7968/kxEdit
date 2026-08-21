@@ -8,7 +8,7 @@ namespace kxEdit.Core.Tests.Buffers;
 /// モデルのスナップ規則はバッファ実装をコピーせず char.IsLowSurrogate で独立実装。
 /// モデルのUndoは全文スタックで単純化(毎操作 BreakUndoCoalescing。coalescing の
 /// 正しさは UndoTests の決定的テストが担保)。
-/// 操作数は環境変数 YEDIT_FUZZ_OPS で増量可(既定3,000)。
+/// 操作数は環境変数 KXEDIT_FUZZ_OPS で増量可(既定3,000)。
 /// </summary>
 public class FuzzTests
 {
@@ -41,7 +41,7 @@ public class FuzzTests
     public void Random_edits_match_naive_model(int seed)
     {
         int ops =
-            int.TryParse(Environment.GetEnvironmentVariable("YEDIT_FUZZ_OPS"), out int v) && v > 0
+            int.TryParse(Environment.GetEnvironmentVariable("KXEDIT_FUZZ_OPS"), out int v) && v > 0
                 ? v
                 : 3000;
         var rnd = new Random(seed);

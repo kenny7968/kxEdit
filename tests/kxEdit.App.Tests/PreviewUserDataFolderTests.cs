@@ -29,7 +29,7 @@ public class PreviewUserDataFolderTests
     }
 
     [Fact]
-    public void Ctor_PathUnderLocalAppDataYeditWebView2Preview()
+    public void Ctor_PathUnderLocalAppDataKxeditWebView2Preview()
     {
         var sut = new PreviewUserDataFolder();
         try

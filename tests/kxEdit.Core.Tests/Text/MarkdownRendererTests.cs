@@ -408,7 +408,7 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void PreviewStylesheetPath_IsUnderYeditNamespace()
+    public void PreviewStylesheetPath_IsUnderKxeditNamespace()
     {
         // /_kxedit/styles.css は Injector の URL 判定と HTML link href の両方で参照される
         // single source of truth。名前空間 (先頭 _) を機械固定して衝突リスク回帰を防ぐ。

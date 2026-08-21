@@ -12,7 +12,7 @@ Add-Type -AssemblyName UIAutomationTypes
 if (-not $Exe) { $Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\kxEdit.Editor.Smoke\bin\Release\net9.0-windows\kxEdit.Editor.Smoke.exe') }
 $automationId = 'editor'
 # smoke には --uia + ファイルパスを渡す(word-sim が期待する "ABC abc 123" を含むテキストを作る)
-$tmp = Join-Path $env:TEMP ("yedit-word-sim-{0}.txt" -f ([guid]::NewGuid()))
+$tmp = Join-Path $env:TEMP ("kxedit-word-sim-{0}.txt" -f ([guid]::NewGuid()))
 [System.IO.File]::WriteAllText($tmp, "prelude ABC abc 123 tail`nsecond line`n", [System.Text.UTF8Encoding]::new($false))
 $extraArgs = @("--uia", $tmp)
 
