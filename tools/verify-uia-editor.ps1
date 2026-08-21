@@ -1,7 +1,7 @@
-# P5 Task 14: UIA client verification for yEdit.Editor.Smoke (--uia mode).
+# P5 Task 14: UIA client verification for kxEdit.Editor.Smoke (--uia mode).
 # ASCII only for the framing lines to avoid PS 5.1 encoding issues (BOMless UTF-8).
 param(
-    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\yEdit.Editor.Smoke\bin\Release\net9.0-windows\yEdit.Editor.Smoke.exe')
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests\kxEdit.Editor.Smoke\bin\Release\net9.0-windows\kxEdit.Editor.Smoke.exe')
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient

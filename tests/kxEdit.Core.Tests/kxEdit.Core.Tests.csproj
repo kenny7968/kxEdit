@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <!-- P5 Task 2: Accessibility (net9.0-windows / UseWPF) を参照して契約テストを Core.Tests に置くため -->
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <!-- P5 Task 2: net9.0-windows は既定 ImplicitUsings に System.IO を含まないため明示追加
+         (既存 Search / Settings テストが using System.IO なしで Path/File を使っているため) -->
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\kxEdit.Core\kxEdit.Core.csproj" />
+    <ProjectReference Include="..\..\src\kxEdit.Accessibility\kxEdit.Accessibility.csproj" />
+  </ItemGroup>
+</Project>

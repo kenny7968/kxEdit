@@ -1,0 +1,305 @@
+using System.Linq;
+using System.Runtime.InteropServices;
+
+namespace kxEdit.Editor.Tests;
+
+/// <summary>
+/// P3 Task 7: キャレット追従スクロール(BringCaretIntoView + EnsureVisibleCharRange)の契約テスト。
+/// - 垂直: caret 論理行が [TopLine, TopLine + visibleRows) 外なら TopLine 追従
+/// - 水平: 折り返し OFF + HScroll 表示中で caret X が可視外なら ScrollX 追従
+/// - EnsureVisibleCharRange: 範囲末尾を可視化しつつ caret/anchor は保存/復元
+/// - SetSource 前は throw せず no-op
+///
+/// テスト値は MS ゴシック 12pt の実 LineHeight に依存するため相対比較で書く
+/// (「TopLine が上端/下端に張り付く」「no-op」「呼び出し前と後の相対関係」)。
+/// </summary>
+public class CaretScrollTests
+{
+    // GetCaretPos は C-1 の回帰テストで使う(EditorControl 内部の NativeMethods は internal
+    // かつ Task 12 まで InternalsVisibleTo を tests に付けない方針=Task 12 レビュー判断)なので
+    // テスト側で個別に P/Invoke 宣言する。
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCaretPos(out System.Drawing.Point lpPoint);
+
+    // ハンドル生成のため親フォームに載せてサイズを付ける。
+    // GdiCharMetrics は SystemFonts 依存だが、LineHeightPx は行数計算のみに使うため
+    // font 依存性は小さい(MS ゴシック 12pt で ~16-20px)。
+    // 可視行数は明示的に高さから計算するため、テスト値は「TopLine 変化」の相対比較にする。
+    private static (Form f, EditorControl c) MakeControl(string text, int width, int height)
+    {
+        var f = new Form { Size = new System.Drawing.Size(width, height) };
+        var c = new EditorControl { Dock = DockStyle.Fill };
+        f.Controls.Add(c);
+        _ = f.Handle;
+        c.SetSource(TextBuffer.FromString(text));
+        return (f, c);
+    }
+
+    [Fact]
+    public void BringCaretIntoView_ScrollsDown_WhenCaretBelowVisible() =>
+        Sta.Run(() =>
+        {
+            // 10 行の文書、可視領域が 3 行程度になるように高さを絞る
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
+            var (f, c) = MakeControl(text, width: 400, height: 60); // 60px なら MS ゴシック 12pt で ~3行
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                int lineHeight = c.LineHeightPx;
+                int visibleRows = Math.Max(1, c.ClientSize.Height / lineHeight);
+
+                // 末尾行(index 9)にキャレットを置いて BringCaretIntoView 呼び出し
+                int lineStart = text.LastIndexOf('\n') + 1;
+                c.SetCaretCharOffset(lineStart);
+                c.BringCaretIntoView();
+
+                // TopLine は少なくとも「末尾行が可視領域末尾に入る」位置に調整される
+                Assert.True(
+                    c.TopLine >= 9 - visibleRows + 1,
+                    $"expected TopLine >= {9 - visibleRows + 1}, got {c.TopLine}"
+                );
+                Assert.True(c.TopLine <= 9, $"expected TopLine <= 9, got {c.TopLine}");
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_ScrollsUp_WhenCaretAboveVisible() =>
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
+            var (f, c) = MakeControl(text, width: 400, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 5; // 可視領域を下方向にずらす
+
+                // 先頭行にキャレットを置いて呼び出し
+                c.SetCaretCharOffset(0);
+                c.BringCaretIntoView();
+
+                Assert.Equal(0, c.TopLine); // 上端に張り付く
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_NoOp_WhenCaretAlreadyVisible() =>
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
+            var (f, c) = MakeControl(text, width: 400, height: 200); // 全行入る想定
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                int initial = c.TopLine;
+                c.SetCaretCharOffset(text.IndexOf("line2", System.StringComparison.Ordinal)); // 3行目
+                c.BringCaretIntoView();
+                Assert.Equal(initial, c.TopLine);
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_NoOp_BeforeSetSource() =>
+        Sta.Run(() =>
+        {
+            // SetSource 前の呼び出しは throw せず何もしない
+            using var f = new Form();
+            using var c = new EditorControl();
+            f.Controls.Add(c);
+            _ = f.Handle;
+            c.BringCaretIntoView(); // 例外が投げられなければ OK
+            Assert.Equal(0, c.TopLine);
+        });
+
+    [Fact]
+    public void EnsureVisibleCharRange_PreservesCaretAndAnchor() =>
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
+            var (f, c) = MakeControl(text, width: 400, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                c.SetSelectionCharRange(2, 5);
+                var (start0, end0) = c.GetSelectionCharRange();
+
+                int lineStart = text.LastIndexOf('\n') + 1;
+                c.EnsureVisibleCharRange(lineStart, 4); // 末尾行を可視化
+
+                // 選択とキャレットは変わらない
+                var (start1, end1) = c.GetSelectionCharRange();
+                Assert.Equal(start0, start1);
+                Assert.Equal(end0, end1);
+                // でも TopLine は末尾方向に動いている
+                Assert.True(c.TopLine > 0);
+            }
+        });
+
+    [Fact]
+    public void EnsureVisibleCharRange_NoOp_BeforeSetSource() =>
+        Sta.Run(() =>
+        {
+            using var f = new Form();
+            using var c = new EditorControl();
+            f.Controls.Add(c);
+            _ = f.Handle;
+            // SetSource 前でも throw せず no-op であること
+            Assert.Null(Record.Exception(() => c.EnsureVisibleCharRange(0, 10)));
+        });
+
+    [Fact]
+    public void EnsureVisibleCharRange_RestoresSystemCaretPosition() =>
+        Sta.Run(() =>
+        {
+            // Task 7 レビュー C-1 の回帰テスト: EnsureVisibleCharRange 後に OS 側システムキャレット
+            // 座標が savedCaret 位置と一致することを検証する。
+            //
+            // バグ想定(修正前): TopLine/ScrollX setter が内部で PositionCaret を呼び、その時点の
+            // _caret = end で SetCaretPos を発火 → field 復元後も blinking caret 位置は end のまま。
+            // 修正(finally で PositionCaret 再呼び出し)により savedCaret 位置に戻る。
+            //
+            // NOTE: GetCaretPos は Focus を持つスレッド上でのみ有効。Sta.Run 上で Handle 生成
+            // → Focus → SetSource の順に組み立てる。
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
+            using var f = new Form { Size = new System.Drawing.Size(400, 60) };
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            f.Show(); // Focus を得るには可視化が必要
+            c.Focus();
+            c.SetSource(TextBuffer.FromString(text));
+
+            try
+            {
+                c.TopLine = 0;
+                c.SetCaretCharOffset(2); // savedCaret = 2(行 0 col=2 想定)
+
+                // 末尾行を可視化 → TopLine は動くはず・caret 位置は 2 のまま
+                int lineStart = text.LastIndexOf('\n') + 1;
+                c.EnsureVisibleCharRange(lineStart, 4);
+
+                // field は復元される
+                Assert.Equal(2, c.CaretCharOffset);
+                Assert.Equal(2, c.SelectionAnchor);
+
+                // 期待 caret 位置は EnsureVisibleCharRange 後のスクロール状態で再計算
+                // (savedCaret=2 が可視領域から外れる=Point.Empty)なら OS キャレットは
+                // 隠し座標 (-1000, -1000) にあるはず。ここでは savedCaret が上端にあり
+                // 末尾行を可視化して行 0 も可視外になるので Point.Empty 経路を通る。
+                bool ok = GetCaretPos(out var actual);
+                Assert.True(ok, "GetCaretPos failed");
+
+                var expectedAfter = c.PointFromCharOffset(2);
+                if (expectedAfter == System.Drawing.Point.Empty)
+                {
+                    // savedCaret が可視外に押し出された → 隠し座標
+                    Assert.Equal(-1000, actual.X);
+                    Assert.Equal(-1000, actual.Y);
+                }
+                else
+                {
+                    Assert.Equal(expectedAfter.X, actual.X);
+                    Assert.Equal(expectedAfter.Y, actual.Y);
+                }
+            }
+            finally
+            {
+                c.Dispose();
+                f.Close();
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_ScrollsDown_WhenCaretHiddenByHScrollBar() =>
+        Sta.Run(() =>
+        {
+            // Task 7 レビュー I-1 の回帰テスト: hscroll 表示中(折り返し OFF・長い行がある)に
+            // キャレットが最下論理行に来たとき、垂直判定が paintHeight ベースでないと
+            // TopLine が「hscroll 領域まで可視カウント」で足りない値で止まる。
+            //
+            // Bug/Fix の TopLine を確実に食い違わせるために ClientSize.Height を LineHeightPx の
+            // 倍数(3*LH)に強制する。この配置なら:
+            //   visibleRows_bug = 3*LH / LH = 3
+            //   visibleRows_fix = (3*LH - hscroll.H) / LH ≤ 2   (hscroll.H > 0 のため必ず 1 段小さい)
+            // 論理行 9 (0-based) の末尾行キャレット:
+            //   TopLine_bug = 9 - 3 + 1 = 7
+            //   TopLine_fix = 9 - visibleRows_fix + 1 ≥ 8
+            // 検証は「TopLine が fix 側の期待値以上」で行う。Bug 状態では TopLine=7 で
+            // 8 未満なので必ず fail。Fix 状態では 8 以上になり pass。
+            //
+            // 長文行は line 0 に置く: UpdateHorizontalScrollbar は _topLine から probeHeight 分の
+            // 視覚行のみを走査して最長幅を推定するため、長文行が TopLine=0 時の viewport 内に
+            // ないと hscroll が表示されず、fix 側の paintHeight 減算が効かない(=バグを再現できない)。
+            var text = new string('x', 200) + "\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9";
+            using var f = new Form { Size = new System.Drawing.Size(200, 200) };
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            f.Show(); // Show 経由でレイアウトを確定させる(unshown だと ClientSize の子伝播が不完全)
+            c.SetSource(TextBuffer.FromString(text));
+
+            try
+            {
+                // ClientSize を LineHeightPx の 3 倍に強制。Dock=Fill 経由で c.ClientSize.Height も同値に。
+                // 100 px 幅は 200 char の長文行より狭い → OnResize 内で UpdateHorizontalScrollbar が
+                // hscroll を表示状態にする。
+                int lh = c.LineHeightPx;
+                f.ClientSize = new System.Drawing.Size(100, 3 * lh);
+                f.PerformLayout();
+
+                c.WrapColumns = 0; // 折り返し OFF(念のため明示・既定 0)
+                c.TopLine = 0;
+
+                // 論理行 9(末尾)にキャレット
+                int line9Start = text.LastIndexOf('\n') + 1;
+                c.SetCaretCharOffset(line9Start);
+                c.BringCaretIntoView();
+
+                // Bug/Fix の TopLine 期待値を計算
+                int hscrollH = SystemInformation.HorizontalScrollBarHeight;
+                int paintH = c.ClientSize.Height - hscrollH;
+                int visibleRowsFix = Math.Max(1, paintH / Math.Max(1, lh));
+                int expectedTopLineFix = 9 - visibleRowsFix + 1;
+
+                Assert.True(
+                    c.TopLine >= expectedTopLineFix,
+                    $"expected TopLine >= {expectedTopLineFix} (fix formula), got {c.TopLine} "
+                        + $"(LH={lh}, ClientH={c.ClientSize.Height}, hscroll.H={hscrollH}, paintH={paintH}, visibleRows_fix={visibleRowsFix})"
+                );
+            }
+            finally
+            {
+                c.Dispose();
+                f.Close();
+            }
+        });
+
+    [Fact]
+    public void KeyDown_Down_ScrollsWhenReachingBottom() =>
+        Sta.Run(() =>
+        {
+            // Task 6 の OnKeyDown で BringCaretIntoView が呼ばれるので、
+            // 連続 Down で TopLine が追従することを検証
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"l{i}"));
+            var (f, c) = MakeControl(text, width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                c.SetCaretCharOffset(0);
+
+                // Down を 9 回押してキャレットを末尾行へ
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                for (int i = 0; i < 9; i++)
+                    mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.Down) });
+
+                // TopLine は 0 より進んでいる(末尾行が可視領域に入る位置まで)
+                Assert.True(c.TopLine > 0, $"expected TopLine to advance, still 0");
+            }
+        });
+}

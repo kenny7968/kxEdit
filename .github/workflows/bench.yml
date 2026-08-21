@@ -23,19 +23,19 @@ jobs:
           dotnet-version: 9.0.x
 
       - name: ビルド(Release)
-        run: dotnet build tests/yEdit.Core.Bench -c Release
+        run: dotnet build tests/kxEdit.Core.Bench -c Release
 
       - name: 応答性ベンチ(--typing)
         continue-on-error: true
-        run: dotnet run --project tests/yEdit.Core.Bench -c Release --no-build -- --typing
+        run: dotnet run --project tests/kxEdit.Core.Bench -c Release --no-build -- --typing
 
       - name: レイアウト+文書ベンチ(--layout)
         continue-on-error: true
-        run: dotnet run --project tests/yEdit.Core.Bench -c Release --no-build -- --layout
+        run: dotnet run --project tests/kxEdit.Core.Bench -c Release --no-build -- --layout
 
       - name: 文字アクセスベンチ(--characcess)
         continue-on-error: true
-        run: dotnet run --project tests/yEdit.Core.Bench -c Release --no-build -- --characcess
+        run: dotnet run --project tests/kxEdit.Core.Bench -c Release --no-build -- --characcess
 
       - name: 運用注記
         shell: pwsh

@@ -10,7 +10,7 @@ permissions:
 
 env:
   TAG: ${{ github.ref_name }}
-  ZIP: yEdit-${{ github.ref_name }}-win-x64.zip
+  ZIP: kxEdit-${{ github.ref_name }}-win-x64.zip
 
 jobs:
   release:
@@ -32,18 +32,18 @@ jobs:
       # (implicit build 経由の dotnet test は -warnaserror が伝播しないため素通り経路になっていた)。
       # ci.yml と対称形。以降のテスト 3 ステップは --no-build で二重ビルドを回避する。
       - name: ビルド(警告=エラー)
-        run: dotnet build yEdit.sln -c Release -warnaserror
+        run: dotnet build kxEdit.sln -c Release -warnaserror
 
       # テストプロジェクトを追加/削除する場合は 3 箇所同期: tools/pre-merge-check.ps1・.github/workflows/ci.yml・.github/workflows/release.yml
-      # (sln 一括ステップ寄せは検討済みだが、dotnet test yEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持)
+      # (sln 一括ステップ寄せは検討済みだが、dotnet test kxEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持)
       - name: "テスト(リリース前ゲート: Core)"
-        run: dotnet test tests/yEdit.Core.Tests -c Release --no-build
+        run: dotnet test tests/kxEdit.Core.Tests -c Release --no-build
 
       - name: "テスト(リリース前ゲート: Editor・LocalOnly 除外)"
-        run: dotnet test tests/yEdit.Editor.Tests -c Release --no-build --filter "Category!=LocalOnly"
+        run: dotnet test tests/kxEdit.Editor.Tests -c Release --no-build --filter "Category!=LocalOnly"
 
       - name: "テスト(リリース前ゲート: App・LocalOnly 除外)"
-        run: dotnet test tests/yEdit.App.Tests -c Release --no-build --filter "Category!=LocalOnly"
+        run: dotnet test tests/kxEdit.App.Tests -c Release --no-build --filter "Category!=LocalOnly"
 
       - name: バージョン抽出 (v1.2.3 → 1.2.3)
         id: ver
@@ -56,7 +56,7 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: >
-          dotnet publish src/yEdit.App -c Release -r win-x64 --self-contained false
+          dotnet publish src/kxEdit.App -c Release -r win-x64 --self-contained false
           "-p:Version=$env:VERSION"
           -p:DebugType=embedded
           -o publish
@@ -101,6 +101,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "$env:TAG" "$env:ZIP"
-          --title "yEdit $env:TAG"
+          --title "kxEdit $env:TAG"
           --notes-file notes.md
           --verify-tag

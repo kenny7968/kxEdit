@@ -44,18 +44,18 @@ jobs:
         run: dotnet csharpier check .
 
       - name: ビルド(警告=エラー)
-        run: dotnet build yEdit.sln -c Release -warnaserror
+        run: dotnet build kxEdit.sln -c Release -warnaserror
 
       # テストプロジェクトを追加/削除する場合は 3 箇所同期: tools/pre-merge-check.ps1・.github/workflows/ci.yml・.github/workflows/release.yml
-      # (sln 一括ステップ寄せは検討済みだが、dotnet test yEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持)
+      # (sln 一括ステップ寄せは検討済みだが、dotnet test kxEdit.sln が Editor/App 両 UI アセンブリを並列実行するため現状維持)
       - name: Core.Tests
-        run: dotnet test tests/yEdit.Core.Tests -c Release --no-build
+        run: dotnet test tests/kxEdit.Core.Tests -c Release --no-build
 
       - name: Editor.Tests(LocalOnly 除外)
-        run: dotnet test tests/yEdit.Editor.Tests -c Release --no-build --filter "Category!=LocalOnly"
+        run: dotnet test tests/kxEdit.Editor.Tests -c Release --no-build --filter "Category!=LocalOnly"
 
       - name: App.Tests(LocalOnly 除外)
-        run: dotnet test tests/yEdit.App.Tests -c Release --no-build --filter "Category!=LocalOnly"
+        run: dotnet test tests/kxEdit.App.Tests -c Release --no-build --filter "Category!=LocalOnly"
 
       # MD-L-2: 依存 (直接/推移) の可視化。依存更新 PR で人間が diff を確認できる
       # ようログ出力するだけの参考ステップ。lock file check は行わないため
