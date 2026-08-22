@@ -410,4 +410,50 @@ public class DocumentManagerTests
         Assert.NotNull(property);
         Assert.Equal(typeof(Action), property!.PropertyType);
     }
+
+    // ===== A-1 / M-31: 任意の文書の dirty 遷移を伝えるイベント(設計 2026-08-22 §3.1) =====
+
+    /// <summary>既存 ActiveDirtyChanged はアクティブ分しか飛ばないため、非アクティブタブの
+    /// 保存(別タブで作業中の Ctrl+S 相当)を BackupCoordinator が取りこぼす。
+    /// DocumentDirtyChanged は文書を引数に取り、非アクティブでも飛ぶことを固定する。</summary>
+    [Fact]
+    public void DocumentDirtyChanged_FiresForNonActiveDocument() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var first = host.Docs.CreateNew();
+            var second = host.Docs.CreateNew(); // second がアクティブになる
+            Assert.Same(second, host.Docs.Active);
+
+            var seen = new List<Document>();
+            var activeOnly = 0;
+            host.Docs.DocumentDirtyChanged += (_, d) => seen.Add(d);
+            host.Docs.ActiveDirtyChanged += (_, _) => activeOnly++;
+
+            first.Editor.Text = "x";
+            first.Editor.ClearSavePoint(); // 非アクティブ文書を dirty 化
+
+            Assert.Contains(first, seen);
+            Assert.Equal(0, activeOnly); // 既存イベントでは観測できないことの対照
+        });
+
+    /// <summary>dirty 化(SavePointLeft)と clean 化(SavePointReached)の両方で飛ぶ。
+    /// 片方だけの配線だと、購読側が「clean 化のみ処理する」フィルタを持てない。</summary>
+    [Fact]
+    public void DocumentDirtyChanged_FiresOnBothLeftAndReached() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "x";
+
+            var states = new List<bool>();
+            host.Docs.DocumentDirtyChanged += (_, d) => states.Add(d.Editor.Modified);
+
+            doc.Editor.ClearSavePoint(); // → dirty
+            doc.Editor.SetSavePoint(); // → clean
+
+            Assert.Contains(true, states);
+            Assert.Contains(false, states);
+        });
 }

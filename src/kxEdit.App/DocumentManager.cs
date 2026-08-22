@@ -61,6 +61,12 @@ public sealed class DocumentManager : IDisposable
     /// 非アクティブタブを閉じる経路ではそもそも切替が起きない。「閉じた」の唯一の通知源。</summary>
     public event EventHandler<Document>? DocumentClosed;
 
+    /// <summary>任意の文書の dirty 状態が変化した(SavePointLeft / SavePointReached の両方)。
+    /// <see cref="ActiveDirtyChanged"/> は<b>アクティブ分しか飛ばない</b>ため、非アクティブタブの
+    /// 保存を購読側が取りこぼす。BackupCoordinator が「clean 化 = バックアップ不要」を
+    /// 即時に知るための通知源(設計 2026-08-22 §3.1・A-1 / M-31)。</summary>
+    public event EventHandler<Document>? DocumentDirtyChanged;
+
     /// <summary>新しい空タブを生成しアクティブ化する。State の中身は呼び出し側が設定する。</summary>
     public Document CreateNew()
     {
@@ -195,6 +201,7 @@ public sealed class DocumentManager : IDisposable
         UpdateLabel(doc);
         if (ReferenceEquals(doc, Active))
             ActiveDirtyChanged?.Invoke(this, EventArgs.Empty);
+        DocumentDirtyChanged?.Invoke(this, doc); // 非アクティブ分も含めて購読側へ(A-1 / M-31)
     }
 
     // CA1001 対応(Sub 3.4-B): 通常は MainForm.Controls に _tabs(=TabHost) が接続され
