@@ -507,6 +507,115 @@ public class FileControllerTests
             Assert.True(doc.Editor.Modified); // ロールバック発火=未保存の本文が失われない
         });
 
+    // ===== A-7 (b): 他タブ重複の検知 =====
+
+    [Fact]
+    public void SaveAs_PathOpenInAnotherTab_ShowsErrorAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string occupied = tmp.File("occupied.txt");
+            File2.WriteAllText(occupied, "original");
+            Assert.NotNull(host.File.TryOpenOrActivate(occupied)); // タブ A
+
+            var doc = host.Docs.CreateNew(); // タブ B(無題)
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(occupied, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
+            );
+            Assert.Equal("original", File2.ReadAllText(occupied)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>
+    /// 自分自身のパスへの上書き保存は正当な操作。
+    /// **非既定状態から始めるのが要点**: 無題タブ(State.Path == null)から始めると
+    /// FindByPath は常に null を返し、「null が返った」と「自分が返った」を区別できない
+    /// =自タブ除外(!ReferenceEquals)を落とす変異が生存する。
+    /// パス確定済みの doc + 別パスの他タブ、という配置にする。
+    /// </summary>
+    [Fact]
+    public void SaveAs_OwnPath_IsNotTreatedAsDuplicate() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string other = tmp.File("other.txt");
+            File2.WriteAllText(other, "other");
+            Assert.NotNull(host.File.TryOpenOrActivate(other)); // 別パスの他タブを在席させる
+
+            string mine = tmp.File("mine.txt");
+            File2.WriteAllText(mine, "old");
+            var doc = host.File.TryOpenOrActivate(mine); // パス確定済みの自タブ
+            Assert.NotNull(doc);
+            doc!.Editor.Text = "new";
+            host.Dialogs.SaveAs = new SaveAsResult(mine, 65001, false, LineEnding.Crlf);
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("別のタブで開いています"));
+            Assert.Contains("new", File2.ReadAllText(mine));
+        });
+
+    /// <summary>
+    /// 照合は <c>PathKey</c>(GetFullPath + ToLowerInvariant)であって文字列等値ではない。
+    /// <c>LoadInto</c> は渡された生パスをそのまま <c>State.Path</c> に入れるので、別経路で開いた
+    /// タブと SaveAs のダイアログ入力が同じファイルの**違う綴り**を持ちうる
+    /// (=文字列等値で照合すると重複を見逃して A-7 (b) が再発する)。
+    /// 綴り差は Windows で実在する大文字小文字違いを使い、
+    /// (a) 2 つの綴りが Ordinal で別物・(b) それでも同じファイルを指す(ボリュームが大小無視)
+    /// の 2 点を fixture 側で実測して固定する。Windows 10 以降のディレクトリ単位
+    /// case sensitivity が有効な環境では (b) が落ちる = 「たまたま緑」ではなく前提の破れとして見える。
+    /// </summary>
+    [Fact]
+    public void SaveAs_PathOpenInAnotherTab_DifferentCaseSpelling_IsStillDetected() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string lower = tmp.File("occupied.txt");
+            string upper = tmp.File("OCCUPIED.TXT");
+            File2.WriteAllText(lower, "original");
+
+            Assert.NotEqual(lower, upper, StringComparer.Ordinal); // (a) 綴りは別物
+            Assert.True(File2.Exists(upper)); // (b) それでも同じファイル
+
+            var tabA = host.File.TryOpenOrActivate(lower); // タブ A は小文字綴り
+            Assert.NotNull(tabA);
+            Assert.Equal(lower, tabA!.State.Path); // 生パスがそのまま入る
+
+            var doc = host.Docs.CreateNew(); // タブ B(無題)
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(upper, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            // 再表示の初期値 = 正規化済み full。大文字綴りのまま = タブ A の State.Path とは
+            // 別文字列であることを実測で固定する(文字列等値では照合できない証拠)。
+            string full = host.Dialogs.SaveAsRequests[1].Path!;
+            Assert.Equal(upper, full);
+            Assert.NotEqual(tabA.State.Path, full, StringComparer.Ordinal);
+
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
+            );
+            Assert.Equal("original", File2.ReadAllText(lower)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]

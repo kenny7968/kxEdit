@@ -389,12 +389,27 @@ public sealed class FileController
             }
             // 以降の判定・保存・State 反映はすべて正規化済みの full を使う。
             // 再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)。
-#pragma warning disable S1854 // reason: 現時点(A-19)ではこの代入以降の経路がすべて return するため
-            // 静的には dead store。Task 8(文字コード警告のキャンセルを continue 化)と A-7 の
-            // 上書き確認が入ると読まれる=先に正しい値を入れておく側に倒す。位置も load-bearing:
-            // 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、必ずその後に上書きする。
-            seed = seed with { Path = full };
-#pragma warning restore S1854
+            // 位置も load-bearing: 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、
+            // 必ずその後に上書きする。直後の重複タブ分岐が continue するため、この代入は
+            // 再表示の初期値として実際に読まれる(Task 5 の S1854 局所抑止は本タスクで不要になり削除)。
+            seed = seed with
+            {
+                Path = full,
+            };
+
+            // A-7 (b): 同一ファイルを 2 タブで編集させない。片方の Ctrl+S が
+            // もう片方の内容を無警告で消す導線(hot exit レイアウトにも同一 Path が 2 件並ぶ)。
+            // FindByPath は PathKey(GetFullPath + ToLowerInvariant)照合なので
+            // 大小・区切りの揺れも同一と見なす。自分自身への上書きは正当なので除外する。
+            var other = _docs.FindByPath(full);
+            if (other is not null && !ReferenceEquals(other, doc))
+            {
+                _prompt.Error(
+                    $"このファイルは別のタブで開いています。そのタブで保存してください: {SanitizeForDisplay.OneLine(full, 200)}",
+                    "エラー"
+                );
+                continue;
+            }
 
             var newEncoding = EncodingCatalog.Get(picked.CodePage);
 
