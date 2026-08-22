@@ -55,6 +55,23 @@ public class EditorControlCompatApiTests
         });
     }
 
+    // 最終ブランチレビュー(脆弱性パス)L-2: start + length の int 加算が溢れると、
+    // 負値になった端が SetSelectionCharRange の Min/Max 正規化で 0 側へ落ち「全文選択」になっていた。
+    // 姉妹 API の EnsureVisibleCharRange は同じ加算を long 経由で守っている。
+    // 本 API は grep 結果由来のオフセットを受ける外部入力面(MainForm.OpenAndSelect)。
+    [Fact]
+    public void SelectCharRange_OverflowingLength_ClampsToEnd()
+    {
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("hello world")); // CharLength = 11
+            ctrl.SelectCharRange(int.MaxValue, 10); // start + length が int を溢れる
+            // 全文選択 (0, 11) ではなく、契約どおり末尾へクランプされること。
+            Assert.Equal((11, 11), ctrl.GetSelectionCharRange());
+        });
+    }
+
     [Fact]
     public void LineCount_ReturnsBufferLineCount()
     {

@@ -15,8 +15,19 @@ public sealed partial class EditorControl
     // Caret 位置操作 + 選択範囲 API + view-into scroll
 
     /// <summary>P6 Task 2: 長さベースの選択設定エイリアス(App 層互換)。</summary>
-    public void SelectCharRange(int start, int length) =>
-        SetSelectionCharRange(start, start + Math.Max(0, length));
+    /// <remarks>
+    /// <c>start + length</c> は int 加算オーバーフロー対策で long 経由にする
+    /// (<see cref="EnsureVisibleCharRange"/> と同じ流儀)。素の int 加算だと溢れた端が負値になり、
+    /// <see cref="SetSelectionCharRange"/> の Min/Max 正規化で 0 側へ落ちて<b>全文選択</b>になる。
+    /// 本 API は grep 結果由来のオフセットを受ける外部入力面(<c>MainForm.OpenAndSelect</c>)なので、
+    /// 範囲外は「全文選択」ではなく契約どおり [0, CharLength] へクランプさせる。
+    /// </remarks>
+    public void SelectCharRange(int start, int length)
+    {
+        long endLong = (long)start + Math.Max(0, length);
+        int end = endLong > int.MaxValue ? int.MaxValue : (int)endLong;
+        SetSelectionCharRange(start, end);
+    }
 
     /// <summary>
     /// P6 Task 2: <see cref="SetCaretCharOffset"/> のエイリアス(App 層互換)。
