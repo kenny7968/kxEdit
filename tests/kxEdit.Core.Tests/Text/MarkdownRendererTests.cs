@@ -528,4 +528,26 @@ public class MarkdownRendererTests
         string html = MarkdownRenderer.Render("# 見出し {#custom}", Base);
         Assert.Contains("{#custom}", html);
     }
+
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_RawHtml()
+    {
+        // FINDING 1: Markdig の HtmlAbbreviationRenderer はラベルを WriteEscape せず出力するため、
+        // DisableHtml() が全面バイパスされていた (title 側は正しくエスケープされる)。
+        string md = "*[<script>fetch(1)</script>]: x\n\n<script>fetch(1)</script>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<script", html);
+    }
+
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_MetaRefresh()
+    {
+        // 最も実害のある注入。CSP に該当 directive が無いため、プレビューを開くだけで
+        // MarkdownPreviewForm の LaunchExternal 経路が発火し既定ブラウザが開く。
+        string md =
+            "*[<meta http-equiv=refresh content=0;url=https://evil.example/pwn>]: x\n\n"
+            + "<meta http-equiv=refresh content=0;url=https://evil.example/pwn>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<meta http-equiv=refresh", html);
+    }
 }

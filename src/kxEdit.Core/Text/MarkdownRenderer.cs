@@ -1,4 +1,5 @@
 using Markdig;
+using Markdig.Extensions.Abbreviations;
 using Markdig.Extensions.GenericAttributes;
 
 namespace kxEdit.Core.Text;
@@ -94,7 +95,17 @@ public static class MarkdownRenderer
         // UseAutoIdentifiers が引き続き生成するが、`{#id}` で指定していたカスタム id は
         // 自動生成値へ変わるため (`# Title {#custom}` は id="custom" → id="title-custom")、
         // 既存 .md 内の `[link](#custom)` は切れる。
-        builder.Extensions.RemoveAll(e => e is GenericAttributesExtension);
+        //
+        // FINDING 1 (2026-08-22): 同じく UseAdvancedExtensions 同梱の Abbreviations も外す。
+        // Markdig の略語レンダラは title (展開文) 側だけを WriteEscape し、`*[ラベル]: 展開`
+        // のラベル側を生のまま出力するため、`*[<meta http-equiv=refresh ...>]: x` が
+        // `DisableHtml()` を全面バイパスして HTML 要素になる。CSP に該当 directive が無い
+        // meta refresh は、プレビューを開くだけで App 側の LaunchExternal 経路を発火させ
+        // 既定ブラウザに攻撃者 URL を開かせうる。
+        // 代償: 略語が <abbr> へ展開されなくなる (`*[...]: ...` 定義行はそのまま表示される)。
+        builder.Extensions.RemoveAll(e =>
+            e is GenericAttributesExtension || e is AbbreviationExtension
+        );
         // MD-M-3: リンク URL scheme whitelist (二層目の防御)。CSP を弱めた瞬間の
         // live XSS を防ぐため javascript:/vbscript:/data:/file: 等は href を drop する。
         builder.Extensions.AddIfNotAlready<SafeLinkExtension>();
