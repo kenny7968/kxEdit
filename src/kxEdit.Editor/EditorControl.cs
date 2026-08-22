@@ -1574,9 +1574,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 可視判定・スクロール判断・座標算出・ヒットテストが「起点から視覚行数で数える」ための共有部品。
     // 「どのセグメントに属するか」の規約を二重化しないため、判定は LocateSegmentIndex 1 箇所に置く。
     // 歩き/数えは I-4 に従い必要本数で打ち切る(文書全体・論理行全体を無条件に Wrap しない)。
-#pragma warning disable S1144 // reason: 本コミットは状態と seam だけを入れる挙動不変の段であり、
-    // LocateVisualRow / CountVisualRowsForward / WalkForwardVisualRows / WalkBackVisualRows は
-    // まだ呼び出し元を持たない(スクロール判断・座標算出・ホイールの各経路を後続で移すため)。
+#pragma warning disable S1144 // reason: seam を先に入れて呼び出し元を段階的に移す途中であり、
+    // LocateVisualRow / CountVisualRowsForward / WalkBackVisualRows がまだ呼び出し元を持たない
+    // (スクロール判断・ホイールの各経路を後続で移すため)。
+    // WalkForwardVisualRows は Task 4(OffsetFromClientPoint のヒットテスト)で呼び出し元を得た。
     // 呼び出し元が 4 本すべて揃うのはホイールを視覚行送りにする段(実装計画
     // docs/plans/2026-08-22-wrap-vertical-navigation.md の Task 6)であり、
     // その完了時にこの抑止を外すこと。
