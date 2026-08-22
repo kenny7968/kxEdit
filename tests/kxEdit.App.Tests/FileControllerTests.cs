@@ -164,7 +164,14 @@ public class FileControllerTests
     /// 存在しない新規パスは到達可能でも常に false=「ネットワークパスに到達できません」で止まる。
     /// Fake の Result(読み取り側)を false・SaveTargetResult(保存側)を到達可能にすることで、
     /// **どちらのメソッドを使っているか**を判別する(同値だと判別できない)。
-    /// 実ネットワークは無いので書込自体は失敗する。検証するのは「止まった理由」。
+    /// 共有が実在しないので書込自体は失敗する。検証するのは「止まった理由」。
+    ///
+    /// ホストを 127.0.0.1 にするのは意図的: この 2 本は App スイートで唯一
+    /// **プローブを素通りさせて実 I/O まで到達する** UNC テストなので、所要時間がホストの
+    /// 名前解決に依存する。架空のホスト名はワイルドカード DNS ゾーンで実 IP に解決されると
+    /// 445 への TCP SYN 再送で 1 呼出あたり約 21 秒かかりうる。ループバックなら名前解決が
+    /// 消え、共有名不在が即座に返る。<c>UncPathDetector.IsUnc</c> は先頭 <c>\\</c> の
+    /// 純粋な文字列判定なので IsRemote=true は変わらない。
     /// </summary>
     [Fact]
     public void SaveAs_NewFileOnUncPath_PassesReachabilityGate() =>
@@ -179,13 +186,13 @@ public class FileControllerTests
                 FileExists: false
             );
             host.Dialogs.SaveAs = new SaveAsResult(
-                @"\\no-such-server\share\a.txt",
+                @"\\127.0.0.1\no-such-share\a.txt",
                 65001,
                 HasBom: false,
                 LineEnding.Crlf
             );
 
-            Assert.False(host.File.SaveAs()); // 実ネットワーク不在なので書込は失敗する
+            Assert.False(host.File.SaveAs()); // 共有が実在しないので書込は失敗する
 
             Assert.DoesNotContain(
                 host.Prompt.Log,
@@ -199,7 +206,10 @@ public class FileControllerTests
             );
         });
 
-    /// <summary>5 秒契約の pin(読み取り側 LastTimeout の観測点と対称)。</summary>
+    /// <summary>
+    /// 5 秒契約の pin(読み取り側 LastTimeout の観測点と対称)。
+    /// ホストが 127.0.0.1 な理由は上のテストの doc を参照(名前解決依存の排除)。
+    /// </summary>
     [Fact]
     public void SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout() =>
         Sta.Run(() =>
@@ -208,7 +218,7 @@ public class FileControllerTests
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = "abc";
             host.Dialogs.SaveAs = new SaveAsResult(
-                @"\\no-such-server\share\a.txt",
+                @"\\127.0.0.1\no-such-share\a.txt",
                 65001,
                 HasBom: false,
                 LineEnding.Crlf
