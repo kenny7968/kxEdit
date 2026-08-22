@@ -38,10 +38,10 @@ public class PreviewUrlResolverTests
     [InlineData("#midashi")] // FINDING 3: 同一文書内アンカーを守る
     [InlineData("#fn:1")] // 脚注の戻りリンク
     [InlineData("//evil.example/p")] // protocol-relative は別ホストへ飛ぶので触らない
-    // 規則 3 (// 始まり) の網。上の "//evil.example/p" は Windows の Uri が UNC パスと解釈して
-    // file://evil.example/p になるため規則 4 が偶然拾ってしまい、規則 3 を消しても赤くならない。
-    // port / userinfo が付くと UNC として解釈されなくなり規則 4 を素通りするので、
-    // 規則 3 だけが止められる入力としてこの 2 本を並べる (ミューテーションで確認済み)。
+    // port / userinfo が付く protocol-relative。UNC として解釈されなくなるため規則 4
+    // (Uri.TryCreate(Absolute)) を素通りする。ただしこれらを実際に止めているのは事後条件で
+    // あって規則 3 ではない: 規則 3 (StartsWith("//")) は早期 return にすぎず、それだけを
+    // 削っても全緑になる (= 前方一致側に固有の網は無い。ミューテーションで確認済み)。
     [InlineData("//evil.example:8080/p")]
     [InlineData("//user@evil.example/p")]
     // 事後条件 (解決結果が preview origin であること) の網。規則 3 は前方一致にすぎず、
@@ -54,7 +54,7 @@ public class PreviewUrlResolverTests
     [InlineData("\\/evil.example?q")]
     [InlineData(" //evil.example?x=1")]
     [InlineData("\t//evil.example#f")]
-    // userinfo だけが違う形。Host / GetLeftPart(Authority) は userinfo を含まないので、
+    // userinfo だけが違う形。Uri.Host も Uri.Authority も userinfo を含まないので、
     // 事後条件から UserInfo 検査を外すとこの 1 本だけがすり抜ける。
     [InlineData("\\/user@kxedit.preview/x")]
     // port だけが違う形。scheme と host は preview と一致するので、事後条件から Port 検査を

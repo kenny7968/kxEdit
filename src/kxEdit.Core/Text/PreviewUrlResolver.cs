@@ -53,9 +53,9 @@ internal static class PreviewUrlResolver
             // 実在する (Uri は先頭空白を捨て、バックスラッシュを / へ正規化してから authority を
             // 解釈する)。列挙は原理的に漏れるので、解決結果側で preview origin を検査する。
             // Host / Port / UserInfo の 3 条件はそれぞれ単独で網が張ってある (条件ごとに
-            // 変異させて kill を確認済み)。UserInfo は必須: Host も
-            // GetLeftPart(UriPartial.Authority) も userinfo を含まないため、
-            // "\/user@kxedit.preview/x" はホスト検査だけではすり抜ける。
+            // 変異させて kill を確認済み)。UserInfo は必須: Uri.Host も Uri.Authority も
+            // userinfo を含まないため、"\/user@kxedit.preview/x" は
+            // ホスト検査だけではすり抜ける (実測で確認済み)。
             // Scheme 検査だけは現状到達不能 (変異させても全緑)。相対解決で scheme が変わるには
             // url 自身が scheme を持つ必要があり、それは上の Uri.TryCreate(Absolute) が
             // 先に捕まえるため。System.Uri の解釈が将来変わったときの保険として残す。

@@ -75,7 +75,7 @@ public class MarkdownRendererTests
     public void Render_Accepts_PreviewBaseHref()
     {
         // MD-L-4 の allow-list が PreviewBaseHref を通すこと (例外を投げず文書を返す)。
-        // <base> の有無は Preview_base_href_emits_no_base_tag が受け持つ。
+        // <base> の有無は Render_EmitsNoBaseTag が受け持つ。
         var html = MarkdownRenderer.Render("x", MarkdownRenderer.PreviewBaseHref);
         Assert.Contains("<html", html);
     }
@@ -649,7 +649,8 @@ public class MarkdownRendererTests
         // 空 baseHref の経路は解決基準を持たないので書き換えない (パイプライン 2 本の境界)。
         // 案 B 以降、SafeLinkExtension の whitelist が「scheme 無し相対 URL」を drop しない
         // ことを固定する唯一の網でもある (preview 経路では絶対化が先に効いて href が https に
-        // なるため、Render_RelativeLink_KeepsHref 系は相対のケースを検証できなくなった)。
+        // なるため、Render_RelativeLink_IsResolvedButNotDropped 系は相対のケースを
+        // 検証できなくなった)。
         string html = MarkdownRenderer.Render("![](pic.png)\n\n[y](other.md)\n", "");
         Assert.Contains("src=\"pic.png\"", html);
         Assert.Contains("href=\"other.md\"", html);
