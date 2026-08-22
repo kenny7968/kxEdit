@@ -1371,4 +1371,50 @@ public class VisualRowScrollTests
                 }
             }
         });
+
+    // ===== 最終レビュー脆弱性パス Low: int オーバーフローで負の index / 負の距離を返さない =====
+    // seam は internal なので、production 経路(実在の起点しか渡らない)からは踏めないが、
+    // 上限の破れが「負のセグメント index を Exhausted=false で返す」→ 呼び出し側の
+    // OffsetFromClientPoint が List の負 index でクラッシュ、という形で表に出る。
+    // 素の int 加算へ戻す変異でこの 2 件が赤くなる。
+
+    [Fact]
+    public void WalkForwardVisualRows_HugeDistance_DoesNotOverflowToNegativeSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(Paragraphs(2, 10), wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+
+                // 起点は正常・距離だけ過大 → 文書末で打ち切り(Exhausted=true)
+                var (line, seg, exhausted) = WalkForward(c, snap, 0, 1, int.MaxValue);
+                Assert.True(exhausted, "文書末で打ち切られていない");
+                Assert.True(seg >= 0, $"負のセグメント index が返った: {seg}");
+                Assert.Equal(snap.LineCount - 1, line);
+
+                // 起点が過大(陳腐化の極端形)。seg は最終セグメントへ寄せられるので
+                // 1 本進むと次の論理行の先頭に着地する=歩き切れているので Exhausted は false。
+                var (line2, seg2, exhausted2) = WalkForward(c, snap, 0, int.MaxValue, 1);
+                Assert.True(seg2 >= 0, $"負のセグメント index が返った: {seg2}");
+                Assert.Equal((1, 0, false), (line2, seg2, exhausted2));
+            }
+        });
+
+    [Fact]
+    public void CountVisualRowsForward_HugeTargetSegment_DoesNotOverflowToNegativeDistance() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(Paragraphs(2, 10), wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                const int Cap = 4;
+                int d = CountForward(c, snap, 0, 0, 1, int.MaxValue, Cap);
+                // 負の距離は「起点より上=既に可視」と誤判定されるため、cap で頭打ちになること。
+                Assert.Equal(Cap, d);
+            }
+        });
 }

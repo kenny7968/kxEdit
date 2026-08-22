@@ -1764,7 +1764,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             int eff = Math.Min(skip, count - 1);
             rows += count - eff;
         }
-        return Math.Min(cap, rows + toSeg);
+        // rows + toSeg は long 経由(上の needed と同じ理由)。toSeg は通常 LocateVisualRow 由来の
+        // 実 index だが、internal な直接呼び出しで int.MaxValue 級を渡されると素の int 加算では
+        // 負へ回り込み「距離が負=既に可視」と誤判定する(最終レビュー脆弱性パス Low)。
+        long total = (long)rows + toSeg;
+        return (int)Math.Min(cap, total);
     }
 
     /// <summary>
@@ -1779,6 +1783,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// ここで寄せられるのは、その行の<b>真の</b>総数 <c>count</c> が既に手元にあり追加コストが
     /// ゼロだからである。総数を得るのに追加の Wrap が要る <see cref="WalkBackVisualRows"/> は
     /// 寄せない=非対称は意図的であり、理由は同メソッドの remarks を参照。
+    /// <para>
+    /// <b>事前条件</b>: <paramref name="seg"/> と <paramref name="n"/> は非負であること。
+    /// 和が <c>int.MaxValue</c> を超える破れ自体は内部で long 経由にして防いでいるが、
+    /// 意味のある結果を返せるのは呼び出し側が実在の起点を渡した場合だけである。
+    /// </para>
     /// </remarks>
     private (int Line, int Seg, bool Exhausted) WalkForwardVisualRows(
         TextSnapshot snap,
@@ -1796,8 +1805,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
                 line,
                 cap > int.MaxValue ? int.MaxValue : (int)cap
             );
-            if (seg + n < count)
-                return (line, seg + n, false);
+            // seg + n も long 経由。素の int 加算だと int.MaxValue 級の seg / n で負へ回り込み、
+            // 負のセグメント index を Exhausted=false で返して呼び出し側(OffsetFromClientPoint)を
+            // 落とす(最終レビュー脆弱性パス Low)。cap の long 化と対で守る。
+            long landing = (long)seg + n;
+            if (landing < count)
+                return (line, (int)landing, false);
             // ここに到達した時点の count は打ち切られていない=その行の真の総数である
             // (打ち切られていれば count == seg + n + 1 > seg + n となり上で早期 return する)。
             // よって count - 1 は真の最終セグメント index であり、陳腐化した seg をそこへ
