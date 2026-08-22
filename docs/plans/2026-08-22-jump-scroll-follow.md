@@ -997,4 +997,59 @@ PR description(日本語)に必ず書くこと:
 
 ## 実施記録
 
-(実装時に追記する。特に Task 4 Step 4 のセッション復元の観測結果は必ず書き残すこと。)
+### Task 4 Step 4 — セッション復元時の追従(設計書 §3「要確認」の回収)
+
+**結論: 判定 (i)「キャレットが可視域内」。悪化なし。観測用テストを
+`MainFormSmokeTests.OnShown_UnifiedOn_RestoredCaret_ScrollsIntoView` として残した。**
+
+fixture: 200 行 / `CaretLine = 190` / タブ 2 枚(#0 = disk 再オープン・非アクティブ、
+#1 = バックアップからの無題復元・アクティブ)。実装者とレビュアーが**独立に観測して同値**を得た。
+
+| タブ | 経路 | active | `IsHandleCreated` | `TopLine` | `CurrentLine` | `ClientSize.Height` | `LineHeightPx` |
+|---|---|---|---|---|---|---|---|
+| #0 `many.txt` | disk 再オープン | False | True | 160 | 190 | 505 | 16 |
+| #1 無題 | バックアップ復元 | True | True | 160 | 190 | 505 | 16 |
+
+`visibleRows = 505 / 16 = 31` に対し `TopLine = 190 - 31 + 1 = 160` の理論値ぴったり。
+暫定サイズで計算されていれば別の値になるため、復元時点で `ClientSize` が確定していたことの裏付け。
+
+**懸念が到達しない機序**(レビュアーが `TabControl.Selected` イベントのフックで特定):
+`src/kxEdit.App/DocumentManager.cs:100` の `_tabs.SelectedTab = page;` により、
+**CreateNew したタブは生成直後に必ず選択される**。したがってどのタブも「作られた瞬間は選択中=
+`ClientSize` が実値」の状態で `SetCaretByLineColumn` を受け、その後に次のタブへ選択が移って
+非アクティブになる。「一度も選択されない TabPage」は現在のコードベースでは到達不能。
+
+**将来の注意**: `DocumentManager.CreateNew()` から作成時選択を外すと、この前提は黙って崩れる。
+そのときは復元側でタブ表示後に再追従させる(設計書 §7 の方針)。
+
+補強実験(レビュアー実施): 非アクティブタブに対して直接 `SetCaretByLineColumn(190, 0)` を
+呼んでも `TopLine = 160` になる=非アクティブそのものが追従を妨げるわけではない。
+
+### 網の穴として発見し塞いだもの(各タスクの仕様レビュー由来)
+
+| 発見 | 内容 | 対応 |
+|---|---|---|
+| Task 1 レビュー | fixture 組み替えの理由コメントが機序を取り違えていた(「`BringCaretIntoView` を壊しても緑」は成立しない。実際は「検証対象が `SetCaretCharOffset` へすり替わる」) | fixup `ea6f475` |
+| Task 2 レビュー | `SetSelectionCharRange_ScrollsRangeEndIntoView` の選択範囲が両端とも同一論理行で、「範囲**末尾**を可視化する」契約を検証できていなかった(実装を範囲先頭の可視化へ差し替える変異が生存) | fixup `b2cd9c1`(範囲を行 0〜29 にまたがせた) |
+| Task 2 レビュー | fixture の可視行数は実測 **1**(`MakeControl` の height は `Form.Size` なので `ClientSize.Height` は約 21 px)。計画の「3 行程度」は誤り | fixup `b2cd9c1`(実測値を remarks に記録) |
+| Task 4 レビュー | 復元テストのコメントが「非アクティブページのハンドル遅延生成」を前提に書かれていたが、その性質はこの網では原理的に検証できない | fixup(機序を上記のとおり訂正) |
+| Task 4 レビュー | grep テストの `Assert.Equal(199, hitLine)` だけでは `+2` 忘れ(`offset = 1679`)を捕まえられない | fixup(選択開始が桁 0 であることを追加。`+2` を外すと実際に赤化することを確認) |
+
+### 受容した指摘
+
+| 指摘 | 判断 |
+|---|---|
+| `BringCaretIntoView();` を `PositionCaret();` の**前**へ移す変異が生存する | **② 受容**。`PositionCaret` は `SetCaretPos` を呼ぶだけで `BringCaretIntoView` が読む状態を作らない=等価変異。順序は `AfterEdit` との一貫性・自己文書化のための規約でありテストで固定できる観測可能な契約ではない |
+| doc comment で `<c>AfterEdit</c>` を選んだ理由付け(CS1574 回避)が誤り(cref でも解決できる) | **③ 却下**。コードに誤った記述は残っておらず実害なし |
+
+### 未回収の申し送り
+
+- 復元経路の被覆は 2/3。`FileController.cs:824`(パスあり dirty をバックアップから復元)は
+  テスト未被覆。同じ `SetCaretByLineColumn` 委譲なので YAGNI と判断した。
+- テスト側 `visibleRows` は `ClientSize.Height / LineHeightPx`、実装側は
+  `PaintHeightPx`(hscroll 分を引く)ベース。現 fixture は hscroll 非表示で両者一致するが、
+  hscroll が出る fixture を将来足すときはテスト側の上限が 1 行ゆるくなる(上界方向なので
+  嘘の緑は生まないが、境界の kill 力は落ちる)。
+- `InputRouter` のマウス経路(`HandleMouseDown` / `HandleMouseMove` / `HandleMouseDoubleClick`)の
+  `BringCaretIntoView()` は本ブランチ後も load-bearing だが、テスト未被覆のまま
+  (本変更による退行ではなく既存の空白)。

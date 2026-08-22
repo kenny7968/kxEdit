@@ -260,7 +260,11 @@ public class MainFormSmokeTests
             );
             int hitLine = doc.Editor.CurrentLine;
             // オフセットがずれて「たまたま緑」にならないよう、対象行自体を固定する。
+            // 行番号だけでは不足する: +2(直前の CRLF 分)を落とした offset=1679 でも
+            // 選択末尾は行 199 に入るため CurrentLine==199 は成立してしまう。選択開始が
+            // 行頭(桁 0)であることまで見て、行 199 の先頭ちょうどを指していることを固定する。
             Assert.Equal(199, hitLine);
+            Assert.Equal(0, doc.Editor.GetColumn(doc.Editor.GetSelectionCharRange().Start));
             Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
             Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
         });
@@ -306,9 +310,16 @@ public class MainFormSmokeTests
     // A-3(2026-08-22): 復元したキャレットが可視域に入ること。復元経路は
     // FileController の SetCaretByLineColumn(=SetCaretCharOffset 委譲)なので、
     // Task 2 の setter 追従がここまで届いていることの確認。非アクティブタブ(disk 再オープン)と
-    // アクティブタブ(バックアップからの無題復元)の両方を 1 本で観測する
-    // (TabControl は非アクティブページのハンドル生成が遅れ得るため、可視域計算の前提が
-    // タブの状態で変わらないことまで固定する)。
+    // アクティブタブ(バックアップからの無題復元)の両方を 1 本で観測する。
+    //
+    // 設計書 §3 は「TabControl は非アクティブページのハンドル生成を遅らせるので、復元時点の
+    // ClientSize が暫定値で TopLine が最適にならないのでは」と懸念していたが、これは
+    // 到達しない: DocumentManager.CreateNew() が生成直後に _tabs.SelectedTab = page を
+    // 行うため、どのタブも「作られた瞬間は選択中」で ClientSize が実値になった状態で
+    // SetCaretByLineColumn を受ける(その後で次のタブへ選択が移り非アクティブになる)。
+    // したがって本テストが固定しているのは「非アクティブでも正しい」ではなく
+    // 「作成時選択のおかげで両タブとも実 ClientSize で追従できている」という状態。
+    // 将来 CreateNew() から作成時選択を外すとこの前提は黙って崩れる。
     [Fact]
     public void OnShown_UnifiedOn_RestoredCaret_ScrollsIntoView() =>
         Sta.Run(() =>
