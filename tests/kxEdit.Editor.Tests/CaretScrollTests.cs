@@ -310,4 +310,159 @@ public class CaretScrollTests
                 Assert.True(c.TopLine > 0, $"expected TopLine to advance, still 0");
             }
         });
+
+    [Fact]
+    public void KeyDown_ShiftDown_ScrollsWhenReachingBottom() =>
+        Sta.Run(() =>
+        {
+            // A-3(Task 2)後、InputRouter.ApplyNavMove 末尾の BringCaretIntoView() が
+            // load-bearing なのは **shift 分岐だけ** になる:
+            //   - 無修飾分岐は SetCaretCharOffset が自ら追従スクロールするようになった
+            //   - shift 分岐は MoveCaretWithSelection(非追従=Ctrl+A が画面を飛ばさない契約)を通る
+            // したがって既存の無修飾 Down のテスト(KeyDown_Down_ScrollsWhenReachingBottom)だけでは
+            // ApplyNavMove の BringCaretIntoView() 行を消しても全緑になる(網の穴)。
+            // この網はその行を kill するために張っている。
+            var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"l{i}"));
+            var (f, c) = MakeControl(text, width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                c.SetCaretCharOffset(0);
+
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                for (int i = 0; i < 9; i++)
+                    mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.Down | Keys.Shift) });
+
+                // shift 分岐(MoveCaretWithSelection)を通ったことを選択の伸長で確定させる。
+                // これが無いと、万一 shift が効かず無修飾扱いになっても TopLine の assert は通ってしまう。
+                var (selStart, selEnd) = c.GetSelectionCharRange();
+                Assert.Equal(0, selStart);
+                Assert.True(selEnd > 0, $"expected selection to extend, got end={selEnd}");
+
+                Assert.True(c.TopLine > 0, "expected TopLine to advance, still 0");
+            }
+        });
+
+    // ===== A-3: 絶対位置指定 setter の追従スクロール(2026-08-22 設計書 §2)=====
+    //
+    // 契約: キャレット/選択の「絶対位置を外から指定する」API はキャレットを可視域に入れる。
+    //       アンカー相対で動かす API は呼び出し側がスクロールを判断する。
+    // 検索ジャンプ / Ctrl+G / grep ジャンプ / UIA Select() はすべてこの 2 メソッドを通る。
+
+    /// <summary>30 行の文書と 3 行程度の可視域を作る(末尾行が必ず初期ビューポート外になる)。</summary>
+    private static (Form f, EditorControl c, string text) MakeTallDocument()
+    {
+        var text = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line{i}"));
+        var (f, c) = MakeControl(text, width: 400, height: 60);
+        return (f, c, text);
+    }
+
+    [Fact]
+    public void SetCaretCharOffset_ScrollsCaretIntoView() =>
+        Sta.Run(() =>
+        {
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                int visibleRows = Math.Max(1, c.ClientSize.Height / c.LineHeightPx);
+                // fixture 前提: 末尾行(index 29)が初期ビューポートの外にあること。
+                // これが崩れると以降の assertion が空振りする。
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                int lineStart = text.LastIndexOf('\n') + 1; // 論理行 29 の先頭
+                c.SetCaretCharOffset(lineStart); // ★ BringCaretIntoView は呼ばない
+
+                Assert.True(
+                    c.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {c.TopLine}"
+                );
+            }
+        });
+
+    [Fact]
+    public void SetSelectionCharRange_ScrollsRangeEndIntoView() =>
+        Sta.Run(() =>
+        {
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                int visibleRows = Math.Max(1, c.ClientSize.Height / c.LineHeightPx);
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                int lineStart = text.LastIndexOf('\n') + 1;
+                c.SetSelectionCharRange(lineStart, lineStart + 4); // ★ 検索ヒット選択と同じ経路
+
+                Assert.True(
+                    c.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {c.TopLine}"
+                );
+            }
+        });
+
+    // ----- 非対象 API が「スクロールしない」ことの固定 -----
+    // no-change テストは非既定位置から始める(CLAUDE.md §4)= TopLine を 0 以外に置く。
+
+    [Fact]
+    public void SetSelectionAnchored_DoesNotScroll() =>
+        Sta.Run(() =>
+        {
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                // 非既定位置から開始: caret を先頭に置いた後、可視域を 3 行目へずらす。
+                c.SetCaretCharOffset(0);
+                c.TopLine = 3;
+
+                // Ctrl+A 相当。キャレットは末尾(可視域外)へ動くが画面は動かない契約。
+                c.SetSelectionAnchored(0, text.Length);
+
+                Assert.Equal(3, c.TopLine);
+            }
+        });
+
+    [Fact]
+    public void SelectAll_DoesNotScroll() =>
+        Sta.Run(() =>
+        {
+            // Ctrl+A のユーザー可視契約(Task 6 レビュー I-1 の判断)を直接固定する。
+            var (f, c, _) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                c.TopLine = 3;
+
+                c.SelectAll();
+
+                Assert.Equal(3, c.TopLine);
+            }
+        });
+
+    [Fact]
+    public void MoveCaretWithSelection_DoesNotScroll() =>
+        Sta.Run(() =>
+        {
+            // shift+移動の共通経路。追従は呼び出し側(InputRouter)の責務=setter は動かさない。
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                c.TopLine = 3;
+
+                c.MoveCaretWithSelection(text.Length);
+
+                Assert.Equal(3, c.TopLine);
+            }
+        });
 }

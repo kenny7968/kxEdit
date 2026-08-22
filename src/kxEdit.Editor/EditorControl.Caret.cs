@@ -102,7 +102,25 @@ public sealed partial class EditorControl
     /// キャレット位置を UTF-16 文字オフセットで設定する(選択はクリアされる=Anchor=Caret=snapped)。
     /// サロゲートペア中間位置(low)は前方(high)にスナップ。範囲外は [0, CharLength] にクランプ。
     /// SetSource 前の呼び出しは no-op(_buffer が null のため)。
+    /// 位置が実際に変わったときは <see cref="BringCaretIntoView"/> で可視域へ追従する。
     /// </summary>
+    /// <remarks>
+    /// A-3 修正(2026-08-22): 「キャレット/選択の絶対位置を外から指定する API は可視域に入れる」
+    /// という規約でこの追従を持たせている。<see cref="SetSelectionAnchored"/> /
+    /// <see cref="MoveCaretWithSelection"/>(アンカー相対で動かす API)には<b>足さない</b>
+    /// = Ctrl+A(<see cref="SelectAll"/>)が文書末尾まで画面を飛ばさないための意図的な非対称
+    /// (Task 6 レビュー I-1 の判断を維持する)。shift+移動系は呼び出し側の
+    /// <c>InputRouter</c> が直後に <see cref="BringCaretIntoView"/> を呼ぶ。
+    ///
+    /// 呼び出しは早期 return(位置無変化)の<b>後</b>に置く。UIA クライアントは無変化の
+    /// <c>Select()</c> を高頻度で投げてくるため、前に置くと水平分岐の
+    /// <c>ComputeCaretPoint</c> が毎回走る(<see cref="ScrollCharRangeIntoView"/> が
+    /// 無変化呼び出しの早期 return を設けたのと同じ理由)。代償として「キャレットは既にその位置
+    /// にあるが画面だけスクロールで離れている」ケースでは追従しない=受容する。
+    ///
+    /// 順序は <c>PositionCaret</c> → <c>BringCaretIntoView</c> → <c>Invalidate</c> で
+    /// <c>AfterEdit</c> と揃える(先出しの PositionCaret が要る理由も同メソッドの remarks 参照)。
+    /// </remarks>
     public void SetCaretCharOffset(int offset)
     {
         if (IsComposing)
@@ -114,6 +132,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.SetTo(snapped, _buffer.Current); // 単純キャレット移動は選択解除
         PositionCaret();
+        BringCaretIntoView();
         Invalidate();
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
@@ -139,6 +158,11 @@ public sealed partial class EditorControl
     /// <remarks>
     /// 非対称版(キャレット位置を明示指定=shift+左方向の選択)は <see cref="SetSelectionAnchored(int, int)"/>
     /// を使う。既存呼び出し側の挙動を変えないためこの API はキャレット末尾固定のまま維持する。
+    ///
+    /// A-3 修正(2026-08-22): 位置が実際に変わったときは <see cref="BringCaretIntoView"/> で
+    /// 可視域へ追従する。<c>Caret = Max(start, end)</c> にマップするため<b>範囲末尾</b>が
+    /// 可視化される(<see cref="EnsureVisibleCharRange"/> の仕様と一致)。規約の詳細は
+    /// <see cref="SetCaretCharOffset"/> の remarks を参照。
     /// </remarks>
     public void SetSelectionCharRange(int start, int end)
     {
@@ -152,6 +176,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.SetSelection(s, e, _buffer.Current);
         PositionCaret();
+        BringCaretIntoView();
         Invalidate();
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
