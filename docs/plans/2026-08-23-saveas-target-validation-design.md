@@ -386,6 +386,18 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   `exists` だけ採る」がある(制御フローも文言も不変のまま 5 秒上限になる)が、採ると Task 7 の
   上書き確認テストが「実ファイルがディスクに在る → 確認が出る」から「Fake が在ると言った →
   確認が出る」に変わり、**本ブランチで最も重要な網が弱まる**。このトレードオフを Task 7 で判断する。
+- **S-6**(Task 5 の脆弱性レビューで追加・2026-08-23): `SanitizeForDisplay` の適用漏れが 3 箇所ある。
+  `FileController.ConfirmDiscardIfDirty` の「{DisplayName} の変更を保存しますか?」・
+  `DocumentState.DisplayName`(タブラベル)・`MainForm.RebuildRecentMenu`(`&` のエスケープのみ)。
+  **Task 5 が開けた穴ではない**(本タスクが足した文言は `SanitizeForDisplay.OneLine` を通っている)。
+  RLO 入りの名前が実測でタブラベルと最近のファイルにそのまま載ることを確認済み。
+  自分で打った名前が自分に見えるだけなのでスプーフィング価値は低いが、**`RestoreFromBackup` 経由
+  (攻撃者 JSON)の `State.Path` も同じ面に載る**ので、そちらは実入力起源。CSV-L-5 の
+  「新規 File I/O / 表示面を足すときの定番チェック」の棚卸し対象。
+- **S-7**(同上): `IsNullOrWhiteSpace` は `​`(ZWSP)/ `﻿` / `⠀`(点字空白)/ `᠎` を
+  空白と見なさないので、これらだけのファイル名が保存できてしまう。実ファイルは作られるので
+  喪失は無いが、**タブ名が空に見えてファイルを見つけられない**(SR では特に厄介)。
+  空白判定の意味論を広げると全角空白等で別の議論を呼ぶため A-19 の範囲外とした。
 
 ## 10. 実施記録
 

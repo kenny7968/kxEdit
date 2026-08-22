@@ -834,6 +834,19 @@ git commit -m "fix(app): 名前を付けて保存の相対パスを絶対パス�
 
 ## Task 6: A-7 (b) — 他タブで開いているファイルへの保存を止める
 
+> **本タスクで `#pragma warning disable S1854` の 2 行を必ず削除すること(Task 5 の脆弱性レビュー V-4)。**
+> Task 5 は `seed = seed with { Path = full };` を将来のために残したが、その時点では全経路が
+> `return` するため**証明可能な dead store** で、`-warnaserror` を通すために局所抑止を置いた。
+> 本タスクが重複タブ分岐の `continue` を**その直後に**入れると assignment は live になり、
+> 抑止は不要になる。**忘れても警告は出ない**(抑止は無害な no-op に見える)ので、
+> 以後その行に本物の dead store が生じても永久に隠れる。**これが唯一の検出手段。**
+> 削除後に `dotnet build kxEdit.sln -c Release -warnaserror` が 0 warning であることを確認すること。
+>
+> **重複タブの照合は `PathKey.For` で行う(Task 5 の申し送り)。** `TryOpenOrActivate` / `LoadInto` は
+> 今も生パスを `State.Path` に入れるので、別経路で開いたタブと SaveAs したタブが同じファイルの
+> **違う綴り**を持ちうる。`State.Path` の文字列等値で照合してはいけない。
+> (`DocumentManager.FindByPath` は既に `PathKey.For` を使っているので、それを呼ぶ限り問題ない)
+
 **Files:**
 - Modify: `src/kxEdit.App/FileController.cs`
 - Modify: `tests/kxEdit.App.Tests/FileControllerTests.cs`
