@@ -388,4 +388,44 @@ public class EditorControlCompatApiTests
             }
         });
     }
+
+    // A-3(2026-08-22)最終ブランチレビュー Minor 6: キャレットが既にその行にある状態で
+    // もう一度「行へ移動」しても可視化されること。
+    // 導線: Ctrl+G で行 29 へ → ホイール等で先頭までスクロール → もう一度 Ctrl+G で行 29。
+    // SetCaretCharOffset の追従は無変化の早期 return に当たって効かないので、GoToLine 側が
+    // 明示的に BringCaretIntoView を呼んで補う。ユーザーから見れば A-3 の再発に等しい導線。
+    [Fact]
+    public void GoToLine_SameLineAfterScrollAway_StillScrollsIntoView()
+    {
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line{i}"));
+            using var form = new Form { Size = new System.Drawing.Size(400, 60) };
+            var ctrl = new EditorControl { Dock = DockStyle.Fill };
+            form.Controls.Add(ctrl);
+            _ = form.Handle;
+            ctrl.SetSource(TextBuffer.FromString(text));
+            try
+            {
+                int visibleRows = Math.Max(1, ctrl.ClientSize.Height / ctrl.LineHeightPx);
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                ctrl.GoToLine(29); // 1 回目=キャレットが行 29 へ動く
+                ctrl.TopLine = 0; // ユーザーがホイールで先頭まで戻した状態を再現
+                Assert.Equal(29, ctrl.CurrentLine); // 前提: キャレットは行 29 のまま
+
+                ctrl.GoToLine(29); // 2 回目=キャレット位置は無変化
+
+                Assert.True(
+                    ctrl.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {ctrl.TopLine}"
+                );
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
 }

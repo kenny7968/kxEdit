@@ -1034,6 +1034,11 @@ fixture: 200 行 / `CaretLine = 190` / タブ 2 枚(#0 = disk 再オープン・
 | Task 2 レビュー | fixture の可視行数は実測 **1**(`MakeControl` の height は `Form.Size` なので `ClientSize.Height` は約 21 px)。計画の「3 行程度」は誤り | fixup `b2cd9c1`(実測値を remarks に記録) |
 | Task 4 レビュー | 復元テストのコメントが「非アクティブページのハンドル遅延生成」を前提に書かれていたが、その性質はこの網では原理的に検証できない | fixup(機序を上記のとおり訂正) |
 | Task 4 レビュー | grep テストの `Assert.Equal(199, hitLine)` だけでは `+2` 忘れ(`offset = 1679`)を捕まえられない | fixup(選択開始が桁 0 であることを追加。`+2` を外すと実際に赤化することを確認) |
+| 最終・脆弱性パス L-2 | `SelectCharRange(start, length)` の `start + length` が素の int 加算でオーバーフローし、溢れた端が Min/Max 正規化で 0 側へ落ちて**全文選択**になる(姉妹 API の `EnsureVisibleCharRange` は long 経由で守っていた) | fixup `9b4e8ac`(long 経由へ揃え、回帰テストを追加) |
+| 最終・品質パス Minor 4 | A-12 の網が X と幅しか見ておらず、**軸取り違え**変異 `rects.Add(csy + y1 - sx)` が全 2080 テストを素通りした | fixup(Y と高さの assert を追加。同変異が kill されることを確認) |
+| 最終・品質パス Minor 5 | Ctrl+A の非スクロール契約が API 層でしか固定されておらず、`InputRouter.HandleA` に `BringCaretIntoView()` を足す変異が生存した | fixup(`KeyDown_CtrlA_DoesNotScroll` を追加。shift+移動の網と対称にキー経路まで張った) |
+| 最終・品質パス Minor 6 | 早期 return の受容した副作用のうち **Ctrl+G の導線**(行 250 へ移動 → ホイールで先頭へ → もう一度 Ctrl+G)はユーザーに A-3 の再発として見える | fixup(`GoToLine` が明示的に `BringCaretIntoView()` を呼ぶ形にし、回帰テストを追加) |
+| 最終・品質パス Minor 1〜3 | 設計書 §3 の波及表で `InputRouter.cs:489`(実際は `HandleMouseDown`)と `:531`(実際は `HandleMouseDoubleClick`)のラベルが誤り・実際のドラッグ `:507` が表に無い。doc comment の規約が `SetSelectionAnchored` を「アンカー相対」と誤説明(両端とも絶対位置)。非対象 API 側に逆参照が無い | fixup(設計書 §2/§3 を精密化・規約の弁別軸を「ジャンプか対話操作か」へ言い換え・非対象 2 API に逆参照 remarks を追加) |
 
 ### 受容した指摘
 
@@ -1053,3 +1058,20 @@ fixture: 200 行 / `CaretLine = 190` / タブ 2 枚(#0 = disk 再オープン・
 - `InputRouter` のマウス経路(`HandleMouseDown` / `HandleMouseMove` / `HandleMouseDoubleClick`)の
   `BringCaretIntoView()` は本ブランチ後も load-bearing だが、テスト未被覆のまま
   (本変更による退行ではなく既存の空白)。
+- 設計書 §3 が ★(A-3 が直る)を付けた経路のうち、`SearchController.cs:308`(置換して次を検索)と
+  `KinsokuFormatController.cs:74 / 76`(整形後のキャレット再配置)はテスト未被覆。
+  同じ setter を通るので YAGNI と判断した(最終ブランチレビュー品質パス Info 2)。
+- 折り返し OFF × 長大行 × hscroll 表示のとき、UIA `Select()` 1 件あたりのコストが
+  **11.7 ms → 32.0 ms**(20K 文字 CJK 単一論理行で実測)。Adapter は fire-and-forget なので
+  invoke キューが単調増加する閾値が約 85 件/秒 → 約 31 件/秒 に下がる。NVDA のレビューカーソル
+  走査速度なら実用上は下回るが余裕が 1/3 になる(最終ブランチレビュー脆弱性パス M-1)。
+  根治は「水平分岐で `PositionCaret` が直前に計算した `ComputeCaretPoint` を使い回す」だが、
+  A-3 の範囲を超えた最適化なので受容した。折り返し ON では悪化していない(実測 155.9 ms → 158.2 ms)。
+- A-12 の修正で、水平方向に画面外の範囲の矩形 X が大きく負になる(実測 `ScrollX=259999` で
+  -291,991)。設計書 §2.2 の「クリップはクライアント側の責務」に沿った正しい算術で、修正前は
+  「間違った座標だがもっともらしい位置」を返して弱視ユーザーを積極的に誤導していたので総体としては
+  改善。ただし画面拡大鏡が UIA 矩形を追う設定では大きく飛ぶ余地がある(脆弱性パス L-1)。
+- `UiaTextHostAdapter` の読み取り系 4 経路のうち `GetBoundingRectangles` と `OffsetFromScreenPoint`
+  は `Invoke` を `catch (ObjectDisposedException / InvalidOperationException)` で包んでいない
+  (`GetVisibleRange` / `TryFindVisualSegment` は包んでいる)。既存の不揃いで本変更による悪化はない
+  (脆弱性パス I-2)。

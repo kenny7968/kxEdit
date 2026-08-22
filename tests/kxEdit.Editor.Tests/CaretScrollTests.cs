@@ -315,6 +315,39 @@ public class CaretScrollTests
         });
 
     [Fact]
+    public void KeyDown_CtrlA_DoesNotScroll() =>
+        Sta.Run(() =>
+        {
+            // Ctrl+A の非スクロール契約(Task 6 レビュー I-1)を**キーボード経路で**固定する。
+            // API 層(SelectAll_DoesNotScroll / SetSelectionAnchored_DoesNotScroll)だけでは
+            // InputRouter.HandleA に BringCaretIntoView() を足す変異を kill できない
+            // (最終ブランチレビュー品質パス Minor 5 で実際に生存した)。
+            // 設計書 §2 が非対称の唯一の根拠に挙げているのがこの契約なので、
+            // shift+移動(KeyDown_ShiftDown_ScrollsWhenReachingBottom)と対称にキー経路まで張る。
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                // 非既定位置から開始: caret を先頭に置いた後、可視域を 3 行目へずらす。
+                c.SetCaretCharOffset(0);
+                c.TopLine = 3;
+
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.A | Keys.Control) });
+
+                // 全選択されたこと(=Ctrl+A の経路を実際に通ったこと)を確定させる。
+                // これが無いと、キーが握られず何も起きなくても TopLine の assert は通る。
+                Assert.Equal((0, text.Length), c.GetSelectionCharRange());
+                // キャレットは末尾(可視域外)へ動くが画面は動かない契約。
+                Assert.Equal(3, c.TopLine);
+            }
+        });
+
+    [Fact]
     public void KeyDown_ShiftDown_ScrollsWhenReachingBottom() =>
         Sta.Run(() =>
         {

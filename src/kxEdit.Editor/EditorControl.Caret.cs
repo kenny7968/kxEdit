@@ -36,6 +36,15 @@ public sealed partial class EditorControl
     public void MoveCaretCharOffset(int offset) => SetCaretCharOffset(offset);
 
     /// <summary>P6 Task 3: 指定 0-based 行の先頭にキャレット移動(App 層互換=`Lines[i].Goto()` 相当)。</summary>
+    /// <remarks>
+    /// A-3 修正(2026-08-22): 「行へ移動」は<b>移動先を必ず見せる</b>操作なので、
+    /// <see cref="SetCaretCharOffset"/> の追従に加えて明示的に <see cref="BringCaretIntoView"/> を呼ぶ。
+    /// setter 側の追従だけだと、キャレットが既にその行にあるケース
+    /// (Ctrl+G で行 250 へ移動 → ホイールで先頭までスクロール → もう一度 Ctrl+G で行 250)で
+    /// 無変化の早期 return に当たり、ユーザーには A-3 が再発したように見える。
+    /// setter 側の早期 return 自体は UIA の高頻度な無変化 <c>Select()</c> を守るために必要なので
+    /// (<see cref="SetCaretCharOffset"/> の remarks 参照)、ジャンプ操作の側で補う。
+    /// </remarks>
     public void GoToLine(int line)
     {
         if (_buffer is null)
@@ -43,6 +52,7 @@ public sealed partial class EditorControl
         var snap = _buffer.Current;
         int clamped = Math.Clamp(line, 0, snap.LineCount - 1);
         SetCaretCharOffset(snap.GetLineStart(clamped));
+        BringCaretIntoView();
     }
 
     /// <summary>
@@ -116,12 +126,18 @@ public sealed partial class EditorControl
     /// 位置が実際に変わったときは <see cref="BringCaretIntoView"/> で可視域へ追従する。
     /// </summary>
     /// <remarks>
-    /// A-3 修正(2026-08-22): 「キャレット/選択の絶対位置を外から指定する API は可視域に入れる」
-    /// という規約でこの追従を持たせている。<see cref="SetSelectionAnchored"/> /
-    /// <see cref="MoveCaretWithSelection"/>(アンカー相対で動かす API)には<b>足さない</b>
-    /// = Ctrl+A(<see cref="SelectAll"/>)が文書末尾まで画面を飛ばさないための意図的な非対称
-    /// (Task 6 レビュー I-1 の判断を維持する)。shift+移動系は呼び出し側の
-    /// <c>InputRouter</c> が直後に <see cref="BringCaretIntoView"/> を呼ぶ。
+    /// A-3 修正(2026-08-22): <b>移動先の提示</b>を目的に外から呼ばれる「ジャンプ系」の API は
+    /// 自分で可視域に入れる、という規約でこの追従を持たせている(検索 / Ctrl+G / grep /
+    /// セッション復元 / UIA <c>Select()</c> がここを通る)。
+    ///
+    /// 逆に <b>対話的な選択操作の構成要素</b>として呼ばれる <see cref="SetSelectionAnchored"/> /
+    /// <see cref="MoveCaretWithSelection"/> には<b>足さない</b>。追従の要否は操作ごとに違い、
+    /// 呼び出し側の <c>InputRouter</c> が既に判断しているため
+    /// (shift+移動・shift+クリック・ドラッグ・ダブルクリックは直後に
+    /// <see cref="BringCaretIntoView"/> を呼び、Ctrl+A(<see cref="SelectAll"/>)は
+    /// <b>意図的に呼ばない</b>=文書末尾まで画面を飛ばさない。Task 6 レビュー I-1 の判断)。
+    /// 弁別軸は引数が絶対位置かどうかではない点に注意
+    /// (<see cref="SetSelectionAnchored"/> も両端とも絶対位置を取る)。
     ///
     /// 呼び出しは早期 return(位置無変化)の<b>後</b>に置く。UIA クライアントは無変化の
     /// <c>Select()</c> を高頻度で投げてくるため、前に置くと水平分岐の
@@ -202,6 +218,13 @@ public sealed partial class EditorControl
     /// <c>newCaret == Anchor</c> のとき選択が消える(=アンカーと同位置)。
     /// SetSource 前の呼び出しは no-op。
     /// </summary>
+    /// <remarks>
+    /// <b>意図的に <see cref="BringCaretIntoView"/> を呼ばない。</b>追従は呼び出し側の
+    /// <c>InputRouter</c>(shift+移動・shift+クリック・ドラッグ)が直後に判断する。
+    /// 規約の全体は <see cref="SetCaretCharOffset"/> の remarks 参照(A-3 / 2026-08-22)。
+    /// ここに追従を足すと Ctrl+A の非スクロール契約と対称性が崩れるので、足す前に
+    /// <c>CaretScrollTests.MoveCaretWithSelection_DoesNotScroll</c> の意図を読むこと。
+    /// </remarks>
     public void MoveCaretWithSelection(int newCaret)
     {
         if (IsComposing)
@@ -227,6 +250,15 @@ public sealed partial class EditorControl
     /// (=shift+左方向の選択)。両端はサロゲートペア中間位置なら前方スナップ・範囲外はクランプ。
     /// SetSource 前の呼び出しは no-op。
     /// </summary>
+    /// <remarks>
+    /// <b>意図的に <see cref="BringCaretIntoView"/> を呼ばない。</b>両端とも絶対位置を取るが、
+    /// これは対話的な選択操作(Ctrl+A / ダブルクリック単語選択)の構成要素であり、追従の要否は
+    /// 呼び出し側が決める。特に <b>Ctrl+A(<see cref="SelectAll"/>)は追従させない</b>
+    /// =全選択で画面が文書末尾へ飛ばないための契約(Task 6 レビュー I-1)。
+    /// 規約の全体は <see cref="SetCaretCharOffset"/> の remarks 参照(A-3 / 2026-08-22)。
+    /// ここに追従を足すと <c>CaretScrollTests.SetSelectionAnchored_DoesNotScroll</c> /
+    /// <c>SelectAll_DoesNotScroll</c> / <c>KeyDown_CtrlA_DoesNotScroll</c> が赤化する。
+    /// </remarks>
     public void SetSelectionAnchored(int anchor, int caret)
     {
         if (IsComposing)

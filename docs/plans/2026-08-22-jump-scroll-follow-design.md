@@ -27,7 +27,8 @@ SetSelectionCharRange   → _caretCtrl.SetSelection → PositionCaret() → Inva
 
 一方で **キーボード経路と編集経路は明示的に追従している**。
 
-- `InputRouter.cs:149, 493, 508, 534` — 矢印/Home/End/マウスドラッグの直後に `BringCaretIntoView()`
+- `InputRouter.cs:149`(矢印/Home/End/PageUp/PageDown)/ `:493`(マウス左クリック)/
+  `:508`(ドラッグ)/ `:534`(ダブルクリック単語選択)— いずれも直後に `BringCaretIntoView()`
 - `EditorControl.AfterEdit()`(`EditorControl.cs:1162`)— 編集後に `BringCaretIntoView()`
 
 つまり **ジャンプ系だけが契約から漏れている**。旧 `ScintillaHost.SelectCharRange` は
@@ -72,18 +73,25 @@ SR が範囲を選択したのに画面が動かないと、晴眼者が SR の�
 
 ## 2. 方針 — 契約の言い直し
 
-Editor には絶対位置/相対位置の 4 つの setter があり、追従スクロールの責務が不揃いになっている。
+Editor には 4 つのキャレット/選択 setter があり、追従スクロールの責務が不揃いになっている。
 これを次の規約で揃える。
 
-> **キャレット/選択の絶対位置を外から指定する API は、キャレットを可視域に入れる。
-> アンカー相対で動かす API は、呼び出し側がスクロールを判断する。**
+> **移動先の提示を目的に外から呼ばれる「ジャンプ系」の API は、キャレットを可視域に入れる。
+> 対話的な選択操作の構成要素として呼ばれる API は、呼び出し側がスクロールを判断する。**
+
+**実装時追記(2026-08-22・最終ブランチレビュー品質パス Minor 2)**: 策定時はこの規約を
+「絶対位置を外から指定する API は可視域に入れる / アンカー相対で動かす API は呼び出し側が判断する」
+と書いていたが、これは弁別軸を誤っている。`SetSelectionAnchored(anchor, caret)` は
+**両端とも絶対位置**を取るので、この言い方では `SetSelectionCharRange` と区別できず、
+新しい API を足す人が規約を適用できない。実際の軸は上記のとおり「ジャンプか対話操作か」。
+下表の行そのものは策定時から変わっていない。
 
 | API | 追従を足すか | 根拠 |
 |---|---|---|
 | `SetCaretCharOffset` | **足す** | GoToLine・セッション復元・CSV モード復帰・矢印キーの無修飾分岐が通る |
 | `SetSelectionCharRange` | **足す** | 検索 / grep / 整形のジャンプ・UIA `Select()`(= M-32)が通る |
-| `SetSelectionAnchored` | 足さない | Ctrl+A(`SelectAll`)と マウスドラッグが通る。Ctrl+A の非スクロールは Task 6 レビュー I-1 で意図的に決定済み |
-| `MoveCaretWithSelection` | 足さない | shift+移動。呼び出し側の `InputRouter` が直後に明示的に呼んでいる |
+| `SetSelectionAnchored` | 足さない | Ctrl+A(`SelectAll`)とダブルクリック単語選択が通る。Ctrl+A の非スクロールは Task 6 レビュー I-1 で意図的に決定済み |
+| `MoveCaretWithSelection` | 足さない | shift+移動・shift+クリック・マウスドラッグ。呼び出し側の `InputRouter` が直後に明示的に呼んでいる |
 
 App 側の各ジャンプ地点に `EnsureVisibleCharRange` を足す案(案 B)と、App 互換エイリアス
 (`SelectCharRange` / `GoToLine`)だけに足す案(案 C)も検討したが、次の理由で採らない。
@@ -125,6 +133,14 @@ public void SetCaretCharOffset(int offset)
 スクロールで離れている」ケース(現在行を Ctrl+G で指定・同じヒットを再検索)ではスクロールしない。
 実害は小さいと判断して受容する。
 
+**実装時追記(2026-08-22・最終ブランチレビュー品質パス Minor 6)**: このうち **Ctrl+G の導線だけは
+塞いだ**。「Ctrl+G で行 250 へ → ホイールで先頭までスクロール → もう一度 Ctrl+G で行 250」で
+何も起きないのは、監査書 A-3 の見出し再現手順そのものなのでユーザーには再発に見える。
+`EditorControl.GoToLine` が `SetCaretCharOffset` の後に `BringCaretIntoView()` を明示的に呼ぶ形にした
+(ダイアログ駆動の 1 回きりの操作なので、setter 側の早期 return が守っている高頻度経路とは無関係)。
+検索側は `TextSearcher.FindNext` が折り返さないため「同じヒットを再検索」は発生せず、この導線は
+Ctrl+G 固有だった。
+
 `SetSelectionCharRange` も同じ形で追加する(`BringCaretIntoView` は `_caretCtrl.Caret` を見るが、
 このメソッドは `Caret = Max(start, end)` にマップするので**範囲末尾**が可視化される
 = `EnsureVisibleCharRange` の仕様と一致する)。
@@ -162,16 +178,25 @@ if (visible)
 
 | 呼び出し経路 | 変化 |
 |---|---|
-| `InputRouter.cs:147, 489`(矢印/Home/End の無修飾分岐)| 直後の `BringCaretIntoView()` と二重呼び。2 回目は可視のため no-op。`InputRouter` 側は**残す**(同じ if/else の shift 分岐は `MoveCaretWithSelection` を通り、setter 側の追従が無いため) |
-| `InputRouter.cs:288`(Ctrl+A)/ `:531`(マウスドラッグ)| **不変**(`SetSelectionAnchored` 経路) |
+| `InputRouter.cs:147`(`ApplyNavMove` = 矢印/Home/End/PageUp/PageDown の無修飾分岐)/ `:489`(`HandleMouseDown` = マウス左クリックの無修飾分岐)| 直後の `BringCaretIntoView()` と二重呼び。2 回目は観測可能な挙動としては no-op(ただしコストはゼロではない=下の注記)。`InputRouter` 側は**残す**(同じ if/else の shift 分岐は `MoveCaretWithSelection` を通り、setter 側の追従が無いため) |
+| `InputRouter.cs:288`(Ctrl+A)/ `:531`(`HandleMouseDoubleClick` = 単語選択)| **不変**(`SetSelectionAnchored` 経路) |
+| `InputRouter.cs:507`(`HandleMouseMove` = ドラッグ選択)| **不変**(`MoveCaretWithSelection` 経路。`InputRouter` が直後に追従を呼ぶ) |
 | `EditorControl.SelectAll()` | **不変**(同上) |
 | `MainForm.GoToLine`(`:958`)| ★ A-3 が直る |
 | `MainForm.OpenAndSelect`(`:919`・grep ジャンプ)| ★ A-3 が直る |
 | `SearchController.cs:232`(検索)/ `:308`(置換して次へ)| ★ A-3 が直る |
 | `KinsokuFormatController.cs:74`(全文整形→先頭)/ `:76`(部分整形→変化箇所)| ★ A-3 が直る。整形直後は `ReplaceCharRange` → `AfterEdit` で既に追従済みだが、その後のキャレット再配置にも追従が付く=意図どおり |
 | `CsvController.ExitMode`(`:113`・`MoveCaretCharOffset`)| CSV モードを抜けたとき最終セル位置へ追従(改善) |
-| `FileController` セッション復元(`:760` / `:824` / `:849`・`SetCaretByLineColumn`)| 復元キャレットが可視域に入る(改善)。**要確認**: 非アクティブタブは TabControl がページを表示するまでハンドル未生成で `ClientSize` が暫定値のため、`TopLine` が最適値にならない可能性がある。現状は常に `TopLine=0`(キャレットが下方にあれば必ず不可視)なので**悪化はしない**が、実装時に App.Tests で確認する |
+| `FileController` セッション復元(`:760` / `:824` / `:849`・`SetCaretByLineColumn`)| 復元キャレットが可視域に入る(改善)。~~**要確認**~~ → **実装時に解決(2026-08-22)**: 懸念は到達しない。`DocumentManager.CreateNew()` が生成直後に `_tabs.SelectedTab = page` を行うため、どのタブも「作られた瞬間は選択中=`ClientSize` が実値」の状態で `SetCaretByLineColumn` を受ける。実測は実装計画の実施記録を参照(両タブとも `TopLine` が理論値ぴったり)。将来 `CreateNew()` から作成時選択を外すとこの前提は崩れる |
 | UIA `Select()` → `UiaTextHostAdapter.SetSelection` → `SetSelectionCharRange` | ★ M-32 が直る |
+
+**実装時追記(2026-08-22・最終ブランチレビュー品質パス Info 1)** — 「2 回目は no-op」の但し書き:
+`BringCaretIntoView` の水平分岐は `_wrapColumns == 0 && _hscroll.Visible` なら**可視かどうかに
+関係なく** `ComputeCaretPoint` を走らせる。したがって二重呼びは観測可能な挙動としては no-op でも
+コストはゼロではない。折り返し OFF・hscroll 表示での実測は
+`BringCaretIntoView()` 1 回あたり **通常の行 0.02 ms / 20 万文字の単一行 0.50 ms**
+(キー 1 打あたり呼び出しが 2 回 → 3 回に増える)。実害なしと判断して `InputRouter` 側の
+呼び出しは残す(§7)。
 
 ## 4. 折り返し ON の制約(本ブランチでは直さない)
 

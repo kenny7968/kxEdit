@@ -126,6 +126,11 @@ public class EditorControlBoundingRectsTests
                 // X は ScrollX 分だけ左へ寄る。幅は差分なので不変。
                 Assert.Equal(before[0] - ctrl.ScrollX, after[0]);
                 Assert.Equal(before[2], after[2]);
+                // Y と高さは水平スクロールと無関係=不変。X だけ見ていると
+                // 「軸を取り違えて Y から引く」変異(rects.Add(csy + y1 - sx))が素通りする
+                // (最終ブランチレビュー品質パス Minor 4 で実際に生存した)。
+                Assert.Equal(before[1], after[1]);
+                Assert.Equal(before[3], after[3]);
             }
             finally
             {
