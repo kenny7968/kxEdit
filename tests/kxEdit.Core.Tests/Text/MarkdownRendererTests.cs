@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using kxEdit.Core.Text;
 
 namespace kxEdit.Core.Tests.Text;
@@ -33,12 +34,16 @@ public class MarkdownRendererTests
     public void Text_special_chars_are_escaped() =>
         Assert.Contains("1 &lt; 2 &amp; 3", MarkdownRenderer.Render("1 < 2 & 3", Base));
 
-    [Fact]
-    public void Base_href_is_injected() =>
-        Assert.Contains(
-            "<base href=\"https://kxedit.preview/\">",
-            MarkdownRenderer.Render("x", Base)
-        );
+    // A-2 (2026-08-22・案 B): <base> は経路を問わず一切出力しない。<base> があると裸の
+    // フラグメント URL (#section) まで base 基準で解決され、目次リンクと脚注の戻りリンクが
+    // MD-H-1 の Block に巻き込まれて全滅する (設計書 §7.1)。相対 URL は描画前に絶対化する。
+    // 「空文字なら省く / 非空なら出す」という案 A 時代の対比はもう存在しないので、
+    // 両経路を 1 本の Theory で固定する。
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EmitsNoBaseTag(string baseHref) =>
+        Assert.DoesNotContain("<base", MarkdownRenderer.Render("x", baseHref));
 
     [Fact]
     public void Document_declares_utf8_charset() =>
@@ -47,10 +52,6 @@ public class MarkdownRendererTests
     [Fact]
     public void Null_markdown_does_not_throw() =>
         Assert.Contains("<html", MarkdownRenderer.Render(null, Base));
-
-    [Fact]
-    public void Empty_base_href_omits_base_tag() =>
-        Assert.DoesNotContain("<base", MarkdownRenderer.Render("x", ""));
 
     // MD-L-4: baseHref は空文字か PreviewBaseHref 定数以外を受け付けない (単一 caller の防御ガード)。
     [Fact]
@@ -73,17 +74,20 @@ public class MarkdownRendererTests
     [Fact]
     public void Render_Accepts_PreviewBaseHref()
     {
+        // MD-L-4 の allow-list が PreviewBaseHref を通すこと (例外を投げず文書を返す)。
+        // <base> の有無は Render_EmitsNoBaseTag が受け持つ。
         var html = MarkdownRenderer.Render("x", MarkdownRenderer.PreviewBaseHref);
         Assert.Contains("<html", html);
-        Assert.Contains("<base href=\"https://kxedit.preview/\">", html);
     }
 
     [Fact]
     public void PreviewBaseHref_ContainsOnly_HtmlAttrSafeChars()
     {
-        // MD-L-4 の allow-list は "baseHref は PreviewBaseHref か空文字のみ" を保証するので
-        // 直接 interpolate しても安全。ただし PreviewBaseHref 自体が将来 URL-safe 外の
-        // 文字を持つとその前提が崩れる。ここで機械固定して回帰を防ぐ。
+        // A-2 (案 B) で <base> の出力を廃止したので、baseHref が HTML へ interpolate される
+        // 経路はもう無い。それでも PreviewBaseHref は PreviewUrlResolver が
+        // new Uri(PreviewBase, url) の解決基準として使う URI であり、URL-safe 外の文字が
+        // 混ざると解決結果が壊れる (絶対化された URL は最終的に href/src 属性へ載る)。
+        // ここで機械固定して回帰を防ぐ。
         Assert.DoesNotContain('"', MarkdownRenderer.PreviewBaseHref);
         Assert.DoesNotContain('<', MarkdownRenderer.PreviewBaseHref);
         Assert.DoesNotContain('>', MarkdownRenderer.PreviewBaseHref);
@@ -98,25 +102,34 @@ public class MarkdownRendererTests
         Assert.Contains("default-src 'none'", html);
     }
 
-    [Fact]
-    public void Render_EscapesRawScriptTag()
+    // DisableHtml() の網。A-2 (案 B) でパイプラインが preview 用 / 素の用の 2 本に分かれたため、
+    // 空 baseHref だけを回すと本番で実際に使われる側 (MainForm は常に PreviewBaseHref を渡す)
+    // を検証しないことになる。両経路を回して構成差で穴が開かないことを固定する。
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesRawScriptTag(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<script>alert(1)</script>", "");
+        var html = MarkdownRenderer.Render("<script>alert(1)</script>", baseHref);
         Assert.DoesNotContain("<script>alert(1)</script>", html);
         Assert.Contains("&lt;script&gt;", html);
     }
 
-    [Fact]
-    public void Render_EscapesRawIframeTag()
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesRawIframeTag(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<iframe src=\"evil\"></iframe>", "");
+        var html = MarkdownRenderer.Render("<iframe src=\"evil\"></iframe>", baseHref);
         Assert.DoesNotContain("<iframe", html);
     }
 
-    [Fact]
-    public void Render_EscapesInlineEventHandler()
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesInlineEventHandler(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<a href=\"x\" onclick=\"evil()\">y</a>", "");
+        var html = MarkdownRenderer.Render("<a href=\"x\" onclick=\"evil()\">y</a>", baseHref);
         // <a> tag itself is escaped, so onclick can never reach the DOM as an attribute
         Assert.Contains("&lt;a href=", html);
         Assert.DoesNotContain("<a href=\"x\"", html);
@@ -208,17 +221,20 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Render_RelativeLink_KeepsHref()
+    public void Render_RelativeLink_IsResolvedButNotDropped()
     {
+        // whitelist は相対 URL を drop しない。ただし preview 経路では A-2 (案 B) の絶対化が
+        // 先に効くため href は preview 仮想ホスト基準になる。よって「相対のまま保つ」ことは
+        // もう検証していない (その網は Render_EmptyBaseHref_DoesNotRewriteRelativeUrls)。
         var html = MarkdownRenderer.Render("[x](path/to.md)", Base);
-        Assert.Contains("href=\"path/to.md\"", html);
+        Assert.Contains("href=\"https://kxedit.preview/path/to.md\"", html);
     }
 
     [Fact]
-    public void Render_RootRelativeLink_KeepsHref()
+    public void Render_RootRelativeLink_IsResolvedButNotDropped()
     {
         var html = MarkdownRenderer.Render("[x](/root/path)", Base);
-        Assert.Contains("href=\"/root/path\"", html);
+        Assert.Contains("href=\"https://kxedit.preview/root/path\"", html);
     }
 
     [Fact]
@@ -311,9 +327,12 @@ public class MarkdownRendererTests
     //   - img-src から data: を削除 (MD-L-1)
     //   - base-uri/form-action/frame-ancestors/object-src/worker-src/manifest-src/connect-src
     //     を追加 (全て 'none')
+    //   - A-2 (2026-08-22・案 B): base-uri は 'none' のまま。文書に <base> を出力せず、
+    //     相対 URL は PreviewRelativeUrlExtension が描画前に絶対化する (設計書 §7)
     //   - style-src から 'unsafe-inline' を削除し 'self' https://kxedit.preview のみに
-    //   - <style>{Css}</style> を <link rel="stylesheet" href="/_kxedit/styles.css"> へ外部化
-    //     (実 file は PreviewCspHeaderInjector が virtual response で供給)
+    //   - <style>{Css}</style> を <link rel="stylesheet"> へ外部化 (href は A-2 案 B で
+    //     絶対 URL https://kxedit.preview/_kxedit/styles.css へ変更・<base> 非依存にするため。
+    //     実 file は PreviewCspHeaderInjector が virtual response で供給)
     // ---------------------------------------------------------------------
 
     [Fact]
@@ -331,8 +350,16 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Meta_Contains_BaseUri_None() =>
-        Assert.Contains("base-uri 'none'", MarkdownRenderer.Render("x", Base));
+    public void Meta_Contains_BaseUri_None()
+    {
+        // A-2 (2026-08-22・案 B): 文書に <base> を出力しないので base-uri は最も強い 'none' を
+        // 維持できる。directive 全体を切り出して 'none' ちょうどであることを機械固定する
+        // (Meta_ImgSrc_Excludes_Data_Scheme と同じ insertion mutation 耐性)。
+        string html = MarkdownRenderer.Render("x", Base);
+        var m = Regex.Match(html, @"base-uri\s+([^;]*);");
+        Assert.True(m.Success, "base-uri directive が見つからない");
+        Assert.Equal("'none'", m.Groups[1].Value.Trim());
+    }
 
     [Fact]
     public void Meta_Contains_FormAction_None() =>
@@ -367,13 +394,21 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Document_LinksToStylesheet_ViaAbsolutePath()
+    public void Document_StylesheetLink_IsAbsolutePreviewUrl()
     {
-        // MD-M-2: inline <style> を撤去し <link> へ外部化。href は
-        // /_kxedit/styles.css 固定 (先頭アンダースコアで .md フォルダ内のユーザ
-        // ファイル衝突をほぼゼロに)。
-        string html = MarkdownRenderer.Render("x", Base);
-        Assert.Contains("<link rel=\"stylesheet\" href=\"/_kxedit/styles.css\">", html);
+        // MD-M-2: inline <style> を撤去し <link> へ外部化。パスは /_kxedit/styles.css 固定
+        // (先頭アンダースコアで .md フォルダ内のユーザファイル衝突をほぼゼロに)。
+        // A-2 (案 B): href は絶対 URL。<base> を出力しなくなったので、相対のままでは
+        // data: origin (NavigateToString) から解決できず CSS が永久に効かない。
+        // 空 baseHref 経路でも同じ絶対 URL であること (Minor-4 の解消) まで固定する。
+        Assert.Equal(
+            "https://kxedit.preview/_kxedit/styles.css",
+            MarkdownRenderer.PreviewStylesheetUrl
+        );
+        string expected =
+            "<link rel=\"stylesheet\" href=\"https://kxedit.preview/_kxedit/styles.css\">";
+        Assert.Contains(expected, MarkdownRenderer.Render("x", Base));
+        Assert.Contains(expected, MarkdownRenderer.Render("x", ""));
     }
 
     [Fact]
@@ -432,5 +467,194 @@ public class MarkdownRendererTests
         // 同一定数を参照している契約を機械固定する。
         string html = MarkdownRenderer.Render("x", Base);
         Assert.Contains(MarkdownRenderer.PreviewCspHeader, html);
+    }
+
+    // ---------------------------------------------------------------------
+    // A-21 (v0.2 リリース前バグ監査): UseAdvancedExtensions 同梱の GenericAttributes を
+    // 除去し、`{...}` 属性記法が HTML 属性として出力されないことを機械固定する。
+    // 実行を止めていたのは CSP (script-src なし) だけで、SafeLinkExtension (二層目の
+    // scheme whitelist) に対して GenericAttributes は 2 つの別経路で作用していた:
+    //   追記 — 安全な href を持つリンクに 2 つ目の href を足す。
+    //          `[y](x){href="javascript:..."}` → <a href="x" href="javascript:...">
+    //          HTML の先勝ち規則で実挙動は守られていたが、属性が出ること自体が
+    //          パーサ差で容易に逆転しうる不安定な均衡。
+    //   復活 — SafeLink が drop した href を単一の href として蘇らせる。
+    //          `[y](javascript:...){href="javascript:..."}` → <a href="javascript:...">
+    //          先勝ち規則が効かない本物のバイパスで、CSP を弱めた瞬間に live XSS。
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Render_GenericAttributes_DoesNotEmit_OnClickOnLink()
+    {
+        string html = MarkdownRenderer.Render("[y](x){onclick=\"evil()\"}", Base);
+        Assert.DoesNotMatch(@"<a[^>]*onclick", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_DoesNotEmit_OnErrorOnImage()
+    {
+        string html = MarkdownRenderer.Render("![a](x){onerror=alert(1)}", Base);
+        Assert.DoesNotMatch(@"<img[^>]*onerror", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_CannotAppend_JavascriptHref()
+    {
+        // 安全な href を持つリンクに 2 つ目の href を追記できないこと。
+        // 変更前は <a href="x" href="javascript:alert(1)"> となっていた。HTML の先勝ち規則で
+        // 実挙動は守られていたが、属性が出力されること自体が不安定な均衡なので塞ぐ。
+        // (drop された href の復活は Render_GenericAttributes_CannotRestore_DroppedJavascriptHref。)
+        string html = MarkdownRenderer.Render("[y](x){href=\"javascript:alert(1)\"}", Base);
+        Assert.DoesNotMatch(@"<a[^>]*javascript:", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_CannotRestore_DroppedJavascriptHref()
+    {
+        // 本物のバイパス経路: SafeLinkExtension が javascript: scheme の href を drop した後、
+        // GenericAttributes が {href="javascript:..."} で単一の href として復活させていた。
+        // (`[y](x){href=...}` と違い href の重複にならないため、HTML の先勝ち規則では守られない。)
+        string html = MarkdownRenderer.Render(
+            "[y](javascript:alert(1)){href=\"javascript:alert(1)\"}",
+            Base
+        );
+        Assert.DoesNotMatch(@"<a[^>]*javascript:", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_Syntax_BecomesLiteralText()
+    {
+        // 拡張除去に伴う挙動変化を仕様として固定する ({#id} は本文にそのまま出る)。
+        // 見出しの id は UseAutoIdentifiers が引き続き生成するが、{#id} で指定していた
+        // カスタム id は自動生成値へ変わる (`# Title {#custom}` は id="custom" →
+        // id="title-custom")。よって既存 .md 内の [link](#custom) は切れる。
+        // この fixture が変更前後とも id="custom" で一致するのは、slug 生成が非 ASCII
+        // (見出し) と {#} を捨てた結果の偶然にすぎない。ASCII 見出しへ書き換えると id は
+        // 変わるので、本テストを「id が不変である」根拠には使わないこと。
+        string html = MarkdownRenderer.Render("# 見出し {#custom}", Base);
+        Assert.Contains("{#custom}", html);
+    }
+
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_RawHtml()
+    {
+        // FINDING 1: Markdig の HtmlAbbreviationRenderer はラベルを WriteEscape せず出力するため、
+        // DisableHtml() が全面バイパスされていた (title 側は正しくエスケープされる)。
+        string md = "*[<script>fetch(1)</script>]: x\n\n<script>fetch(1)</script>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<script", html);
+    }
+
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_MetaRefresh()
+    {
+        // 最も実害のある注入。CSP に該当 directive が無いため、プレビューを開くだけで
+        // MarkdownPreviewForm の LaunchExternal 経路が発火し既定ブラウザが開く。
+        string md =
+            "*[<meta http-equiv=refresh content=0;url=https://evil.example/pwn>]: x\n\n"
+            + "<meta http-equiv=refresh content=0;url=https://evil.example/pwn>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<meta http-equiv=refresh", html);
+    }
+
+    [Fact]
+    public void Render_AbbreviationDefinition_BecomesLiteralText()
+    {
+        // 拡張除去 (FINDING 1) に伴う挙動変化を仕様として固定する。
+        // Render_GenericAttributes_Syntax_BecomesLiteralText (A-21) と対称。
+        // 定義行はそのまま本文に出て、本文中の略語も <abbr> へ展開されない。
+        string md = "*[HTML]: HyperText Markup Language\n\nHTML は仕様である。\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.Contains("*[HTML]: HyperText Markup Language", html);
+        Assert.DoesNotContain("<abbr", html);
+    }
+
+    // ---------------------------------------------------------------------
+    // A-2 (2026-08-22・案 B): <base> を出力せず、相対 URL を描画前 (DocumentProcessed) に
+    // preview 仮想ホスト基準へ絶対化する。
+    //
+    // <base> を復活させる案 A は、裸のフラグメント URL (#section) まで base 基準で解決させて
+    // しまい、文書自身の URL が data:text/html;... のままなので同一文書内スクロールではなく
+    // クロス文書遷移になる。PreviewNavigationPolicy.Classify は https + preview ホストを
+    // MD-H-1 で Block するため、目次リンクと脚注の戻りリンクが全て無反応になる (FINDING 3)。
+    //
+    // FINDING 3 の回帰防止網は次の 2 本 (ミューテーションで kill 確認済み):
+    //   - Render_FragmentLink_IsNotRewritten ... resolver が # 始まりを書き換えないこと
+    //     (PreviewUrlResolver の # ガードを消すと赤)
+    //   - Render_EmitsNoBaseTag ... 文書に <base> を出力しないこと
+    //     (<base> を再注入すると赤)
+    // Render_FootnoteLinks_AreNotRewritten はこの網には入らない (同テストのコメント参照)。
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Render_RelativeImage_IsResolvedToPreviewHost()
+    {
+        string html = MarkdownRenderer.Render("![](pic.png)", Base);
+        Assert.Contains("src=\"https://kxedit.preview/pic.png\"", html);
+    }
+
+    [Fact]
+    public void Render_RelativeLink_IsResolvedToPreviewHost()
+    {
+        string html = MarkdownRenderer.Render("[y](other.md)", Base);
+        Assert.Contains("href=\"https://kxedit.preview/other.md\"", html);
+    }
+
+    [Fact]
+    public void Render_FragmentLink_IsNotRewritten()
+    {
+        // FINDING 3 の回帰防止 (最重要)。目次リンクは同一文書内スクロールのまま保つ。
+        string html = MarkdownRenderer.Render("# 見出し\n\n[目次](#midashi)\n", Base);
+        Assert.Contains("href=\"#midashi\"", html);
+        Assert.DoesNotContain("href=\"https://kxedit.preview/#", html);
+    }
+
+    [Fact]
+    public void Render_FootnoteLinks_AreNotRewritten()
+    {
+        // FINDING 3 の網ではない。脚注リンクは LinkInline ではなく FootnoteLink で、href は
+        // HtmlFootnoteLinkRenderer が直書きするため PreviewRelativeUrlExtension が届かない。
+        // よって resolver の # ガードを消しても <base> を再注入しても赤くならない (実測済み)。
+        // 本テストの位置づけは脚注リンクの出力形式 (#fn:1 / #fnref:1) の仕様固定で、
+        // RemoveAll の述語に FootnoteExtension を足す変異を唯一 kill する網でもある。
+        string html = MarkdownRenderer.Render("text[^1]\n\n[^1]: note\n", Base);
+        Assert.Contains("href=\"#fn:1\"", html);
+        Assert.Contains("href=\"#fnref:1\"", html);
+        Assert.DoesNotContain("href=\"https://kxedit.preview/#", html);
+    }
+
+    [Fact]
+    public void Render_AbsoluteLink_IsNotRewritten()
+    {
+        string html = MarkdownRenderer.Render("[y](https://example.com/)", Base);
+        Assert.Contains("href=\"https://example.com/\"", html);
+        Assert.DoesNotContain("kxedit.preview/https", html);
+    }
+
+    [Fact]
+    public void Render_JavascriptScheme_StillDropsHref_UnderPreviewPipeline()
+    {
+        // 相対 URL 書き換えが SafeLinkExtension の scheme whitelist を壊していないことの証拠。
+        // PreviewUrlResolver は scheme 付き URL を触らないので判定結果は不変。
+        string html = MarkdownRenderer.Render("[y](javascript:alert(1))", Base);
+        Assert.DoesNotContain("href=\"javascript:", html);
+        Assert.DoesNotContain("kxedit.preview/javascript:", html);
+        Assert.Contains("<a", html);
+        Assert.Contains(">y</a>", html);
+    }
+
+    [Fact]
+    public void Render_EmptyBaseHref_DoesNotRewriteRelativeUrls()
+    {
+        // 空 baseHref の経路は解決基準を持たないので書き換えない (パイプライン 2 本の境界)。
+        // 案 B 以降、SafeLinkExtension の whitelist が「scheme 無し相対 URL」を drop しない
+        // ことを固定する唯一の網でもある (preview 経路では絶対化が先に効いて href が https に
+        // なるため、Render_RelativeLink_IsResolvedButNotDropped 系は相対のケースを
+        // 検証できなくなった)。
+        string html = MarkdownRenderer.Render("![](pic.png)\n\n[y](other.md)\n", "");
+        Assert.Contains("src=\"pic.png\"", html);
+        Assert.Contains("href=\"other.md\"", html);
+        Assert.DoesNotContain("https://kxedit.preview/pic.png", html);
+        Assert.DoesNotContain("https://kxedit.preview/other.md", html);
     }
 }
