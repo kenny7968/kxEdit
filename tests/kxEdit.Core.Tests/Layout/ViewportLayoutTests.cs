@@ -342,4 +342,24 @@ public class ViewportLayoutTests
         Assert.Equal(new VisualRow(1, 0, 5, 2, 10), rows[1]);
         Assert.Equal(new VisualRow(1, 1, 7, 2, 20), rows[2]);
     }
+
+    [Fact]
+    public void TopSegment_negative_is_treated_as_zero()
+    {
+        // 負値ガード。外すと si が -1 から始まり segments[-1] で
+        // ArgumentOutOfRangeException になる(= load-bearing な防御)。
+        var buf = TextBuffer.FromString("aaaaaa");
+        var rows = ViewportLayout.Build(
+            buf.Current,
+            topLine: 0,
+            topSegment: -1,
+            heightPx: 20,
+            wrapColumns: 2,
+            M
+        );
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(new VisualRow(0, 0, 0, 2, 0), rows[0]);
+        Assert.Equal(new VisualRow(0, 1, 2, 2, 10), rows[1]);
+    }
 }

@@ -92,6 +92,13 @@ internal static class ViewportLayout
                 )
                 .Segments;
             // topSegment が実セグメント数以上=編集で段落が縮んだ。最終セグメントへ寄せる。
+            //
+            // このクランプが「打ち切りの途中結果」を最終セグメントと誤認することはない。
+            // WrapCore の打ち切り判定は result.Add の直後にしかなく、打ち切りが起きたときの
+            // segments.Count は要求値 needed に厳密に等しい。needed >= skip + 1 > skip なので、
+            // 打ち切り時に skip >= segments.Count は成立しない。つまりここが発火するのは
+            // ReachedLineEnd == true(行末まで Wrap しきった)ときだけであり、寄せ先は
+            // 真の最終セグメントである(Task 2 レビュー Minor)。
             if (skip >= segments.Count)
                 skip = segments.Count - 1;
             for (int si = skip; si < segments.Count; si++)
