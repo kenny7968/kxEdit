@@ -34,12 +34,16 @@ public class MarkdownRendererTests
     public void Text_special_chars_are_escaped() =>
         Assert.Contains("1 &lt; 2 &amp; 3", MarkdownRenderer.Render("1 < 2 & 3", Base));
 
-    [Fact]
-    public void Preview_base_href_emits_no_base_tag() =>
-        // A-2 (2026-08-22・案 B): <base> は一切出力しない。<base> があると裸のフラグメント URL
-        // (#section) まで base 基準で解決され、目次リンクと脚注の戻りリンクが MD-H-1 の Block に
-        // 巻き込まれて全滅する (設計書 §7.1)。相対 URL は描画前に絶対化する方式へ移行した。
-        Assert.DoesNotContain("<base", MarkdownRenderer.Render("x", Base));
+    // A-2 (2026-08-22・案 B): <base> は経路を問わず一切出力しない。<base> があると裸の
+    // フラグメント URL (#section) まで base 基準で解決され、目次リンクと脚注の戻りリンクが
+    // MD-H-1 の Block に巻き込まれて全滅する (設計書 §7.1)。相対 URL は描画前に絶対化する。
+    // 「空文字なら省く / 非空なら出す」という案 A 時代の対比はもう存在しないので、
+    // 両経路を 1 本の Theory で固定する。
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EmitsNoBaseTag(string baseHref) =>
+        Assert.DoesNotContain("<base", MarkdownRenderer.Render("x", baseHref));
 
     [Fact]
     public void Document_declares_utf8_charset() =>
@@ -48,10 +52,6 @@ public class MarkdownRendererTests
     [Fact]
     public void Null_markdown_does_not_throw() =>
         Assert.Contains("<html", MarkdownRenderer.Render(null, Base));
-
-    [Fact]
-    public void Empty_base_href_omits_base_tag() =>
-        Assert.DoesNotContain("<base", MarkdownRenderer.Render("x", ""));
 
     // MD-L-4: baseHref は空文字か PreviewBaseHref 定数以外を受け付けない (単一 caller の防御ガード)。
     [Fact]
@@ -102,25 +102,34 @@ public class MarkdownRendererTests
         Assert.Contains("default-src 'none'", html);
     }
 
-    [Fact]
-    public void Render_EscapesRawScriptTag()
+    // DisableHtml() の網。A-2 (案 B) でパイプラインが preview 用 / 素の用の 2 本に分かれたため、
+    // 空 baseHref だけを回すと本番で実際に使われる側 (MainForm は常に PreviewBaseHref を渡す)
+    // を検証しないことになる。両経路を回して構成差で穴が開かないことを固定する。
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesRawScriptTag(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<script>alert(1)</script>", "");
+        var html = MarkdownRenderer.Render("<script>alert(1)</script>", baseHref);
         Assert.DoesNotContain("<script>alert(1)</script>", html);
         Assert.Contains("&lt;script&gt;", html);
     }
 
-    [Fact]
-    public void Render_EscapesRawIframeTag()
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesRawIframeTag(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<iframe src=\"evil\"></iframe>", "");
+        var html = MarkdownRenderer.Render("<iframe src=\"evil\"></iframe>", baseHref);
         Assert.DoesNotContain("<iframe", html);
     }
 
-    [Fact]
-    public void Render_EscapesInlineEventHandler()
+    [Theory]
+    [InlineData("")]
+    [InlineData(Base)]
+    public void Render_EscapesInlineEventHandler(string baseHref)
     {
-        var html = MarkdownRenderer.Render("<a href=\"x\" onclick=\"evil()\">y</a>", "");
+        var html = MarkdownRenderer.Render("<a href=\"x\" onclick=\"evil()\">y</a>", baseHref);
         // <a> tag itself is escaped, so onclick can never reach the DOM as an attribute
         Assert.Contains("&lt;a href=", html);
         Assert.DoesNotContain("<a href=\"x\"", html);
@@ -212,17 +221,17 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Render_RelativeLink_KeepsHref()
+    public void Render_RelativeLink_IsResolvedButNotDropped()
     {
-        // whitelist は相対 URL を drop しない。preview 経路では A-2 (案 B) の絶対化が
-        // 先に効くため href は preview 仮想ホスト基準になる (書き換え自体の網は
-        // Render_RelativeLink_IsResolvedToPreviewHost)。
+        // whitelist は相対 URL を drop しない。ただし preview 経路では A-2 (案 B) の絶対化が
+        // 先に効くため href は preview 仮想ホスト基準になる。よって「相対のまま保つ」ことは
+        // もう検証していない (その網は Render_EmptyBaseHref_DoesNotRewriteRelativeUrls)。
         var html = MarkdownRenderer.Render("[x](path/to.md)", Base);
         Assert.Contains("href=\"https://kxedit.preview/path/to.md\"", html);
     }
 
     [Fact]
-    public void Render_RootRelativeLink_KeepsHref()
+    public void Render_RootRelativeLink_IsResolvedButNotDropped()
     {
         var html = MarkdownRenderer.Render("[x](/root/path)", Base);
         Assert.Contains("href=\"https://kxedit.preview/root/path\"", html);
@@ -572,7 +581,7 @@ public class MarkdownRendererTests
     // FINDING 3 の回帰防止網は次の 2 本 (ミューテーションで kill 確認済み):
     //   - Render_FragmentLink_IsNotRewritten ... resolver が # 始まりを書き換えないこと
     //     (PreviewUrlResolver の # ガードを消すと赤)
-    //   - Preview_base_href_emits_no_base_tag ... 文書に <base> を出力しないこと
+    //   - Render_EmitsNoBaseTag ... 文書に <base> を出力しないこと
     //     (<base> を再注入すると赤)
     // Render_FootnoteLinks_AreNotRewritten はこの網には入らない (同テストのコメント参照)。
     // ---------------------------------------------------------------------

@@ -9,6 +9,10 @@ namespace kxEdit.Core.Text;
 /// 解決してしまい、目次リンクと脚注の戻りリンクが MD-H-1 の Block に巻き込まれて全滅するため
 /// 採らない。代わりに描画前の AST 段でここが絶対化する。
 /// </para>
+/// <para>
+/// 中核の不変条件: <b>書き換え先は必ず preview 仮想ホスト origin である</b>。
+/// 前置ガードの前方一致では担保できないため、解決結果に事後条件を課して保証する。
+/// </para>
 /// </summary>
 internal static class PreviewUrlResolver
 {
@@ -30,7 +34,8 @@ internal static class PreviewUrlResolver
         {
             return false;
         }
-        // protocol-relative は new Uri(base, "//host/p") が別ホストへ飛ぶので触らない。
+        // protocol-relative (//host/p) の早期 return。これは前方一致にすぎず保証にはならない
+        // (先頭のバックスラッシュや空白/タブが付くと素通りする)。真の保証は下の事後条件が与える。
         if (url.StartsWith("//", StringComparison.Ordinal))
         {
             return false;
@@ -42,7 +47,34 @@ internal static class PreviewUrlResolver
         }
         try
         {
-            absolute = new Uri(PreviewBase, url).ToString();
+            var resolved = new Uri(PreviewBase, url);
+            // 事後条件: 絶対化は origin を変えてはならない。前方一致のガード (規則 3) だけでは
+            // 先頭のバックスラッシュ・空白・タブが付いた protocol-relative が素通りする形が
+            // 実在する (Uri は先頭空白を捨て、バックスラッシュを / へ正規化してから authority を
+            // 解釈する)。列挙は原理的に漏れるので、解決結果側で preview origin を検査する。
+            // Host / Port / UserInfo の 3 条件はそれぞれ単独で網が張ってある (条件ごとに
+            // 変異させて kill を確認済み)。UserInfo は必須: Host も
+            // GetLeftPart(UriPartial.Authority) も userinfo を含まないため、
+            // "\/user@kxedit.preview/x" はホスト検査だけではすり抜ける。
+            // Scheme 検査だけは現状到達不能 (変異させても全緑)。相対解決で scheme が変わるには
+            // url 自身が scheme を持つ必要があり、それは上の Uri.TryCreate(Absolute) が
+            // 先に捕まえるため。System.Uri の解釈が将来変わったときの保険として残す。
+            if (
+                !string.Equals(resolved.Scheme, PreviewBase.Scheme, StringComparison.Ordinal)
+                || !string.Equals(
+                    resolved.Host,
+                    PreviewBase.Host,
+                    StringComparison.OrdinalIgnoreCase
+                )
+                || resolved.Port != PreviewBase.Port
+                || !string.IsNullOrEmpty(resolved.UserInfo)
+            )
+            {
+                return false;
+            }
+            // AbsoluteUri は percent-escape を保った正規形。ToString() は表示用に復号するため
+            // out 値に生の < や " が載り、安全性が下流 (Markdig の WriteEscapeUrl) 依存になる。
+            absolute = resolved.AbsoluteUri;
             return true;
         }
         catch (UriFormatException)

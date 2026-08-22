@@ -16,6 +16,9 @@ internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
 {
     public void Setup(MarkdownPipelineBuilder pipeline)
     {
+        // -= は Setup が同一 builder に対して複数回呼ばれた場合の冪等化。現状その経路は無い
+        // (builder は BuildPipeline のローカル 1 個で Build() は 1 回だけ) ので到達不能であり、
+        // 変異させてもテストは赤くならない。二重登録の実例があるという意味ではない。
         pipeline.DocumentProcessed -= OnDocumentProcessed;
         pipeline.DocumentProcessed += OnDocumentProcessed;
     }

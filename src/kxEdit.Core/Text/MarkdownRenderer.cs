@@ -10,7 +10,17 @@ public static class MarkdownRenderer
     /// <summary>プレビュー用の仮想ホスト名（相対リソース解決の基準。App 側のマッピングと一致させる）。</summary>
     public const string PreviewVirtualHost = "kxedit.preview";
 
-    /// <summary>プレビュー HTML の base href（PreviewVirtualHost への https URL）。</summary>
+    /// <summary>
+    /// preview 仮想ホストの origin URL (<see cref="PreviewVirtualHost"/> への https URL)。
+    /// <para>
+    /// A-2 (案 B) で <c>&lt;base href&gt;</c> の出力を廃止したので、名前に反して HTML の
+    /// base href としては使われない。現在の用途は 2 つ:
+    /// ① <c>PreviewUrlResolver</c> が <c>new Uri(PreviewBase, url)</c> の解決基準および
+    ///    事後条件 (解決先 origin) の照合値として使う
+    /// ② <see cref="Render"/> の MD-L-4 allow-list が受け付けるトークン
+    /// (改名は <c>MainForm</c> とテストへ波及するため申し送り。)
+    /// </para>
+    /// </summary>
     public const string PreviewBaseHref = "https://" + PreviewVirtualHost + "/";
 
     /// <summary>
@@ -91,6 +101,11 @@ public static class MarkdownRenderer
     //
     // A-2 (2026-08-22・案 B): 相対 URL の絶対化は preview 経路だけで行うためパイプラインを 2 本持つ。
     // baseHref が空文字の経路は解決基準を持たないので書き換えない (相対のまま出す)。
+    //
+    // ただし Render の唯一の caller (MainForm.ShowMarkdownPreview) は常に PreviewBaseHref を
+    // 渡すため、空 baseHref 側 (Pipeline) は現状 production から使われないテスト専用経路である。
+    // MD-L-4 の allow-list が空文字を受け付ける契約なので分岐ごと残す (2 本化は受容)。
+    // セキュリティ網のテストは両経路を回すこと (構成差で穴が開かないようにするため)。
     private static readonly MarkdownPipeline PreviewPipeline = BuildPipeline(
         rewriteRelativeUrls: true
     );
@@ -153,7 +168,9 @@ public static class MarkdownRenderer
     public static string Render(string? markdown, string baseHref)
     {
         // MD-L-4: baseHref は空文字か PreviewBaseHref 定数のみを受け付ける allow-list ガード。
-        // 属性エスケープを万一漏らした場合の被害を封じるため、定数比較でホワイトリスト化する。
+        // A-2 (案 B) で <base> の出力を廃止したので、baseHref が HTML へ interpolate される
+        // 攻撃面はもう存在しない。現在の役割は「どちらのパイプラインを使うか」を決める
+        // トークンの fail-fast 検証で、将来 caller が増えたときの混入をここで止める。
         if (baseHref != string.Empty && baseHref != PreviewBaseHref)
         {
             throw new ArgumentException(
