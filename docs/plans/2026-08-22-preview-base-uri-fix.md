@@ -327,6 +327,22 @@ CLAUDE.md §4 の高価値テスト検証。`Meta_BaseUri_Matches_PreviewBaseHre
 
 ⚠️ 過去に「変異を戻さずに完了報告した」事故がある。Step 4 の `git diff` 確認は省略しない。
 
+> **実装時の訂正(Task 2 仕様レビュー)**: 上記 3. の変異は**実行できない**。テスト側の
+> `Base` は `MarkdownRendererTests.cs:8` のハードコードリテラルなので、`PreviewBaseHref`
+> だけを変異させると `Render` の MD-L-4 allow-list ガードが先に `ArgumentException` を投げ、
+> assertion に到達する前に両方が落ちる。代替として「CSP は正しいまま `<base>` タグの出力
+> だけをずらす」変異を使ったところ、`Meta_BaseUri_Matches_PreviewBaseHref` に加え既存
+> `Base_href_is_injected` / `Render_Accepts_PreviewBaseHref` も赤になった。
+>
+> **判定**: `Meta_BaseUri_Matches_PreviewBaseHref` は vacuous ではない(変異 1. で落ちる)が、
+> 現時点では他 2 本に論理的に包含されており**固有のキル能力はゼロ**。
+> `normalized` が末尾スラッシュを吸収するため、この assertion が通す集合は
+> `Meta_BaseUri_Is_Limited_To_PreviewHost` が通す集合の厳密な上位集合になる。
+> それでも残す(3 択の ② 受容): 他 2 本は期待値をリテラルでハードコードしているため、
+> 将来 `PreviewVirtualHost` を改名すると「実際値をコピーして直す」保守で網としての力を失う。
+> `Matches` は両辺が同時に動くのでその直し方ができず、CSP と `<base>` の**対応関係**を
+> 改名を跨いで守り続ける。設計書 §4.1 #2 の意図はこの形でのみ担保される。
+
 **Step 6: コミット**
 
 ```bash
@@ -422,6 +438,9 @@ gh pr create --base main
 - **範囲外**: 相対リンクのクリックは MD-H-1 により Block のまま(退行ではなく設計判断)
 - レビュー経緯: 2 パスの指摘と 3 択の対応
 - **L5 の状態**(実施済みなら結果、未実施ならその旨を明記)
+- **テスト設計の受容判断**: `Meta_BaseUri_Matches_PreviewBaseHref` は現時点で他 2 本
+  (`Meta_BaseUri_Is_Limited_To_PreviewHost` / `Base_href_is_injected`)に包含され固有の
+  キル能力を持たないが、ホスト改名を跨いで CSP と `<base>` の対応関係を守る目的で残す
 - **ユーザー影響のある挙動変更**: A-21 により `{#id}` のカスタム見出し id が失われ、
   自動生成値へ変わる。手元の .md で `[link](#custom)` を使っている場合は切れる
   (リリースノートにも記載を検討)
