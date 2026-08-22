@@ -139,8 +139,18 @@ public class FileControllerTests
             Assert.Empty(host.Settings.RecentFiles);
         });
 
+    /// <summary>
+    /// 空白パスは警告し、State を書き換えない。文言の全文と no-change を固定するのはこのテストだけ。
+    /// Task 4(2026-08-23)以降、この <c>false</c> は「警告して中止した」結果ではない:
+    /// 警告後は <c>continue</c> してダイアログを再表示し、2 回目に Fake のキューが枯渇して
+    /// キャンセル扱いになった結果である。**再表示そのものの pin は
+    /// <see cref="SaveAs_BlankPath_WarnsAndReopensDialog"/>** が持つ。
+    /// (旧名 `SaveAs_WhitespacePath_WarnsAndAborts` は「中止」を主張していたが、
+    /// `continue` を `return false` へ戻す改悪が入っても本テストは緑のままなので、名前が
+    /// 改悪を追認する状態だった。CLAUDE.md §4「assertion の前提と guard の発火条件を一致させる」)
+    /// </summary>
     [Fact]
-    public void SaveAs_WhitespacePath_WarnsAndAborts() =>
+    public void SaveAs_WhitespacePath_WarnsWithExactMessage_AndLeavesStateUnchanged() =>
         Sta.Run(() =>
         {
             using var host = new Host();
