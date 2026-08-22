@@ -65,15 +65,23 @@ public sealed partial class MainForm : Form
     // できた時のみ破棄される契約(Task 5 review M-2)。ctor 末尾で 1 度だけ代入し以後不変。
     private readonly Document? _startupEmptyDoc;
 
-    // Task 7 テスト用: FailedPaths の Warn ダイアログ (MessageBox.Show=blocking) をテストで抑止する seam。
-    // 4 番目の smoke テスト(missing file → FailedPaths に載る)で MessageBox が UI スレッドを
-    // 塞ぐのを避けるため。実運用経路では常に false=ダイアログは出る。
+    // Task 7 テスト用: 起動時復元の Warn ダイアログ (MessageBox.Show=blocking) をテストで抑止する seam。
+    // 対象は 2 種 = FailedPaths の集約警告(ShowFailedRestoreDialog)と、A-1 第 2 層の陳腐化警告
+    // (ShowStaleBackupWarning)。MessageBox が UI スレッドを塞ぐのを避けるため。
+    // 実運用経路では常に false=ダイアログは出る。
     // Form 派生上の bool プロパティは WFO1000 を誘発するため、field + setter method で seam を作る
     // (SetLastSessionBuffersPathForTest と同じ方式)。
-    private bool _suppressFailedRestoreDialogForTest;
+    private bool _suppressRestoreDialogsForTest;
 
-    internal void SetSuppressFailedRestoreDialogForTest(bool value) =>
-        _suppressFailedRestoreDialogForTest = value;
+    internal void SetSuppressRestoreDialogsForTest(bool value) =>
+        _suppressRestoreDialogsForTest = value;
+
+    // A-1 第 2 層テスト用: 陳腐化警告に到達した回数(抑止中でも数える)。ダイアログ自体は
+    // MessageBox=blocking で観測できないため、到達を数だけ観測して配線を固定する。
+    private int _staleBackupWarningCountForTest;
+    internal int StaleBackupWarningCountForTest => _staleBackupWarningCountForTest;
+
+    internal BackupCoordinator BackupForTest => _backup;
 
     // Task 13 テスト用: OnFormClosing が silent path(§8.2 fast-path)を通ったかを観測する。
     // null = OnFormClosing 未実行 / true = silent (ConfirmDiscardIfDirty loop skip) / false = fall-through。
@@ -236,13 +244,33 @@ public sealed partial class MainForm : Form
         _restoreOffered = true;
 
         if (_settings.RestoreOpenFilesOnStartup)
-        {
             // hot exit 統合復元(設計 §3.3): クラッシュ/正常終了を区別せず silent 復元。
             RestoreUnifiedSession();
-            return;
-        }
+        else
+            OfferBackupRestoreOnStartup();
 
-        // OFF: 従来どおり異常終了バックアップの復元提案のみ。
+        // A-1 / M-31(設計 2026-08-22 §3.3): ここから先だけ、保存点・クローズの即時反映が働く。
+        // 復元より前に有効化すると、ctor の NewFile → SetSavePoint が空無題 1 タブのレイアウトを
+        // session-state.json へ書き、前回セッションを失う。
+        _backup.MarkStartupRestoreComplete();
+
+        // A-1 第 2 層(設計 2026-08-22 §4.2): 復元したタブのうちディスク側が新しかったものを
+        // 1 個の警告にまとめて通知する。ON / OFF どちらの復元経路も FileController を通るため
+        // 回収点は 1 つでよい。
+        var stale = _file.TakeStaleRestoredPaths();
+        if (stale.Count > 0)
+        {
+            _staleBackupWarningCountForTest++;
+            if (!_suppressRestoreDialogsForTest)
+                ShowStaleBackupWarning(stale);
+        }
+    }
+
+    /// <summary>OFF 経路(RestoreOpenFilesOnStartup=false)の従来どおりの復元提案。
+    /// OnShown から切り出しただけで挙動は不変(早期 return を無くし、復元後の共通処理=
+    /// ゲート開放と陳腐化警告を ON / OFF 双方で通すため)。</summary>
+    private void OfferBackupRestoreOnStartup()
+    {
         // 設計 2026-07-24-restore-no-initial-untitled §1: 復元件数>0 なら ON 経路
         // (FileController.RestoreSession の openedCount>0 で initialEmpty を TryClose)と対称に
         // 起動時の空無題タブ (_startupEmptyDoc) を閉じる。Announcer は従来どおり silent 自動復元
@@ -313,7 +341,7 @@ public sealed partial class MainForm : Form
             _backup.DeleteConsumedLayout();
             _settings.LastSession = null; // レガシー残骸の掃除(次回 Save で消える)
             kxEdit.Core.Session.LastSessionBuffersStore.Delete(LastSessionBuffersPath);
-            if (failed.Count > 0 && !_suppressFailedRestoreDialogForTest)
+            if (failed.Count > 0 && !_suppressRestoreDialogsForTest)
                 ShowFailedRestoreDialog(failed);
         }
         catch (Exception ex)
@@ -344,6 +372,39 @@ public sealed partial class MainForm : Form
             this,
             body,
             "一部のファイルを開けませんでした",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning
+        );
+    }
+
+    /// <summary>
+    /// A-1 第 2 層(設計 2026-08-22 §4.2): バックアップ取得後にディスク側が更新されていた
+    /// ファイルを 1 個の警告にまとめて通知する。
+    /// </summary>
+    /// <remarks>
+    /// バックアップを捨てて「ディスク版を優先」はしない。ディスクが新しい理由が kxEdit 自身の
+    /// 保存(A-1)か他アプリの更新かを区別できず、捨てる実装は新しい無言喪失経路になるため。
+    /// 表示規約(最大 10 件・<see cref="SanitizeForDisplay.OneLine"/>)は
+    /// <see cref="ShowFailedRestoreDialog"/> と揃える。
+    /// </remarks>
+    private void ShowStaleBackupWarning(IReadOnlyList<string> paths)
+    {
+        const int Cap = 10;
+        var shown = paths
+            .Take(Cap)
+            .Select(p => kxEdit.Core.Text.SanitizeForDisplay.OneLine(p, 200));
+        var body =
+            "次のファイルは、バックアップを取った後にディスク側が更新されています:\n\n  "
+            + string.Join("\n  ", shown);
+        if (paths.Count > Cap)
+            body += $"\n  ... 他 {paths.Count - Cap} 件";
+        body +=
+            "\n\n復元したタブを上書き保存すると、ディスク上の新しい内容が失われます。"
+            + "\n内容を確認してから保存してください。";
+        MessageBox.Show(
+            this,
+            body,
+            "復元した内容が古い可能性があります",
             MessageBoxButtons.OK,
             MessageBoxIcon.Warning
         );

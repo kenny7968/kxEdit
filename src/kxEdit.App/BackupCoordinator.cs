@@ -444,6 +444,11 @@ public sealed class BackupCoordinator : IDisposable
     /// 丸ごと死ぬため、MainFormSmokeTests が実経路で固定する。</summary>
     public void MarkStartupRestoreComplete() => _startupRestoreDone = true;
 
+    /// <summary>テスト観測用: ゲートが開いているか。MainForm が
+    /// <see cref="MarkStartupRestoreComplete"/> を呼んだことを実経路から固定する seam
+    /// (Coordinator 側テストは seam を直接叩くため配線漏れを検出できない)。</summary>
+    internal bool StartupRestoreDoneForTest => _startupRestoreDone;
+
     /// <summary>本文バックアップの走査(旧 Reconcile 本体をそのまま抽出・挙動不変)。</summary>
     private void ReconcileContent()
     {
