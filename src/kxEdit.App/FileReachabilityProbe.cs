@@ -36,24 +36,37 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
         TimeSpan timeout
     ) => WaitBounded(Task.Run(work), timeout, new SaveTargetProbeResult(false, false));
 
+    /// <summary>
+    /// 読み取り側プローブの骨格。<paramref name="work"/> をバックグラウンドへ退避し、
+    /// 期限内に終わらなければ「存在を確認できなかった」= false へ倒す。
+    /// 保存側の <see cref="RunSaveTargetProbe"/> と対称に切り出すのは、フェイルセーフ値を
+    /// テストが届く場所へ置くため(再レビュー I-3): 素の
+    /// <c>WaitBounded(task, timeout, false)</c> では定数が 1 トークンの引数でしかなく、
+    /// true へ書き換えてもコンパイルが通り・ハングもせず・全緑になってしまう
+    /// (= タイムアウトを「ファイルは在る」と読み、切断済み UNC で実 read へ進んで
+    /// UI が 60 秒凍結する HIGH-6 の再導入)。
+    /// </summary>
+    internal static bool RunFileExistsProbe(Func<bool> work, TimeSpan timeout) =>
+        WaitBounded(Task.Run(work), timeout, false);
+
     /// <inheritdoc />
-    public bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout)
-    {
-        var task = Task.Run(() =>
-        {
-            try
+    public bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout) =>
+        RunFileExistsProbe(
+            () =>
             {
-                return File.Exists(path);
-            }
-            catch
-            {
-                // File.Exists は通常例外を投げないが、UNC 未到達などで
-                // 稀に IOException 系が出る可能性を吸って false 扱いにする。
-                return false;
-            }
-        });
-        return WaitBounded(task, timeout, false);
-    }
+                try
+                {
+                    return File.Exists(path);
+                }
+                catch
+                {
+                    // File.Exists は通常例外を投げないが、UNC 未到達などで
+                    // 稀に IOException 系が出る可能性を吸って false 扱いにする。
+                    return false;
+                }
+            },
+            timeout
+        );
 
     /// <inheritdoc />
     public SaveTargetProbeResult ProbeSaveTargetWithTimeout(string path, TimeSpan timeout) =>

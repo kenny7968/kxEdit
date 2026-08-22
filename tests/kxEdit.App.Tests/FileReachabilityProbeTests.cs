@@ -29,7 +29,7 @@ public class FileReachabilityProbeTests
     [Fact]
     public void ProbeSaveTarget_NewNameInExistingDir_ReachableAndNotExists()
     {
-        // A-4 の核。旧 ProbeFileExistsWithTimeout(File.Exists 意味論)はここで false を返し、
+        // A-4 の核。読み取り側の ProbeFileExistsWithTimeout(File.Exists 意味論)はここで false を返し、
         // 「ネットワークパスに到達できません」でネットワーク共有への新規保存を止めていた。
         // Reachable を `fileExists && dirExists` に変異させるとこのテストが kill する。
         using var tmp = new TempDir();
@@ -93,9 +93,14 @@ public class FileReachabilityProbeTests
         Assert.False(result.FileExists);
     }
 
-    // ===== 境界付き待ちのフェイルセーフ(I-1) =====
+    // ===== 境界付き待ちのフェイルセーフ(I-1 / I-3) =====
     // 実 I/O 経由でタイムアウトを起こすテストはフレーキーなので、待ちの判断だけを
-    // WaitBounded に切り出して決定的に検証する。
+    // WaitBounded / Run*Probe に切り出して決定的に検証する。
+    //
+    // 以下のタイムアウト系テストは「完了しないタスク」を渡して決定化している。そのため
+    // 「タイムアウト経路で task.Result を読む」型の変異(三項の反転など)は red ではなく
+    // **ハング**として現れる(xunit に既定のテストタイムアウトが無い)。ミューテーション検証で
+    // 応答が返らなくなったら環境問題ではなく kill と読むこと。
 
     [Fact]
     public void WaitBounded_Timeout_ReturnsFailSafeValue()
@@ -156,6 +161,41 @@ public class FileReachabilityProbeTests
         {
             gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
         }
+    }
+
+    [Fact]
+    public void RunFileExistsProbe_WorkExceedsTimeout_FailsSafeToNotFound()
+    {
+        // I-3。読み取り側のフェイルセーフ false → true の変異は、この 1 本が無いと全緑で生存する
+        // (= タイムアウトを「ファイルは在る」と読み、切断済み UNC で実 read へ進んで
+        // UI が 60 秒凍結する HIGH-6 の再導入)。組み方は保存側と対称:
+        // work は true を返すので、false が返ったならフェイルセーフ由来と確定する。
+        var gate = new TaskCompletionSource();
+        try
+        {
+            bool result = FileReachabilityProbe.RunFileExistsProbe(
+                () =>
+                {
+                    gate.Task.Wait();
+                    return true;
+                },
+                TimeSpan.FromMilliseconds(50)
+            );
+
+            Assert.False(result);
+        }
+        finally
+        {
+            gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
+        }
+    }
+
+    [Fact]
+    public void RunFileExistsProbe_WorkCompletes_ReturnsWorkResult()
+    {
+        // 対照群。RunFileExistsProbe が常に false を返す実装を kill する
+        // (これが無いと「常にフェイルセーフ」が上のテストだけでは通ってしまう)。
+        Assert.True(FileReachabilityProbe.RunFileExistsProbe(() => true, Timeout));
     }
 
     [Fact]

@@ -16,8 +16,11 @@ public readonly record struct SaveTargetProbeResult(bool Reachable, bool FileExi
 /// パスへの到達可否を短時間で判定する DI シーム(HIGH-6)。
 /// 本番は <see cref="FileReachabilityProbe"/> / テストは Fake を差し込む。
 /// UNC ロード時の 60 秒 UI 凍結を 5 秒プローブで回避するために FileController が使う。
-/// どちらのメソッドも、呼出側が**正規化済みの絶対パス**を渡す契約
-/// (相対パスは親フォルダーが空文字になるため到達不能へ倒れる)。
+/// どちらのメソッドも、呼出側が**正規化済みの絶対パス**を渡す契約。
+/// ただし破ったときの壊れ方は非対称なので理由は分けて読むこと:
+/// <see cref="ProbeSaveTargetWithTimeout"/> は親フォルダーが空文字になり到達不能へ倒れる(失敗が見える)。
+/// <see cref="ProbeFileExistsWithTimeout"/> は File.Exists が CWD 基準で**普通に動いてしまう**ため
+/// 黙って別のファイルを指す(= A-19 が正規化を要求する理由)。
 /// </summary>
 public interface IReachabilityProbe
 {

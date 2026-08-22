@@ -211,7 +211,8 @@ public class SerialBackupWriterTests
     /// `OnWriteFailed?.Invoke(record.Id)` を null 差替/削除に変異させれば、本テストが red
     /// 化することを実測確認済み。
     ///
-    /// 失敗機構の注記: 計画書は「SbwTempDir を削除して I/O 失敗を起こす」を提案していたが、
+    /// 失敗機構の注記: 計画書は「TempDir を削除して I/O 失敗を起こす」を提案していたが
+    /// (引用は当時の名前。現在の同等物は SbwTempDir)、
     /// <see cref="BackupStore.Write"/> は先頭で <see cref="Directory.CreateDirectory(string)"/>
     /// を呼ぶため dir 削除では失敗しない(=書込は成功してしまう)。決定的に失敗を起こせるのは
     /// <c>&lt;id&gt;.json</c> 同名ディレクトリで File.Move をブロックする経路(複合テストと
