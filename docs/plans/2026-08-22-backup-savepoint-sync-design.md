@@ -251,3 +251,55 @@ ON(hot exit silent)経路と OFF(起動時確認)経路の**両方**が `FileCon
   本書で導入した `IFileTimestampProvider` と `BackupStaleness` を再利用できる。
 - 背景ライターの削除がディスクに届く前のクラッシュ窓は原理的に残る((b) が第 2 層として受ける)。
   完全に閉じるには保存経路での同期削除が要るが、保存の応答時間と引き換えになるため採らない。
+
+---
+
+## 9. 実施記録(2026-08-22・追記)
+
+本節は策定後の追記(CLAUDE.md §8 の「実装時の精密化・実施記録の追記」)。上の §1〜§8 は策定時のまま。
+
+### 9.1 §4.3 の前提が誤りだった(脆弱性レビュー H-1)
+
+§4.3 に「新たな UI 凍結クラスは作らない: mtime を取るのは `OriginalPathValidator.Check` が
+既に同期 I/O で触れた後のパスのみ(A-16 の既存リスクを超えない)」と書いたが、**UNC では成立しない**。
+
+`OriginalPathValidator.Check` は `isUnc` のとき `RejectIfReparsePresent`(唯一の I/O)を
+スキップし、残るのは `Path.GetFullPath` と文字列比較だけである。復元本文は `BackupRecord.Content`
+由来でディスクを読まないため、UNC では **`FileTimestampProvider` の `File.Exists` が復元経路で
+最初の同期 I/O** になる。切断済み共有では SMB タイムアウト(約 60 秒)まで UI スレッドが返らず、
+タブ数ぶん直列に発生する(HIGH-6 / CSV-M-1 / `FileMetaProvider` が既に踏んだ罠の再導入)。
+
+対応: `FileTimestampProvider` に `IReachabilityProbe` を注入し、`RemotePathDetector.IsRemote` が
+true のパスには 5 秒プローブを前置する(`FileMetaProvider` と同型)。到達不能なら seam の既定契約
+どおり null を返す(= 判定しない = 従来どおり復元)。さらに、到達不能と判明したリモートルートを
+記録して同一共有の 2 件目以降のプローブを省く(「5 秒 × レコード数」の積み上がりを断つ)。
+
+マップドネットワークドライブ(`Z:\`)は `isUnc=false` で reparse 検査の I/O が既に走るため
+新しい凍結クラスではないが、同じ修正で stat 2 回分も消える。
+
+### 9.2 ミューテーション検証で網の位置を 1 件修正
+
+`OnCleanedOrClosed` の `if (!clean) return;` を除去する変異が**生き残った**。
+`ReconcileMapMaintenance` は削除しかしないため「dirty 化でバックアップが書かれない」を
+assert してもガードの有無で差が出ない(網が分岐に当たっていない)。実際に差が出るのは
+`ReconcileLayout`(キャレット位置が署名に載る)なので、観測点をレイアウト書込へ移した。
+§3.2 の「1 打鍵目ごとにバックアップを書き」という記述も、この実装では正しくない
+(正しくは「レイアウト書込の churn が増える」)。実装側のコメントは訂正済み。
+
+### 9.3 その他のレビュー反映
+
+- `BackupStaleness.IsDiskNewer`: オーバーフロー防護に使う `DateTime.MaxValue - tolerance` 自身が、
+  DateTime の全幅を超える tolerance で例外になる。現行呼出元は 2 秒固定で到達しないが、
+  public API かつ M-18 での再利用を申し送っているため上限クランプを追加(レビュー L-1)。
+- `MainForm.OnShown` の `MarkStartupRestoreComplete()` を `finally` へ移動。OFF 経路
+  (`OfferBackupRestoreOnStartup`)は ON 経路と違い全体 try/catch を持たず、例外が抜けると
+  ゲートが二度と開かずプロセスの間ずっと A-1 の修正が死ぬため(レビュー L-3)。
+- `BackupStaleness` の XML doc に「セキュリティ制御ではない」と明記。攻撃者が JSON の
+  `TimestampUtc` を未来にすれば判定を確実に抑止できるため、将来この関数を防御として
+  頼る誤用を防ぐ(レビュー L-2・§4.2 の設計意図の再確認であり挙動変更なし)。
+
+### 9.4 申し送りの追加
+
+- `BackupCoordinator.OfferRestoreOnStartup` の `confirm=false` 分岐はレコード件数が**無制限**
+  (ON 経路の `SessionLayoutStore.MaxTabs=200` に相当する打ち切りがない)。本 PR の範囲外の
+  既存事項だが、リモート I/O やタブ生成の増幅器になる。次テーマで上限の要否を判断する。

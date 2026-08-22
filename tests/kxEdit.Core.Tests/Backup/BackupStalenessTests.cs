@@ -79,6 +79,33 @@ public class BackupStalenessTests
     public void BackupAtMaxValue_ReturnsFalse_WithoutOverflow() =>
         Assert.False(BackupStaleness.IsDiskNewer(DateTime.MaxValue, DateTime.MaxValue, Two));
 
+    /// <summary>レビュー L-1: オーバーフロー防護に使う <c>DateTime.MaxValue - tolerance</c> 自身が、
+    /// DateTime の全幅を超える tolerance では ArgumentOutOfRangeException を投げる。
+    /// 現行の呼出元は 2 秒固定で到達しないが、public API なので打ち切りを固定する。</summary>
+    [Fact]
+    public void HugeTolerance_ReturnsFalse_WithoutThrowing()
+    {
+        Assert.False(BackupStaleness.IsDiskNewer(DateTime.MaxValue, Backup, TimeSpan.MaxValue));
+        Assert.False(
+            BackupStaleness.IsDiskNewer(
+                DateTime.MaxValue,
+                Backup,
+                DateTime.MaxValue - DateTime.MinValue + TimeSpan.FromTicks(1)
+            )
+        );
+    }
+
+    /// <summary>境界: ちょうど DateTime の全幅ぶんの tolerance は例外にならず、判定も false。</summary>
+    [Fact]
+    public void ToleranceExactlyFullRange_ReturnsFalse_WithoutThrowing() =>
+        Assert.False(
+            BackupStaleness.IsDiskNewer(
+                DateTime.MaxValue,
+                DateTime.MinValue,
+                DateTime.MaxValue - DateTime.MinValue
+            )
+        );
+
     [Fact]
     public void NegativeTolerance_ClampedToZero()
     {

@@ -6,6 +6,12 @@ namespace kxEdit.Core.Backup;
 /// ディスクへ届く前にクラッシュする残余窓が原理的に残るため、復元側でも陳腐化を検出する。
 /// UI/スレッド/ファイルシステム非依存 = Core で単体テストできる。
 /// </summary>
+/// <remarks>
+/// <b>これはセキュリティ制御ではない</b>(脆弱性レビュー L-2)。<c>BackupRecord.TimestampUtc</c> は
+/// %APPDATA% 配下の JSON 由来で、攻撃者が書ければ未来の時刻を入れて判定を確実に抑止できる。
+/// 用途は A-1(kxEdit 自身の保存とバックアップ削除のレース)を検出する整合性ヒントに限る。
+/// 攻撃者 JSON への防御は <c>OriginalPathValidator</c> ほかの既存層が担う。
+/// </remarks>
 public static class BackupStaleness
 {
     /// <summary>既定の許容差。FAT の 2 秒粒度と NTP の微調整を吸収する。</summary>
@@ -33,6 +39,12 @@ public static class BackupStaleness
             return false;
         if (tolerance < TimeSpan.Zero)
             tolerance = TimeSpan.Zero;
+        // レビュー L-1: 下の `DateTime.MaxValue - tolerance` 自体が、DateTime の全幅を超える
+        // tolerance では ArgumentOutOfRangeException を投げる(オーバーフロー防護が投げる)。
+        // 現行の唯一の呼出元は DefaultTolerance 固定で到達しないが、public API かつ M-18 での
+        // 再利用を申し送っているため、ここで打ち切る。
+        if (tolerance > DateTime.MaxValue - DateTime.MinValue)
+            return false; // これより新しいディスクは存在しない
 
         DateTime backupUtc = AsUtc(backupTimestampUtc);
         if (backupUtc > DateTime.MaxValue - tolerance)

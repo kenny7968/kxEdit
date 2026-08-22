@@ -243,16 +243,24 @@ public sealed partial class MainForm : Form
             return;
         _restoreOffered = true;
 
-        if (_settings.RestoreOpenFilesOnStartup)
-            // hot exit 統合復元(設計 §3.3): クラッシュ/正常終了を区別せず silent 復元。
-            RestoreUnifiedSession();
-        else
-            OfferBackupRestoreOnStartup();
-
-        // A-1 / M-31(設計 2026-08-22 §3.3): ここから先だけ、保存点・クローズの即時反映が働く。
-        // 復元より前に有効化すると、ctor の NewFile → SetSavePoint が空無題 1 タブのレイアウトを
-        // session-state.json へ書き、前回セッションを失う。
-        _backup.MarkStartupRestoreComplete();
+        try
+        {
+            if (_settings.RestoreOpenFilesOnStartup)
+                // hot exit 統合復元(設計 §3.3): クラッシュ/正常終了を区別せず silent 復元。
+                RestoreUnifiedSession();
+            else
+                OfferBackupRestoreOnStartup();
+        }
+        finally
+        {
+            // A-1 / M-31(設計 2026-08-22 §3.3): ここから先だけ、保存点・クローズの即時反映が働く。
+            // 復元より前に有効化すると、ctor の NewFile → SetSavePoint が空無題 1 タブのレイアウトを
+            // session-state.json へ書き、前回セッションを失う。
+            // finally なのはレビュー L-3: OFF 経路(OfferBackupRestoreOnStartup)は ON 経路と違い
+            // 全体 try/catch を持たないため、ここで例外が抜けるとゲートが二度と開かず、
+            // そのプロセスの間ずっと A-1 の修正が黙って死ぬ(300 秒のクラッシュ窓が復活する)。
+            _backup.MarkStartupRestoreComplete();
+        }
 
         // A-1 第 2 層(設計 2026-08-22 §4.2): 復元したタブのうちディスク側が新しかったものを
         // 1 個の警告にまとめて通知する。ON / OFF どちらの復元経路も FileController を通るため
