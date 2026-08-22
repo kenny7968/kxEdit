@@ -44,6 +44,22 @@ public class VisualRowScrollTests
         }
     }
 
+    /// <summary>
+    /// 垂直スクロールバー(private フィールド)を取り出す。<see cref="Helper"/> と同じ理由で、
+    /// リネームで静かに緑になる事故を防ぐためフィールド名つきで明示的に落とす。
+    /// </summary>
+    private static VScrollBar VScroll(EditorControl c)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_vscroll",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(fi is not null, "EditorControl に private フィールド _vscroll が見つからない");
+        var bar = fi!.GetValue(c) as VScrollBar;
+        Assert.True(bar is not null, "_vscroll が VScrollBar として取り出せない");
+        return bar!;
+    }
+
     private static (int Line, int Seg, bool Exhausted) WalkForward(
         EditorControl c,
         TextSnapshot snap,
@@ -656,6 +672,56 @@ public class VisualRowScrollTests
                 var (_, y, visible) = c.ComputeCaretPoint(11); // 論理行 1 の先頭(k)
                 Assert.True(visible, "論理行 1 の先頭は可視域内");
                 Assert.Equal(1 * lh, y);
+            }
+        });
+
+    /// <summary>
+    /// 積み上げループの Wrap 予算に<b>読み飛ばす <c>skip</c> 本ぶんが乗っている</b>こと
+    /// (<c>needed = maxUsefulRows - visualRowsBeforeThisLine + skip</c>)。先頭論理行は
+    /// 画面外に <c>_topSegment</c> 本を持つので「可視分 + 読み飛ばし分」を要求しないと
+    /// 打ち切りが浅すぎ、直後の <c>Math.Min(skip, segs.Count - 1)</c> が<b>打ち切り後の</b>
+    /// 最終セグメントへ誤って寄せる。結果、積み上げが実際より縮み
+    /// <b>可視域の外にある視覚行を「可視」として返す</b>(equivalent mutant ではない)。
+    /// 実害は UIA <c>GetBoundingRectangles</c> / <c>PointFromCharOffset</c> /
+    /// システムキャレット位置が誤った視覚行を指すこと=SR 経路。
+    /// </summary>
+    /// <remarks>
+    /// 同型の <c>+ skip</c> は <c>CountVisualRowsForward</c> と <c>ViewportLayout.Build</c> にも
+    /// あり、そちらには既に網がある。ここが 3 兄弟で唯一の穴だった(最終レビュー品質パス)。
+    /// 穴になった理由は既存 fixture の <c>visibleRows</c> が先頭行のセグメント数以上で、
+    /// <b>打ち切りが一度も噛まなかった</b>こと=可視行数 &lt; 先頭行の残りセグメント数、が
+    /// この網の要である。
+    /// </remarks>
+    [Fact]
+    public void ComputeCaretPoint_BudgetsSkippedRows_WhenLeadingLineIsTruncated() =>
+        Sta.Run(() =>
+        {
+            // 論理行 0 = 20 文字(wrap=2 → 視覚行 10 本)・論理行 1 = "klmnop"。
+            // 可視 3 行なので、先頭行の Wrap は必ず打ち切られる。
+            var (f, c) = MakeControl(new string('a', 20) + "\nklmnop", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                Assert.Equal(10, SegCount(c, snap, 0)); // fixture 前提: 先頭行は 10 視覚行
+                int lh = c.LineHeightPx;
+                const int Line1Head = 21; // 20 文字 + "\n"
+
+                // (a) TopSegment=5 → 論理行 1 の先頭は視覚行 10 - 5 = 5。可視 3 本の外=不可視。
+                //     予算から skip を落とすと先頭行を 3 本しか Wrap せず、
+                //     eff = Math.Min(5, 3 - 1) = 2 → 積み上げ 1 → Y = lh で「可視」と誤答する。
+                c.SetTopPosition(0, 5);
+                Assert.False(
+                    c.ComputeCaretPoint(Line1Head).Visible,
+                    "可視域の外(視覚行 5 / 可視 3 本)を可視と報告している"
+                );
+
+                // (b) TopSegment=8 → 同じ位置が視覚行 2 = 可視域の 3 本目。座標も固定して
+                //     「常に不可視を返す」変異と弁別する(予算を落とすとここは Y = lh になる)。
+                c.SetTopPosition(0, 8);
+                var (_, y, visible) = c.ComputeCaretPoint(Line1Head);
+                Assert.True(visible, "視覚行 2 は可視域内");
+                Assert.Equal(2 * lh, y);
             }
         });
 
@@ -1304,6 +1370,58 @@ public class VisualRowScrollTests
                     Wheel(c, 120);
                     Assert.Equal(rows[notch * step], (c.TopLine, c.TopSegment));
                 }
+            }
+        });
+
+    /// <summary>
+    /// 起点が<b>論理行を跨いで</b>動いたとき VScrollBar のサムが追従すること
+    /// (<see cref="EditorControl.SetTopPosition"/> の <c>_vscroll.Value</c> 同期)。
+    /// </summary>
+    /// <remarks>
+    /// 折り返し ON では <c>SetTopPosition</c> が主スクロール経路(A-6 の本体)であり、
+    /// キーボード追従・ホイールが論理行を跨いだときの<b>唯一のサム同期点</b>である。
+    /// <c>UpdateVerticalScrollbar</c> は編集 / リサイズ時にしか走らないため、純粋な
+    /// ナビゲーション中は復旧しない。同期の 2 行を落とすと「↓ を押し続けても /
+    /// ホイールを回してもサムが動かず、次にサムを掴むと画面が飛ぶ」
+    /// (CLAUDE.md §2「晴眼・弱視ユーザーも第一級」に直接効く・equivalent mutant ではない)。
+    /// <para>
+    /// 段落<b>途中</b>(同一論理行内)ではサムが動かないのは意識的な近似(設計書 §4.4 / S-3)。
+    /// ここで固定するのは「論理行が変わったら追従する」ことだけである。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void MouseWheel_WithWrap_KeepsVScrollValueInSyncWithTopLine() =>
+        Sta.Run(() =>
+        {
+            // 1 段落 = 5 視覚行 × 8 段落 = 40 視覚行(論理行を何度も跨ぐ)。
+            var (f, c) = MakeControl(Paragraphs(8, 10), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                var bar = VScroll(c);
+                Assert.Equal(8, c.Buffer!.Current.LineCount); // fixture 前提: 論理行は複数本
+                Assert.Equal(0, bar.Value);
+
+                var seenLines = new HashSet<int>();
+                for (int notch = 0; notch < 20; notch++)
+                {
+                    Wheel(c, -120);
+                    seenLines.Add(c.TopLine);
+                    Assert.Equal(c.TopLine, bar.Value);
+                }
+                Assert.True(c.TopLine > 0, "fixture 前提: 下方向で論理行を跨いでいる");
+                Assert.True(
+                    seenLines.Count >= 3,
+                    $"fixture 前提: 論理行を複数回跨いでいる(観測 {seenLines.Count} 種)"
+                );
+
+                // 上方向も追従する(下がったまま張り付かない)。
+                for (int notch = 0; notch < 20; notch++)
+                {
+                    Wheel(c, 120);
+                    Assert.Equal(c.TopLine, bar.Value);
+                }
+                Assert.Equal(0, c.TopLine); // 文書頭まで戻り切っていること
             }
         });
 
