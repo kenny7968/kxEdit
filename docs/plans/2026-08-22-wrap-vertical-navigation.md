@@ -1101,16 +1101,29 @@ dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~Vi
 置き換え前後で `MouseInputTests` / `EditorControlOffsetFromPointTests` が
 **1 行も変更せずに全緑**であることが等価性の証拠。
 
+具体的には、現在の `while (rowsToAdvance > 0) { ... }` ループと `segCount` の管理を丸ごと
+次に置き換える(`exhausted` の意味は変わらない)。
+
 ```csharp
-        int line = _topLine;
-        int segIdx = _topSegment; // I-2: 可視域の最上段は TopLine の _topSegment 本目
-        int rowsToAdvance = visualRowFromTop;
-        int segCount = SegmentCountAtLine(snap, line, maxWidthPx);
-        // _topSegment が実セグメント数以上(編集で段落が縮んだ)= 最終セグメントへ寄せる
-        // (ViewportLayout.Build / ComputeCaretPoint と同じクランプ)
-        if (segIdx >= segCount)
-            segIdx = segCount - 1;
+        // (TopLine, TopSegment) の視覚行から visualRowFromTop 個進む。前進規約は seam に一本化する
+        // (規約を二重定義しない・折り返し OFF ガードと打ち切りを継承する)。
+        // 文書末に達した場合(Exhausted)は文書末尾へクランプする=X による位置決めは行わない。
+        var (line, segIdx, exhausted) = WalkForwardVisualRows(
+            snap,
+            _topLine,
+            _topSegment,
+            visualRowFromTop
+        );
+
+        // 最終視覚行より下 → 文書末尾にクランプ
+        if (exhausted)
+            return snap.CharLength;
 ```
+
+**この後の `int useSeg = Math.Min(segIdx, segs.Count - 1);` は残すこと。**
+`visualRowFromTop == 0` のとき `WalkForwardVisualRows` は while ループに入らず
+`_topSegment` をそのまま返すため、陳腐化した `_topSegment`(編集で段落が縮んだ)を
+寄せる役目がここに残っている。
 
 doc コメントの「`Y < 0` は `_topLine` の先頭視覚行にクランプ」を
 「`(_topLine, _topSegment)` の視覚行にクランプ」へ更新する。
