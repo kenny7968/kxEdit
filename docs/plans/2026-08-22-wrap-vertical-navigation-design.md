@@ -324,3 +324,15 @@ v0.2 の直前に入れる変更ではない。§8 申し送り。
 | S-3 | 垂直スクロールバーの視覚行対応(§4.4)。全論理行の視覚行数キャッシュが前提=別テーマ |
 | S-4 | `VerticalNavigation` がキー 1 打ごとに現在行・移動先行を完全 Wrap している(巨大 1 行で毎回 ~30 ms)。`WrapThroughOffset` / `WrapFirstSegments` で打ち切れる可能性がある |
 | S-5 | E-1 が A-6 修正後も再現する場合は UIA 側の独立欠陥として起票する(§1.3) |
+
+### 実装中に決まった追記(2026-08-23・Task 7)
+
+策定時のスナップショット(§1〜§7)は変更していない。以下は実装で判明し、
+実装計画の実施記録から回収した申し送りである。
+
+| ID | 内容 |
+|----|------|
+| S-6 | **`OnPaint` での `_topSegment` 自己修復案は却下した**。`ViewportLayout.Build` が返す `rows[0].SegmentIndex` を `_topSegment` へ書き戻せば陳腐化(編集で先頭段落が縮んでも `_topSegment` をリセットしない設計=§4.1)が無料で消える、という案が Task 3 の品質レビューで出た。却下の理由は 2 つ。(a) **描画中に状態を書くのは再入・順序の観点でリスク**(`Invalidate` を誘発する経路との相互作用、`OnPaint` が UI スレッド以外から来ないという前提への依存が増える)。(b) **残る実害が確認できない**=陳腐化は `AfterEdit` → `BringCaretIntoView` の第 1 分岐(辞書順比較)が編集直後に必ず修復するため、1 フレームを跨いで残らない。**将来 `BringCaretIntoView` の呼び出し構造を変えるとき(S-8)は再検討の価値がある**=第 1 分岐が自己修復を担っている事実が前提になっているため |
+| S-7 | **`PointFromCharOffset` の `Point.Empty` は「不可視」と「可視域最上段の行頭」を弁別できない**。`Point.Empty == new Point(0, 0)` であり、可視域最上段の行頭は座標も `(0, 0)` になる。public API の設計上の瑕疵。テストは `ComputeCaretPoint` の `Visible` フラグで弁別している(Task 4 で計画のテスト期待値が原理的に矛盾していたのはこれが原因)。戻り値を `Point?` にするのが筋だが public API の破壊的変更=別テーマ |
+| S-8 | **`BringCaretIntoView` が 1 打鍵で 2 回呼ばれる**(`EditorControl.Caret.cs` の `SetCaretCharOffset` 内の追従と、`InputRouter.cs` の `ApplyNavMove` 末尾の明示呼び出し)。**本ブランチ以前からの構造**で本ブランチは呼び出し元を変えていないが、折り返し ON では 1 打鍵あたりの `LineLayout.WrapThroughOffset` を **2 倍**にしている(実測=実装計画 Task 5 の実施記録)。重複解消は別テーマ。S-4 と併せて扱うのが筋 |
+| S-9 | **ホイール 1 ノッチの送り量(絶対量)の網は本ブランチで張ったが、既存 `MouseInputTests`(折り返し OFF 経路)は今も「TopLine が増えた/減った」しか見ていない**。`OnMouseWheel` の `wheelLines` に +1 する変異は折り返し OFF 側では今も生存する。本ブランチの変更対象外のため触っていない |

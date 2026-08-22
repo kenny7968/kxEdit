@@ -1855,3 +1855,216 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   - 受容したトレードオフ(右端で 1 コードポイント内側・スクロールバーは論理行基準のまま)
   - 申し送り S-1〜S-5(設計書 §8)
   - **L5 は未実施**であること(実施したらチェックリストの結果を追記する)
+
+---
+
+## 実施記録(2026-08-23・Task 7)
+
+本節は CLAUDE.md §8 が認める「実装時の精密化・実施記録の追記」である。
+Task 1〜6 の各節(策定時スナップショット)は書き換えていない。
+
+### 1. コミット
+
+| Task | commit | 内容 |
+|------|--------|------|
+| — | `b77d1dd` | 設計書 |
+| — | `4cfe577` | 実装計画 |
+| 1 | `70e8daf` | fix(core): 非最終視覚行の segEnd に着地しない(A-5) |
+| 1 | `b81f232` | docs: ミューテーション検証の順序を訂正し A-5 の赤の実測を反映 |
+| 2 | `65b1ba9` | refactor(core): `ViewportLayout.Build` に topSegment を足す(挙動不変) |
+| 2 | `74c04cf` | fixup(core): topSegment 負値ガードに網を張る(レビュー Minor 2 件) |
+| 3 | `e76de4f` | feat(editor): 視覚行の状態とヘルパ(挙動不変) |
+| 3 | `52903d9` | docs: Task 6 に S1144 局所抑止の除去ステップを追加 |
+| 3 | `b0fef66` | fixup(editor): 陳腐化クランプと折り返し OFF の追加コストを塞ぐ(レビュー) |
+| 3 | `34d9ad7` | docs: Task 4 で `OffsetFromClientPoint` を seam に載せる方針へ変更(品質レビュー) |
+| 3 | `78fba6d` | fixup(editor): seam に総当りオラクルの網・規約重複の解消(品質レビュー) |
+| 3 | `0f8ffce` | test(editor): 陳腐化 seg の距離計算に網を張る(品質レビュー) |
+| 4 | `9b16ed4` | docs: Task 4 Step 4 のコード例を seam 方針に合わせる |
+| 4 | `85ecb2e` | feat(editor): 座標・ヒットテスト・可視域報告を TopSegment 起点に(挙動不変) |
+| 4 | `07be9b7` | fixup(editor): S1144 抑止理由の陳腐化を直す |
+| 4 | `f856135` | fixup(editor): 陳腐化クランプに網・可視行の起点を機構で共有(レビュー Minor) |
+| 5 | `76792f4` | fix(editor): 折り返し ON でキャレットを視覚行で追従スクロール(A-6) |
+| 5 | `8ea2bfe` | test(editor): 生存変異 3 件を塞ぎ「順序が load-bearing」の記述を実態へ直す |
+| 5 | `91ccf2b` | docs: Task 5 のミューテーション検証 実施記録 |
+| 5 | `4fa7a0d` | fixup(editor): 性能申し送りの過小申告を訂正・A-6 の到達症状に網(レビュー) |
+| 5 | `d662776` | fixup(test): ↓ の道中で起点が最下段に居続けることを固定(レビュー) |
+| 6 | `c4c6827` | fix(editor): 折り返し ON のホイールを視覚行送りに(A-6)+ S1144 抑止の除去 |
+| 6 | `510cee9` | fixup(test): ホイール 1 ノッチの絶対量に網を張る(レビュー Minor 1) |
+| 7 | 本コミット | test(smoke)/docs: 性能ベンチ・L5 チェックリスト・実施記録 |
+
+### 2. 性能ベンチの実測値と §5-2 のメモの判断
+
+```powershell
+dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --wrapscroll
+```
+
+**測定条件**: CJK 500,000 文字の**単一論理行**(改行なし)・折り返し ON(`WrapColumns=80`)・
+`ClientSize={884, 661}` / `LineHeightPx=20`(可視 33 視覚行)・
+`MouseWheelScrollLines=3`(1 ノッチ = 3 視覚行)・**画面内 Form**・**`editor.Focus()` あり**。
+実測で **1 視覚行 = 60 文字**(全角が半角 2 桁ぶんとは限らない)= 文書全体で約 **8,333 視覚行**。
+数値は連続 2 回の実行でほぼ一致した(下表は 2 回目)。
+
+**(1) 1 フレーム描画**(設計書 §5-2 が受容した O(topSegment)/フレーム)
+
+| topSegment | ms/frame |
+|---:|---:|
+| 0 | 33.1 |
+| 100 | 31.9 |
+| 1000 | 32.7 |
+| **5000** | **36.4** |
+
+**(2) ↓ 1 打鍵**(20 打鍵の平均。`topBefore == topAfter` の行は起点が動かない打鍵 = Wrap 2 回、
+違う行は起点が動く打鍵 = Wrap 3 回。`nominalSeg` は狙いの深さで、実際の深さは `topBefore`)
+
+| nominalSeg | topBefore | topAfter | ms/key |
+|---:|---:|---:|---:|
+| 0 | 0 | 0 | 25.4 |
+| 100 | 69 | 89 | 27.6 |
+| 1000 | 981 | 1001 | 30.9 |
+| **5000** | **5035** | **5055** | **45.6** |
+
+**(3) ホイール 1 ノッチ**(= 3 視覚行。10 ノッチの平均。毎回同じ深さへ戻してから 1 ノッチを測る)
+
+| topSegment | 下方向 ms/notch | 上方向 ms/notch |
+|---:|---:|---:|
+| 0 | 4.2 | 0.0 |
+| 100 | 4.2 | 1.9 |
+| 1000 | 4.8 | 2.1 |
+| **5000** | **8.5** | **2.1** |
+
+**判断: 設計書 §5-2 の 1 エントリメモ(`(snapshot, line, wrap, topSegment) → 行内 char offset`)は
+実装しない。申し送りに残す。**
+
+理由:
+
+1. **判定ゲートを大きく下回る**。`TopSegment=5000` の描画は **36.4 ms/frame** で、
+   計画の判定基準 100 ms/frame の 3 分の 1 強。PR #35 の基準値 30.1 ms/frame からの
+   悪化も約 6 ms に留まる。
+2. **O(topSegment) の増分が支配項ではない**。`topSegment` 0 → 5000 の増分は
+   描画で **+3.3 ms**(≒ 11 ns/char)。フレームの大半(約 32 ms)は深さに依存しない定数
+   (論理行全文の string 化 + 可視 33 行の GDI 描画)で、メモを入れても消えるのは
+   3.3 ms のうちの一部でしかない。
+3. **同じ結論がホイールでも成り立つ**。下方向 1 ノッチの深さ依存増分は
+   0 → 5000 で **+4.3 ms**(4.2 → 8.5 ms)。上方向は **2.1 ms で平坦**
+   = `WalkBackVisualRows` の `seg >= n` 即 return が O(1) であることの実証。
+   非対称は数値に出ているが、絶対値がホイール 1 ノッチとして体感できる水準ではない。
+4. **メモは正しさのリスクを増やす**。キー(snapshot / line / wrapColumns / topSegment)の
+   どれか 1 つでも無効化を落とすと、**編集後に誤った位置から描く**という
+   「静かに壊れる」種類の欠陥になる。3.3 ms のために v0.2 直前に入れる変更ではない。
+
+**この判断の限界(申し送り)**: 本ベンチが測ったのは 500K 単一論理行・約 8,333 視覚行で、
+`topSegment=5000` は文書の 60% 相当である。**より深い位置・より長い行では線形に伸びる**。
+体感の閾値(100 ms/frame)に届くのは、上の傾き(3.3 ms / 5000 セグメント)から外挿すると
+**約 10 万視覚行**(= 600 万文字の単一段落)の深さになる。到達しうる文書が出てきたら
+§5-2 のメモを再検討する。
+
+**支配項は別にある(こちらの方が体感に効く)**: **↓ 1 打鍵が深さ 5000 で 45.6 ms**
+(深さ 0 でも 25.4 ms)。この 25 ms の下駄は A-6 由来ではなく、
+`VerticalNavigation` がキー 1 打ごとに現在行・移動先行を完全 Wrap している既存コスト
+(申し送り S-4)である。深さによる増分 +20 ms は
+「`BringCaretIntoView` が 1 打鍵で 2 回呼ばれる」構造(申し送り S-8)が
+`WrapThroughOffset` を 2 倍にしているぶんが効いている。
+**S-4 と S-8 を潰す方が §5-2 のメモより費用対効果が高い**。
+
+### 3. 計画から逸脱した点
+
+計画は策定時スナップショットなので節そのものは直していない。実装で判明した
+**計画側の誤り**を以下に記録する。
+
+**Task 1** — 計画の「赤の予測」が誤りだった。修正前の実測は `[9, 13, 17]` ではなく
+**`[9, 17, 21]`**。A-5 の飛ばしは 1 回で済まず、**押すたびに視覚行を 1 本ずつ食い潰す**
+(飛び幅が広がっていく)。症状の理解そのものが計画より重かった。
+`b81f232` で計画本文の該当箇所に反映済み。
+
+**Task 2** — (a) `tests/kxEdit.Core.Bench/Program.cs` が計画の Files 節から**漏れていた**。
+`topSegment` を必須引数にしたため 9 箇所がコンパイル不能になった。
+(b) `topSegment` の**負値ガードに網が無かった**(レビュー指摘・`74c04cf` の fixup で追加)。
+
+**Task 3** — (a) **計画のコードのままではビルドが通らない**。呼び出し元を持たない private
+ヘルパ 4 本に SonarAnalyzer **S1144** が出て `-warnaserror` でエラーになる。
+`#pragma warning disable S1144` の局所抑止を入れ、Task 6 で呼び出し元が入った時点で
+除去するステップを計画へ追記した(`52903d9`)。
+(b) `WalkForwardVisualRows` が**陳腐化した seg で行き過ぎる**欠陥(`b0fef66` の fixup で修正)。
+(c) **折り返し OFF でも `LineTextOf` が論理行全文を string 化していた**
+(= I-3「OFF では増分ゼロ」が破れていた。同 fixup で塞いだ)。
+(d) 品質レビューの指摘で Task 4 の方針を変更(`OffsetFromClientPoint` も seam に載せる・`34d9ad7`)。
+
+**Task 4** — (a) **計画のテスト期待値が原理的に矛盾していた**。`Point.Empty == new Point(0, 0)`
+なので `PointFromCharOffset` では「可視域最上段の行頭」と「不可視」を弁別できない。
+`ComputeCaretPoint` の `Visible` フラグで判定するようテストを組み替えた(設計書 S-7 に記録)。
+(b) 計画の 3 テストが**すべて単一論理行 fixture** で、**論理行を跨ぐ積み上げに網が無かった**。
+
+**Task 5** — (a) コントローラの指示「判定の**記述順**が load-bearing」は**誤り**だった。
+2 条件は排他なので記述順は観測不能(equivalent mutant)。load-bearing なのは
+**辞書順で弁別する第 1 分岐が存在すること**である(落とす変異は 4 件が kill する)。
+実装の remarks をこの実態へ訂正した(`8ea2bfe`)。
+(b) **性能の申し送りが過小申告だった**(1 打鍵 +1 回 → 実測 **+2 回**、実機ではさらに +1 で最大 3 回)。
+`4fa7a0d` で訂正。
+
+**Task 6** — (a) **計画のコードはコンパイルできない**。
+`deltaRows < 0 ? WalkBackVisualRows(...) : WalkForwardVisualRows(...)` は
+両辺が 2 要素タプルと 3 要素タプルで共通型を持たない(**CS0173**)。`if/else` に展開した。
+(b) 計画のテストは**上ループの変異を殺せなかった**(最終状態が偶然一致するため)。
+`510cee9` で 1 ノッチの絶対量に網を張った。
+
+**横断する教訓** — 計画に書いたテストは**期待値は正しいのに fixture が狭くて狙った境界に
+当たらず変異が生存する**という事故が **6 回連続**で起きた。パターンは 3 つに集約できる。
+
+1. **単一論理行だけの fixture**(論理行を跨ぐ積み上げ・数え落とし・二重数えに当たらない)。
+2. **実在する視覚行しか起点にできないオラクル**(陳腐化 seg・起点より上の位置に当たらない)。
+3. **最終状態しか見ないループ**(道中で 1 本ずれていても、上限や文書末に張り付いて
+   最終値が一致してしまう)。
+
+**計画にテストを書く時点で「この fixture でその変異は本当に観測できるか」を
+1 件ずつ当てて確かめる**のが唯一の対策だった。期待値の正しさは網の強さを保証しない。
+
+### 4. 既存テストの変更(不変条件 I-3 の証拠)
+
+**設計書 §6 が I-3 の証拠として名指しした 5 本は、1 バイトも変更していない。**
+
+| ファイル | 状態 |
+|---|---|
+| `tests/kxEdit.Editor.Tests/CaretScrollTests.cs` | **無改変** |
+| `tests/kxEdit.Editor.Tests/UiaScrollIntoViewTests.cs` | **無改変** |
+| `tests/kxEdit.Editor.Tests/UiaVisibleRangeTests.cs` | **無改変** |
+| `tests/kxEdit.Editor.Tests/EditorControlWrapCaretTests.cs` | **無改変** |
+| `tests/kxEdit.Editor.Tests/MouseInputTests.cs` | **無改変** |
+
+`git diff --numstat efd2127..HEAD -- tests/kxEdit.Editor.Tests` は
+`VisualRowScrollTests.cs`(**新規** 1374 行・削除 0)のみを返す。
+
+**ただし「既存テストの変更ゼロ」ではない**。Core.Tests / Core.Bench 側に
+**呼び出し側の機械的な追随**が 25 行ある。
+
+| ファイル | +/− | 内容 |
+|---|---|---|
+| `tests/kxEdit.Core.Bench/Program.cs` | 53/8 | `ViewportLayout.Build(...)` 8 箇所に `topSegment: 0` を足す(Task 2 で必須引数化) |
+| `tests/kxEdit.Core.Tests/Layout/ViewportLayoutTests.cs` | 143/8 | 同上 8 箇所 + topSegment のテスト追加 |
+| `tests/kxEdit.Core.Tests/Layout/ViewportLayoutPrefixTests.cs` | 35/7 | 同上 7 箇所 |
+| `tests/kxEdit.Core.Tests/Layout/FrameBuilderTests.cs` | 17/2 | 同上 2 箇所 |
+| `tests/kxEdit.Core.Tests/Layout/VisualSegmentsTests.cs` | 35/0 | 追加のみ |
+| `tests/kxEdit.Core.Tests/Editing/VerticalNavigationTests.cs` | 104/0 | 追加のみ |
+
+**削除された 25 行はすべて `ViewportLayout.Build(...)` の呼び出し 1 行**であり、
+**assertion・期待値・fixture を書き換えた箇所は 1 件も無い**
+(`git diff efd2127..HEAD -- tests/ | grep '^-' | grep -v '^---'` で機械的に確認できる)。
+折り返し OFF の挙動を固定している既存の期待値は、Core / Editor とも一切触れていない。
+
+### 5. Task 6 のミューテーション記録の数値訂正
+
+Task 6 実施時に「`ScrollByVisualRows` の折り返し OFF 委譲ブロック
+(`TopLine = _topLine + deltaRows`)の符号を反転する変異は **4 件 red**」と報告したが、
+レビュアーの実測では **3 件 red** が正しい。結論(= OFF 経路にも網が掛かっている)は
+変わらないが、数値は訂正しておく。
+
+### 6. 品質ゲート
+
+`powershell -File tools\pre-merge-check.ps1` → **EXIT 0**
+(Local tool restore → CSharpier check → Release ビルド 0 警告 → Core / Editor / App 全緑)。
+
+### 7. 残作業
+
+- **L5 実機 SR 検証は未実施**。`docs/plans/2026-08-22-wrap-vertical-navigation-l5-checklist.md`
+  の 8 項目(計画の 6 項目 + ⑦ 段落途中の描画 + ⑧ スクロールバーのサム)をユーザーが実施する。
+  **⑦ は自動テストでは原理的に確認できない**(オフスクリーン Form に WM_PAINT が来ない)。
+- 最終ブランチレビュー(コード品質パス / 脆弱性パスの 2 パス・別エージェント)。

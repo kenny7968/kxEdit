@@ -23,6 +23,14 @@ if (args.Length > 0 && args[0] == "--largeline")
     return LargeLineBench.Run();
 }
 
+// 2026-08-22 A-6(視覚行スクロール)Task 7: --wrapscroll。巨大段落の途中へスクロールした
+// 状態のコストを 3 系統(1 フレーム描画・↓ 1 打鍵・ホイール 1 ノッチの上下)で測る
+// (設計書 §5-2 が受容した O(topSegment) コストの実測。詳細は WrapScrollBench のクラス doc)。
+if (args.Length > 0 && args[0] == "--wrapscroll")
+{
+    return WrapScrollBench.Run();
+}
+
 // 2026-08-03 UIA 単語単位調査 Task 1 で新設し、2026-08-04 の修正 Task 6 で作り直した
 // --wordunit。調査時代は「UIA の単語スパン(空白のみ区切り)が Ctrl+←→ / ダブルクリック選択
 // (文字クラス規則)とずれる」ことの採取が目的だったが、その素朴実装は修正 Task 3 で消えた。
