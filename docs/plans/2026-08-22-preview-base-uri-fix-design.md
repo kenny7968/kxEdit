@@ -113,6 +113,12 @@ Markdig 1.3.2 の DLL で確認済み。`MarkdownPipelineBuilder.Extensions` は
 
 **機能影響**: `{#id}` / `{.class}` 記法が本文にリテラル表示されるようになる。
 見出しの id は別拡張 `UseAutoIdentifiers` が生成し続けるためアンカーは維持される。
+
+> **実装時の訂正(2026-08-22 / Task 1 仕様レビュー)**: 「アンカーは維持される」は誤り。
+> id は生成され続けるが**値が変わる**(`# Title {#custom}` は `id="custom"` → `id="title-custom"`)。
+> 既存 .md 内の `[link](#custom)` は切れる。策定時に fixture `# 見出し {#custom}` で検算したが、
+> 非 ASCII の見出しは slug 生成で捨てられ base / 修正後とも `id="custom"` になる**偶然の一致**で、
+> 検算が成立していなかった。
 プレビューの CSS は固定(ユーザーがスタイルシートを差し替える経路がない)ので、
 class 指定に実用価値はない。既存テストに generic attributes 依存は 0 件。
 
