@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
@@ -236,6 +237,34 @@ public class MainFormSmokeTests
             Assert.Equal((2, 5), doc.Editor.GetSelectionCharRange());
         });
 
+    // A-3(2026-08-22): grep 結果からのジャンプで画面が追従することの固定。
+    [Fact]
+    public void OpenAndSelect_ScrollsTargetIntoView() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string path = tmp.File("many-lines.txt");
+            var lines = Enumerable.Range(0, 200).Select(i => $"line{i}").ToArray();
+            File2.WriteAllText(path, string.Join("\r\n", lines));
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            // 末尾行(index 199)の先頭オフセット。
+            int offset = string.Join("\r\n", lines.Take(199)).Length + 2; // +2 = 直前の CRLF
+            form.OpenAndSelect(path, offset, length: 4);
+
+            var doc = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(doc);
+            int visibleRows = Math.Max(
+                1,
+                doc!.Editor.ClientSize.Height / Math.Max(1, doc.Editor.LineHeightPx)
+            );
+            int hitLine = doc.Editor.CurrentLine;
+            // オフセットがずれて「たまたま緑」にならないよう、対象行自体を固定する。
+            Assert.Equal(199, hitLine);
+            Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
+            Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
+        });
+
     // ===== hot exit 統合: OnShown の silent 統合復元(設計 §3.3/§8) =====
 
     // 統合復元 e2e: layout(パスあり clean+無題 dirty+アクティブ指定)+backups →
@@ -272,6 +301,53 @@ public class MainFormSmokeTests
             Assert.Equal("unsaved-text", docs[1].Editor.SnapshotText);
             Assert.True(docs[1].Editor.Modified);
             Assert.True(IsActiveTab(docs[1])); // IsActive 反映
+        });
+
+    // A-3(2026-08-22): 復元したキャレットが可視域に入ること。復元経路は
+    // FileController の SetCaretByLineColumn(=SetCaretCharOffset 委譲)なので、
+    // Task 2 の setter 追従がここまで届いていることの確認。非アクティブタブ(disk 再オープン)と
+    // アクティブタブ(バックアップからの無題復元)の両方を 1 本で観測する
+    // (TabControl は非アクティブページのハンドル生成が遅れ得るため、可視域計算の前提が
+    // タブの状態で変わらないことまで固定する)。
+    [Fact]
+    public void OnShown_UnifiedOn_RestoredCaret_ScrollsIntoView() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("many.txt");
+            var lines = Enumerable.Range(0, 200).Select(i => $"line{i}").ToArray();
+            File2.WriteAllText(p1, string.Join("\r\n", lines));
+            string dirtyId = NewId();
+            PlantBackup(tmp, Rec(dirtyId, path: null, untitledNumber: 2, string.Join("\n", lines)));
+            // caret を末尾付近(190)に置く=既定の TopLine=0 では絶対に見えない位置。
+            PlantLayout(
+                tmp,
+                new SessionLayoutRecord(p1, 0, null, false, CaretLine: 190, CaretColumn: 0, 0),
+                new SessionLayoutRecord(null, 2, dirtyId, IsActive: true, 190, 0, 0)
+            );
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            var docs = form.FileForTest.DocsForTest;
+            Assert.Equal(2, docs.Count);
+            Assert.Equal(p1, docs[0].State.Path); // disk 再オープン経路
+            Assert.Null(docs[1].State.Path); // バックアップからの無題復元経路
+            Assert.False(IsActiveTab(docs[0])); // 非アクティブ側も観測対象であることを固定
+            Assert.True(IsActiveTab(docs[1]));
+            foreach (var d in docs)
+            {
+                int visibleRows = Math.Max(
+                    1,
+                    d.Editor.ClientSize.Height / Math.Max(1, d.Editor.LineHeightPx)
+                );
+                int caretLine = d.Editor.CurrentLine;
+                Assert.Equal(190, caretLine); // 復元 caret 自体は従来どおり
+                Assert.True(d.Editor.TopLine > 0, $"expected TopLine > 0, got {d.Editor.TopLine}");
+                Assert.InRange(caretLine, d.Editor.TopLine, d.Editor.TopLine + visibleRows - 1);
+            }
         });
 
     // E5'(layout null=クラッシュ等でレイアウト喪失)+ ON は OfferRestore を呼ばない pin:
