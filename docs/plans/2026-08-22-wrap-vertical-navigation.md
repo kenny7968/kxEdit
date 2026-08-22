@@ -29,6 +29,10 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
   「変異させたのに緑」を誤認する。過去ブランチで実際に踏んだ事故)。
 - **`--filter` で 1 件に絞った結果からミューテーションの結論を出さない**。変異が本当に kill されたかは
   対象プロジェクト全件で確認する(絞ると別の網が拾っていることを見落とす)。
+- **ミューテーション検証は必ずコミットしてから行う**。コミット前に `git checkout -- src/` で復元すると
+  **未コミットの実装ごと消える**(Task 1 で実際に踏んだ。復元手順が実装を破壊し、差分が空になって発覚)。
+  順序は「テスト緑 → コミット → 変異 → `git checkout -- src/` で復元 → 全緑を再確認」。
+  変異で網の穴が見つかったら、テストを足して**別コミット**を積む(元コミットは書き換えない)。
 - 0 warning を維持する(`-warnaserror` 稼働中)。
 - コミットは `--no-verify` を使わない(CSharpier 整形+ローカルパス検出フックを通す)。
 - コミットメッセージは日本語。末尾に `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`。
@@ -150,9 +154,12 @@ dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~Vert
 ```
 
 期待: 5 件中 4 件が FAIL。
-- `MoveDown_WithWrap_FromLineEnd_...` → `Assert.Equal(8, t)` が `9` で失敗
+- `MoveDown_WithWrap_FromLineEnd_...` → 先行する `Assert.InRange(t, 5, 8)` が Actual `9` で失敗
+  (`Assert.Equal(8, t)` まで到達しない。原因は同一)
 - `MoveUp_WithWrap_FromRightEdge_...` → 2 回目の `caret < before` で失敗
-- `MoveDown_WithWrap_RightEdge_...` → `[9, 13, 17]` が返って失敗
+- `MoveDown_WithWrap_RightEdge_...` → **実測は `[9, 17, 21]`**(策定時の予測 `[9, 13, 17]` は誤り)。
+  caret=9 は視覚行 1 の先頭と解釈されるため 2 回目の ↓ が視覚行 2 へ跳び(17)、3 回目で行 2 へ抜ける(21)。
+  **A-5 の「1 行飛ばし」は 1 回では済まず、押すたびに視覚行を 1 本ずつ食い潰していく**
 - `MoveDownThenUp_...` → 失敗
 - `MoveDown_WithWrap_LastSegment_...` → **PASS**(既に正しい挙動=クランプの過剰適用を検出する網)
 
@@ -274,6 +281,10 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 (A-5 の修正が既存の被覆範囲を壊していない証拠)。
 
 ### Step 6: ミューテーション検証(2 件)
+
+> **実装時に判明した手順の誤り(2026-08-22)**: 本 Step は当初 Step 7(コミット)より前に置いていたが、
+> 末尾の復元手順 `git checkout -- src/` は**未コミットの実装ごと消す**。実装中に実際にこれを踏んだ。
+> **正しい順序は Step 7(コミット)→ Step 6(変異 → 復元 → 全緑再確認)**。共通ルールに反映済み。
 
 `--no-build` を付けずに実行すること。
 
@@ -1382,17 +1393,7 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 `EditorControlWrapCaretTests`)を 1 行も変更していない**こと=設計書 I-3 の証拠その 2。
 もしこれらが赤くなったら、折り返し OFF の退化が壊れている(実装の誤り)。**テストを直さない**。
 
-### Step 6: ミューテーション検証(2 件)
-
-1. `caretSeg < _topSegment` を `caretSeg <= _topSegment` にする
-   → `BringCaretIntoView_WithWrap_NoOp_WhenCaretAlreadyVisible` か
-   `KeyDown_Up_WithWrap_ScrollsBackToTop` が赤くなること。
-2. `WalkBackVisualRows(..., visibleRows - 1)` を `visibleRows` にする
-   → `EnsureVisibleCharRange_WithWrap_PutsTargetAtBottom` が赤くなること。
-
-確認後 `git checkout -- src/` で復元し、全緑を再確認する。
-
-### Step 7: コミット
+### Step 6: コミット
 
 ```powershell
 git add -A
@@ -1410,6 +1411,19 @@ BringCaretIntoView / ScrollCharRangeIntoView の可視判定を論理行から�
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+### Step 7: ミューテーション検証(2 件)
+
+**コミット後に行う**(共通ルール参照。コミット前に復元すると実装ごと消える)。
+
+1. `caretSeg < _topSegment` を `caretSeg <= _topSegment` にする
+   → `BringCaretIntoView_WithWrap_NoOp_WhenCaretAlreadyVisible` か
+   `KeyDown_Up_WithWrap_ScrollsBackToTop` が赤くなること。
+2. `WalkBackVisualRows(..., visibleRows - 1)` を `visibleRows` にする
+   → `EnsureVisibleCharRange_WithWrap_PutsTargetAtBottom` が赤くなること。
+
+確認後 `git checkout -- src/` で復元し(コミット済みなので実装は戻る)、全緑を再確認する。
+変異が生存したら網の穴なので、テストを足して**別コミット**を積む。
 
 ---
 
