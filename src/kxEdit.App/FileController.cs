@@ -986,11 +986,16 @@ public sealed class FileController
 
     /// <summary>
     /// 保存先の既存有無を得る。到達不能なら false(エラー表示済み)。
+    /// <b>false を返したとき <paramref name="exists"/> は無意味</b>(未存在と到達不能を区別できない
+    /// =<see cref="SaveTargetProbeResult"/> の契約)。必ず戻り値を先に見て短絡すること。
     /// リモート(UNC / マップドネットワークドライブ)だけを 5 秒プローブに載せる。
     /// ローカルを素通りさせるのは意図的(設計書 §3.3): ローカルには従来から到達性検査が無く、
     /// ここでゲートを外すと「存在しないフォルダー配下への保存」が WriteToPath の
     /// ロールバック導線に届かなくなる=挙動が変わる。
     /// </summary>
+    /// <param name="exists">
+    /// 保存が上書きになる(A-7 の上書き確認の入力)。現状 <see cref="WriteToPath"/> は捨てている。
+    /// </param>
     private bool TryInspectSaveTarget(string path, out bool exists)
     {
         if (RemotePathDetector.IsRemote(path))
@@ -1014,7 +1019,9 @@ public sealed class FileController
 
     /// <summary>
     /// 到達不能の通知。CSV-L-5: path は外部入力(SR ユーザーの直入力・grep / BackupRecord 由来)なので
-    /// SanitizeForDisplay で無害化する。Task 4: 復元経路は per-file ダイアログを抑止する。
+    /// SanitizeForDisplay で無害化する。復元経路(<see cref="WithLoadErrorPromptSuppressed"/> 実行中)は
+    /// per-file ダイアログを抑止し、呼出元で失敗パスを集約通知させる(戻り値 false は伝播)
+    /// = 2026-07-23 復元設計 Task 4。
     /// </summary>
     private void ReportUnreachable(string path)
     {
