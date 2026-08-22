@@ -464,6 +464,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         var (caretM, caretK) = CountNonBreakAndBreaksInSnapshot(snap, _caretCtrl.Caret);
         var (anchorM, anchorK) = CountNonBreakAndBreaksInSnapshot(snap, _caretCtrl.Anchor);
         int savedTopLine = _topLine;
+        // 2026-08-22 A-6: EOL 変換は行本文(改行を除く)を変えない=セグメント分割は不変なので、
+        // 段落の途中を表示していたスクロール位置もそのまま復元できる(_scrollX と対称)。
+        int savedTopSegment = _topSegment;
         int savedScrollX = _scrollX;
 
         // ピース単位に UTF-8 byte を走査し、EOL(0x0D/0x0A)を target に置換しつつ
@@ -540,7 +543,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             Math.Min(caretM + caretK * targetCharLen, total),
             _buffer.Current
         );
-        TopLine = savedTopLine; // setter でクランプ+VScrollBar 同期
+        // TopLine セッターは「その行の先頭視覚行から」の意味を持ち _topSegment を 0 に落とすため、
+        // 視覚行位置を保つ SetTopPosition で復元する(クランプ+VScrollBar 同期は同じ)。
+        SetTopPosition(savedTopLine, savedTopSegment);
         ScrollX = savedScrollX; // 同上
         // P7 別エージェント最終レビュー Important-2: TopLine/ScrollX の値が不変(小文書で先頭表示中)
         // だと setter が no-op で PositionCaret 再発火されず、Win32 system caret(SetCaretPos)が
@@ -775,6 +780,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     internal void SetTopPosition(int line, int segment)
     {
         int clampedLine = ClampTopLine(line);
+        // Math.Max(0, segment) は load-bearing: 負のセグメントが _topSegment に入ると
+        // WalkBackVisualRows の `n -= seg` で n が増え、上方向の歩きが文書頭まで暴走する
+        // (Task 2 fixup で ViewportLayout.Build の topSegment 負値に張ったガードと対称)。
         int clampedSeg = clampedLine == line ? Math.Max(0, segment) : 0;
         if (clampedLine == _topLine && clampedSeg == _topSegment)
             return;
@@ -1570,6 +1578,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // その完了時にこの抑止を外すこと。
 
     /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
+    /// <remarks>
+    /// OFF 側の三項は<b>現状の呼び出し元からは到達しない</b>(<see cref="LocateVisualRow"/> も
+    /// <see cref="SegmentCountCapped"/> も <c>_wrapColumns &lt;= 0</c> を先に短絡するため)。
+    /// 将来 OFF でも呼ぶ経路が増えたときのための契約であり、<see cref="ViewportLayout.Build"/> の
+    /// 「到達可能な生きた防御(外してはならない)」とは性質が違う。
+    /// </remarks>
     private int MaxWrapWidthPx => _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
 
     /// <summary>論理行 1 本の本文(改行を含まない)。空行は空文字列。</summary>
@@ -1582,13 +1596,33 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>
     /// 論理行内オフセットが属する視覚セグメントの index を返す(設計書 I-2 の単一定義)。
-    /// 最終セグメントに限り「末尾ちょうど」も許容する(EOL キャレット位置)。
+    /// 通常は「<c>seg.OffsetInLine + seg.Length</c> で終わる直前」まで。最終セグメントに限り
+    /// 「末尾ちょうど」も許容する(EOL キャレット位置)。
     /// </summary>
     /// <remarks>
-    /// <paramref name="reachedLineEnd"/> が false(打ち切られた結果)のとき、最後の要素は
-    /// 論理行の最終セグメントとは限らないため EOL 分岐を発火させてはならない。
-    /// 詳細は <see cref="ComputeCaretPoint"/> 本体のコメント(「本当に load-bearing なのは
-    /// LineLayout.WrapCore の &gt; 1 文字」)を参照。
+    /// <para>
+    /// EOL 分岐は「<paramref name="segments"/> の最後の要素 = 論理行の最終セグメント」を仮定して
+    /// おり、打ち切られている(<paramref name="reachedLineEnd"/> == false)ときその仮定は成り立た
+    /// ない。よって条件に <paramref name="reachedLineEnd"/> を足してあるが、これは防御ではなく
+    /// 「依存関係を明示するドキュメント」である。実際:
+    /// <list type="bullet">
+    /// <item><c>LineLayout.WrapThroughOffset</c> は「covered &gt; offsetInLine」を厳密な不等号で
+    /// 保証するため、打ち切り時は最後の要素で必ず <c>offsetInLine &lt; segEnd</c> が先に成立し
+    /// EOL 分岐には到達しない。</item>
+    /// <item>そもそも EOL 分岐は segIdx を <c>segments.Count - 1</c>(初期値と同じ)にするだけ
+    /// なので、発火してもしなくても結果は変わらない=<paramref name="reachedLineEnd"/> を外しても
+    /// 観測可能な挙動は変化しない(実証済み)。</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// 本当に load-bearing なのは <c>LineLayout.WrapCore</c> の「<c>segStart &gt; minCoverOffset</c>」
+    /// の「&gt;」1 文字の方。ここを「&gt;=」に緩めると「セグメント境界ちょうど」のキャレット
+    /// (offset == 次セグメント先頭)が打ち切りに巻き込まれ、次の視覚行へ降りずに 1 行「上」・
+    /// 前セグメント「末尾」(右端)に留まる。行末キャレットは segStart が line.Length に到達しない
+    /// ため打ち切られず無傷=症状は行末ではなくセグメント境界に出る。この「&gt;」は
+    /// <c>EditorControlWrapCaretTests</c>(Editor 13 件)と <c>LineLayoutPrefixTests</c>(Core 5 件)
+    /// が守っている。
+    /// </para>
     /// </remarks>
     private static int LocateSegmentIndex(
         IReadOnlyList<WrapSegment> segments,
@@ -1650,6 +1684,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <para>
     /// <paramref name="cap"/> は 1 未満でも 1 として扱う(<see cref="LineLayout.Wrap"/> は必ず
     /// 1 個以上返す契約であり、<see cref="LineLayout.WrapFirstSegments"/> は 0 以下で投げるため)。
+    /// この丸めは<b>現状の呼び出し元からは到達しない</b>(3 経路とも 1 以上を渡す)。将来の
+    /// 呼び出し元のための契約であり、<see cref="ViewportLayout.Build"/> の同型の
+    /// <c>Math.Max(1, ...)</c> に付いている「到達可能な生きた防御(外してはならない)」とは
+    /// 性質が違う。
     /// 打ち切りが起きたときの Count は要求値に厳密に等しい(WrapCore の打ち切り判定が
     /// <c>result.Add</c> の直後にしかないため。<see cref="ViewportLayout.Build"/> の同旨のコメント参照)。
     /// </para>
@@ -1676,8 +1714,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <remarks>
     /// 前方距離しか意味を持たないため、(toLine, toSeg) が起点より<b>手前</b>のときは 0 を返す
     /// (呼び出し側が先に辞書順比較で「起点より上」を弁別している前提。設計書 §4.2 の 2→3 の順)。
-    /// <paramref name="fromSeg"/> が先頭行の実セグメント数以上なら最終セグメントへ寄せて数える
-    /// (<see cref="ViewportLayout.Build"/> の topSegment クランプと同じ寄せ方)。
+    /// <b>複数の論理行を跨ぐ場合に限り</b>、<paramref name="fromSeg"/> が先頭行の実セグメント数
+    /// 以上なら最終セグメントへ寄せて数える(<see cref="ViewportLayout.Build"/> の topSegment
+    /// クランプと同じ寄せ方)。同一論理行内(<c>toLine == fromLine</c>)は行の実セグメント数を
+    /// 見ずに <c>toSeg - fromSeg</c> の引き算で答えるため、この寄せは働かない。
+    /// <paramref name="cap"/> は 1 以上であること(可視行数を渡す想定)。0 以下は 1 として扱う。
     /// </remarks>
     private int CountVisualRowsForward(
         TextSnapshot snap,
@@ -1688,6 +1729,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         int cap
     )
     {
+        // cap <= 0 は契約違反(可視行数は 1 以上)。負値を Math.Min で素通しすると負の距離を
+        // 返し、呼び出し側の可視判定を反転させるため 1 に丸める。
+        cap = Math.Max(1, cap);
         if (toLine < fromLine)
             return 0;
         if (toLine == fromLine)
@@ -1715,7 +1759,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         return Math.Min(cap, rows + toSeg);
     }
 
-    /// <summary>視覚行を n 本ぶん前へ進めた位置を返す。文書末で打ち切る。</summary>
+    /// <summary>
+    /// 視覚行を n 本ぶん前へ進めた位置を返す。文書末に達したらそこで打ち切り、
+    /// <c>Exhausted</c> に true を入れる(=<b>要求 n 本を歩き切れずに文書末で止まった</b>)。
+    /// 歩き切れた場合は false。n が 0 以下なら起点をそのまま返す(Exhausted=false)。
+    /// </summary>
     /// <remarks>
     /// <paramref name="seg"/> がその行の実セグメント数以上(編集で段落が縮み <c>_topSegment</c> が
     /// 陳腐化した状態)なら最終セグメントへ寄せて数える=<see cref="ViewportLayout.Build"/> の
@@ -1724,7 +1772,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// ゼロだからである。総数を得るのに追加の Wrap が要る <see cref="WalkBackVisualRows"/> は
     /// 寄せない=非対称は意図的であり、理由は同メソッドの remarks を参照。
     /// </remarks>
-    private (int Line, int Seg) WalkForwardVisualRows(TextSnapshot snap, int line, int seg, int n)
+    private (int Line, int Seg, bool Exhausted) WalkForwardVisualRows(
+        TextSnapshot snap,
+        int line,
+        int seg,
+        int n
+    )
     {
         while (n > 0)
         {
@@ -1736,7 +1789,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
                 cap > int.MaxValue ? int.MaxValue : (int)cap
             );
             if (seg + n < count)
-                return (line, seg + n);
+                return (line, seg + n, false);
             // ここに到達した時点の count は打ち切られていない=その行の真の総数である
             // (打ち切られていれば count == seg + n + 1 > seg + n となり上で早期 return する)。
             // よって count - 1 は真の最終セグメント index であり、陳腐化した seg をそこへ
@@ -1745,11 +1798,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             int eff = Math.Min(seg, count - 1);
             n -= count - eff; // この行の残り本数 + 次行先頭へ移る 1 本
             if (line + 1 >= snap.LineCount)
-                return (line, count - 1); // 文書末で打ち切り
+                return (line, count - 1, true); // 文書末で打ち切り=要求を歩き切れていない
             line++;
             seg = 0;
         }
-        return (line, seg);
+        return (line, seg, false);
     }
 
     /// <summary>視覚行を n 本ぶん遡った位置を返す。文書頭で打ち切る。</summary>
@@ -1840,43 +1893,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         var wrapped = LineLayout.WrapThroughOffset(lineText, maxWidthPx, _metrics, caretInLine);
         var segments = wrapped.Segments;
 
-        // 対象がどの視覚セグメントに属するかを決める。
-        // - 通常は「seg.OffsetInLine + seg.Length で終わる直前」まで
-        // - 最終セグメントに限り「末尾ちょうど」も許容(EOL キャレット位置)
-        //
-        // EOL 分岐は「segments の最後の要素 = 論理行の最終セグメント」を仮定しており、
-        // 打ち切られている(ReachedLineEnd=false)ときその仮定は成り立たない。よって
-        // ReachedLineEnd を条件に足してあるが、これは防御ではなく「依存関係を明示する
-        // ドキュメント」である。実際:
-        //   - WrapThroughOffset は「covered > caretInLine」を厳密な不等号で保証するため、
-        //     打ち切り時は最後の要素で必ず caretInLine < segEnd が先に成立し
-        //     EOL 分岐には到達しない
-        //   - そもそも EOL 分岐は segIdx を segments.Count - 1(初期値と同じ)に
-        //     するだけなので、発火してもしなくても結果は変わらない
-        //     = ReachedLineEnd を外しても観測可能な挙動は変化しない(実証済み)
-        //
-        // 本当に load-bearing なのは LineLayout.WrapCore の
-        // 「segStart > minCoverOffset」の「>」1 文字の方。ここを「>=」に緩めると
-        // 「セグメント境界ちょうど」のキャレット(offset == 次セグメント先頭)が
-        // 打ち切りに巻き込まれ、次の視覚行へ降りずに 1 行「上」・前セグメント「末尾」
-        // (右端)に留まる。行末キャレットは segStart が line.Length に到達しないため
-        // 打ち切られず無傷=症状は行末ではなくセグメント境界に出る。
-        // この「>」は EditorControlWrapCaretTests(Editor 13 件)と
-        // LineLayoutPrefixTests(Core 5 件)が守っている。
-        int segIdx = segments.Count - 1;
-        for (int i = 0; i < segments.Count; i++)
-        {
-            var seg = segments[i];
-            int segEnd = seg.OffsetInLine + seg.Length;
-            if (
-                caretInLine < segEnd
-                || (wrapped.ReachedLineEnd && i == segments.Count - 1 && caretInLine == segEnd)
-            )
-            {
-                segIdx = i;
-                break;
-            }
-        }
+        // 対象がどの視覚セグメントに属するかの規約は seam に集約する(設計書 §4.3=
+        // 「どのセグメントに属するか」を二重化しない)。選択規約そのもの・条件に
+        // ReachedLineEnd を足してある理由・「本当に load-bearing なのは LineLayout.WrapCore の
+        // 『>』1 文字の方」という依存関係は、すべて LocateSegmentIndex の doc に書いてある。
+        int segIdx = LocateSegmentIndex(segments, wrapped.ReachedLineEnd, caretInLine);
         var chosenSeg = segments[segIdx];
         int localOffset = caretInLine - chosenSeg.OffsetInLine;
         var segSpan = lineText.AsSpan(chosenSeg.OffsetInLine, chosenSeg.Length);
