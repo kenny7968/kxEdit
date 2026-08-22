@@ -1584,13 +1584,6 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 可視判定・スクロール判断・座標算出・ヒットテストが「起点から視覚行数で数える」ための共有部品。
     // 「どのセグメントに属するか」の規約を二重化しないため、判定は LocateSegmentIndex 1 箇所に置く。
     // 歩き/数えは I-4 に従い必要本数で打ち切る(文書全体・論理行全体を無条件に Wrap しない)。
-#pragma warning disable S1144 // reason: seam を先に入れて呼び出し元を段階的に移した名残。
-    // WalkForwardVisualRows は Task 4(OffsetFromClientPoint のヒットテスト)で、
-    // LocateVisualRow / CountVisualRowsForward / WalkBackVisualRows は Task 5
-    // (BringCaretIntoView / ScrollCharRangeIntoView のスクロール判断)で呼び出し元を得た=
-    // 4 本すべて揃っており、この抑止はもう何も抑止していない(外しても 0 warning を確認済み)。
-    // 除去は実装計画 docs/plans/2026-08-22-wrap-vertical-navigation.md の Task 6 の
-    // ステップとして予定されているため、そちらで外すこと。
 
     /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
     /// <remarks>
@@ -1862,7 +1855,48 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         }
         return (line, seg);
     }
-#pragma warning restore S1144
+
+    /// <summary>
+    /// 可視域の起点を<b>視覚行</b>単位で相対移動する(ホイール用)。
+    /// <paramref name="deltaRows"/> は正 = 下方向(文書末へ)・負 = 上方向。
+    /// 折り返し OFF は <see cref="TopLine"/> の相対移動に委譲する = 導入前と同一(設計書 I-3)。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 折り返し ON では <see cref="TopLine"/> セッターを使ってはならない。論理行 1 本の文書では
+    /// <c>ClampTopLine</c> の上限が 0 になり、ホイールが<b>完全に効かなかった</b>(監査 A-6)。
+    /// </para>
+    /// <para>
+    /// 上方向の <see cref="WalkBackVisualRows"/> には陳腐化しうる <c>_topSegment</c> を渡す
+    /// (キャレット由来ではないため)。同メソッドの remarks のとおりクランプしない設計で、
+    /// 帰結は「大量削除の直後に上方向が数ノッチ空振りしうる」程度・描画は
+    /// <see cref="ViewportLayout.Build"/> のクランプで破綻せず自己修復する。
+    /// </para>
+    /// <para>
+    /// 戻り値の型が違う(前進は Exhausted を持つ)ため三項演算子では書けない。
+    /// 文書末に達した <c>Exhausted</c> は破棄する = そこで打ち切られた位置が答えであり、
+    /// ホイールでは「最終視覚行が最上段」で止まるのが期待動作(<see cref="TopLine"/> 経由の
+    /// 従来挙動が maxLine で頭打ちになるのと同じ性質)。
+    /// </para>
+    /// </remarks>
+    private void ScrollByVisualRows(int deltaRows)
+    {
+        if (_buffer is null || deltaRows == 0)
+            return;
+        if (_wrapColumns <= 0)
+        {
+            TopLine = _topLine + deltaRows;
+            return;
+        }
+        var snap = _buffer.Current;
+        int line;
+        int seg;
+        if (deltaRows < 0)
+            (line, seg) = WalkBackVisualRows(snap, _topLine, _topSegment, -deltaRows);
+        else
+            (line, seg, _) = WalkForwardVisualRows(snap, _topLine, _topSegment, deltaRows);
+        SetTopPosition(line, seg);
+    }
 
     /// <summary>
     /// 与えられた UTF-16 char offset のクライアント座標(px)と可視性を算出する純ロジック。

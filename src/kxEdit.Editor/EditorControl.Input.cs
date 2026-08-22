@@ -76,8 +76,12 @@ public sealed partial class EditorControl
     /// - Delta は 1 tick = 120 単位。細切れデルタは <see cref="_wheelAccum"/> に蓄積し、閾値に達したら発火。
     /// - 1 tick あたりの行送り量は <see cref="SystemInformation.MouseWheelScrollLines"/> を使う
     ///   (レジストリ未設定 / 「1 ページ」設定=-1 では既定 3 にフォールバック)。
-    /// - Delta&gt;0=上方向スクロール=<see cref="TopLine"/> 減。TopLine setter がクランプするため
-    ///   上限/下限を跨ぐ蓄積は自然に上端/下端で頭打ちになる。
+    /// - Delta&gt;0=上方向スクロール。送りの単位は<b>視覚行</b>で、実処理は
+    ///   <see cref="EditorControl.ScrollByVisualRows"/>(折り返し ON は視覚行を歩き、
+    ///   OFF は従来どおり <see cref="TopLine"/> の相対移動に委譲する=設計書 I-3)。
+    ///   上限/下限を跨ぐ蓄積はどちらの経路でもクランプされ、自然に上端/下端で頭打ちになる。
+    ///   2026-08-22 A-6: 折り返し ON で <see cref="TopLine"/> に代入していた頃は、論理行 1 本の
+    ///   文書で <c>ClampTopLine</c> の上限が 0 になりホイールが完全に効かなかった。
     /// - 末尾で <see cref="HandledMouseEventArgs.Handled"/> を立てて親コンテナへのバブリングを止める
     ///   (P6 で SplitContainer / ScrollableControl 内に置いた場合の二重スクロール防止)。
     /// Task 3c: Wheel は _wheelAccum 蓄積状態を持ち、経路が独特(HandledMouseEventArgs 判定含む)なので
@@ -96,12 +100,12 @@ public sealed partial class EditorControl
             wheelLines = 3;
         while (_wheelAccum >= 120)
         {
-            TopLine = _topLine - wheelLines;
+            ScrollByVisualRows(-wheelLines);
             _wheelAccum -= 120;
         }
         while (_wheelAccum <= -120)
         {
-            TopLine = _topLine + wheelLines;
+            ScrollByVisualRows(wheelLines);
             _wheelAccum += 120;
         }
         // WM_MOUSEWHEEL は親コンテナへ再ディスパッチされる仕様のため、Handled=true で

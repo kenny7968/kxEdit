@@ -1186,4 +1186,178 @@ public class VisualRowScrollTests
                 Assert.Equal(rows[rows.Count - VisibleRows], (c.TopLine, c.TopSegment));
             }
         });
+
+    // ===== A-6: ホイールを視覚行送りにする(Task 6)=====
+
+    /// <summary>
+    /// <c>OnMouseWheel</c>(protected)を 1 ノッチぶん叩く。<paramref name="delta"/> は
+    /// WM_MOUSEWHEEL と同じ符号規約で、負 = 下方向スクロール。
+    /// </summary>
+    private static void Wheel(EditorControl c, int delta)
+    {
+        var mi = typeof(EditorControl).GetMethod(
+            "OnMouseWheel",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(mi is not null, "EditorControl に protected OnMouseWheel が見つからない");
+        try
+        {
+            mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, delta) });
+        }
+        catch (TargetInvocationException e) when (e.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            throw; // 到達しない
+        }
+    }
+
+    /// <summary>
+    /// 論理行 1 本の文書でホイールが視覚行を送ること。修正前は <c>TopLine</c> セッターの
+    /// <c>ClampTopLine</c>(maxLine = 0)に潰されてホイールが<b>完全に効かなかった</b>。
+    /// </summary>
+    /// <remarks>
+    /// 上方向は「TopSegment が減ったこと」では足りない: 上のループだけ <c>TopLine</c> 代入の
+    /// ままにする変異でも、論理行が 1 本なので <c>clamped == _topLine &amp;&amp; _topSegment != 0</c>
+    /// で早期リターンせず <c>_topSegment = 0</c> に落ちる=「減った」ように見えて生存する。
+    /// 1 ノッチの視覚行数 <c>step</c> を実測し、往復の各段で<b>正確な位置</b>を固定する。
+    /// </remarks>
+    [Fact]
+    public void MouseWheel_WithWrap_ScrollsByVisualRows() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            // 2000 文字 / wrap=2 = 視覚行 1000 本。ノッチ量(MouseWheelScrollLines)が
+            // どんな環境値でも 4 ノッチが文書末に当たらない余裕を取る。
+            var (f, c) = MakeControl(new string('a', 2000), wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                Assert.Equal(1, snap.LineCount); // fixture 前提: 論理行は 1 本だけ
+
+                Wheel(c, -120);
+                int step = c.TopSegment; // 1 ノッチの視覚行数(環境の MouseWheelScrollLines 依存)
+                Assert.True(step > 0, "ホイール下方向で TopSegment が進んでいない");
+                Assert.Equal(0, c.TopLine); // 論理行は 1 本しかない
+                Assert.True(
+                    4 * step < EnumerateRows(c, snap).Count,
+                    "fixture 前提: 4 ノッチでも文書末に当たらない"
+                );
+
+                for (int notch = 2; notch <= 4; notch++)
+                {
+                    Wheel(c, -120);
+                    Assert.Equal(notch * step, c.TopSegment);
+                }
+
+                for (int notch = 3; notch >= 1; notch--)
+                {
+                    Wheel(c, 120);
+                    Assert.Equal(notch * step, c.TopSegment);
+                }
+            }
+        });
+
+    /// <summary>
+    /// 論理行を跨ぐホイール送り(単一論理行 fixture では覆えない積み上げ / 遡りを踏む)。
+    /// 期待値は視覚行を全列挙したオラクルの index で表し、歩き側のロジックに依存させない。
+    /// </summary>
+    [Fact]
+    public void MouseWheel_WithWrap_ScrollsAcrossLogicalLines() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            // 1 段落 = 5 視覚行 × 8 段落 = 40 視覚行。
+            var (f, c) = MakeControl(Paragraphs(8, 10), wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.Equal(8, snap.LineCount); // fixture 前提: 論理行は複数本ある
+
+                Wheel(c, -120);
+                int step = rows.IndexOf((c.TopLine, c.TopSegment));
+                Assert.True(step > 0, "ホイール下方向で起点が進んでいない");
+                Assert.True(4 * step < rows.Count, "fixture 前提: 4 ノッチでも文書末に当たらない");
+
+                for (int notch = 2; notch <= 4; notch++)
+                {
+                    Wheel(c, -120);
+                    Assert.Equal(rows[notch * step], (c.TopLine, c.TopSegment));
+                }
+                Assert.True(c.TopLine > 0, "fixture 前提: 4 ノッチで論理行を跨いでいる");
+
+                for (int notch = 3; notch >= 1; notch--)
+                {
+                    Wheel(c, 120);
+                    Assert.Equal(rows[notch * step], (c.TopLine, c.TopSegment));
+                }
+            }
+        });
+
+    /// <summary>
+    /// 文書頭 / 文書末でのクランプ。上端側は非既定位置(TopSegment=1)から回して
+    /// 「最初から 0 だった」と区別する。
+    /// </summary>
+    [Fact]
+    public void MouseWheel_WithWrap_ClampsAtDocumentEnds() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.Equal(1, snap.LineCount);
+                Assert.True(rows.Count > VisibleRows * 4, "fixture 前提: 視覚行が十分多い");
+
+                // 下端: 視覚行数ぶん回しても最終視覚行より下へは行かない。
+                for (int i = 0; i < rows.Count; i++)
+                    Wheel(c, -120);
+                Assert.Equal(rows[^1], (c.TopLine, c.TopSegment));
+
+                // 上端: 非既定位置から回しても負に回り込まず (0, 0) で止まる。
+                c.SetTopPosition(0, 1);
+                Assert.Equal(1, c.TopSegment);
+                for (int i = 0; i < 5; i++)
+                    Wheel(c, 120);
+                Assert.Equal((0, 0), (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// 折り返し OFF は従来どおり論理行送り(I-3)。TopSegment は 1 度も立たない。
+    /// </summary>
+    [Fact]
+    public void MouseWheel_WithoutWrap_StillMovesTopLine() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(Paragraphs(60, 4), wrap: 0, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                Wheel(c, -120);
+                int step = c.TopLine; // 1 ノッチの論理行数
+                Assert.True(step > 0, "ホイール下方向で TopLine が進んでいない");
+                Assert.Equal(0, c.TopSegment);
+                Assert.True(4 * step < 60, "fixture 前提: 4 ノッチでも文書末に当たらない");
+
+                for (int notch = 2; notch <= 4; notch++)
+                {
+                    Wheel(c, -120);
+                    Assert.Equal(notch * step, c.TopLine);
+                    Assert.Equal(0, c.TopSegment);
+                }
+
+                for (int notch = 3; notch >= 1; notch--)
+                {
+                    Wheel(c, 120);
+                    Assert.Equal(notch * step, c.TopLine);
+                    Assert.Equal(0, c.TopSegment);
+                }
+            }
+        });
 }
