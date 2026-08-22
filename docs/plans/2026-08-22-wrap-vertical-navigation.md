@@ -1535,7 +1535,25 @@ dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~Mo
 doc コメントの「Delta>0=上方向スクロール=TopLine 減。TopLine setter がクランプする」を
 「折り返し ON では視覚行送り(`ScrollByVisualRows`)・OFF では従来どおり `TopLine`」に更新する。
 
-### Step 4: 緑を確認する
+### Step 4: S1144 の局所抑止を外す
+
+Task 3 で導入した視覚行ヘルパ群は、その時点で呼び出し元が無いため SonarAnalyzer **S1144**
+(unused private member)が `-warnaserror` で 4 件のエラーになり、
+`#pragma warning disable S1144` で局所抑止してある(Task 3 実施時に判明した計画の穴)。
+
+**本タスクで 4 本すべてに呼び出し元が入る**ので、`src/kxEdit.Editor/EditorControl.cs` の
+`#pragma warning disable S1144` / `restore` の対を**削除する**。
+
+- `LocateVisualRow` → Task 5 の `BringCaretIntoView` / `ScrollCharRangeIntoView`
+- `CountVisualRowsForward` → Task 5
+- `WalkBackVisualRows` → Task 5 + Task 6
+- `WalkForwardVisualRows` → Task 6 の `ScrollByVisualRows`
+
+**不要な `#pragma warning disable` は C# では警告が出ない**=消し忘れても誰も気付かない。
+削除後に `dotnet build kxEdit.sln -c Release -warnaserror` が 0 warning で通ることを確認する
+(通れば「4 本すべてに呼び出し元が入った」ことの機械的な証明にもなる)。
+
+### Step 5: 緑を確認する
 
 ```powershell
 dotnet build kxEdit.sln -c Release -warnaserror
@@ -1544,7 +1562,7 @@ dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
 dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 ```
 
-### Step 5: コミット
+### Step 6: コミット
 
 ```powershell
 git add -A
