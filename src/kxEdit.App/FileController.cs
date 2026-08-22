@@ -368,6 +368,23 @@ public sealed class FileController
                 continue;
             }
 
+            if (!TryNormalizeSavePath(picked.Path, out string full))
+            {
+                _prompt.Warn(
+                    $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    "エラー"
+                );
+                continue;
+            }
+            // 以降の判定・保存・State 反映はすべて正規化済みの full を使う。
+            // 再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)。
+#pragma warning disable S1854 // reason: 現時点(A-19)ではこの代入以降の経路がすべて return するため
+            // 静的には dead store。Task 8(文字コード警告のキャンセルを continue 化)と A-7 の
+            // 上書き確認が入ると読まれる=先に正しい値を入れておく側に倒す。位置も load-bearing:
+            // 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、必ずその後に上書きする。
+            seed = seed with { Path = full };
+#pragma warning restore S1854
+
             var newEncoding = EncodingCatalog.Get(picked.CodePage);
 
             // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
@@ -395,17 +412,17 @@ public sealed class FileController
             doc.State.LineEnding = picked.LineEnding;
             doc.State.HasBom = picked.HasBom;
 
-            if (!WriteToPath(doc, picked.Path))
+            if (!WriteToPath(doc, full))
             {
                 doc.State.Encoding = oldEncoding;
                 doc.State.LineEnding = oldLineEnding;
                 doc.State.HasBom = oldHasBom;
                 return false;
             }
-            doc.State.Path = picked.Path;
+            doc.State.Path = full;
             DocumentManager.UpdateLabel(doc);
             _metaChanged();
-            RegisterRecent(picked.Path); // 保存先も最近のファイルへ
+            RegisterRecent(full); // 保存先も最近のファイルへ
             return true;
         }
     }
@@ -431,6 +448,34 @@ public sealed class FileController
         }
         catch (EncoderFallbackException)
         {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
+    /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
+    /// 例外(null 文字・無効文字・長大パス)は握って呼出側で「入力し直し」に落とす:
+    /// SR ユーザーの直入力がそのまま届く面なので未捕捉例外ダイアログにしない。
+    /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
+    /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
+    /// </summary>
+    private static bool TryNormalizeSavePath(string input, out string full)
+    {
+        try
+        {
+            full = System.IO.Path.GetFullPath(input);
+            return true;
+        }
+        catch (Exception ex)
+            when (ex
+                    is ArgumentException
+                        or NotSupportedException
+                        or System.IO.PathTooLongException
+                        or System.Security.SecurityException
+            )
+        {
+            full = string.Empty;
             return false;
         }
     }

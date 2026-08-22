@@ -335,6 +335,68 @@ public class FileControllerTests
             Assert.Equal(0, host.Probe.SaveTargetCallCount);
         });
 
+    // ===== A-19: 保存先パスの正規化 =====
+
+    /// <summary>
+    /// A-19。相対パスを未正規化のまま State.Path に残すと保存先が CWD 依存になり、
+    /// hot exit 復元で無言の無題化を招く。Environment.CurrentDirectory を触るが、
+    /// App.Tests は GlobalUsings.cs で並列実行を無効化済み(CollectionBehavior)なので安全。
+    /// </summary>
+    [Fact]
+    public void SaveAs_RelativePath_StoresAbsolutePath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            string saved = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = tmp.Root;
+                host.Dialogs.SaveAs = new SaveAsResult("memo.txt", 65001, false, LineEnding.Crlf);
+
+                Assert.True(host.File.SaveAs());
+            }
+            finally
+            {
+                Environment.CurrentDirectory = saved;
+            }
+
+            // CreateTempSubdirectory は 8.3 名や symlink 経由のパスを返しうるので、
+            // 期待値も GetFullPath を通してから比較する(区切り・大小の揺れは吸収しない)。
+            string expected = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(tmp.Root, "memo.txt")
+            );
+            Assert.Equal(expected, doc.State.Path);
+            Assert.Equal(expected, host.Settings.RecentFiles[0]); // RegisterRecent も正規化済みを使う
+            Assert.True(File2.Exists(expected));
+        });
+
+    /// <summary>正規化不能な入力は握って「入力し直し」に落とす(未捕捉例外ダイアログにしない)。</summary>
+    [Fact]
+    public void SaveAs_UnnormalizablePath_WarnsAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("bad\0name.txt", 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.Null(doc.State.Path);
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
