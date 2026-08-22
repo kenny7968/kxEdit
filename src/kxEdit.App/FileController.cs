@@ -329,9 +329,43 @@ public sealed class FileController
         return doc is not null && SaveAsDocument(doc);
     }
 
-    /// <summary>指定ドキュメントを保存。Path 未確定なら SaveAs にフォールバック。</summary>
-    public bool SaveDocument(Document doc) =>
-        doc.State.Path is null ? SaveAsDocument(doc) : WriteToPath(doc, doc.State.Path);
+    /// <summary>
+    /// 指定ドキュメントを保存。Path 未確定なら SaveAs にフォールバック。
+    /// A-7 (b) 残余(Task 6b・2026-08-23): 同一パスを 2 タブが持っている状態での上書き保存を止める。
+    /// </summary>
+    public bool SaveDocument(Document doc)
+    {
+        if (doc.State.Path is null)
+            return SaveAsDocument(doc);
+
+        // A-7 (b) 残余: SaveAsDocument のガード(Task 6)は重複タブが「生まれる」経路しか塞がない。
+        // 「既にある」状態は復元 extras の dedup がバックアップ Id のみで照合するため現行フリートでも
+        // 発生し(クラッシュ直前に開いたタブ・他インスタンス遺物・旧「あとで」孤児)、そこでは
+        // Ctrl+S が無警告でもう一方のタブの内容をディスクから消す。
+        // 述語は Task 6 と同じ(FindByPath = PathKey 照合 + 自タブ除外)。FindByPath は生成順で
+        // 最初の一致を返すので、先に生まれたタブが保存権を持ち、後から生まれた方が止まる。
+        // 置き場所: WriteToPath ではなく Ctrl+S の入口。WriteToPath は低レベルの書き込み
+        // プリミティブで、UI ポリシーを置くと層が濁る(現在の呼出元は本メソッドと SaveAsDocument
+        // の 2 つだけで、SaveAsDocument 側は自前の同等ガードを既に通している)。
+        // 位置も load-bearing: WriteToPath 冒頭の到達性プローブ(TryInspectSaveTarget)より前に
+        // 置く。重複は保存させないので到達性を調べる意味がなく、遠隔共有で無駄な 5 秒を待たせない。
+        var other = _docs.FindByPath(doc.State.Path);
+        if (other is not null && !ReferenceEquals(other, doc))
+        {
+            // 文言は Task 6 と別: ここは呼び出し元のタブ自身もそのパスを持っているので
+            // 「そのタブで保存してください」は成立しない。逃げ道(別名保存)を名指しする。
+            // CSV-L-5: path は外部入力(復元 BackupRecord 由来もある)なので SanitizeForDisplay で無害化。
+            _prompt.Error(
+                "このファイルは別のタブでも開いています。上書きすると、もう一方のタブの内容が失われます。"
+                    + "「名前を付けて保存」で別の名前を指定するか、このタブを破棄してください: "
+                    + SanitizeForDisplay.OneLine(doc.State.Path, 200),
+                "エラー"
+            );
+            return false;
+        }
+
+        return WriteToPath(doc, doc.State.Path);
+    }
 
     /// <summary>
     /// 指定ドキュメントを名前を付けて保存。成功で State.Path/Encoding/LineEnding とラベルを更新する。

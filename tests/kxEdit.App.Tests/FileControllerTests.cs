@@ -616,6 +616,87 @@ public class FileControllerTests
             Assert.Null(doc.State.Path);
         });
 
+    // ===== A-7 (b) 残余(Task 6b): 既にある重複状態での Ctrl+S =====
+
+    /// <summary>
+    /// Task 6(SaveAs 側)のガードは重複タブが**生まれる**経路しか塞がない。**既にある**状態
+    /// (復元 extras の dedup がバックアップ Id のみで照合するため現行フリートでも発生する)では
+    /// <c>SaveDocument</c> が <c>FindByPath</c> を参照せず、Ctrl+S が無警告でもう一方のタブの
+    /// 内容をディスクから消していた。
+    /// fixture は SaveAs を通さず <c>State.Path</c> を直接代入して作る
+    /// (Task 6 のガードが SaveAs 経由での重複生成を塞いでいるため)。
+    /// 同手法の先例 = <see cref="Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified"/>。
+    /// </summary>
+    [Fact]
+    public void Save_PathAlsoOpenInAnotherTab_IsBlocked_AndFileKeepsOtherTabContent() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string shared = tmp.File("shared.txt");
+            File2.WriteAllText(shared, "tabA-content");
+            var tabA = host.File.TryOpenOrActivate(shared); // 先に生まれたタブ
+            Assert.NotNull(tabA);
+
+            var tabB = host.Docs.CreateNew(); // 後から生まれた重複タブ(復元 dedup 漏れ相当)
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = shared; // SaveAs を経由せず衝突状態を作る
+            tabB.Editor.ReplaceCharRange(0, 0, "x"); // dirty=保存点が打たれていないことを観測可能にする
+            Assert.True(tabB.Editor.Modified);
+            // 生成順で先勝ち = FindByPath は tabA を返す(tabB が「新しい方」であることを固定する)。
+            Assert.Same(tabA, host.Docs.FindByPath(shared));
+
+            Assert.False(host.File.Save()); // tabB がアクティブ = Ctrl+S 経路
+
+            // 本体: 相手タブの内容がディスク上に生き残る(戻り値だけでなく実ファイルで見る)。
+            Assert.Equal("tabA-content", File2.ReadAllText(shared));
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブでも開いています")
+            );
+            Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へは落ちない
+            Assert.True(tabB.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
+        });
+
+    /// <summary>
+    /// 対照群(過剰検知の防止): 同じ衝突状態でも**先に生まれたタブ**の Ctrl+S は通る。
+    /// これが無いと「常に false を返す」変異と「<c>!ReferenceEquals</c> を落とす」変異が生き残る
+    /// (衝突相手が在席したままなので <c>FindByPath</c> は必ず非 null を返す = 自タブ除外だけが効いている)。
+    /// </summary>
+    [Fact]
+    public void Save_OlderTabOfCollidingPair_StillWrites() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string shared = tmp.File("shared.txt");
+            File2.WriteAllText(shared, "original");
+            var tabA = host.File.TryOpenOrActivate(shared);
+            Assert.NotNull(tabA);
+
+            var tabB = host.Docs.CreateNew(); // 衝突相手を在席させる(検知対象が在ることが前提)
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = shared;
+            Assert.Same(tabA, host.Docs.FindByPath(shared)); // 検知対象は tabA 自身
+
+            host.Docs.Activate(tabA!);
+            tabA!.Editor.ReplaceCharRange(
+                0,
+                tabA.Editor.CurrentBuffer.Current.CharLength,
+                "tabA-saved"
+            );
+            Assert.True(tabA.Editor.Modified);
+
+            Assert.True(host.File.Save());
+
+            Assert.Equal("tabA-saved", File2.ReadAllText(shared));
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.Contains("別のタブでも開いています")
+            );
+            Assert.False(tabA.Editor.Modified); // SetSavePoint 済み=書き込み経路を通っている
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
