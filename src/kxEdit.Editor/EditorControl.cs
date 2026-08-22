@@ -400,7 +400,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         var rows = ViewportLayout.Build(
             snap,
             _topLine,
-            topSegment: 0,
+            _topSegment,
             PaintHeightPx,
             _wrapColumns,
             _metrics
@@ -1130,6 +1130,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // HScroll 表示可否を決めるための計算では、まだ表示していない前提で高さいっぱいを見る
         // (可視行がわずかに多めになるだけで最長幅の推定には害がない)。
         int probeHeight = Math.Max(0, ClientSize.Height);
+        // topSegment は 0 固定でよい(2026-08-22 A-6)。ここは冒頭のガードで折り返し OFF 専用と
+        // 確定しており(_wrapColumns > 0 なら既に return 済み・wrapColumns: 0 を渡すのも同じ理由)、
+        // 設計書 I-3 のとおり OFF では TopSegment は常に 0 = _topSegment を渡しても同値。
+        // 「OFF 専用の経路である」ことをコード上で明示するため定数のままにする。
         var rows = ViewportLayout.Build(
             snap,
             _topLine,
@@ -1898,6 +1902,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // ReachedLineEnd を足してある理由・「本当に load-bearing なのは LineLayout.WrapCore の
         // 『>』1 文字の方」という依存関係は、すべて LocateSegmentIndex の doc に書いてある。
         int segIdx = LocateSegmentIndex(segments, wrapped.ReachedLineEnd, caretInLine);
+
+        // I-2: TopLine の途中セグメントから描いている場合、その上のセグメントは不可視。
+        // (論理行での「TopLine 未到達」判定と対になる、視覚行での上方はみ出し判定。)
+        if (logicalLine == _topLine && segIdx < _topSegment)
+            return (0, 0, false);
+
         var chosenSeg = segments[segIdx];
         int localOffset = caretInLine - chosenSeg.OffsetInLine;
         var segSpan = lineText.AsSpan(chosenSeg.OffsetInLine, chosenSeg.Length);
@@ -1924,10 +1934,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             lineHeight > 0 ? (paintHeight + lineHeight - 1) / lineHeight : int.MaxValue;
         for (int line = _topLine; line < logicalLine; line++)
         {
-            int lStart = snap.GetLineStart(line);
-            int lEnd = snap.GetLineEnd(line, includeBreak: false);
-            int lLen = lEnd - lStart;
-            string lText = lLen == 0 ? string.Empty : snap.GetText(lStart, lLen);
+            // I-2: 先頭論理行は _topSegment 本ぶん画面外にあるので積み上げから差し引く。
+            int skip = line == _topLine ? _topSegment : 0;
             // Math.Max(1, ...) は到達可能な生きた防御(外してはならない)。
             // PaintHeightPx は 0 になり得る(フォーム最小化・レイアウト確定前・
             // hscroll より低いペイン)。そのとき maxUsefulRows=0 → rowsNeeded=0 となり、
@@ -1936,15 +1944,29 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             // (打ち切り導入で新設された例外面。変更前の Wrap は投げなかった)。
             // ループ継続中の通常ケースでは accumulated < maxUsefulRows が成り立つため
             // rowsNeeded は 1 以上になる。
-            int rowsNeeded = maxUsefulRows - visualRowsBeforeThisLine;
+            //
+            // 読み飛ばす skip 本も Wrap の要求本数に足す(打ち切り結果は完全結果の prefix なので
+            // 「可視分 + 読み飛ばし分」を求めれば足りる)。maxUsefulRows は lineHeight <= 0 で
+            // int.MaxValue になり得るため skip の加算は long で受ける
+            // (CountVisualRowsForward の同旨の long 経由と同じ理由)。
+            long needed = (long)maxUsefulRows - visualRowsBeforeThisLine + skip;
+            int rowsNeeded = needed > int.MaxValue ? int.MaxValue : (int)needed;
             var segs = LineLayout
-                .WrapFirstSegments(lText, maxWidthPx, _metrics, Math.Max(1, rowsNeeded))
+                .WrapFirstSegments(
+                    LineTextOf(snap, line),
+                    maxWidthPx,
+                    _metrics,
+                    Math.Max(1, rowsNeeded)
+                )
                 .Segments;
-            visualRowsBeforeThisLine += segs.Count;
+            // ViewportLayout.Build と同じクランプ(topSegment が実数以上なら最終セグメント)。
+            int eff = Math.Min(skip, segs.Count - 1);
+            visualRowsBeforeThisLine += segs.Count - eff;
             if (visualRowsBeforeThisLine * lineHeight >= paintHeight)
                 return (0, 0, false);
         }
-        int totalVisualRow = visualRowsBeforeThisLine + segIdx;
+        int totalVisualRow =
+            visualRowsBeforeThisLine + segIdx - (logicalLine == _topLine ? _topSegment : 0);
 
         int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
         int x = lnWidth + xInSeg;

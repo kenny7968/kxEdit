@@ -34,7 +34,7 @@ public sealed partial class EditorControl
             var rows = ViewportLayout.Build(
                 snap,
                 _topLine,
-                topSegment: 0,
+                _topSegment,
                 paintHeight,
                 _wrapColumns,
                 _metrics

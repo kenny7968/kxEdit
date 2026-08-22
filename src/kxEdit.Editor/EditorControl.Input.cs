@@ -6,8 +6,9 @@
 //   - OnMouseWheel(精度改善版=Router に載せず現状維持)
 //   - OnKeyPress + InsertConfirmedText(IME 確定と共有する挿入経路・分岐なし)
 //   - IsInputKey(WinForms のフォーカス遷移/ダイアログ既定ボタン発火を抑止する OS レベル契約)
-//   - OffsetFromClientPoint / SegmentCountAtLine(Router のマウスハンドラから叩く座標→char 変換の
-//     内部ヘルパ・EditorControl 状態を多量に参照するので host 側にとどめる)
+//   - OffsetFromClientPoint(Router のマウスハンドラから叩く座標→char 変換の
+//     内部ヘルパ・EditorControl 状態を多量に参照するので host 側にとどめる。
+//     視覚行の前進そのものは EditorControl.cs の視覚行 seam に載せている=2026-08-22 A-6)
 // MouseDragging / _wheelAccum の所有権は EditorControl に残す(Router は state を持たない契約)。
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
@@ -185,7 +186,7 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// クライアント座標(px)から論理オフセット(UTF-16 char)を算出する純ヘルパ(P3 Task 12)。
-    /// - Y &lt; 0 は <see cref="_topLine"/> の先頭視覚行にクランプ
+    /// - Y &lt; 0 は (<see cref="_topLine"/>, <see cref="_topSegment"/>) の視覚行にクランプ
     /// - 最終視覚行を超えた Y は文書末尾(=<see cref="TextSnapshot.CharLength"/>)にクランプ
     ///   (Notepad と同挙動=末尾行より下の空領域クリックで caret が文書末尾に来る)
     /// - X の行末超過は <see cref="PixelMapper.PxToOffset"/> がセグメント末尾にクランプ
@@ -210,32 +211,15 @@ public sealed partial class EditorControl
 
         int maxWidthPx = _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
 
-        // TopLine の先頭視覚行から visualRowFromTop 個進む(折り返し ON 時は視覚行=セグメント単位)。
-        // 文書末に達した場合(exhausted=true)は文書末尾へクランプする=X による位置決めは行わない。
-        int line = _topLine;
-        int segIdx = 0;
-        int rowsToAdvance = visualRowFromTop;
-        int segCount = SegmentCountAtLine(snap, line, maxWidthPx);
-        bool exhausted = false;
-        while (rowsToAdvance > 0)
-        {
-            if (segIdx + 1 < segCount)
-            {
-                segIdx++;
-            }
-            else
-            {
-                if (line + 1 >= snap.LineCount)
-                {
-                    exhausted = true;
-                    break;
-                }
-                line++;
-                segIdx = 0;
-                segCount = SegmentCountAtLine(snap, line, maxWidthPx);
-            }
-            rowsToAdvance--;
-        }
+        // (TopLine, TopSegment) の視覚行から visualRowFromTop 個進む。前進規約は seam に一本化する
+        // (規約を二重定義しない・折り返し OFF ガードと打ち切りを継承する)。
+        // 文書末に達した場合(Exhausted)は文書末尾へクランプする=X による位置決めは行わない。
+        var (line, segIdx, exhausted) = WalkForwardVisualRows(
+            snap,
+            _topLine,
+            _topSegment,
+            visualRowFromTop
+        );
 
         // 最終視覚行より下 → 文書末尾にクランプ
         if (exhausted)
@@ -247,7 +231,10 @@ public sealed partial class EditorControl
         string lineText =
             lineEnd == lineStart ? string.Empty : snap.GetText(lineStart, lineEnd - lineStart);
         var segs = LineLayout.Wrap(lineText, maxWidthPx, _metrics);
-        // WalkVisualRows と同様に防御的にクランプ(通常は segIdx < segs.Count が保たれる)
+        // 防御的にクランプ(通常は segIdx < segs.Count が保たれる)。
+        // visualRowFromTop == 0 のとき WalkForwardVisualRows は while に入らず _topSegment を
+        // そのまま返すため、陳腐化した _topSegment(編集で段落が縮んだ)を最終セグメントへ
+        // 寄せる役目がここに残っている(=ViewportLayout.Build のクランプと同じ寄せ方)。
         int useSeg = Math.Min(segIdx, segs.Count - 1);
         var seg = segs[useSeg];
 
@@ -260,15 +247,6 @@ public sealed partial class EditorControl
         int localOffset = PixelMapper.PxToOffset(segSpan, xInBody, _metrics);
 
         return lineStart + seg.OffsetInLine + localOffset;
-    }
-
-    /// <summary>指定論理行の視覚セグメント数(=折り返し個数)。<see cref="OffsetFromClientPoint"/> のヘルパ。</summary>
-    private int SegmentCountAtLine(TextSnapshot snap, int line, int maxWidthPx)
-    {
-        int ls = snap.GetLineStart(line);
-        int le = snap.GetLineEnd(line, includeBreak: false);
-        string t = le == ls ? string.Empty : snap.GetText(ls, le - ls);
-        return LineLayout.Wrap(t, maxWidthPx, _metrics).Count;
     }
 
     // ===== 確定文字列挿入(OnKeyPress + IME 確定 = 2 経路共有) =====

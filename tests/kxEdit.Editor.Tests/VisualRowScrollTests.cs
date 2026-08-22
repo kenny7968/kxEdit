@@ -509,4 +509,93 @@ public class VisualRowScrollTests
                 Assert.Equal(3, CountForward(c, snap, 0, 0, 3, 0, 99));
             }
         });
+
+    // ===== TopSegment を尊重する経路(描画・座標・ヒットテスト・可視域報告)=====
+
+    [Fact]
+    public void PointFromCharOffset_ReturnsEmpty_ForRowsAboveTopSegment() =>
+        Sta.Run(() =>
+        {
+            // "abcdefghij"(10 文字)を wrap=2 → 視覚行 5 本。TopSegment=2 なら 0,1 本目は不可視。
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                // 可視フラグそのもので弁別する。PointFromCharOffset は「不可視」を Point.Empty で
+                // 表すが、可視域最上段の行頭は座標も (0, 0)=Point.Empty と等しくなるため、
+                // 公開 API だけでは「不可視」と「可視だが原点」を区別できない。
+                Assert.False(
+                    c.ComputeCaretPoint(0).Visible,
+                    "視覚行 0 は TopSegment より上=不可視"
+                );
+                Assert.False(
+                    c.ComputeCaretPoint(2).Visible,
+                    "視覚行 1 は TopSegment より上=不可視"
+                );
+                var (_, y, visible) = c.ComputeCaretPoint(4); // 視覚行 2 = 可視域の最上段
+                Assert.True(visible, "視覚行 2 は可視域の最上段");
+                Assert.Equal(0, y);
+
+                // 公開 API 側にも伝播していること(不可視は Point.Empty)。
+                Assert.Equal(System.Drawing.Point.Empty, c.PointFromCharOffset(0)); // 視覚行 0
+                Assert.Equal(System.Drawing.Point.Empty, c.PointFromCharOffset(2)); // 視覚行 1
+            }
+        });
+
+    /// <summary>
+    /// 対象が TopLine より下の論理行にあるとき、積み上げから TopSegment 本ぶんを差し引くこと
+    /// (先頭論理行は画面外に TopSegment 本を持つ)。<c>ViewportLayout.Build</c> の
+    /// topSegment クランプと同じ寄せ方であることも同時に固定する。
+    /// </summary>
+    [Fact]
+    public void ComputeCaretPoint_SubtractsSkippedRows_WhenTargetIsBelowTopLine() =>
+        Sta.Run(() =>
+        {
+            // 論理行 0 = "abcdefghij"(wrap=2 → 視覚行 5 本)・論理行 1 = "klmnop"(3 本)。
+            // TopSegment=2 なら論理行 0 は 3 本ぶんだけ見える=論理行 1 の先頭は視覚行 3。
+            var (f, c) = MakeControl("abcdefghij\nklmnop", wrap: 2, visibleRows: 6);
+            using (f)
+            using (c)
+            {
+                int lh = c.LineHeightPx;
+                c.SetTopPosition(0, 2);
+
+                var (_, y, visible) = c.ComputeCaretPoint(11); // 論理行 1 の先頭(k)
+                Assert.True(visible, "論理行 1 の先頭は可視域内");
+                Assert.Equal(3 * lh, y);
+
+                // 論理行 1 の 2 本目(m)は視覚行 4。
+                Assert.Equal(4 * lh, c.ComputeCaretPoint(13).Y);
+            }
+        });
+
+    [Fact]
+    public void GetVisibleCharRange_StartsAtTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                var (start, end) = c.GetVisibleCharRange();
+                Assert.Equal(4, start); // 視覚行 2 の先頭
+                Assert.Equal(10, end); // 視覚行 2..4 で文書末まで
+            }
+        });
+
+    [Fact]
+    public void OffsetFromClientPoint_TopRow_MapsToTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                // クライアント最上段(y=0)の左端 = 視覚行 2 の先頭 = offset 4
+                Assert.Equal(4, c.OffsetFromClientPoint(0, 0));
+            }
+        });
 }
