@@ -65,6 +65,14 @@ public sealed class BackupCoordinator : IDisposable
     private readonly ConcurrentQueue<string> _failed = new(); // 背景書込が失敗した Id(UI スレッドで回収)
     private bool _shutDown;
 
+    /// <summary>起動時復元(MainForm.OnShown)が完了したか。完了までは保存点/クローズの
+    /// 即時反映を止める(設計 2026-08-22 §3.3)。MainForm ctor の NewFile は SetSavePoint 経由で
+    /// <see cref="OnCleanedOrClosed"/> へ到達するため、ゲートが無いと空無題 1 タブのレイアウトを
+    /// 復元前に session-state.json へ書き込み、前回セッションを失う。既存の
+    /// ActiveDocumentChanged 経路が同じ事故を起こしていないのは、ctor 時点で TabControl の
+    /// ハンドルが未生成で WinForms の Selected が発火しないため(= 偶然に守られている)。</summary>
+    private bool _startupRestoreDone;
+
     // ===== hot exit 統合(設計 2026-07-23 §3.1)=====
     private bool _sessionRestoreEnabled; // 「起動時に前回開いていたファイルを開く」設定(UpdateSettings で切替可能)
     private readonly string _layoutPath; // session-state.json のフルパス(テストは TempDir 配下へ差替)
@@ -122,6 +130,11 @@ public sealed class BackupCoordinator : IDisposable
         _timer.Interval = Math.Clamp(intervalSeconds, 5, 3600) * 1000; // 上限クランプで int オーバーフロー防止
         _timer.Tick += (_, _) => Reconcile();
         _docs.ActiveDocumentChanged += (_, _) => Reconcile();
+        // A-1 / M-31(設計 2026-08-22 §3.1): 「バックアップが不要になった」瞬間を即時反映する。
+        // Timer と ActiveDocumentChanged だけでは、保存直後 / 破棄直後〜次 tick(既定 300 秒)の
+        // クラッシュ窓で、古いバックアップが dirty 復元され Ctrl+S で新内容を上書きする。
+        _docs.DocumentDirtyChanged += (_, doc) => OnCleanedOrClosed(!doc.Editor.Modified);
+        _docs.DocumentClosed += (_, _) => OnCleanedOrClosed(clean: true);
         // レイアウトのみモード(設計 §5.2 OFF×ON)でも writer と timer は動かす。
         if (!_enabled && !_sessionRestoreEnabled)
             return;
@@ -399,6 +412,37 @@ public sealed class BackupCoordinator : IDisposable
         if (_sessionRestoreEnabled)
             ReconcileLayout(force: false);
     }
+
+    /// <summary>
+    /// A-1 / M-31(設計 2026-08-22 §3.2): clean 化・クローズだけを即時反映する。
+    /// </summary>
+    /// <remarks>
+    /// dirty 化(clean=false)では何もしない。対称に配線するとユーザーが設定した
+    /// バックアップ間隔の契約が消え、M-21(dirty 文書の全文 string 化)を高頻度で誘発する。
+    /// 走らせるのが full <see cref="Reconcile"/> ではなく <see cref="ReconcileMapMaintenance"/>
+    /// なのも同じ理由: <see cref="ReconcileContent"/> は他の dirty タブに対して SnapshotText
+    /// (全文 string 化)を走らせるため、Ctrl+S ごとに呼ぶと巨大 dirty タブ同居時に保存の
+    /// 応答時間が悪化する。必要なのは「clean 化 / 閉じた文書のバックアップ削除 + レイアウト更新」
+    /// だけで、これは ReconcileMapMaintenance の意味論そのもの。
+    /// ReconcileMapMaintenance は info.ForceWrite を落とさないが、
+    /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害
+    /// (次に dirty 化したとき 1 回余分に書くだけ = 安全側)。
+    /// </remarks>
+    private void OnCleanedOrClosed(bool clean)
+    {
+        if (!clean)
+            return;
+        if (_shutDown || !_startupRestoreDone || (!_enabled && !_sessionRestoreEnabled))
+            return;
+        ReconcileMapMaintenance();
+        if (_sessionRestoreEnabled)
+            ReconcileLayout(force: false);
+    }
+
+    /// <summary>起動時復元(MainForm.OnShown)が終わったことを通知する。これ以降のみ
+    /// 保存点・クローズの即時反映が働く(設計 2026-08-22 §3.3)。呼び忘れると A-1 の修正が
+    /// 丸ごと死ぬため、MainFormSmokeTests が実経路で固定する。</summary>
+    public void MarkStartupRestoreComplete() => _startupRestoreDone = true;
 
     /// <summary>本文バックアップの走査(旧 Reconcile 本体をそのまま抽出・挙動不変)。</summary>
     private void ReconcileContent()
