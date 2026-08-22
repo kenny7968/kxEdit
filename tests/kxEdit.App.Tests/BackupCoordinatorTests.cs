@@ -382,22 +382,39 @@ public class BackupCoordinatorTests
             Assert.DoesNotContain(host.Writer.LayoutWrites[^1].Tabs, t => t.BackupId == id);
         });
 
-    /// <summary>間隔契約の保存: dirty 化では即時書込をしない。ここを対称に配線すると
-    /// 1 打鍵目ごとにバックアップを書き、ユーザーが設定した間隔の意味が消える。</summary>
+    /// <summary>
+    /// dirty 化では即時反映を動かさない(= 余計なレイアウト書込を出さない)。
+    /// </summary>
+    /// <remarks>
+    /// 観測点がレイアウト書込なのは、<c>ReconcileMapMaintenance</c> が削除しかしないため
+    /// 「dirty 化でバックアップが書かれない」を assert しても<b>ガードの有無で差が出ない</b>
+    /// (guard を外しても Write は出ない = 網が分岐に当たらない)から。実際に差が出るのは
+    /// ReconcileLayout の呼び出しで、キャレット位置は署名に載るため、位置を変えてから
+    /// dirty 化すると tick 抑止をすり抜けて書込が出てしまう。
+    /// 前半の clean 化 assert は「この fixture でそもそも書込が出る」ことの対照
+    /// (後半の Equal が vacuous でないことの証明)。
+    /// </remarks>
     [Fact]
-    public void DirtyTransition_DoesNotWriteBackup_Immediately() =>
+    public void DirtyTransition_DoesNotWriteLayout_Immediately() =>
         Sta.Run(() =>
         {
-            using var host = new Host();
+            using var host = new Host(restoreSessionEnabled: true);
             host.Backup.MarkStartupRestoreComplete();
-            var doc = host.Docs.CreateNew();
-            host.Backup.Reconcile(); // clean のまま登録(HasBackup=false)
-            int writesBefore = host.Writer.Writes.Count;
+            var doc = host.NewDoc("hello world");
+            host.Backup.Reconcile();
 
-            doc.Editor.Text = "x";
-            doc.Editor.ClearSavePoint(); // dirty 化
+            // 対照: キャレットを動かしてから clean 化すると即時反映で書込が出る。
+            int before = host.Writer.LayoutWrites.Count;
+            doc.Editor.SetCaretCharOffset(3);
+            doc.Editor.SetSavePoint();
+            int afterClean = host.Writer.LayoutWrites.Count;
+            Assert.True(afterClean > before);
 
-            Assert.Equal(writesBefore, host.Writer.Writes.Count);
+            // 本題: 同じくキャレットを動かしてから dirty 化しても書込は出ない。
+            doc.Editor.SetCaretCharOffset(7);
+            doc.Editor.ClearSavePoint();
+
+            Assert.Equal(afterClean, host.Writer.LayoutWrites.Count);
         });
 
     /// <summary>Shutdown 後は即時経路も無反応(既存 _shutDown ガードの共有)。</summary>

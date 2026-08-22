@@ -417,8 +417,13 @@ public sealed class BackupCoordinator : IDisposable
     /// A-1 / M-31(設計 2026-08-22 §3.2): clean 化・クローズだけを即時反映する。
     /// </summary>
     /// <remarks>
-    /// dirty 化(clean=false)では何もしない。対称に配線するとユーザーが設定した
-    /// バックアップ間隔の契約が消え、M-21(dirty 文書の全文 string 化)を高頻度で誘発する。
+    /// dirty 化(clean=false)では何もしない。dirty 化で不要になるものは何も無い一方、
+    /// <see cref="ReconcileLayout"/> はキャレット位置を署名に含むため、対称に配線すると
+    /// 「保存後の 1 打鍵目」ごとに session-state.json の背景書込が増えるだけになる
+    /// (レイアウトは次 tick と終了時の FinalFlush が確定させる)。
+    /// なお <see cref="ReconcileMapMaintenance"/> は削除しかしないため、対称配線でも
+    /// バックアップ本文が増えるわけではない(ここを取り違えないこと=
+    /// テストの観測点もレイアウト書込に置いている)。
     /// 走らせるのが full <see cref="Reconcile"/> ではなく <see cref="ReconcileMapMaintenance"/>
     /// なのも同じ理由: <see cref="ReconcileContent"/> は他の dirty タブに対して SnapshotText
     /// (全文 string 化)を走らせるため、Ctrl+S ごとに呼ぶと巨大 dirty タブ同居時に保存の
