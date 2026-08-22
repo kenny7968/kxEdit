@@ -394,6 +394,17 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   自分で打った名前が自分に見えるだけなのでスプーフィング価値は低いが、**`RestoreFromBackup` 経由
   (攻撃者 JSON)の `State.Path` も同じ面に載る**ので、そちらは実入力起源。CSV-L-5 の
   「新規 File I/O / 表示面を足すときの定番チェック」の棚卸し対象。
+- **S-9**(Task 6 で判明・2026-08-23): **A-7 (b) の修正は重複タブが「生まれる」経路を塞ぐが、
+  「既にある」状態は塞がない。** `SaveDocument` → `WriteToPath`(Ctrl+S)は `FindByPath` を
+  一切参照しないので、2 タブが同じパスを持っていれば無警告の上書きは従来どおり起きる。
+  **その状態は現実に到達可能**: バックアップ/セッション復元は `FindByPath` を通さずに
+  `State.Path` を割り当てるため、**修正前ビルドが書いた hot exit レイアウト**
+  (= A-7 (b) がまさに作る「同一 Path が 2 件並ぶ」成果物)が衝突する 2 タブに復元される。
+  つまり v0.1.x から上げてくるユーザーが踏みうる。
+  対処の候補は (a) 復元側で dedup する、(b) `WriteToPath` に警告を足す、の 2 つだが、
+  (a) は「2 つ目のタブの未保存内容をどう扱うか」という別テーマを抱え、(b) は Ctrl+S を
+  止めると保存自体ができなくなる。本書 §6 が復元/バックアップ側の作業を非目標としているため
+  本ブランチでは扱わず、**リリース判断の材料として PR に明記する**。
 - **S-8**(Task 5 の fixup で発生・2026-08-23): V-1 の修正 (b) で `WriteToPath` の catch フィルタに
   `ArgumentException` を足したが、これは `ArgumentNullException` と `ArgumentOutOfRangeException` も
   一緒に握る。フィルタのコメントは「**想定内の入出力エラーのみ握る。NullReference 等のロジックバグは

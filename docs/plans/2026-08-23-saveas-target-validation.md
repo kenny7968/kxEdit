@@ -963,6 +963,11 @@ git commit -m "fix(app): 他タブで開いているファイルへの名前を�
 > 「Fake が在ると言った → 確認が出る」に変わり、本ブランチで最も重要な網が弱まる。**
 > 判断と理由を報告に書くこと。設計書 §9 S-5 を参照。
 >
+> **fixture の注意(Task 6 で判明)。** 重複タブ検知は上書き確認より**前**にあるので、
+> 「ファイルが既に在る」の fixture に**別タブで開いているパスを使ってはいけない**。
+> 使うと上書き確認ではなく Task 6 のエラーに当たり、テストが別のものを pin する。
+> `TryOpenOrActivate` を呼ばず、実ファイルだけを置くこと。
+>
 > **あわせて既存テスト 1 本を強化すること(Tasks 3+4 のレビューで判明)。**
 > `SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout` は `SaveTargetCallCount >= 1` としか
 > assert していない。本タスクで上書き確認が入ると、Fake の `FileExists` 既定が変わったり
