@@ -1036,12 +1036,13 @@ dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~Vi
 
 `src/kxEdit.Editor/EditorControl.cs` の `ComputeCaretPoint` を次の 3 点で変更する。
 
-1. セグメント選択ループを `LocateSegmentIndex` 呼び出しに置き換える
-   (既存の長いコメントは `LocateSegmentIndex` の remarks から参照できるよう残す)。
+1. **(Task 3 の品質レビューで前倒し実施済み)** セグメント選択ループの `LocateSegmentIndex`
+   呼び出しへの置き換えは Task 3 の fixup で済ませた。理由: 逐語重複を 1 コミットぶん放置すると、
+   `EditorControlWrapCaretTests` 13 件の網が seam 側に一切掛からない
+   (対照実験: `ComputeCaretPoint` 側の `<` → `<=` 変異は 13 件赤・seam コピー側の同じ変異は 0 件)。
+   本タスクでは可視判定の追加だけを行う。
 
 ```csharp
-        int segIdx = LocateSegmentIndex(segments, wrapped.ReachedLineEnd, caretInLine);
-
         // I-2: TopLine の途中セグメントから描いている場合、その上のセグメントは不可視。
         if (logicalLine == _topLine && segIdx < _topSegment)
             return (0, 0, false);
@@ -1082,7 +1083,23 @@ dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~Vi
 
 ### Step 4: `OffsetFromClientPoint` を実装する
 
-`src/kxEdit.Editor/EditorControl.Input.cs` の歩き出しを `_topSegment` にする。
+**方針(Task 3 品質レビュー I-2 / I-3 の決定)**: 歩き出しを `_topSegment` にするだけでなく、
+**視覚行の前進そのものを seam(`WalkForwardVisualRows`)に載せる**。理由:
+
+- ヘッダコメントが seam の用途に「ヒットテスト」を挙げているのに実態が伴わず、規約が二重定義のまま残る。
+- `EditorControl.Input.cs` の `SegmentCountAtLine` は `SegmentCountCapped` と同義だが
+  **折り返し OFF ガードが無く**(OFF でも行全文を materialize)**打ち切りも無い**
+  (`LineLayout.Wrap` で行全体)。巨大 1 行文書ではクリック 1 回が PR #35 の潰したコスト階級に触れる。
+- 「最終視覚行より下のクリックは文書末尾へ」の分岐に必要な情報は、Task 3 fixup で
+  `WalkForwardVisualRows` が返すようになった `Exhausted` で表現できる。
+
+したがって `OffsetFromClientPoint` の視覚行前進ループを
+`WalkForwardVisualRows(snap, _topLine, _topSegment, visualRowFromTop)` に置き換え、
+`Exhausted == true` なら従来どおり `snap.CharLength` を返す。**`SegmentCountAtLine` は削除する**
+(他に呼び出し元が無いことを確認してから)。
+
+置き換え前後で `MouseInputTests` / `EditorControlOffsetFromPointTests` が
+**1 行も変更せずに全緑**であることが等価性の証拠。
 
 ```csharp
         int line = _topLine;
