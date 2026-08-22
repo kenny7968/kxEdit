@@ -949,6 +949,13 @@ git commit -m "fix(app): 他タブで開いているファイルへの名前を�
 > **(b) を採ると本タスクの上書き確認テストが「実ファイルがディスクに在る → 確認が出る」から
 > 「Fake が在ると言った → 確認が出る」に変わり、本ブランチで最も重要な網が弱まる。**
 > 判断と理由を報告に書くこと。設計書 §9 S-5 を参照。
+>
+> **あわせて既存テスト 1 本を強化すること(Tasks 3+4 のレビューで判明)。**
+> `SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout` は `SaveTargetCallCount >= 1` としか
+> assert していない。本タスクで上書き確認が入ると、Fake の `FileExists` 既定が変わったり
+> テストが設定したりした瞬間に確認が発火 → `continue` → 2 回目のダイアログ → キュー枯渇で
+> `null`、という**別の経路を通りながら緑のまま**になる。`Assert.Equal(1, …SaveTargetCallCount)`
+> と `Assert.Equal(1, host.Dialogs.PickSaveAsCount)` を足して 1 周であることを固定する。
 
 **Files:**
 - Modify: `src/kxEdit.App/FileController.cs`
@@ -1105,6 +1112,13 @@ git commit -m "fix(app): 名前を付けて保存の全経路に上書き確認�
 ---
 
 ## Task 8: 文字コード劣化警告も再表示にする
+
+> **無限ループのハザードが 1 つ増える(Tasks 3+4 のレビューで判明)。**
+> 文字コード警告が `continue` になると、**テストで無限ループを止めているのはキューの枯渇だけ**に
+> なる。`FakePrompt.OkCancelResult` は固定フィールドで永久に同じ答を返すため、
+> 「警告 → キャンセル → 再表示 → 同じ入力 → 警告 → …」が自力では終わらない。
+> **`SaveAsQueue` に「最後の値を繰り返す」モードを絶対に足さないこと。**
+> 枯渇=キャンセルという Task 3 の設計は、この時点で唯一の停止保証になる。
 
 **Files:**
 - Modify: `src/kxEdit.App/FileController.cs`
