@@ -1,0 +1,1720 @@
+# 折り返し ON の垂直移動(A-5 / A-6)実装計画
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** 折り返し ON のとき ↑ が効かなくなる / ↓ が視覚行を飛ばす(A-5)と、キャレットが可視域外へ出ても
+画面が追従しない(A-6)を根治する。
+
+**Architecture:** 設計書 [`2026-08-22-wrap-vertical-navigation-design.md`](./2026-08-22-wrap-vertical-navigation-design.md)
+の不変条件 I-1〜I-4 を実装する。A-5 は Core の着地クランプ 1 箇所。A-6 は EditorControl に
+`_topSegment`(可視域最上段の視覚セグメント index)を導入し、可視判定・スクロール判断・座標算出・
+ヒットテストを論理行から視覚行へ移す。折り返し OFF では `_topSegment ≡ 0` で全式が現行に退化する。
+
+**Tech Stack:** .NET 9 / C# / WinForms / xUnit。整形は CSharpier(pre-commit フックが自動実行)。
+
+---
+
+## 全タスク共通のルール
+
+**ビルドとテスト**(`kxEdit.sln` のあるリポジトリルートで実行):
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+- **赤を確認する段では `--no-build` を付けない**(古いバイナリで走ると「落ちるはずのテストが緑」
+  「変異させたのに緑」を誤認する。過去ブランチで実際に踏んだ事故)。
+- **`--filter` で 1 件に絞った結果からミューテーションの結論を出さない**。変異が本当に kill されたかは
+  対象プロジェクト全件で確認する(絞ると別の網が拾っていることを見落とす)。
+- 0 warning を維持する(`-warnaserror` 稼働中)。
+- コミットは `--no-verify` を使わない(CSharpier 整形+ローカルパス検出フックを通す)。
+- コミットメッセージは日本語。末尾に `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`。
+
+**タスクごとのレビュー**(CLAUDE.md §3-4):
+
+| タスク | レビュー |
+|--------|----------|
+| Task 1, 2, 4, 5, 6, 7 | 仕様レビュー(実装・テストが本計画どおりか) |
+| **Task 3** | 仕様レビュー + **コード品質レビュー**(後続 3 タスクが依存する新しい seam を導入するため=前倒し例外) |
+
+**用語**: 「視覚行」= 折り返し後の 1 行 = `WrapSegment` 1 個。「論理行」= 改行で区切られた 1 行。
+
+---
+
+## Task 1: A-5 — 非最終セグメントへの着地をクランプする
+
+**Files:**
+- Modify: `src/kxEdit.Core/Layout/VisualSegments.cs`(先頭に `using kxEdit.Core.Text;` を追加)
+- Modify: `src/kxEdit.Core/Editing/VerticalNavigation.cs:136-143`
+- Test: `tests/kxEdit.Core.Tests/Layout/VisualSegmentsTests.cs`(追記)
+- Test: `tests/kxEdit.Core.Tests/Editing/VerticalNavigationTests.cs`(追記)
+
+### Step 1: 失敗するテストを書く(A-5 の再現)
+
+`tests/kxEdit.Core.Tests/Editing/VerticalNavigationTests.cs` の末尾(クラス閉じ括弧の直前)に追記:
+
+```csharp
+    // ===== A-5(2026-08-22 監査): 視覚行の右端に着地するケース =====
+    // 不変条件 I-1: 非最終セグメントへの着地は segEnd 未満でなければならない。
+    // segEnd は描画・照会の双方で「次の視覚行の先頭」を意味するため、そこへ着地すると
+    // ↓ は 1 行飛んで見え、↑ は同じ値へ着地し続けて動かなくなる。
+    //
+    // fixture: wrapColumns=4 / 半角 8px → maxWidthPx=32。
+    //   行 0 "abcd"          → 視覚 [(0,4)]                     … 幅ぴったり 32px = 1 本
+    //   行 1 "xxxxyyyyzzzz"  → 視覚 [(0,4),(4,4),(8,4)]         … 絶対 offset 5,9,13
+    //   行 2 "end"           → 視覚 [(0,3)]                     … 絶対 offset 18
+    private const string WrapFixture = "abcd\nxxxxyyyyzzzz\nend";
+
+    [Fact]
+    public void MoveDown_WithWrap_FromLineEnd_LandsInFirstVisualRow_NotSecond()
+    {
+        // 行 0 の行末(caret=4 / desiredPx=32=右端)から ↓。
+        // 移動先は行 1 の視覚行 0 = "xxxx"(絶対 [5,9))。
+        // 修正前は 9(= "yyyy" の行頭 = 視覚行 1 の先頭)に着地して 1 行飛んでいた。
+        var s = Snap(WrapFixture);
+        var (t, d) = VerticalNavigation.MoveDown(s, caret: 4, currentDesiredPx: -1, wrapColumns: 4, M);
+        Assert.Equal(32, d);
+        Assert.InRange(t, 5, 8); // 視覚行 0 の内側(9=次の視覚行の先頭 ではない)
+        Assert.Equal(8, t); // 右端 = 最後のコードポイントの先頭
+    }
+
+    [Fact]
+    public void MoveUp_WithWrap_FromRightEdge_ActuallyMovesEveryTime()
+    {
+        // A-5 の主症状。右端の desiredPx を保ったまま ↑ を 3 回押し、毎回 caret が動くこと。
+        // 修正前は 1 回目以降ずっと同じ値に着地して「↑ が効かない」状態だった。
+        var s = Snap(WrapFixture);
+        // 行 1 の視覚行 2("zzzz")の右端に相当する位置=行末(17)から開始する。
+        int caret = 17;
+        int desired = -1;
+        var visited = new List<int>();
+        for (int i = 0; i < 3; i++)
+        {
+            int before = caret;
+            (caret, desired) = VerticalNavigation.MoveUp(s, caret, desired, wrapColumns: 4, M);
+            Assert.True(caret < before, $"↑ {i + 1} 回目で caret が動いていない (before={before}, after={caret})");
+            visited.Add(caret);
+        }
+        // 視覚行 1 の右端 → 視覚行 0 の右端 → 行 0 の行末
+        Assert.Equal(new[] { 12, 8, 4 }, visited);
+    }
+
+    [Fact]
+    public void MoveDown_WithWrap_RightEdge_TraversesEachVisualRowOnce()
+    {
+        // ↓ 側の対称テスト。右端を保ったまま 1 視覚行ずつ降りること(飛ばさないこと)。
+        var s = Snap(WrapFixture);
+        int caret = 4; // 行 0 の行末
+        int desired = -1;
+        var visited = new List<int>();
+        for (int i = 0; i < 3; i++)
+        {
+            (caret, desired) = VerticalNavigation.MoveDown(s, caret, desired, wrapColumns: 4, M);
+            visited.Add(caret);
+        }
+        // 視覚行 0 の右端 → 視覚行 1 の右端 → 視覚行 2 は最終セグメント=行末(17)まで行ける
+        Assert.Equal(new[] { 8, 12, 17 }, visited);
+    }
+
+    [Fact]
+    public void MoveDown_WithWrap_LastSegment_StillLandsAtLogicalLineEnd()
+    {
+        // クランプの過剰適用防止。最終セグメントは segEnd(=行末)に着地してよい
+        // (そこは「次の視覚行の先頭」ではないため)。
+        var s = Snap(WrapFixture);
+        // 行 2 "end" は 1 セグメント=最終。右端 desiredPx で ↓ すると行末(21)。
+        var (t, _) = VerticalNavigation.MoveDown(s, caret: 13, currentDesiredPx: 32, wrapColumns: 4, M);
+        Assert.Equal(21, t); // 18 + 3 = "end" の行末
+    }
+
+    [Fact]
+    public void MoveDownThenUp_WithWrap_RightEdge_ReturnsToOriginalVisualRow()
+    {
+        // 往復。desiredPx を保持しているので元の視覚行へ戻る。
+        var s = Snap(WrapFixture);
+        var (down, d1) = VerticalNavigation.MoveDown(s, caret: 4, currentDesiredPx: -1, wrapColumns: 4, M);
+        var (up, _) = VerticalNavigation.MoveUp(s, down, d1, wrapColumns: 4, M);
+        Assert.Equal(4, up);
+    }
+```
+
+`using System.Collections.Generic;` が必要なら追加する(ImplicitUsings 有効なら不要)。
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~VerticalNavigationTests"
+```
+
+期待: 5 件中 4 件が FAIL。
+- `MoveDown_WithWrap_FromLineEnd_...` → `Assert.Equal(8, t)` が `9` で失敗
+- `MoveUp_WithWrap_FromRightEdge_...` → 2 回目の `caret < before` で失敗
+- `MoveDown_WithWrap_RightEdge_...` → `[9, 13, 17]` が返って失敗
+- `MoveDownThenUp_...` → 失敗
+- `MoveDown_WithWrap_LastSegment_...` → **PASS**(既に正しい挙動=クランプの過剰適用を検出する網)
+
+### Step 3: `ClampLandingOffset` を実装する
+
+`src/kxEdit.Core/Layout/VisualSegments.cs` の 1 行目に `using kxEdit.Core.Text;` を追加し、
+`FindContaining` の直後(クラス閉じ括弧の直前)に追記:
+
+```csharp
+    /// <summary>
+    /// 視覚行への「キャレットの着地オフセット」を規約に合う範囲へクランプする(設計書 不変条件 I-1)。
+    /// </summary>
+    /// <param name="segment">着地先の視覚セグメントの本文(セグメント先頭を 0 とする span)。</param>
+    /// <param name="localOffset">セグメント先頭からの着地オフセット([0, segment.Length])。</param>
+    /// <param name="isFinalSegment">着地先が論理行の最終セグメントなら true。</param>
+    /// <remarks>
+    /// <para>
+    /// <b>なぜ必要か</b>: <see cref="FindContaining"/> は <c>offsetInLine == segEnd</c> を
+    /// 「<b>次の</b>視覚行の先頭」と判定する(最終セグメントのみ例外)。描画側
+    /// (<c>EditorControl.ComputeCaretPoint</c>)も同じ規約なので、非最終セグメントの
+    /// <c>segEnd</c> へキャレットを着地させると「歩いた視覚行」と「描画される視覚行」が
+    /// 1 本ずれる。その結果 ↓ は 1 行飛んで見え、↑ は 1 つ戻した先で同じ <c>segEnd</c> に
+    /// 再着地して動かなくなる(2026-08-22 監査 A-5)。
+    /// </para>
+    /// <para>
+    /// クランプ先は最後のコードポイントの<b>先頭</b>=サロゲートペアを割らない。
+    /// </para>
+    /// <para>
+    /// <b>マウス経路には適用しない</b>: ドラッグ選択の端点としては <c>segEnd</c> が正しく、
+    /// クランプすると視覚行の最後の 1 文字が選択から漏れる(設計書 §3.2)。
+    /// </para>
+    /// </remarks>
+    public static int ClampLandingOffset(
+        ReadOnlySpan<char> segment,
+        int localOffset,
+        bool isFinalSegment
+    )
+    {
+        if (isFinalSegment || localOffset < segment.Length)
+            return localOffset;
+        if (segment.Length == 0)
+            return 0; // Wrap 契約上、空セグメントは [(0,0)] の 1 本=常に最終。到達しない防御
+        return TextBoundary.SnapToCodePointStart(segment, segment.Length - 1);
+    }
+```
+
+`src/kxEdit.Core/Editing/VerticalNavigation.cs:136-143` を次に置き換える:
+
+```csharp
+        var targetSegs = LineLayout.Wrap(targetLineText, maxWidthPx, metrics);
+        // WalkVisualRows はセグメント数を歩きながら渡すので通常はここでのクランプは不要だが、
+        // 折り返しなし経路(targetSegIdx=0 固定)と併せて防御的にクランプする。
+        int usedSegIdx = Math.Min(targetSegIdx, targetSegs.Count - 1);
+        var targetSeg = targetSegs[usedSegIdx];
+        var targetSpan = targetLineText.AsSpan(targetSeg.OffsetInLine, targetSeg.Length);
+        int localTarget = PixelMapper.PxToOffset(targetSpan, desiredPx, metrics);
+        // 不変条件 I-1: 非最終セグメントの segEnd は「次の視覚行の先頭」なので着地させない。
+        // ここを外すと ↓ が視覚行を飛ばし ↑ が固着する(2026-08-22 監査 A-5)。
+        localTarget = VisualSegments.ClampLandingOffset(
+            targetSpan,
+            localTarget,
+            isFinalSegment: usedSegIdx == targetSegs.Count - 1
+        );
+        int newCaret = targetLineStart + targetSeg.OffsetInLine + localTarget;
+        return (newCaret, desiredPx);
+```
+
+### Step 4: `ClampLandingOffset` 単体のテストを追加する
+
+`tests/kxEdit.Core.Tests/Layout/VisualSegmentsTests.cs` のクラス末尾に追記:
+
+```csharp
+    // ===== ClampLandingOffset(設計書 I-1)=====
+
+    [Fact]
+    public void ClampLandingOffset_FinalSegment_KeepsSegEnd()
+    {
+        // 最終セグメントの segEnd は論理行の行末=正当なキャレット位置なので触らない。
+        Assert.Equal(4, VisualSegments.ClampLandingOffset("abcd", 4, isFinalSegment: true));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_ClampsToLastCodePointStart()
+    {
+        Assert.Equal(3, VisualSegments.ClampLandingOffset("abcd", 4, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_Interior_Unchanged()
+    {
+        Assert.Equal(2, VisualSegments.ClampLandingOffset("abcd", 2, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_SurrogateTail_DoesNotSplitPair()
+    {
+        // "a" + U+1F600(サロゲートペア)= 3 code unit。末尾から 1 引くと low サロゲート位置に
+        // なるので、ペア先頭(=1)まで戻ること。
+        Assert.Equal(1, VisualSegments.ClampLandingOffset("a😀", 3, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_EmptySegment_ReturnsZero()
+    {
+        Assert.Equal(0, VisualSegments.ClampLandingOffset("", 0, isFinalSegment: false));
+    }
+```
+
+### Step 5: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+期待: 3 プロジェクト全緑・0 warning。**既存テストの変更は 0 件**であること
+(A-5 の修正が既存の被覆範囲を壊していない証拠)。
+
+### Step 6: ミューテーション検証(2 件)
+
+`--no-build` を付けずに実行すること。
+
+1. `ClampLandingOffset` の `isFinalSegment ||` を削って `if (localOffset < segment.Length)` にする
+   → `ClampLandingOffset_FinalSegment_KeepsSegEnd` と
+   `MoveDown_WithWrap_LastSegment_StillLandsAtLogicalLineEnd` が赤くなること。
+2. `localOffset < segment.Length` を `localOffset <= segment.Length` にする
+   → `MoveUp_WithWrap_FromRightEdge_ActuallyMovesEveryTime` が赤くなること。
+
+いずれも確認後 `git checkout -- src/` で**必ず復元**し、復元後に全緑を再確認する
+(変異を戻し忘れたままコミットした事故が過去にある)。
+
+### Step 7: コミット
+
+```powershell
+git add src/kxEdit.Core/Layout/VisualSegments.cs src/kxEdit.Core/Editing/VerticalNavigation.cs tests/kxEdit.Core.Tests
+git commit -F - <<'EOF'
+fix(core): 折り返し ON の垂直移動で非最終視覚行の segEnd に着地しない(A-5)
+
+VerticalNavigation の着地オフセットが、移動先が非最終セグメントのときに
+segEnd(=次の視覚行の先頭)になり得た。segEnd は VisualSegments.FindContaining と
+ComputeCaretPoint の双方で「次の視覚行」と解釈されるため、歩いた視覚行と
+描画される視覚行が 1 本ずれ、↓ は 1 行飛び、↑ は同じ値に着地し続けて固着していた。
+
+不変条件を VisualSegments.ClampLandingOffset として明示し、
+MoveVerticalRelative(MoveUp/MoveDown/PageUp/PageDown の唯一の実装)で適用する。
+PixelMapper.PxToOffset は純関数のまま据え置く(マウス経路と共有しており、
+ドラッグ選択の端点としては segEnd が正しいため)。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+EOF
+```
+
+---
+
+## Task 2: `ViewportLayout.Build` に topSegment を足す(挙動不変)
+
+**Files:**
+- Modify: `src/kxEdit.Core/Layout/ViewportLayout.cs`
+- Modify(呼び出し側・`topSegment: 0` を渡すだけ): `src/kxEdit.Editor/EditorControl.Paint.cs:34`、
+  `src/kxEdit.Editor/EditorControl.cs:390`(`GetVisibleCharRange`)、
+  `src/kxEdit.Editor/EditorControl.cs:1072`(`UpdateHorizontalScrollbar`)
+- Test: `tests/kxEdit.Core.Tests/Layout/ViewportLayoutTests.cs`、
+  `tests/kxEdit.Core.Tests/Layout/ViewportLayoutPrefixTests.cs`、
+  `tests/kxEdit.Core.Tests/Layout/FrameBuilderTests.cs`(いずれも引数追加の機械的修正)
+
+**注意**: **省略可能引数(`int topSegment = 0`)にしない**。必須引数にすることで全呼び出し元に
+「この経路の起点はどこか」を一度考えさせる(既定値で素通りさせない)。
+
+### Step 1: 失敗するテストを書く
+
+`tests/kxEdit.Core.Tests/Layout/ViewportLayoutTests.cs` のクラス末尾に追記:
+
+```csharp
+    [Fact]
+    public void TopSegment_skips_leading_visual_rows_of_first_line()
+    {
+        // "aaaaaa"(6 文字)を wrapColumns=2(=maxWidthPx 2px)で折り返すと視覚 [(0,2),(2,2),(4,2)]。
+        // topSegment=1 なら先頭 1 本を読み飛ばして 2 本目から積む(y は 0 から始まる)。
+        var buf = TextBuffer.FromString("aaaaaa");
+        var rows = ViewportLayout.Build(
+            buf.Current,
+            topLine: 0,
+            topSegment: 1,
+            heightPx: 20,
+            wrapColumns: 2,
+            M
+        );
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(new VisualRow(0, 1, 2, 2, 0), rows[0]);
+        Assert.Equal(new VisualRow(0, 2, 4, 2, 10), rows[1]);
+    }
+
+    [Fact]
+    public void TopSegment_beyond_segment_count_clamps_to_last_segment()
+    {
+        // 編集で段落が縮み topSegment が実際のセグメント数以上になった場合の防御。
+        // 最終セグメントへクランプする(空リストを返して真っ白にしない)。
+        var buf = TextBuffer.FromString("aaaaaa");
+        var rows = ViewportLayout.Build(
+            buf.Current,
+            topLine: 0,
+            topSegment: 99,
+            heightPx: 20,
+            wrapColumns: 2,
+            M
+        );
+
+        Assert.Single(rows);
+        Assert.Equal(new VisualRow(0, 2, 4, 2, 0), rows[0]);
+    }
+
+    [Fact]
+    public void TopSegment_applies_only_to_the_first_logical_line()
+    {
+        // 2 行目以降は常に先頭視覚行から積む。
+        var buf = TextBuffer.FromString("aaaa\nbbbb");
+        var rows = ViewportLayout.Build(
+            buf.Current,
+            topLine: 0,
+            topSegment: 1,
+            heightPx: 40,
+            wrapColumns: 2,
+            M
+        );
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(new VisualRow(0, 1, 2, 2, 0), rows[0]);
+        Assert.Equal(new VisualRow(1, 0, 5, 2, 10), rows[1]);
+        Assert.Equal(new VisualRow(1, 1, 7, 2, 20), rows[2]);
+    }
+```
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~ViewportLayoutTests"
+```
+
+期待: **コンパイルエラー**(`Build` に 6 引数版が無い)。これがこの段階の「赤」。
+
+### Step 3: `ViewportLayout.Build` を実装する
+
+`src/kxEdit.Core/Layout/ViewportLayout.cs` のシグネチャと doc を更新し、本体のループ先頭を変更する。
+
+```csharp
+    /// <summary>
+    /// (topLine, topSegment) 以降を積み上げて heightPx を満たす分だけ VisualRow を返す。
+    /// - wrapColumns&lt;=0: 折り返し OFF(1 論理行=1 視覚行)。<paramref name="topSegment"/> は常に 0 の想定
+    /// - wrapColumns&gt;0: 半角 wrapColumns 文字分の px を max として折り返しを各行に適用
+    ///   (各行は「まだ積める視覚行数」までで打ち切って Wrap する=巨大 1 行でも O(可視行数))
+    /// - <paramref name="topSegment"/>: 先頭論理行のうち読み飛ばす視覚行数(設計書 不変条件 I-2)。
+    ///   実際のセグメント数以上なら最終セグメントへクランプする(編集で段落が縮んだ場合の防御)
+    /// - 空文書(LineCount=1・CharLength=0)は topLine=0 なら "1 個空の視覚行"(EOF キャレット用)を返す
+    /// - topLine が LineCount 以上なら空リスト
+    /// </summary>
+    public static IReadOnlyList<VisualRow> Build(
+        TextSnapshot snapshot,
+        int topLine,
+        int topSegment,
+        int heightPx,
+        int wrapColumns,
+        ICharMetrics metrics
+    )
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(metrics);
+
+        var result = new List<VisualRow>();
+        if (topLine < 0 || topLine >= snapshot.LineCount || heightPx <= 0)
+            return result;
+        if (topSegment < 0)
+            topSegment = 0;
+
+        int maxWidthPx = wrapColumns > 0 ? wrapColumns * metrics.MeasureRun("0") : 0;
+        int lineHeight = metrics.LineHeightPx;
+
+        int y = 0;
+        for (int line = topLine; line < snapshot.LineCount; line++)
+        {
+            if (y >= heightPx)
+                return result;
+
+            int lineStart = snapshot.GetLineStart(line);
+            int lineEndNoBreak = snapshot.GetLineEnd(line, includeBreak: false);
+            int lineLen = lineEndNoBreak - lineStart;
+            string lineText = lineLen == 0 ? string.Empty : snapshot.GetText(lineStart, lineLen);
+
+            // 先頭論理行だけ topSegment 本を読み飛ばす。読み飛ばす分も Wrap の要求本数に足す
+            // (打ち切り結果は完全結果の prefix なので、skip 本目以降は完全 Wrap と一致する)。
+            int skip = line == topLine ? topSegment : 0;
+            int rowsNeeded =
+                lineHeight > 0 ? (heightPx - y + lineHeight - 1) / lineHeight : int.MaxValue;
+            // skip 加算のオーバーフロー回避(rowsNeeded は lineHeight<=0 で int.MaxValue になる)
+            long needed = (long)Math.Max(1, rowsNeeded) + skip;
+            var segments = LineLayout
+                .WrapFirstSegments(
+                    lineText,
+                    maxWidthPx,
+                    metrics,
+                    needed > int.MaxValue ? int.MaxValue : (int)needed
+                )
+                .Segments;
+            // topSegment が実セグメント数以上=編集で段落が縮んだ。最終セグメントへ寄せる。
+            if (skip >= segments.Count)
+                skip = segments.Count - 1;
+            for (int si = skip; si < segments.Count; si++)
+            {
+                if (y >= heightPx)
+                    return result;
+                var seg = segments[si];
+                result.Add(
+                    new VisualRow(
+                        LogicalLine: line,
+                        SegmentIndex: si,
+                        SegmentStartChar: lineStart + seg.OffsetInLine,
+                        SegmentLength: seg.Length,
+                        YPx: y
+                    )
+                );
+                y += lineHeight;
+            }
+        }
+        return result;
+    }
+```
+
+既存のコメント(2026-08-02 変更 B の説明・`Math.Max(1, ...)` の生存理由)は保持したまま、
+上記の変更点だけを差し込むこと。
+
+### Step 4: 呼び出し元 3 箇所に `topSegment: 0` を渡す
+
+- `src/kxEdit.Editor/EditorControl.Paint.cs:34`
+- `src/kxEdit.Editor/EditorControl.cs:390`(`GetVisibleCharRange`)
+- `src/kxEdit.Editor/EditorControl.cs:1072`(`UpdateHorizontalScrollbar`。折り返し OFF 専用経路なので
+  Task 4 以降も 0 のまま)
+
+```csharp
+var rows = ViewportLayout.Build(snap, _topLine, topSegment: 0, paintHeight, _wrapColumns, _metrics);
+```
+
+既存テスト(`ViewportLayoutTests` 8 件・`ViewportLayoutPrefixTests`・`FrameBuilderTests`)にも
+`topSegment: 0` を機械的に足す。**引数追加以外の変更を混ぜない**。
+
+### Step 5: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+期待: 全緑・0 warning。**Editor / App のテストは 1 行も変更していない**こと(挙動不変の証拠)。
+
+### Step 6: コミット
+
+```powershell
+git add -A
+git commit -m "refactor(core): ViewportLayout.Build に topSegment を足す(挙動不変・A-6 の下準備)
+
+可視域の起点を視覚行にするため(設計書 I-2)、先頭論理行のうち読み飛ばす視覚行数を
+引数に足した。既存呼び出し元は 3 箇所とも topSegment: 0 を渡すため挙動は不変。
+省略可能引数にしないのは、将来の呼び出し元に起点を必ず意識させるため。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 3: EditorControl に視覚行の状態とヘルパを入れる(挙動不変)
+
+> **このタスクは仕様レビューに加えてコード品質レビューを行う**(後続 3 タスクが依存する
+> 新しい seam を導入するため。CLAUDE.md §3-4 の前倒し例外)。
+
+**Files:**
+- Modify: `src/kxEdit.Editor/EditorControl.cs`(フィールド・`TopLine` セッター・`SetTopPosition`・
+  リセット規則・視覚行ヘルパ群)
+- Test: `tests/kxEdit.Editor.Tests/VisualRowScrollTests.cs`(新規)
+
+### Step 1: 失敗するテストを書く
+
+`tests/kxEdit.Editor.Tests/VisualRowScrollTests.cs` を新規作成:
+
+```csharp
+using kxEdit.Core.Buffers;
+
+namespace kxEdit.Editor.Tests;
+
+/// <summary>
+/// 2026-08-22 監査 A-6: 可視域の起点を視覚行 (TopLine, TopSegment) にする(設計書 不変条件 I-2)。
+/// 本ファイルは状態とスクロール判断の契約を固定する。
+/// 折り返し OFF では TopSegment が常に 0 で全式が現行に退化すること(I-3)も併せて守る。
+/// </summary>
+public class VisualRowScrollTests
+{
+    /// <summary>
+    /// 可視行数を明示したエディタを作る。折り返し ON では HScrollBar が常に隠れるため
+    /// PaintHeightPx == ClientSize.Height になり、可視行数をテストから固定できる
+    /// (EditorControlWrapCaretTests.MakeControl と同じ流儀)。
+    /// </summary>
+    private static (Form f, EditorControl c) MakeControl(string text, int wrap, int visibleRows)
+    {
+        var f = new HostForm();
+        var c = new EditorControl { WrapColumns = wrap };
+        f.Controls.Add(c);
+        _ = f.Handle;
+        c.ClientSize = new System.Drawing.Size(800, c.LineHeightPx * visibleRows);
+        c.SetSource(TextBuffer.FromString(text));
+        return (f, c);
+    }
+
+    [Fact]
+    public void TopSegment_IsZero_ByDefault() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+
+    [Fact]
+    public void SetTopPosition_KeepsSegment_AndTopLineSetterResetsIt() =>
+        Sta.Run(() =>
+        {
+            // 非既定位置(TopSegment=2)から検証を始める=「0 のままだった」と区別する。
+            var (f, c) = MakeControl("abcdefghij\nklmnop", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                Assert.Equal(0, c.TopLine);
+                Assert.Equal(2, c.TopSegment);
+
+                // TopLine セッターは「その行の先頭視覚行から」の意味を保つ=TopSegment を 0 に戻す。
+                // 同じ論理行を代入しても戻ること(早期 return に潰されないこと)。
+                c.TopLine = 0;
+                Assert.Equal(0, c.TopLine);
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+
+    [Fact]
+    public void WrapColumnsSetter_ResetsTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                Assert.Equal(2, c.TopSegment);
+                c.WrapColumns = 4; // 折り返し幅が変わればセグメント分割そのものが変わる
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+
+    [Fact]
+    public void ReplaceSource_ResetsTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                c.ReplaceSource(TextBuffer.FromString("xyz"));
+                Assert.Equal(0, c.TopSegment);
+                Assert.Equal(0, c.TopLine);
+            }
+        });
+
+    [Fact]
+    public void SetTopPosition_ClampsLine_AndDropsSegmentWhenLineClamped() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                // 論理行 1 本しかないので line=5 は 0 にクランプされる。
+                // 行がクランプされたときは segment の意味が失われるので 0 にする。
+                c.SetTopPosition(5, 3);
+                Assert.Equal(0, c.TopLine);
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+}
+```
+
+`HostForm` は `tests/kxEdit.Editor.Tests/TestHost.cs`、`Sta` は同 `Sta.cs` の既存ヘルパ。
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~VisualRowScrollTests"
+```
+
+期待: **コンパイルエラー**(`TopSegment` / `SetTopPosition` が無い)。
+
+### Step 3: 状態とリセット規則を実装する
+
+`src/kxEdit.Editor/EditorControl.cs`:
+
+1. `private int _topLine;`(`:42`)の直後にフィールドを追加。
+
+```csharp
+    // 2026-08-22 A-6: 可視域最上段が属する視覚セグメント index(設計書 不変条件 I-2)。
+    // 折り返し OFF では常に 0=全式が導入前に退化する(I-3)。
+    // 「セグメント index の意味が変わる契機」では 0 に戻す(SetSource / ReplaceSource /
+    // TopLine セッター / WrapColumns セッター / ApplyAppearance / VScrollBar の防御クランプ)。
+    // 編集ではリセットしない(巨大段落の途中を編集するたび段落先頭へ飛ぶのを避ける。
+    // 実セグメント数を超えた場合は ViewportLayout.Build 側でクランプされる)。
+    private int _topSegment;
+```
+
+2. `TopLine` プロパティの近くに公開(internal)アクセサを追加。
+
+```csharp
+    /// <summary>可視域最上段の視覚セグメント index(設計書 I-2)。折り返し OFF では常に 0。</summary>
+    internal int TopSegment => _topSegment;
+```
+
+3. `TopLine` セッターを差し替える(早期 return が `_topSegment` を取り残さないようにする)。
+
+```csharp
+        set
+        {
+            int clamped = ClampTopLine(value);
+            // 同じ論理行への代入でも「その行の先頭視覚行から」の意味を回復させるため、
+            // _topSegment != 0 のときは早期 return しない(2026-08-22 A-6)。
+            if (clamped == _topLine && _topSegment == 0)
+                return;
+            _topLine = clamped;
+            _topSegment = 0;
+            if (_vscroll.Value != clamped)
+                _vscroll.Value = clamped;
+            PositionCaret();
+            Invalidate();
+        }
+```
+
+4. `SetTopPosition` を追加(`TopLine` セッターの直後)。
+
+```csharp
+    /// <summary>
+    /// 可視域の起点を<b>視覚行</b>単位で設定する(設計書 I-2)。<see cref="TopLine"/> セッターと違い
+    /// <see cref="TopSegment"/> を保つ=巨大段落の途中を先頭に置ける。
+    /// 論理行がクランプされた場合はセグメント index の意味が失われるので 0 に落とす。
+    /// </summary>
+    /// <remarks>
+    /// VScrollBar は論理行基準のまま(Value = TopLine)である。段落の途中をスクロールしている間
+    /// サムは動かず、論理行 1 本の文書ではバーが無効のままになる=意識的な近似
+    /// (全文の視覚行数を数えると O(文書) になり PR #35 の退行になるため。設計書 §4.4 / 申し送り S-3)。
+    /// </remarks>
+    internal void SetTopPosition(int line, int segment)
+    {
+        int clampedLine = ClampTopLine(line);
+        int clampedSeg = clampedLine == line ? Math.Max(0, segment) : 0;
+        if (clampedLine == _topLine && clampedSeg == _topSegment)
+            return;
+        _topLine = clampedLine;
+        _topSegment = clampedSeg;
+        if (_vscroll.Value != clampedLine)
+            _vscroll.Value = clampedLine;
+        PositionCaret();
+        Invalidate();
+    }
+```
+
+5. リセット箇所に `_topSegment = 0;` を足す。
+
+| 場所 | 変更 |
+|------|------|
+| `SetSource`(`:215` の `_topLine = 0;` の直後) | `_topSegment = 0;` |
+| `ReplaceSource`(`:273` の `_topLine = 0;` の直後) | `_topSegment = 0;` |
+| `WrapColumns` セッター(`_wrapColumns = clamped;` の直後) | `_topSegment = 0;` |
+| `ApplyAppearance`(`_wrapColumns` 更新の直後) | `_topSegment = 0;` |
+| `UpdateVerticalScrollbar` の防御クランプ | `if (_topLine > maxLine) { _topLine = maxLine; _topSegment = 0; }` |
+
+### Step 4: 視覚行ヘルパを実装する
+
+`src/kxEdit.Editor/EditorControl.cs` の `ComputeCaretPoint` の近くに追加する。
+
+```csharp
+    /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
+    private int MaxWrapWidthPx => _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
+
+    /// <summary>論理行 1 本の本文(改行を含まない)。空行は空文字列。</summary>
+    private static string LineTextOf(TextSnapshot snap, int line)
+    {
+        int ls = snap.GetLineStart(line);
+        int le = snap.GetLineEnd(line, includeBreak: false);
+        return le == ls ? string.Empty : snap.GetText(ls, le - ls);
+    }
+
+    /// <summary>
+    /// 論理行内オフセットが属する視覚セグメントの index を返す(設計書 I-2 の単一定義)。
+    /// 最終セグメントに限り「末尾ちょうど」も許容する(EOL キャレット位置)。
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="reachedLineEnd"/> が false(打ち切られた結果)のとき、最後の要素は
+    /// 論理行の最終セグメントとは限らないため EOL 分岐を発火させてはならない。
+    /// 詳細は <see cref="ComputeCaretPoint"/> 本体のコメント(「本当に load-bearing なのは
+    /// LineLayout.WrapCore の &gt; 1 文字」)を参照。
+    /// </remarks>
+    private static int LocateSegmentIndex(
+        IReadOnlyList<WrapSegment> segments,
+        bool reachedLineEnd,
+        int offsetInLine
+    )
+    {
+        int segIdx = segments.Count - 1;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            int segEnd = seg.OffsetInLine + seg.Length;
+            if (
+                offsetInLine < segEnd
+                || (reachedLineEnd && i == segments.Count - 1 && offsetInLine == segEnd)
+            )
+            {
+                segIdx = i;
+                break;
+            }
+        }
+        return segIdx;
+    }
+
+    /// <summary>
+    /// char offset の視覚行位置 (論理行, セグメント index) を返す(設計書 I-2)。
+    /// 折り返し OFF は Wrap を一切呼ばず (論理行, 0) を返す=I-3。
+    /// </summary>
+    private (int Line, int Seg) LocateVisualRow(TextSnapshot snap, int offset)
+    {
+        int line = snap.GetLineIndexOfChar(offset);
+        if (_wrapColumns <= 0)
+            return (line, 0);
+        int lineStart = snap.GetLineStart(line);
+        int offsetInLine = offset - lineStart;
+        var wrapped = LineLayout.WrapThroughOffset(
+            LineTextOf(snap, line),
+            MaxWrapWidthPx,
+            _metrics,
+            offsetInLine
+        );
+        return (line, LocateSegmentIndex(wrapped.Segments, wrapped.ReachedLineEnd, offsetInLine));
+    }
+
+    /// <summary>
+    /// 論理行 <paramref name="line"/> の視覚行数を最大 <paramref name="cap"/> 本まで数える
+    /// (設計書 I-4: 打ち切れる歩きは必ず打ち切る)。
+    /// Exact=false なら実際の本数は Count より多い。
+    /// </summary>
+    private (int Count, bool Exact) SegmentCountCapped(TextSnapshot snap, int line, int cap)
+    {
+        var r = LineLayout.WrapFirstSegments(
+            LineTextOf(snap, line),
+            MaxWrapWidthPx,
+            _metrics,
+            Math.Max(1, cap)
+        );
+        return (r.Segments.Count, r.ReachedLineEnd);
+    }
+
+    /// <summary>
+    /// (fromLine, fromSeg) から (toLine, toSeg) までの視覚行距離を数える。
+    /// <paramref name="cap"/> 本を超えたら <paramref name="cap"/> を返して打ち切る(I-4)。
+    /// 「可視域 visibleRows 本に収まるか」の判定にだけ使うため、cap 超過の正確な値は要らない。
+    /// </summary>
+    private int CountVisualRowsForward(
+        TextSnapshot snap,
+        int fromLine,
+        int fromSeg,
+        int toLine,
+        int toSeg,
+        int cap
+    )
+    {
+        if (toLine < fromLine)
+            return 0;
+        if (toLine == fromLine)
+            return Math.Min(cap, Math.Max(0, toSeg - fromSeg));
+
+        int rows = 0;
+        for (int line = fromLine; line < toLine; line++)
+        {
+            if (rows >= cap)
+                return cap;
+            int skip = line == fromLine ? fromSeg : 0;
+            long needed = (long)(cap - rows) + skip;
+            var (count, _) = SegmentCountCapped(
+                snap,
+                line,
+                needed > int.MaxValue ? int.MaxValue : (int)needed
+            );
+            int eff = Math.Min(skip, count - 1);
+            rows += count - eff;
+        }
+        return Math.Min(cap, rows + toSeg);
+    }
+
+    /// <summary>視覚行を n 本ぶん前へ進めた位置を返す。文書末で打ち切る。</summary>
+    private (int Line, int Seg) WalkForwardVisualRows(TextSnapshot snap, int line, int seg, int n)
+    {
+        while (n > 0)
+        {
+            // この行に「seg + n」本目があるかだけ判れば良いので打ち切って数える(I-4)。
+            long cap = (long)seg + n + 1;
+            var (count, _) = SegmentCountCapped(
+                snap,
+                line,
+                cap > int.MaxValue ? int.MaxValue : (int)cap
+            );
+            if (seg + n < count)
+                return (line, seg + n);
+            n -= count - seg; // この行の残り本数 + 次行先頭へ移る 1 本
+            if (line + 1 >= snap.LineCount)
+                return (line, count - 1); // 文書末で打ち切り
+            line++;
+            seg = 0;
+        }
+        return (line, seg);
+    }
+
+    /// <summary>視覚行を n 本ぶん遡った位置を返す。文書頭で打ち切る。</summary>
+    /// <remarks>
+    /// 前の論理行へ入るときだけ<b>正確な</b>視覚行数が要る(最終セグメントから数えるため)ので、
+    /// そこは打ち切れない完全 Wrap になる。巨大行を下から遡る場合の 1 回だけで、
+    /// PR #35 の幅メモ化により CJK 500K 行で約 30 ms(設計書 §5)。
+    /// </remarks>
+    private (int Line, int Seg) WalkBackVisualRows(TextSnapshot snap, int line, int seg, int n)
+    {
+        while (n > 0)
+        {
+            if (seg >= n)
+                return (line, seg - n);
+            n -= seg; // (line, 0) までで seg 本
+            if (line == 0)
+                return (0, 0); // 文書頭で打ち切り
+            line--;
+            var segs = LineLayout.Wrap(LineTextOf(snap, line), MaxWrapWidthPx, _metrics);
+            seg = segs.Count - 1; // 前行の最終視覚行へ移る = さらに 1 本
+            n--;
+        }
+        return (line, seg);
+    }
+```
+
+`WrapSegment` / `LineLayout` / `TextSnapshot` の using は既存の `EditorControl.cs` に揃っている
+(`kxEdit.Core.Layout` / `kxEdit.Core.Buffers`)。
+
+### Step 5: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+期待: 全緑・0 warning。この時点では新ヘルパを本番経路が誰も呼んでいないので**挙動は不変**
+(既存 Editor / App テストは 1 行も変更していないこと)。
+
+### Step 6: コミットし、コード品質レビューを依頼する
+
+```powershell
+git add -A
+git commit -m "feat(editor): 可視域の起点を視覚行にする状態とヘルパを入れる(挙動不変・A-6)
+
+_topSegment(可視域最上段の視覚セグメント index)と、視覚行を数える/歩くヘルパ群を追加した。
+本番経路はまだ誰も呼ばないため挙動は不変。折り返し OFF では LocateVisualRow が Wrap を
+一切呼ばず (論理行, 0) を返す=以降の全経路が現行式に退化する(設計書 I-3)。
+
+歩きは I-4 に従い打ち切る。唯一打ち切れないのは WalkBackVisualRows が前の論理行へ入るとき
+(最終セグメントから数えるため正確な本数が要る)で、これは設計書 §5 で受容した箇所。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+レビュー観点(別エージェントへ渡す):
+- ヘルパ 5 本の境界(`cap` ちょうど・文書頭/末・空行・`seg` が実数を超える場合)
+- `long` 経由のオーバーフロー回避が必要な箇所を落としていないか
+- 折り返し OFF で追加コスト(Wrap 呼び出し)が発生していないか
+- リセット規則の抜け(`_topLine = 0` を書いている箇所を全部拾えているか)
+
+---
+
+## Task 4: 座標・ヒットテスト・可視域報告を topSegment 対応にする(挙動不変)
+
+**Files:**
+- Modify: `src/kxEdit.Editor/EditorControl.cs`(`ComputeCaretPoint` / `GetVisibleCharRange`)
+- Modify: `src/kxEdit.Editor/EditorControl.Paint.cs:34`
+- Modify: `src/kxEdit.Editor/EditorControl.Input.cs`(`OffsetFromClientPoint`)
+- Test: `tests/kxEdit.Editor.Tests/VisualRowScrollTests.cs`(追記)
+
+### Step 1: 失敗するテストを書く
+
+`VisualRowScrollTests` に追記:
+
+```csharp
+    // ===== TopSegment を尊重する経路(描画・座標・ヒットテスト・可視域報告)=====
+
+    [Fact]
+    public void PointFromCharOffset_ReturnsEmpty_ForRowsAboveTopSegment() =>
+        Sta.Run(() =>
+        {
+            // "abcdefghij"(10 文字)を wrap=2 → 視覚行 5 本。TopSegment=2 なら 0,1 本目は不可視。
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                Assert.Equal(System.Drawing.Point.Empty, c.PointFromCharOffset(0)); // 視覚行 0
+                Assert.Equal(System.Drawing.Point.Empty, c.PointFromCharOffset(2)); // 視覚行 1
+                var p = c.PointFromCharOffset(4); // 視覚行 2 = 可視域の最上段
+                Assert.NotEqual(System.Drawing.Point.Empty, p);
+                Assert.Equal(0, p.Y);
+            }
+        });
+
+    [Fact]
+    public void GetVisibleCharRange_StartsAtTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                var (start, end) = c.GetVisibleCharRange();
+                Assert.Equal(4, start); // 視覚行 2 の先頭
+                Assert.Equal(10, end); // 視覚行 2..4 で文書末まで
+            }
+        });
+
+    [Fact]
+    public void OffsetFromClientPoint_TopRow_MapsToTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 2);
+                // クライアント最上段(y=0)の左端 = 視覚行 2 の先頭 = offset 4
+                Assert.Equal(4, c.OffsetFromClientPoint(0, 0));
+            }
+        });
+```
+
+`ShowLineNumbers` は既定 false(`_showLineNumbers` のフィールド既定)なので行番号マージンは 0 で、
+X=0 が本文先頭になる。テストで明示的に true にしないこと。
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~VisualRowScrollTests"
+```
+
+期待: 追加 3 件が FAIL(`_topSegment` を誰も読んでいないため、`SetTopPosition(0,2)` しても
+座標も可視域も視覚行 0 起点のまま)。
+
+### Step 3: `ComputeCaretPoint` を実装する
+
+`src/kxEdit.Editor/EditorControl.cs` の `ComputeCaretPoint` を次の 3 点で変更する。
+
+1. セグメント選択ループを `LocateSegmentIndex` 呼び出しに置き換える
+   (既存の長いコメントは `LocateSegmentIndex` の remarks から参照できるよう残す)。
+
+```csharp
+        int segIdx = LocateSegmentIndex(segments, wrapped.ReachedLineEnd, caretInLine);
+
+        // I-2: TopLine の途中セグメントから描いている場合、その上のセグメントは不可視。
+        if (logicalLine == _topLine && segIdx < _topSegment)
+            return (0, 0, false);
+```
+
+2. 積み上げループで先頭論理行の読み飛ばしを差し引く。
+
+```csharp
+        for (int line = _topLine; line < logicalLine; line++)
+        {
+            int skip = line == _topLine ? _topSegment : 0;
+            long needed = (long)maxUsefulRows - visualRowsBeforeThisLine + skip;
+            int rowsNeeded = needed > int.MaxValue ? int.MaxValue : (int)needed;
+            var segs = LineLayout
+                .WrapFirstSegments(
+                    LineTextOf(snap, line),
+                    maxWidthPx,
+                    _metrics,
+                    Math.Max(1, rowsNeeded)
+                )
+                .Segments;
+            // ViewportLayout.Build と同じクランプ(topSegment が実数以上なら最終セグメント)
+            int eff = Math.Min(skip, segs.Count - 1);
+            visualRowsBeforeThisLine += segs.Count - eff;
+            if (visualRowsBeforeThisLine * lineHeight >= paintHeight)
+                return (0, 0, false);
+        }
+        int totalVisualRow =
+            visualRowsBeforeThisLine + segIdx - (logicalLine == _topLine ? _topSegment : 0);
+```
+
+`Math.Max(1, ...)` を外さないこと(`PaintHeightPx == 0` で `WrapFirstSegments` の
+`ThrowIfNegativeOrZero` が発火する生きた防御。既存コメント参照)。
+
+3. `GetVisibleCharRange`(`:390`)と `EditorControl.Paint.cs:34` の `Build` 呼び出しで
+   `topSegment: 0` → `_topSegment` に変える。`UpdateHorizontalScrollbar`(`:1072`)は
+   折り返し OFF 専用なので **0 のまま**にする(コメントで理由を書く)。
+
+### Step 4: `OffsetFromClientPoint` を実装する
+
+`src/kxEdit.Editor/EditorControl.Input.cs` の歩き出しを `_topSegment` にする。
+
+```csharp
+        int line = _topLine;
+        int segIdx = _topSegment; // I-2: 可視域の最上段は TopLine の _topSegment 本目
+        int rowsToAdvance = visualRowFromTop;
+        int segCount = SegmentCountAtLine(snap, line, maxWidthPx);
+        // _topSegment が実セグメント数以上(編集で段落が縮んだ)= 最終セグメントへ寄せる
+        // (ViewportLayout.Build / ComputeCaretPoint と同じクランプ)
+        if (segIdx >= segCount)
+            segIdx = segCount - 1;
+```
+
+doc コメントの「`Y < 0` は `_topLine` の先頭視覚行にクランプ」を
+「`(_topLine, _topSegment)` の視覚行にクランプ」へ更新する。
+
+### Step 5: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+期待: 全緑・0 warning。**既存の Editor / App テストは 1 行も変更していない**こと
+(`_topSegment` は本番経路ではまだ常に 0 なので挙動不変=設計書 I-3 の証拠その 1)。
+
+### Step 6: コミット
+
+```powershell
+git add -A
+git commit -m "feat(editor): 座標・ヒットテスト・可視域報告を TopSegment 起点にする(挙動不変・A-6)
+
+ComputeCaretPoint / OffsetFromClientPoint / GetVisibleCharRange / OnPaint が
+(TopLine, TopSegment) を起点に視覚行を数えるようにした。スクロール判断はまだ論理行のままなので
+_topSegment は本番経路では常に 0=挙動不変(既存テスト無改変で全緑)。
+
+セグメント選択の規約は LocateSegmentIndex に一本化した(ComputeCaretPoint と
+LocateVisualRow で二重定義しない)。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 5: A-6 本体 — スクロール判断を視覚行にする
+
+**Files:**
+- Modify: `src/kxEdit.Editor/EditorControl.Caret.cs`(`BringCaretIntoView` / `ScrollCharRangeIntoView`)
+- Test: `tests/kxEdit.Editor.Tests/VisualRowScrollTests.cs`(追記)
+
+### Step 1: 失敗するテストを書く
+
+`VisualRowScrollTests` に追記:
+
+```csharp
+    // ===== A-6: 折り返し ON の追従スクロール =====
+
+    /// <summary>各段落が複数視覚行になる文書。段落数 × 段落あたりの文字数で作る。</summary>
+    private static string Paragraphs(int count, int charsPerParagraph) =>
+        string.Join(
+            "\n",
+            Enumerable.Range(0, count).Select(i => new string((char)('a' + (i % 26)), charsPerParagraph))
+        );
+
+    [Fact]
+    public void KeyDown_Down_WithWrap_KeepsCaretVisible() =>
+        Sta.Run(() =>
+        {
+            // 1 段落 = 5 視覚行(10 文字 / wrap=2)、可視 6 行。
+            // 修正前は論理行が可視行数(6)に達するまで TopLine が動かず、
+            // 2 段落目の途中でキャレットが可視域外へ出たまま戻らなかった。
+            var (f, c) = MakeControl(Paragraphs(8, 10), wrap: 2, visibleRows: 6);
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                for (int i = 0; i < 20; i++)
+                {
+                    mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.Down) });
+                    Assert.NotEqual(
+                        System.Drawing.Point.Empty,
+                        c.PointFromCharOffset(c.CaretCharOffset)
+                    );
+                }
+                Assert.True(c.TopLine > 0 || c.TopSegment > 0, "画面が 1 度も追従していない");
+            }
+        });
+
+    [Fact]
+    public void KeyDown_Down_SingleHugeLogicalLine_ScrollsByVisualRows() =>
+        Sta.Run(() =>
+        {
+            // 論理行 1 本だけの文書。修正前は TopLine が 0 から動かず(maxLine=0)、
+            // 先頭 visibleRows 本より下へ到達する手段が無かった。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                for (int i = 0; i < 10; i++)
+                    mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.Down) });
+
+                Assert.Equal(0, c.TopLine); // 論理行は 1 本しかない
+                Assert.True(c.TopSegment > 0, "TopSegment が進んでいない=視覚行スクロールしていない");
+                Assert.NotEqual(
+                    System.Drawing.Point.Empty,
+                    c.PointFromCharOffset(c.CaretCharOffset)
+                );
+            }
+        });
+
+    [Fact]
+    public void KeyDown_Up_WithWrap_ScrollsBackToTop() =>
+        Sta.Run(() =>
+        {
+            // 下端まで降りてから ↑ で戻り、TopSegment が 0 まで戻ること。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 20);
+                c.SetCaretCharOffset(40); // 視覚行 20 の先頭
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                for (int i = 0; i < 25; i++)
+                    mi!.Invoke(c, new object[] { new KeyEventArgs(Keys.Up) });
+
+                Assert.Equal(0, c.TopSegment);
+                Assert.Equal(0, c.CaretCharOffset);
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_WithWrap_NoOp_WhenCaretAlreadyVisible() =>
+        Sta.Run(() =>
+        {
+            // no-change テストは非既定位置から始める(既定 0 と区別する)。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 10);
+                c.SetCaretCharOffset(22); // 視覚行 11 = 可視域の 2 本目
+                c.SetTopPosition(0, 10); // SetCaretCharOffset 自体の追従で動いた分を戻す
+                c.BringCaretIntoView();
+                Assert.Equal(10, c.TopSegment);
+            }
+        });
+
+    [Fact]
+    public void EnsureVisibleCharRange_WithWrap_PutsTargetAtBottom() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.EnsureVisibleCharRange(100, 0); // 視覚行 50
+                // 対象を下端に寄せる=起点は 50 - (4 - 1) = 47
+                Assert.Equal(0, c.TopLine);
+                Assert.Equal(47, c.TopSegment);
+            }
+        });
+```
+
+`c.CaretCharOffset`(`EditorControl.Caret.cs:84`)と `c.PointFromCharOffset` は public、
+`c.GetVisibleCharRange()` / `c.OffsetFromClientPoint` / `c.SetTopPosition` / `c.TopSegment` は
+internal(`InternalsVisibleTo` で `kxEdit.Editor.Tests` から見える)。
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~VisualRowScrollTests"
+```
+
+期待: A-6 系 5 件が FAIL(`TopSegment` が 0 のまま / キャレットが `Point.Empty`)。
+
+### Step 3: `BringCaretIntoView` の垂直分岐を実装する
+
+`src/kxEdit.Editor/EditorControl.Caret.cs` の垂直部分を置き換える(水平部分は無変更)。
+
+```csharp
+        var snap = _buffer.Current;
+
+        // I-1 対応: paintHeight ベースで可視行数を算出(ComputeCaretPoint の可視性判定と一致)。
+        int visibleRows = VisibleRowCount;
+
+        // 垂直: caret の視覚行が [(TopLine,TopSegment), +visibleRows 本) に入るように起点を調整。
+        // 折り返し OFF では LocateVisualRow が (論理行, 0) を返し、CountVisualRowsForward は
+        // 論理行差になるため、式は導入前(logicalLine < _topLine / >= _topLine + visibleRows)と
+        // 同値に退化する(設計書 I-3)。
+        var (caretLine, caretSeg) = LocateVisualRow(snap, _caretCtrl.Caret);
+        if (caretLine < _topLine || (caretLine == _topLine && caretSeg < _topSegment))
+        {
+            // 上へはみ出している=キャレットの視覚行を最上段にする
+            SetTopPosition(caretLine, caretSeg);
+        }
+        else if (
+            CountVisualRowsForward(snap, _topLine, _topSegment, caretLine, caretSeg, visibleRows)
+            >= visibleRows
+        )
+        {
+            // 下へはみ出している=キャレットの視覚行が最下段に来る位置まで遡る
+            var (newLine, newSeg) = WalkBackVisualRows(snap, caretLine, caretSeg, visibleRows - 1);
+            SetTopPosition(newLine, newSeg);
+        }
+```
+
+doc コメントの「垂直: キャレットの論理行が …」を視覚行ベースの説明に更新し、
+折り返し ON では近似ではなくなった旨を書く(`VisibleRowCount` の remarks にある
+「折り返し ON では視覚行数を論理行数と見なす近似」も併せて訂正する)。
+
+### Step 4: `ScrollCharRangeIntoView` を実装する
+
+```csharp
+    internal void ScrollCharRangeIntoView(int start, int end, bool alignToTop)
+    {
+        if (_buffer is null)
+            return;
+        var snap = _buffer.Current;
+        int target = SnapAndClamp(alignToTop ? start : end);
+        int line = snap.GetLineIndexOfChar(target);
+
+        int visibleRows = VisibleRowCount;
+        bool alreadyVisible;
+        (int Line, int Seg)? targetRow = null;
+        if (_wrapColumns <= 0)
+        {
+            // 折り返し OFF: 導入前と同一式(I-3)。Wrap を一切呼ばない。
+            alreadyVisible = line >= _topLine && line < _topLine + visibleRows;
+        }
+        else if (line < _topLine || line >= _topLine + visibleRows)
+        {
+            // 各論理行は 1 本以上の視覚行を占めるので、可視域が跨ぐ論理行は高々 visibleRows 本。
+            // この粗い否定で弾ければ視覚行の計算(=対象行の Wrap)を省ける。
+            alreadyVisible = false;
+        }
+        else
+        {
+            var row = LocateVisualRow(snap, target);
+            targetRow = row;
+            alreadyVisible =
+                (row.Line > _topLine || (row.Line == _topLine && row.Seg >= _topSegment))
+                && CountVisualRowsForward(
+                    snap,
+                    _topLine,
+                    _topSegment,
+                    row.Line,
+                    row.Seg,
+                    visibleRows
+                ) < visibleRows;
+        }
+
+        // 垂直に動かす必要が無く、水平も動く余地が無いなら完全 no-op で抜ける。
+        // (EnsureVisibleCharRange は finally で PositionCaret を呼び、その先の ComputeCaretPoint が
+        //  対象論理行を再折り返しするため、無変化呼び出しでも折り返し ON の長行では重い。
+        //  SR は歩くたびにここを呼ぶ。)
+        if (alreadyVisible && (_wrapColumns > 0 || !_hscroll.Visible))
+            return;
+
+        // 既に可視なら垂直は動かさない(視界の揺れ防止)
+        if (!alreadyVisible)
+        {
+            var (tl, ts) = targetRow ?? LocateVisualRow(snap, target);
+            if (alignToTop)
+                SetTopPosition(tl, ts);
+            else
+            {
+                var (nl, ns) = WalkBackVisualRows(snap, tl, ts, visibleRows - 1);
+                SetTopPosition(nl, ns);
+            }
+        }
+
+        // 水平 + 保険。caret / anchor は EnsureVisibleCharRange が try/finally で復元する
+        EnsureVisibleCharRange(target, 0);
+    }
+```
+
+既存 remarks の「等価性の根拠」の 1 項目目(`logicalLine < _topLine` / `>= _topLine + visibleRows`
+の両方とも不発)を視覚行版の表現へ更新する。また折り返し ON の「既に可視」判定に
+対象行の Wrap 1 回ぶんのコストが乗ったこと(粗い否定で弾けなかった場合のみ)を追記する。
+
+### Step 5: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+期待: 全緑・0 warning。**折り返し OFF の既存テスト
+(`CaretScrollTests` / `UiaScrollIntoViewTests` / `UiaVisibleRangeTests` / `MouseInputTests` /
+`EditorControlWrapCaretTests`)を 1 行も変更していない**こと=設計書 I-3 の証拠その 2。
+もしこれらが赤くなったら、折り返し OFF の退化が壊れている(実装の誤り)。**テストを直さない**。
+
+### Step 6: ミューテーション検証(2 件)
+
+1. `caretSeg < _topSegment` を `caretSeg <= _topSegment` にする
+   → `BringCaretIntoView_WithWrap_NoOp_WhenCaretAlreadyVisible` か
+   `KeyDown_Up_WithWrap_ScrollsBackToTop` が赤くなること。
+2. `WalkBackVisualRows(..., visibleRows - 1)` を `visibleRows` にする
+   → `EnsureVisibleCharRange_WithWrap_PutsTargetAtBottom` が赤くなること。
+
+確認後 `git checkout -- src/` で復元し、全緑を再確認する。
+
+### Step 7: コミット
+
+```powershell
+git add -A
+git commit -m "fix(editor): 折り返し ON でキャレットを視覚行で追従スクロールする(A-6)
+
+BringCaretIntoView / ScrollCharRangeIntoView の可視判定を論理行から視覚行へ移した。
+折り返し ON では 1 論理行が複数視覚行を占めるため、論理行での判定は成立しておらず、
+キャレットが可視域外へ出ても画面が追従しなかった。論理行が 1 本しかない文書
+(巨大 1 行)では TopLine が原理的に動かせず、先頭 visibleRows 本より下が
+恒久的に到達不能だった。
+
+折り返し OFF では LocateVisualRow が (論理行, 0) を返し CountVisualRowsForward が
+論理行差になるため、判定式は導入前と同値に退化する。折り返し OFF の既存テストは
+1 行も変更していない。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 6: ホイールを視覚行送りにする
+
+**Files:**
+- Modify: `src/kxEdit.Editor/EditorControl.Input.cs`(`OnMouseWheel`)
+- Modify: `src/kxEdit.Editor/EditorControl.cs`(`ScrollByVisualRows` を追加)
+- Test: `tests/kxEdit.Editor.Tests/VisualRowScrollTests.cs`(追記)
+
+### Step 1: 失敗するテストを書く
+
+```csharp
+    [Fact]
+    public void MouseWheel_WithWrap_ScrollsByVisualRows() =>
+        Sta.Run(() =>
+        {
+            // 論理行 1 本 = 従来はホイールが完全に効かなかったケース。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnMouseWheel",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, -120) });
+                Assert.True(c.TopSegment > 0, "ホイール下方向で TopSegment が進んでいない");
+
+                int after = c.TopSegment;
+                mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, 120) });
+                Assert.True(c.TopSegment < after, "ホイール上方向で戻っていない");
+            }
+        });
+
+    [Fact]
+    public void MouseWheel_WithoutWrap_StillMovesTopLine() =>
+        Sta.Run(() =>
+        {
+            // 折り返し OFF は従来どおり論理行送り(I-3)。
+            var (f, c) = MakeControl(Paragraphs(30, 4), wrap: 0, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                var mi = typeof(EditorControl).GetMethod(
+                    "OnMouseWheel",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                );
+                mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, -120) });
+                Assert.True(c.TopLine > 0);
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+```
+
+### Step 2: 赤を確認する
+
+```powershell
+dotnet test tests/kxEdit.Editor.Tests -c Release --filter "FullyQualifiedName~MouseWheel"
+```
+
+期待: `MouseWheel_WithWrap_ScrollsByVisualRows` が FAIL(TopSegment が 0 のまま)。
+`MouseWheel_WithoutWrap_StillMovesTopLine` は PASS(現行挙動の固定=退行検出用)。
+
+### Step 3: 実装する
+
+`src/kxEdit.Editor/EditorControl.cs` に追加:
+
+```csharp
+    /// <summary>
+    /// 可視域の起点を視覚行単位で相対移動する(ホイール用)。折り返し OFF は
+    /// <see cref="TopLine"/> の相対移動に委譲する=導入前と同一(設計書 I-3)。
+    /// </summary>
+    private void ScrollByVisualRows(int deltaRows)
+    {
+        if (_buffer is null || deltaRows == 0)
+            return;
+        if (_wrapColumns <= 0)
+        {
+            TopLine = _topLine + deltaRows;
+            return;
+        }
+        var snap = _buffer.Current;
+        var (line, seg) =
+            deltaRows < 0
+                ? WalkBackVisualRows(snap, _topLine, _topSegment, -deltaRows)
+                : WalkForwardVisualRows(snap, _topLine, _topSegment, deltaRows);
+        SetTopPosition(line, seg);
+    }
+```
+
+`src/kxEdit.Editor/EditorControl.Input.cs` の `OnMouseWheel`:
+
+```csharp
+        while (_wheelAccum >= 120)
+        {
+            ScrollByVisualRows(-wheelLines);
+            _wheelAccum -= 120;
+        }
+        while (_wheelAccum <= -120)
+        {
+            ScrollByVisualRows(wheelLines);
+            _wheelAccum += 120;
+        }
+```
+
+doc コメントの「Delta>0=上方向スクロール=TopLine 減。TopLine setter がクランプする」を
+「折り返し ON では視覚行送り(`ScrollByVisualRows`)・OFF では従来どおり `TopLine`」に更新する。
+
+### Step 4: 緑を確認する
+
+```powershell
+dotnet build kxEdit.sln -c Release -warnaserror
+dotnet test tests/kxEdit.Core.Tests   -c Release --no-build
+dotnet test tests/kxEdit.Editor.Tests -c Release --no-build
+dotnet test tests/kxEdit.App.Tests    -c Release --no-build
+```
+
+### Step 5: コミット
+
+```powershell
+git add -A
+git commit -m "fix(editor): 折り返し ON のホイールを視覚行送りにする(A-6)
+
+論理行 1 本の文書ではホイールが TopLine セッターのクランプに潰されて完全に効かなかった。
+折り返し ON では視覚行を歩く。OFF は TopLine の相対移動に委譲=導入前と同一。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 7: 性能確認・L5 チェックリスト・品質ゲート
+
+**Files:**
+- Create: `tests/kxEdit.Editor.Smoke/WrapScrollBench.cs`
+- Modify: `tests/kxEdit.Editor.Smoke/Program.cs`(`--wrapscroll` サブコマンド追加)
+- Create: `docs/plans/2026-08-22-wrap-vertical-navigation-l5-checklist.md`
+- Modify: `docs/plans/2026-08-22-wrap-vertical-navigation.md`(本書に実施記録を追記)
+
+### Step 1: 性能ベンチを追加する
+
+設計書 §5-2 が受容した「巨大段落の途中へスクロールした状態の描画は O(topSegment)/フレーム」を
+実測する。`tests/kxEdit.Editor.Smoke/WrapScrollBench.cs`:
+
+```csharp
+using System.Diagnostics;
+using System.Text;
+using kxEdit.Core.Buffers;
+using kxEdit.Editor;
+
+namespace kxEdit.Editor.Smoke;
+
+/// <summary>
+/// 2026-08-22 A-6(視覚行スクロール)の性能確認。CJK 単一長大行を折り返し ON で載せ、
+/// TopSegment を段階的に進めながら 1 フレームの描画時間を測る。
+/// 設計書 §5-2 が受容した O(topSegment)/フレームのコストが実用域に収まるかの判断材料。
+/// 判定ゲートは持たない(常に EXIT 0)。対になる基準値は PR #35 の 30.1 ms/フレーム。
+/// </summary>
+internal static class WrapScrollBench
+{
+    public static int Run()
+    {
+        ApplicationConfiguration.Initialize();
+        using var form = new Form
+        {
+            Text = "kxEdit.Editor.Smoke --wrapscroll",
+            Width = 900,
+            Height = 700,
+            StartPosition = FormStartPosition.Manual,
+            // 画面外ウィンドウには WM_PAINT が来ない=描画を測り落とす(GdiBench と同じ理由)。
+            Location = new Point(100, 100),
+            ShowInTaskbar = false,
+        };
+        using var editor = new EditorControl { Dock = DockStyle.Fill, WrapColumns = 80 };
+        form.Controls.Add(editor);
+        form.Show();
+        editor.Focus();
+        Application.DoEvents();
+
+        var sb = new StringBuilder(500_000);
+        for (int i = 0; i < 500_000; i++)
+            sb.Append((char)('あ' + (i % 40)));
+        editor.SetSource(TextBuffer.FromString(sb.ToString()));
+        Application.DoEvents();
+
+        Console.WriteLine($"ClientSize={editor.ClientSize} / LineHeightPx={editor.LineHeightPx}");
+        // ウォームアップ(JIT + 幅メモ化の初回コストを計測から外す)
+        editor.Invalidate();
+        editor.Update();
+
+        foreach (int seg in new[] { 0, 100, 1000, 5000 })
+        {
+            editor.SetTopPosition(0, seg);
+            Application.DoEvents();
+            var sw = Stopwatch.StartNew();
+            const int frames = 20;
+            for (int i = 0; i < frames; i++)
+            {
+                editor.Invalidate();
+                editor.Update();
+            }
+            sw.Stop();
+            Console.WriteLine(
+                $"TopSegment={seg,5}: {sw.Elapsed.TotalMilliseconds / frames:F1} ms/frame"
+            );
+        }
+        return 0;
+    }
+}
+```
+
+`Program.cs` の `--largeline` 分岐の直後に追加:
+
+```csharp
+// 2026-08-22 A-6(視覚行スクロール)Task 7: --wrapscroll。巨大段落の途中へスクロールした
+// 状態の 1 フレーム時間を測る(設計書 §5-2 が受容した O(topSegment) コストの実測)。
+if (args.Length > 0 && args[0] == "--wrapscroll")
+{
+    return WrapScrollBench.Run();
+}
+```
+
+実行:
+
+```powershell
+dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --wrapscroll
+```
+
+判断: `TopSegment=5000` が 100 ms/frame を大きく超えるなら、設計書 §5-2 の
+「1 エントリメモ(`(snapshot, line, wrap, topSegment) → 行内 char offset`)」を実装する。
+超えないなら実装せず、申し送りに残す。**どちらを選んだかを本書の実施記録に必ず書く**。
+
+### Step 2: L5 チェックリストを作る
+
+`docs/plans/2026-08-22-wrap-vertical-navigation-l5-checklist.md` を作成する
+(`2026-08-22-backup-savepoint-sync-l5-checklist.md` の書式に合わせる)。項目:
+
+1. 折り返し ON・通常の日本語文書で ↓↑ が 1 視覚行ずつ動き、NVDA が各視覚行を読む
+   (行を飛ばさない・↑ が固着しない)。
+2. **E-1 の再検証**: CJK 500K・折り返し ON で ↓ 連打。NVDA が「ブランク」と言わないこと。
+   → 言わなければ E-1 は A-6 由来と確定=クローズ。言うなら UIA 側の独立欠陥として起票する
+   (設計書 §1.3 / 申し送り S-5)。
+3. 巨大 1 行(単一論理行)で ↓ を押し続けて文書末尾まで到達できること・ホイールで
+   スクロールできること。
+4. 折り返し ON で検索ジャンプ・Ctrl+G が追従すること(PR #45 の回帰確認)。
+5. 折り返し ON の PageDown / PageUp が視覚行単位で動き、画面が追従すること。
+6. 折り返し OFF で ↓↑ / ホイール / 検索ジャンプの挙動が従来どおりであること(I-3 の実機確認)。
+
+### Step 3: 品質ゲート
+
+```powershell
+powershell -File tools\pre-merge-check.ps1
+```
+
+EXIT 0 を確認する(Format check → Release ビルド 0 警告 → 3 テストプロジェクト全緑)。
+
+### Step 4: 実施記録を追記してコミット
+
+本書の末尾に「## 実施記録」節を作り、次を書く:
+
+- 各タスクのコミットハッシュ
+- Task 7 Step 1 のベンチ実測値と、メモを実装したか否かの判断
+- 計画から逸脱した点(あれば理由つき)
+- 既存テストを変更した箇所(あれば理由つき。**無いことが I-3 の証拠**)
+
+```powershell
+git add -A
+git commit -m "test(smoke)/docs: 視覚行スクロールの性能ベンチと L5 チェックリスト(A-6)
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## 最終ブランチレビュー(CLAUDE.md §3-5)
+
+タスク完了後、**独立した 2 エージェント**で焦点別 2 パスを実施する(1 起動に混載しない)。
+
+**コード品質パス**の重点:
+- 設計書 I-3(折り返し OFF の退化)が本当に成り立っているか。`_wrapColumns <= 0` の分岐を
+  1 つずつ潰して、折り返し OFF の既存テストが赤くなるか確かめる
+  (**赤くならない分岐は網が無い**=I-3 が実証されていない)。
+- 視覚行を歩く 4 本(`CountVisualRowsForward` / `WalkForwardVisualRows` / `WalkBackVisualRows` /
+  `SegmentCountCapped`)の境界。特に「行を跨ぐ 1 本」の数え落とし/二重数え。
+- ミューテーション検証のスポットチェック(Task 1 / Task 5 で実施したもの + 追加 2〜3 件)。
+  変異は**必ず復元**し、復元後の全緑を確認する。
+
+**脆弱性パス**の重点:
+- 新しい算術(`seg + n` / `cap - rows` / `topSegment + rowsNeeded`)のオーバーフロー。
+  `int.MaxValue` 付近のオフセット・巨大 `visibleRows` を実際に流し込んで確かめる。
+- `_topSegment` が実セグメント数を超えた状態(編集で段落が縮む)での全経路
+  (描画・座標・ヒットテスト・可視域報告・スクロール)。例外が抜けないこと。
+- `SetTopPosition` の `_vscroll.Value` 代入が範囲外にならないこと(バッファ縮小との競合)。
+
+## PR
+
+- タイトル: `fix: 折り返し ON の垂直移動を直す(A-5 / A-6)`
+- description(日本語)に含める:
+  - 監査書 A-5 / A-6 との対応、設計書へのリンク
+  - **A-6 の帰結が監査書の記述より重かった**こと(論理行 1 本の文書で到達不能)
+  - E-1 の見立てと L5 での判定方法
+  - 折り返し OFF の既存テストが無改変で全緑=I-3 の証拠
+  - 受容したトレードオフ(右端で 1 コードポイント内側・スクロールバーは論理行基準のまま)
+  - 申し送り S-1〜S-5(設計書 §8)
+  - **L5 は未実施**であること(実施したらチェックリストの結果を追記する)
