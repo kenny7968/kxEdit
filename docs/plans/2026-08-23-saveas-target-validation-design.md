@@ -394,6 +394,16 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   自分で打った名前が自分に見えるだけなのでスプーフィング価値は低いが、**`RestoreFromBackup` 経由
   (攻撃者 JSON)の `State.Path` も同じ面に載る**ので、そちらは実入力起源。CSV-L-5 の
   「新規 File I/O / 表示面を足すときの定番チェック」の棚卸し対象。
+- **S-8**(Task 5 の fixup で発生・2026-08-23): V-1 の修正 (b) で `WriteToPath` の catch フィルタに
+  `ArgumentException` を足したが、これは `ArgumentNullException` と `ArgumentOutOfRangeException` も
+  一緒に握る。フィルタのコメントは「**想定内の入出力エラーのみ握る。NullReference 等のロジックバグは
+  伝播させる**」と宣言しており、その方針をわずかに侵している。`LoadInto` は同じトレードオフを
+  受容済み(悪意/破損 JSON 由来の path を吸収するため)なので対称ではある。
+  **より根本的な修正は `AtomicFile.cs:62` の `Path.GetDirectoryName(Path.GetFullPath(path))!` にある** —
+  この null 免除は嘘で、親が取れないパスに対して `ArgumentNullException` を生む。`AtomicFile` 側で
+  「親が確定しないパスは保存先にできない」を `IOException` 系で明示的に弾けば、呼出側のフィルタを
+  広げずに済む。ただし `AtomicFile` は Core でバックアップライターも使うため影響範囲の確認が要る。
+  **最終ブランチレビューで判断する。**
 - **S-7**(同上): `IsNullOrWhiteSpace` は `​`(ZWSP)/ `﻿` / `⠀`(点字空白)/ `᠎` を
   空白と見なさないので、これらだけのファイル名が保存できてしまう。実ファイルは作られるので
   喪失は無いが、**タブ名が空に見えてファイルを見つけられない**(SR では特に厄介)。
