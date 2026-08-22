@@ -82,8 +82,10 @@ public static class MarkdownRenderer
         // `[y](x){onclick="evil()"}` を HTML 属性としてそのまま出力し、SafeLinkExtension が
         // 落とした href すら `{href="javascript:..."}` で復活させられる。CSP (script-src なし)
         // が実行を止めているだけの状態なので、二層目の防御を回復するため拡張ごと外す。
-        // 代償: `{#id}` / `{.class}` 記法は本文にリテラル表示される (見出し id は
-        // UseAutoIdentifiers が引き続き生成するのでアンカーは維持される)。
+        // 代償: `{#id}` / `{.class}` 記法は本文にリテラル表示される。見出し id は
+        // UseAutoIdentifiers が引き続き生成するが、`{#id}` で指定していたカスタム id は
+        // 自動生成値へ変わるため (`# Title {#custom}` は id="custom" → id="title-custom")、
+        // 既存 .md 内の `[link](#custom)` は切れる。
         builder.Extensions.RemoveAll(e => e is GenericAttributesExtension);
         // MD-M-3: リンク URL scheme whitelist (二層目の防御)。CSP を弱めた瞬間の
         // live XSS を防ぐため javascript:/vbscript:/data:/file: 等は href を drop する。

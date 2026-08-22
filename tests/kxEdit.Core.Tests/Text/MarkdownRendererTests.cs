@@ -437,8 +437,15 @@ public class MarkdownRendererTests
     // ---------------------------------------------------------------------
     // A-21 (v0.2 リリース前バグ監査): UseAdvancedExtensions 同梱の GenericAttributes を
     // 除去し、`{...}` 属性記法が HTML 属性として出力されないことを機械固定する。
-    // 現状は CSP (script-src なし) が実行を止めているだけで、SafeLinkExtension の
-    // 二層目 (scheme whitelist) は `{href="javascript:..."}` で上書きできてしまっていた。
+    // 実行を止めていたのは CSP (script-src なし) だけで、SafeLinkExtension (二層目の
+    // scheme whitelist) に対して GenericAttributes は 2 つの別経路で作用していた:
+    //   追記 — 安全な href を持つリンクに 2 つ目の href を足す。
+    //          `[y](x){href="javascript:..."}` → <a href="x" href="javascript:...">
+    //          HTML の先勝ち規則で実挙動は守られていたが、属性が出ること自体が
+    //          パーサ差で容易に逆転しうる不安定な均衡。
+    //   復活 — SafeLink が drop した href を単一の href として蘇らせる。
+    //          `[y](javascript:...){href="javascript:..."}` → <a href="javascript:...">
+    //          先勝ち規則が効かない本物のバイパスで、CSP を弱めた瞬間に live XSS。
     // ---------------------------------------------------------------------
 
     [Fact]
@@ -456,10 +463,26 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Render_GenericAttributes_CannotRestoreDroppedHref()
+    public void Render_GenericAttributes_CannotAppend_JavascriptHref()
     {
-        // SafeLinkExtension が落とした href を {href="javascript:..."} で上書きできないこと。
+        // 安全な href を持つリンクに 2 つ目の href を追記できないこと。
+        // 変更前は <a href="x" href="javascript:alert(1)"> となっていた。HTML の先勝ち規則で
+        // 実挙動は守られていたが、属性が出力されること自体が不安定な均衡なので塞ぐ。
+        // (drop された href の復活は Render_GenericAttributes_CannotRestore_DroppedJavascriptHref。)
         string html = MarkdownRenderer.Render("[y](x){href=\"javascript:alert(1)\"}", Base);
+        Assert.DoesNotMatch(@"<a[^>]*javascript:", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_CannotRestore_DroppedJavascriptHref()
+    {
+        // 本物のバイパス経路: SafeLinkExtension が javascript: scheme の href を drop した後、
+        // GenericAttributes が {href="javascript:..."} で単一の href として復活させていた。
+        // (`[y](x){href=...}` と違い href の重複にならないため、HTML の先勝ち規則では守られない。)
+        string html = MarkdownRenderer.Render(
+            "[y](javascript:alert(1)){href=\"javascript:alert(1)\"}",
+            Base
+        );
         Assert.DoesNotMatch(@"<a[^>]*javascript:", html);
     }
 
@@ -467,7 +490,12 @@ public class MarkdownRendererTests
     public void Render_GenericAttributes_Syntax_BecomesLiteralText()
     {
         // 拡張除去に伴う挙動変化を仕様として固定する ({#id} は本文にそのまま出る)。
-        // 見出しの id は UseAutoIdentifiers が別途生成するのでアンカーは失われない。
+        // 見出しの id は UseAutoIdentifiers が引き続き生成するが、{#id} で指定していた
+        // カスタム id は自動生成値へ変わる (`# Title {#custom}` は id="custom" →
+        // id="title-custom")。よって既存 .md 内の [link](#custom) は切れる。
+        // この fixture が変更前後とも id="custom" で一致するのは、slug 生成が非 ASCII
+        // (見出し) と {#} を捨てた結果の偶然にすぎない。ASCII 見出しへ書き換えると id は
+        // 変わるので、本テストを「id が不変である」根拠には使わないこと。
         string html = MarkdownRenderer.Render("# 見出し {#custom}", Base);
         Assert.Contains("{#custom}", html);
     }
