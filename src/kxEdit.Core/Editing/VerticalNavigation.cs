@@ -136,9 +136,17 @@ public static class VerticalNavigation
         var targetSegs = LineLayout.Wrap(targetLineText, maxWidthPx, metrics);
         // WalkVisualRows はセグメント数を歩きながら渡すので通常はここでのクランプは不要だが、
         // 折り返しなし経路(targetSegIdx=0 固定)と併せて防御的にクランプする。
-        var targetSeg = targetSegs[Math.Min(targetSegIdx, targetSegs.Count - 1)];
+        int usedSegIdx = Math.Min(targetSegIdx, targetSegs.Count - 1);
+        var targetSeg = targetSegs[usedSegIdx];
         var targetSpan = targetLineText.AsSpan(targetSeg.OffsetInLine, targetSeg.Length);
         int localTarget = PixelMapper.PxToOffset(targetSpan, desiredPx, metrics);
+        // 不変条件 I-1: 非最終セグメントの segEnd は「次の視覚行の先頭」なので着地させない。
+        // ここを外すと ↓ が視覚行を飛ばし ↑ が固着する(2026-08-22 監査 A-5)。
+        localTarget = VisualSegments.ClampLandingOffset(
+            targetSpan,
+            localTarget,
+            isFinalSegment: usedSegIdx == targetSegs.Count - 1
+        );
         int newCaret = targetLineStart + targetSeg.OffsetInLine + localTarget;
         return (newCaret, desiredPx);
     }

@@ -18,16 +18,19 @@ public readonly record struct VisualRow(
 internal static class ViewportLayout
 {
     /// <summary>
-    /// TopLine 以降を積み上げて heightPx を満たす分だけ VisualRow を返す。
-    /// - wrapColumns&lt;=0: 折り返し OFF(1 論理行=1 視覚行)
+    /// (topLine, topSegment) 以降を積み上げて heightPx を満たす分だけ VisualRow を返す。
+    /// - wrapColumns&lt;=0: 折り返し OFF(1 論理行=1 視覚行)。<paramref name="topSegment"/> は常に 0 の想定
     /// - wrapColumns&gt;0: 半角 wrapColumns 文字分の px を max として折り返しを各行に適用
     ///   (各行は「まだ積める視覚行数」までで打ち切って Wrap する=巨大 1 行でも O(可視行数))
+    /// - <paramref name="topSegment"/>: 先頭論理行のうち読み飛ばす視覚行数(設計書 不変条件 I-2)。
+    ///   実際のセグメント数以上なら最終セグメントへクランプする(編集で段落が縮んだ場合の防御)
     /// - 空文書(LineCount=1・CharLength=0)は topLine=0 なら "1 個空の視覚行"(EOF キャレット用)を返す
     /// - topLine が LineCount 以上なら空リスト
     /// </summary>
     public static IReadOnlyList<VisualRow> Build(
         TextSnapshot snapshot,
         int topLine,
+        int topSegment,
         int heightPx,
         int wrapColumns,
         ICharMetrics metrics
@@ -39,6 +42,8 @@ internal static class ViewportLayout
         var result = new List<VisualRow>();
         if (topLine < 0 || topLine >= snapshot.LineCount || heightPx <= 0)
             return result;
+        if (topSegment < 0)
+            topSegment = 0;
 
         // wrap ON なら max px を 1 度だけ計算(GdiCharMetrics 想定でホットパスを守る)。
         // OFF のときは WrapFirstSegments に 0 を渡せば単一セグメントが返る。
@@ -70,12 +75,33 @@ internal static class ViewportLayout
             // Math.Max(1, ...) は上の早期 return がある限り効かない(y < heightPx なので
             // rowsNeeded >= 1)。WrapFirstSegments の事前条件(1 以上)を呼び出し側で
             // 保証しておくための防御であり、早期 return を外すと実際に効き出す。
+            //
+            // 先頭論理行だけ topSegment 本を読み飛ばす。読み飛ばす分も Wrap の要求本数に足す
+            // (打ち切り結果は完全結果の prefix なので、skip 本目以降は完全 Wrap と一致する)。
+            int skip = line == topLine ? topSegment : 0;
             int rowsNeeded =
                 lineHeight > 0 ? (heightPx - y + lineHeight - 1) / lineHeight : int.MaxValue;
+            // skip 加算のオーバーフロー回避(rowsNeeded は lineHeight<=0 で int.MaxValue になる)
+            long needed = (long)Math.Max(1, rowsNeeded) + skip;
             var segments = LineLayout
-                .WrapFirstSegments(lineText, maxWidthPx, metrics, Math.Max(1, rowsNeeded))
+                .WrapFirstSegments(
+                    lineText,
+                    maxWidthPx,
+                    metrics,
+                    needed > int.MaxValue ? int.MaxValue : (int)needed
+                )
                 .Segments;
-            for (int si = 0; si < segments.Count; si++)
+            // topSegment が実セグメント数以上=編集で段落が縮んだ。最終セグメントへ寄せる。
+            //
+            // このクランプが「打ち切りの途中結果」を最終セグメントと誤認することはない。
+            // WrapCore の打ち切り判定は result.Add の直後にしかなく、打ち切りが起きたときの
+            // segments.Count は要求値 needed に厳密に等しい。needed >= skip + 1 > skip なので、
+            // 打ち切り時に skip >= segments.Count は成立しない。つまりここが発火するのは
+            // ReachedLineEnd == true(行末まで Wrap しきった)ときだけであり、寄せ先は
+            // 真の最終セグメントである(Task 2 レビュー Minor)。
+            if (skip >= segments.Count)
+                skip = segments.Count - 1;
+            for (int si = skip; si < segments.Count; si++)
             {
                 if (y >= heightPx)
                     return result;

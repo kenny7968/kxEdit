@@ -6,8 +6,9 @@
 //   - OnMouseWheel(精度改善版=Router に載せず現状維持)
 //   - OnKeyPress + InsertConfirmedText(IME 確定と共有する挿入経路・分岐なし)
 //   - IsInputKey(WinForms のフォーカス遷移/ダイアログ既定ボタン発火を抑止する OS レベル契約)
-//   - OffsetFromClientPoint / SegmentCountAtLine(Router のマウスハンドラから叩く座標→char 変換の
-//     内部ヘルパ・EditorControl 状態を多量に参照するので host 側にとどめる)
+//   - OffsetFromClientPoint(Router のマウスハンドラから叩く座標→char 変換の
+//     内部ヘルパ・EditorControl 状態を多量に参照するので host 側にとどめる。
+//     視覚行の前進そのものは EditorControl.cs の視覚行 seam に載せている=2026-08-22 A-6)
 // MouseDragging / _wheelAccum の所有権は EditorControl に残す(Router は state を持たない契約)。
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
@@ -75,8 +76,12 @@ public sealed partial class EditorControl
     /// - Delta は 1 tick = 120 単位。細切れデルタは <see cref="_wheelAccum"/> に蓄積し、閾値に達したら発火。
     /// - 1 tick あたりの行送り量は <see cref="SystemInformation.MouseWheelScrollLines"/> を使う
     ///   (レジストリ未設定 / 「1 ページ」設定=-1 では既定 3 にフォールバック)。
-    /// - Delta&gt;0=上方向スクロール=<see cref="TopLine"/> 減。TopLine setter がクランプするため
-    ///   上限/下限を跨ぐ蓄積は自然に上端/下端で頭打ちになる。
+    /// - Delta&gt;0=上方向スクロール。送りの単位は<b>視覚行</b>で、実処理は
+    ///   <see cref="EditorControl.ScrollByVisualRows"/>(折り返し ON は視覚行を歩き、
+    ///   OFF は従来どおり <see cref="TopLine"/> の相対移動に委譲する=設計書 I-3)。
+    ///   上限/下限を跨ぐ蓄積はどちらの経路でもクランプされ、自然に上端/下端で頭打ちになる。
+    ///   2026-08-22 A-6: 折り返し ON で <see cref="TopLine"/> に代入していた頃は、論理行 1 本の
+    ///   文書で <c>ClampTopLine</c> の上限が 0 になりホイールが完全に効かなかった。
     /// - 末尾で <see cref="HandledMouseEventArgs.Handled"/> を立てて親コンテナへのバブリングを止める
     ///   (P6 で SplitContainer / ScrollableControl 内に置いた場合の二重スクロール防止)。
     /// Task 3c: Wheel は _wheelAccum 蓄積状態を持ち、経路が独特(HandledMouseEventArgs 判定含む)なので
@@ -95,12 +100,12 @@ public sealed partial class EditorControl
             wheelLines = 3;
         while (_wheelAccum >= 120)
         {
-            TopLine = _topLine - wheelLines;
+            ScrollByVisualRows(-wheelLines);
             _wheelAccum -= 120;
         }
         while (_wheelAccum <= -120)
         {
-            TopLine = _topLine + wheelLines;
+            ScrollByVisualRows(wheelLines);
             _wheelAccum += 120;
         }
         // WM_MOUSEWHEEL は親コンテナへ再ディスパッチされる仕様のため、Handled=true で
@@ -185,14 +190,18 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// クライアント座標(px)から論理オフセット(UTF-16 char)を算出する純ヘルパ(P3 Task 12)。
-    /// - Y &lt; 0 は <see cref="_topLine"/> の先頭視覚行にクランプ
+    /// - Y &lt; 0 は (<see cref="_topLine"/>, <see cref="_topSegment"/>) の視覚行にクランプ
     /// - 最終視覚行を超えた Y は文書末尾(=<see cref="TextSnapshot.CharLength"/>)にクランプ
     ///   (Notepad と同挙動=末尾行より下の空領域クリックで caret が文書末尾に来る)
     /// - X の行末超過は <see cref="PixelMapper.PxToOffset"/> がセグメント末尾にクランプ
     /// Task 3c: InputRouter の HandleMouseDown/Move/DoubleClick から呼ぶため internal 化。
     /// </summary>
     /// <remarks>
-    /// 折り返し ON 時は 1 論理行ずつ <see cref="LineLayout.Wrap"/> を呼び直しつつ視覚行を歩く。
+    /// 折り返し ON 時の視覚行の歩きは <c>WalkForwardVisualRows</c> →
+    /// <see cref="LineLayout.WrapFirstSegments"/> の打ち切りに載せてあり(2026-08-22 A-6)、
+    /// 通り過ぎる論理行は「その行に何本目があるか」が判る本数までしか Wrap しない。
+    /// 完全な Wrap は<b>着地行 1 本も含めて</b>行わない=着地行も <c>segIdx + 1</c> 本で
+    /// 打ち切る(設計書 I-4)。
     /// Task 14 のベンチで顕在化するようなら Frame 再利用等で最適化(<see cref="ComputeCaretPoint"/>
     /// の Task 9 レビュー M-3 と同じ申し送り)。
     /// </remarks>
@@ -208,34 +217,17 @@ public sealed partial class EditorControl
         if (visualRowFromTop < 0)
             visualRowFromTop = 0;
 
-        int maxWidthPx = _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
+        int maxWidthPx = MaxWrapWidthPx;
 
-        // TopLine の先頭視覚行から visualRowFromTop 個進む(折り返し ON 時は視覚行=セグメント単位)。
-        // 文書末に達した場合(exhausted=true)は文書末尾へクランプする=X による位置決めは行わない。
-        int line = _topLine;
-        int segIdx = 0;
-        int rowsToAdvance = visualRowFromTop;
-        int segCount = SegmentCountAtLine(snap, line, maxWidthPx);
-        bool exhausted = false;
-        while (rowsToAdvance > 0)
-        {
-            if (segIdx + 1 < segCount)
-            {
-                segIdx++;
-            }
-            else
-            {
-                if (line + 1 >= snap.LineCount)
-                {
-                    exhausted = true;
-                    break;
-                }
-                line++;
-                segIdx = 0;
-                segCount = SegmentCountAtLine(snap, line, maxWidthPx);
-            }
-            rowsToAdvance--;
-        }
+        // (TopLine, TopSegment) の視覚行から visualRowFromTop 個進む。前進規約は seam に一本化する
+        // (規約を二重定義しない・折り返し OFF ガードと打ち切りを継承する)。
+        // 文書末に達した場合(Exhausted)は文書末尾へクランプする=X による位置決めは行わない。
+        var (line, segIdx, exhausted) = WalkForwardVisualRows(
+            snap,
+            _topLine,
+            _topSegment,
+            visualRowFromTop
+        );
 
         // 最終視覚行より下 → 文書末尾にクランプ
         if (exhausted)
@@ -246,8 +238,24 @@ public sealed partial class EditorControl
         int lineEnd = snap.GetLineEnd(line, includeBreak: false);
         string lineText =
             lineEnd == lineStart ? string.Empty : snap.GetText(lineStart, lineEnd - lineStart);
-        var segs = LineLayout.Wrap(lineText, maxWidthPx, _metrics);
-        // WalkVisualRows と同様に防御的にクランプ(通常は segIdx < segs.Count が保たれる)
+        // 着地行も打ち切って Wrap する(I-4)。要るのは segIdx 本目までなので segIdx + 1 本で足りる。
+        // 打ち切りが起きたときの Count は要求値に厳密に等しい(= segIdx + 1)ため、下の
+        // Math.Min は「打ち切られた最終要素」ではなく segIdx 自身を選ぶ=陳腐化クランプの根拠は保たれる。
+        // segIdx + 1 は long 経由(WalkForwardVisualRows / CountVisualRowsForward と同じ理由=
+        // int.MaxValue 級の陳腐化 seg で負へ回り込むと WrapFirstSegments が投げる)。
+        long landingCap = (long)segIdx + 1;
+        var segs = LineLayout
+            .WrapFirstSegments(
+                lineText,
+                maxWidthPx,
+                _metrics,
+                landingCap > int.MaxValue ? int.MaxValue : (int)landingCap
+            )
+            .Segments;
+        // 防御的にクランプ(通常は segIdx < segs.Count が保たれる)。
+        // visualRowFromTop == 0 のとき WalkForwardVisualRows は while に入らず _topSegment を
+        // そのまま返すため、陳腐化した _topSegment(編集で段落が縮んだ)を最終セグメントへ
+        // 寄せる役目がここに残っている(=ViewportLayout.Build のクランプと同じ寄せ方)。
         int useSeg = Math.Min(segIdx, segs.Count - 1);
         var seg = segs[useSeg];
 
@@ -260,15 +268,6 @@ public sealed partial class EditorControl
         int localOffset = PixelMapper.PxToOffset(segSpan, xInBody, _metrics);
 
         return lineStart + seg.OffsetInLine + localOffset;
-    }
-
-    /// <summary>指定論理行の視覚セグメント数(=折り返し個数)。<see cref="OffsetFromClientPoint"/> のヘルパ。</summary>
-    private int SegmentCountAtLine(TextSnapshot snap, int line, int maxWidthPx)
-    {
-        int ls = snap.GetLineStart(line);
-        int le = snap.GetLineEnd(line, includeBreak: false);
-        string t = le == ls ? string.Empty : snap.GetText(ls, le - ls);
-        return LineLayout.Wrap(t, maxWidthPx, _metrics).Count;
     }
 
     // ===== 確定文字列挿入(OnKeyPress + IME 確定 = 2 経路共有) =====

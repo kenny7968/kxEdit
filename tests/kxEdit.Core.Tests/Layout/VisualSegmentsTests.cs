@@ -65,4 +65,39 @@ public class VisualSegmentsTests
         var segs = System.Array.Empty<WrapSegment>();
         Assert.Throws<System.ArgumentException>(() => VisualSegments.FindContaining(segs, 0));
     }
+
+    // ===== ClampLandingOffset(設計書 I-1)=====
+
+    [Fact]
+    public void ClampLandingOffset_FinalSegment_KeepsSegEnd()
+    {
+        // 最終セグメントの segEnd は論理行の行末=正当なキャレット位置なので触らない。
+        Assert.Equal(4, VisualSegments.ClampLandingOffset("abcd", 4, isFinalSegment: true));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_ClampsToLastCodePointStart()
+    {
+        Assert.Equal(3, VisualSegments.ClampLandingOffset("abcd", 4, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_Interior_Unchanged()
+    {
+        Assert.Equal(2, VisualSegments.ClampLandingOffset("abcd", 2, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_NonFinalSegment_SurrogateTail_DoesNotSplitPair()
+    {
+        // "a" + U+1F600(サロゲートペア)= 3 code unit。末尾から 1 引くと low サロゲート位置に
+        // なるので、ペア先頭(=1)まで戻ること。
+        Assert.Equal(1, VisualSegments.ClampLandingOffset("a😀", 3, isFinalSegment: false));
+    }
+
+    [Fact]
+    public void ClampLandingOffset_EmptySegment_ReturnsZero()
+    {
+        Assert.Equal(0, VisualSegments.ClampLandingOffset("", 0, isFinalSegment: false));
+    }
 }

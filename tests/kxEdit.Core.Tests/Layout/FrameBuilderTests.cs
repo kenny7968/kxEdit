@@ -25,7 +25,15 @@ public class FrameBuilderTests
         TextSnapshot snap,
         int wrapCols = 0,
         int height = 1000
-    ) => ViewportLayout.Build(snap, topLine: 0, heightPx: height, wrapColumns: wrapCols, M);
+    ) =>
+        ViewportLayout.Build(
+            snap,
+            topLine: 0,
+            topSegment: 0,
+            heightPx: height,
+            wrapColumns: wrapCols,
+            M
+        );
 
     // ---------- 仕様 1: 背景塗り ----------
     [Fact]
@@ -669,7 +677,14 @@ public class FrameBuilderTests
     {
         // 折り返し ON: 論理行 "abcdef" を wrap=3 → 2 視覚行(seg0="abc"/seg1="def")
         var buf = TextBuffer.FromString("abcdef");
-        var rows = ViewportLayout.Build(buf.Current, topLine: 0, heightPx: 1000, wrapColumns: 3, M);
+        var rows = ViewportLayout.Build(
+            buf.Current,
+            topLine: 0,
+            topSegment: 0,
+            heightPx: 1000,
+            wrapColumns: 3,
+            M
+        );
         var style = TestStyle();
 
         var frame = FrameBuilder.Build(

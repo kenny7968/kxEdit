@@ -336,4 +336,108 @@ public class VerticalNavigationTests
         Assert.Equal(3, t);
         Assert.Equal(0, d);
     }
+
+    // ===== A-5(2026-08-22 監査): 視覚行の右端に着地するケース =====
+    // 不変条件 I-1: 非最終セグメントへの着地は segEnd 未満でなければならない。
+    // segEnd は描画・照会の双方で「次の視覚行の先頭」を意味するため、そこへ着地すると
+    // ↓ は 1 行飛んで見え、↑ は同じ値へ着地し続けて動かなくなる。
+    //
+    // fixture: wrapColumns=4 / 半角 8px → maxWidthPx=32。
+    //   行 0 "abcd"          → 視覚 [(0,4)]                     … 幅ぴったり 32px = 1 本
+    //   行 1 "xxxxyyyyzzzz"  → 視覚 [(0,4),(4,4),(8,4)]         … 絶対 offset 5,9,13
+    //   行 2 "end"           → 視覚 [(0,3)]                     … 絶対 offset 18
+    private const string WrapFixture = "abcd\nxxxxyyyyzzzz\nend";
+
+    [Fact]
+    public void MoveDown_WithWrap_FromLineEnd_LandsInFirstVisualRow_NotSecond()
+    {
+        // 行 0 の行末(caret=4 / desiredPx=32=右端)から ↓。
+        // 移動先は行 1 の視覚行 0 = "xxxx"(絶対 [5,9))。
+        // 修正前は 9(= "yyyy" の行頭 = 視覚行 1 の先頭)に着地して 1 行飛んでいた。
+        var s = Snap(WrapFixture);
+        var (t, d) = VerticalNavigation.MoveDown(
+            s,
+            caret: 4,
+            currentDesiredPx: -1,
+            wrapColumns: 4,
+            M
+        );
+        Assert.Equal(32, d);
+        Assert.InRange(t, 5, 8); // 視覚行 0 の内側(9=次の視覚行の先頭 ではない)
+        Assert.Equal(8, t); // 右端 = 最後のコードポイントの先頭
+    }
+
+    [Fact]
+    public void MoveUp_WithWrap_FromRightEdge_ActuallyMovesEveryTime()
+    {
+        // A-5 の主症状。右端の desiredPx を保ったまま ↑ を 3 回押し、毎回 caret が動くこと。
+        // 修正前は 1 回目以降ずっと同じ値に着地して「↑ が効かない」状態だった。
+        var s = Snap(WrapFixture);
+        // 行 1 の視覚行 2("zzzz")の右端に相当する位置=行末(17)から開始する。
+        int caret = 17;
+        int desired = -1;
+        var visited = new List<int>();
+        for (int i = 0; i < 3; i++)
+        {
+            int before = caret;
+            (caret, desired) = VerticalNavigation.MoveUp(s, caret, desired, wrapColumns: 4, M);
+            Assert.True(
+                caret < before,
+                $"↑ {i + 1} 回目で caret が動いていない (before={before}, after={caret})"
+            );
+            visited.Add(caret);
+        }
+        // 視覚行 1 の右端 → 視覚行 0 の右端 → 行 0 の行末
+        Assert.Equal(new[] { 12, 8, 4 }, visited);
+    }
+
+    [Fact]
+    public void MoveDown_WithWrap_RightEdge_TraversesEachVisualRowOnce()
+    {
+        // ↓ 側の対称テスト。右端を保ったまま 1 視覚行ずつ降りること(飛ばさないこと)。
+        var s = Snap(WrapFixture);
+        int caret = 4; // 行 0 の行末
+        int desired = -1;
+        var visited = new List<int>();
+        for (int i = 0; i < 3; i++)
+        {
+            (caret, desired) = VerticalNavigation.MoveDown(s, caret, desired, wrapColumns: 4, M);
+            visited.Add(caret);
+        }
+        // 視覚行 0 の右端 → 視覚行 1 の右端 → 視覚行 2 は最終セグメント=行末(17)まで行ける
+        Assert.Equal(new[] { 8, 12, 17 }, visited);
+    }
+
+    [Fact]
+    public void MoveDown_WithWrap_LastSegment_StillLandsAtLogicalLineEnd()
+    {
+        // クランプの過剰適用防止。最終セグメントは segEnd(=行末)に着地してよい
+        // (そこは「次の視覚行の先頭」ではないため)。
+        var s = Snap(WrapFixture);
+        // 行 2 "end" は 1 セグメント=最終。右端 desiredPx で ↓ すると行末(21)。
+        var (t, _) = VerticalNavigation.MoveDown(
+            s,
+            caret: 13,
+            currentDesiredPx: 32,
+            wrapColumns: 4,
+            M
+        );
+        Assert.Equal(21, t); // 18 + 3 = "end" の行末
+    }
+
+    [Fact]
+    public void MoveDownThenUp_WithWrap_RightEdge_ReturnsToOriginalVisualRow()
+    {
+        // 往復。desiredPx を保持しているので元の視覚行へ戻る。
+        var s = Snap(WrapFixture);
+        var (down, d1) = VerticalNavigation.MoveDown(
+            s,
+            caret: 4,
+            currentDesiredPx: -1,
+            wrapColumns: 4,
+            M
+        );
+        var (up, _) = VerticalNavigation.MoveUp(s, down, d1, wrapColumns: 4, M);
+        Assert.Equal(4, up);
+    }
 }

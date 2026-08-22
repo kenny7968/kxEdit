@@ -28,10 +28,13 @@ public sealed partial class EditorControl
             // 可視高さの定義は PaintHeightPx (EditorControl.Caret.cs) に一本化する。
             // ここで同じ式をコピーすると、UIA の GetVisibleCharRange / BringCaretIntoView /
             // ScrollCharRangeIntoView と「どこまで見えているか」の定義が食い違う。
-            // ローカルへ 1 度だけ受けるのは、以降 2 箇所 (ViewportLayout.Build / FrameBuilder.Build)
+            // ローカルへ 1 度だけ受けるのは、以降 2 箇所 (BuildVisibleRows / FrameBuilder.Build)
             // で同一値を使うことを保証するため(式自体は移設前と同一=挙動不変)。
             int paintHeight = PaintHeightPx;
-            var rows = ViewportLayout.Build(snap, _topLine, paintHeight, _wrapColumns, _metrics);
+            // 起点 (TopLine, TopSegment) と折り返し設定は BuildVisibleRows に集約する
+            // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
+            // 言葉の約束ではなく呼び出しの共有にする=片側だけ起点がずれる変異が成立しなくなる。
+            var rows = BuildVisibleRows(snap, paintHeight);
             int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
 
             // 選択がある間は現在行強調 FillRect を抑止する(選択矩形と重ねると
