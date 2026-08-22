@@ -2,6 +2,12 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **⚠️ 実装時の設計変更(2026-08-22)**: 下の Goal / Architecture と Task 1〜6 は**案 A の
+> 策定時スナップショット**。最終ブランチレビューで案 A がページ内アンカーを全滅させることが
+> 判明し、**Task 8 で案 B(`<base>` を出力せず AST 段で絶対化)へ切り替えた**。
+> **現在の正は設計書 §7 と本書の「追加タスク」節(Task 7 / Task 8)**。上から順に読む場合は
+> 先にそちらを参照すること。
+
 **Goal:** マークダウンプレビューで CSS と相対パス画像が解決されるよう CSP の `base-uri` を preview 仮想ホストに限定し、あわせて Markdig `GenericAttributes` による `on*` 属性素通し(A-21)を塞ぐ。
 
 **Architecture:** 変更は `src/kxEdit.Core/Text/MarkdownRenderer.cs` 1 ファイルに閉じる。`BuildPipeline()` から `GenericAttributesExtension` を除去(A-21)し、`PreviewCspHeader` 定数の `base-uri 'none'` を `base-uri https://kxedit.preview` へ変更(A-2)する。App 層(`MarkdownPreviewForm` / `PreviewCspHeaderInjector` / `PreviewNavigationPolicy`)は一切触らない。
@@ -438,12 +444,19 @@ gh pr create --base main
 - **範囲外**: 相対リンクのクリックは MD-H-1 により Block のまま(退行ではなく設計判断)
 - レビュー経緯: 2 パスの指摘と 3 択の対応
 - **L5 の状態**(実施済みなら結果、未実施ならその旨を明記)
-- **テスト設計の受容判断**: `Meta_BaseUri_Matches_PreviewBaseHref` は現時点で他 2 本
-  (`Meta_BaseUri_Is_Limited_To_PreviewHost` / `Base_href_is_injected`)に包含され固有の
-  キル能力を持たないが、ホスト改名を跨いで CSP と `<base>` の対応関係を守る目的で残す
-- **ユーザー影響のある挙動変更**: A-21 により `{#id}` のカスタム見出し id が失われ、
-  自動生成値へ変わる。手元の .md で `[link](#custom)` を使っている場合は切れる
-  (リリースノートにも記載を検討)
+> **実装時の訂正(最終レビュー・品質パス M-6)**: 上の「テスト設計の受容判断」項目は
+> 案 A 前提で書かれており、そこに挙げた 3 本のテストは Task 8 で**すべて削除済み**。
+> そのまま PR に書くと事実と異なるため、下の 2 項目へ差し替える。
+
+- **ユーザー影響のある挙動変更(2 件)**:
+  - A-21 により `{#id}` のカスタム見出し id が失われ、自動生成値へ変わる
+    (`id="custom"` → `id="title-custom"`)。手元の .md で `[link](#custom)` を
+    使っている場合は切れる
+  - FINDING 1 により略語記法(`*[HTML]: HyperText Markup Language`)が `<abbr>` へ
+    展開されなくなり、定義行が本文にリテラル表示される
+  - どちらもリリースノートへの記載を検討する
+- **テスト設計の受容判断**: パイプライン 2 本化のうち空 baseHref 側は
+  production から使われないテスト専用経路だが、テストの `""` 呼び出しが多数あるため残す
 - 申し送り: 説明書 148 行「ファイルへの相対パスのリンクは…参照できます」が MD-H-1 以降
   成立していない件(説明書はユーザー編集版が正のため本 PR では改稿しない)
 
@@ -703,6 +716,11 @@ Markdig の API 名(`DocumentProcessed` / `Descendants` / `LinkInline` / `IMarkd
    解決基準が無いので書き換えない。`BuildPipeline(bool rewriteRelativeUrls)` にして
    `rewriteRelativeUrls` なら `builder.Extensions.AddIfNotAlready<PreviewRelativeUrlExtension>()` を
    `SafeLinkExtension` の**前**に足す。
+
+   > **実装時の訂正(最終レビュー・品質パス)**: 「`SafeLinkExtension` の**前**」は
+   > **実在しない制約**だった。`DocumentProcessed` は描画より前のフェーズなので登録順に
+   > 依存せず、後ろへ移す変異を入れても全テストが緑のまま(生存)。害はないので実装はそのまま。
+
 2. **`Render` で使い分ける**: `baseHref == PreviewBaseHref` なら preview 用、空文字なら素の方。
 3. **`<base>` タグの出力を削除する**(`baseTag` 変数ごと)。
 4. **スタイルシートの `<link>` を絶対 URL にする**。定数を追加:
