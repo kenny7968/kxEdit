@@ -382,11 +382,26 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     internal bool HasFocusCached => _hasFocus;
 
     /// <summary>
+    /// 可視の視覚行を列挙する唯一の入口。<c>OnPaint</c> と <see cref="GetVisibleCharRange"/> が
+    /// 同じ起点 (TopLine, TopSegment) と同じ折り返し設定を使うことを、言葉の約束ではなく
+    /// 呼び出しの共有で保証する(「どこまで見えているか」の定義を二重化しない)。
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="heightPx"/> だけは共有しない。<c>OnPaint</c> は同じ値を
+    /// <c>FrameBuilder.Build</c> にも渡す必要があり、ローカルへ 1 度だけ受けた
+    /// <c>paintHeight</c> をそのまま流す契約になっているため(<c>EditorControl.Paint.cs</c> の
+    /// 同旨のコメント参照)。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
+    /// 折り返し OFF 専用で topSegment が 0 固定の別経路であり、起点の意味が違う。
+    /// </remarks>
+    private IReadOnlyList<VisualRow> BuildVisibleRows(TextSnapshot snap, int heightPx) =>
+        ViewportLayout.Build(snap, _topLine, _topSegment, heightPx, _wrapColumns, _metrics);
+
+    /// <summary>
     /// UIA <c>ITextProvider.GetVisibleRanges</c> の実処理(UI スレッド専用)。
     /// 現在ビューポートに見えている本文の範囲 [Start, End) を返す。
     /// </summary>
     /// <remarks>
-    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="ViewportLayout.Build"/> と
+    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="BuildVisibleRows"/> と
     /// <see cref="PaintHeightPx"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
     /// 折り返し ON では視覚行境界になる。末尾行の改行は含めない。
     /// バッファ未設定・可視行ゼロでは (0, 0)。
@@ -397,14 +412,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_buffer is null)
             return (0, 0);
         var snap = _buffer.Current;
-        var rows = ViewportLayout.Build(
-            snap,
-            _topLine,
-            _topSegment,
-            PaintHeightPx,
-            _wrapColumns,
-            _metrics
-        );
+        var rows = BuildVisibleRows(snap, PaintHeightPx);
         if (rows.Count == 0)
             return (0, 0);
         var first = rows[0];
@@ -1130,10 +1138,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // HScroll 表示可否を決めるための計算では、まだ表示していない前提で高さいっぱいを見る
         // (可視行がわずかに多めになるだけで最長幅の推定には害がない)。
         int probeHeight = Math.Max(0, ClientSize.Height);
-        // topSegment は 0 固定でよい(2026-08-22 A-6)。ここは冒頭のガードで折り返し OFF 専用と
-        // 確定しており(_wrapColumns > 0 なら既に return 済み・wrapColumns: 0 を渡すのも同じ理由)、
-        // 設計書 I-3 のとおり OFF では TopSegment は常に 0 = _topSegment を渡しても同値。
-        // 「OFF 専用の経路である」ことをコード上で明示するため定数のままにする。
+        // ここは BuildVisibleRows を<b>使わない</b>(2026-08-22 A-6)。冒頭のガードで折り返し OFF
+        // 専用と確定しており(_wrapColumns > 0 なら既に return 済み・wrapColumns: 0 を渡すのも
+        // 同じ理由)、topSegment は 0 固定である。設計書 I-3 のとおり OFF では TopSegment は常に
+        // 0 なので _topSegment を渡しても値は同じだが、この経路の起点は「描画/可視域報告の起点」
+        // ではなく「HScroll 幅を推定するための走査開始点」であり意味が違う。共有ヘルパに載せると
+        // その差が消えるため、定数のまま別呼び出しに保つ。
         var rows = ViewportLayout.Build(
             snap,
             _topLine,
@@ -1856,7 +1866,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>
     /// 与えられた UTF-16 char offset のクライアント座標(px)と可視性を算出する純ロジック。
-    /// - Visible=false: TopLine 未到達 / paintHeight を超える論理行 / y &gt;= paintHeight
+    /// - Visible=false: TopLine 未到達 / TopSegment より上の視覚行 /
+    ///   paintHeight を超える論理行 / y &gt;= paintHeight
     /// - Visible=true: (X, Y) は「行番号マージン含む・_scrollX を引く前」の座標
     /// </summary>
     /// <remarks>

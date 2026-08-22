@@ -598,4 +598,64 @@ public class VisualRowScrollTests
                 Assert.Equal(4, c.OffsetFromClientPoint(0, 0));
             }
         });
+
+    // ===== 陳腐化した TopSegment のクランプ(3 者が同じ寄せ方をすること)=====
+    //
+    // SetTopPosition はセグメントをクランプしない(実セグメント数を知るには行全体の Wrap が要り
+    // I-4 に反するため)。したがって「編集で段落が縮み _topSegment が実数以上になった」状態は
+    // テストから直接作れる。この状態で ViewportLayout.Build / ComputeCaretPoint /
+    // OffsetFromClientPoint の 3 者が<b>同じ最終セグメントへ寄せる</b>ことを以下 2 本で固定する
+    // (Task 3 の WalkForwardVisualRows_ClampsStaleSegment_LandsOnNextLineHead と対称)。
+
+    /// <summary>
+    /// 陳腐化した TopSegment でのヒットテスト。<c>OffsetFromClientPoint</c> の
+    /// <c>Math.Min(segIdx, segs.Count - 1)</c> を外すと <c>segs[99]</c> で
+    /// ArgumentOutOfRangeException=クリック 1 回でクラッシュする(equivalent mutant ではない)。
+    /// 寄せ先が <c>ViewportLayout.Build</c> と一致することも同じテストで確認する。
+    /// </summary>
+    [Fact]
+    public void OffsetFromClientPoint_ClampsStaleTopSegment_ToLastSegment() =>
+        Sta.Run(() =>
+        {
+            // "abcdefghij" は wrap=2 で 5 セグメント(最終セグメントは offset 8..9)。
+            var (f, c) = MakeControl("abcdefghij", wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 99); // 実セグメント数(5)を大きく超える陳腐化した値
+                Assert.Equal(99, c.TopSegment); // SetTopPosition 自体は寄せない
+
+                // Build の寄せ先=最終セグメント(offset 8)。
+                Assert.Equal(8, c.GetVisibleCharRange().Start);
+                // ヒットテストも同じ寄せ先を返す(投げない)。
+                Assert.Equal(8, c.OffsetFromClientPoint(0, 0));
+            }
+        });
+
+    /// <summary>
+    /// 陳腐化した TopSegment での座標算出。<c>ComputeCaretPoint</c> の積み上げにある
+    /// <c>Math.Min(skip, segs.Count - 1)</c> を外すと積み上げが負(5 - 99)になり、
+    /// 巨大な負の Y を「可視」として返す(equivalent mutant ではない)。
+    /// </summary>
+    [Fact]
+    public void ComputeCaretPoint_ClampsStaleTopSegment_ToLastSegment() =>
+        Sta.Run(() =>
+        {
+            // 論理行 0 = 5 セグメント・論理行 1 = 3 セグメント。TopSegment=99 は論理行 0 の
+            // 最終セグメントへ寄るので、論理行 1 の先頭は可視域の 2 本目=視覚行 1。
+            var (f, c) = MakeControl("abcdefghij\nklmnop", wrap: 2, visibleRows: 6);
+            using (f)
+            using (c)
+            {
+                int lh = c.LineHeightPx;
+                c.SetTopPosition(0, 99);
+
+                // Build の寄せ先=論理行 0 の最終セグメント(offset 8)。
+                Assert.Equal(8, c.GetVisibleCharRange().Start);
+
+                var (_, y, visible) = c.ComputeCaretPoint(11); // 論理行 1 の先頭(k)
+                Assert.True(visible, "論理行 1 の先頭は可視域内");
+                Assert.Equal(1 * lh, y);
+            }
+        });
 }

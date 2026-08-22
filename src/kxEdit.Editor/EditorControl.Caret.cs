@@ -294,7 +294,8 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// UTF-16 文字オフセットのクライアント座標(px)を返す(P2 計画 §1 の公開 API)。
-    /// SetSource 前 / 可視外(TopLine 未到達 / 下端超過)は <see cref="Point.Empty"/> を返す。
+    /// SetSource 前 / 可視外(TopLine 未到達 / TopSegment より上の視覚行 / 下端超過)は
+    /// <see cref="Point.Empty"/> を返す。
     /// 返す座標は <see cref="ScrollX"/> 反映後の実描画位置(折り返し OFF 時は -_scrollX された値)。
     /// サロゲート中間位置・範囲外は内部で <see cref="SnapAndClamp"/> により正規化する。
     /// </summary>
