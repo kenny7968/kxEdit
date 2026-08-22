@@ -272,6 +272,199 @@ public class BackupCoordinatorTests
             Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
         });
 
+    // ===== A-1 / M-31: 保存点・破棄の即時反映(設計 2026-08-22 §3) =====
+
+    /// <summary>A-1 回帰網: 保存成功(SetSavePoint)で、<b>次の Reconcile を待たずに</b>
+    /// バックアップが消えること。既存 Reconcile_DirtyThenSaved_DeletesBackup は
+    /// 「次 Reconcile で消える」しか固定しておらず、保存〜次 tick(既定 300 秒)の
+    /// クラッシュ窓を検出できなかった。</summary>
+    [Fact]
+    public void SavePoint_DeletesBackup_WithoutReconcile() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // Write 発生
+            var id = host.Writer.Writes[0].Id;
+
+            doc.Editor.SetSavePoint(); // 保存相当。Reconcile は呼ばない
+
+            Assert.Contains(id, host.Writer.Deletes);
+            Assert.False(host.Writer.Store.ContainsKey(id));
+        });
+
+    /// <summary>ゲート(設計 §3.3): 起動時復元が終わるまでは即時反映を動かさない。
+    /// MainForm ctor の NewFile が SetSavePoint 経由でここへ到達し、復元より前に
+    /// session-state.json を上書きしてしまうのを防ぐ。</summary>
+    [Fact]
+    public void SavePoint_BeforeStartupRestoreComplete_DoesNothing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            int deletesBefore = host.Writer.Deletes.Count;
+
+            doc.Editor.SetSavePoint(); // ゲート閉鎖中 = 何も起きない
+
+            Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
+        });
+
+    /// <summary>ゲート(設計 §3.3)のレイアウト側: 復元完了前は session-state.json を書かない。
+    /// ここが破れると「起動 → 空無題 1 タブのレイアウトを書込 → OnShown がそれを読む」で
+    /// 前回セッションを失う。</summary>
+    [Fact]
+    public void SavePoint_BeforeStartupRestoreComplete_DoesNotWriteLayout() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            var doc = host.NewDoc("hello");
+            int layoutsBefore = host.Writer.LayoutWrites.Count;
+
+            doc.Editor.SetSavePoint();
+
+            Assert.Equal(layoutsBefore, host.Writer.LayoutWrites.Count);
+        });
+
+    /// <summary>M-31 回帰網: 非アクティブタブを閉じても即座にバックアップが消えること。
+    /// <b>非アクティブ</b>タブで検証するのは、アクティブタブのクローズだと TabControl の
+    /// 選択変更 → ActiveDocumentChanged → 既存 Reconcile が走り、即時経路を通らなくても
+    /// テストが緑になってしまうため(網を「実際に分岐する場所」へ置く)。</summary>
+    [Fact]
+    public void ClosingNonActiveDocument_DeletesBackup_WithoutReconcile() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Backup.MarkStartupRestoreComplete();
+            var target = host.NewDoc("hello");
+            _ = host.NewDoc("other"); // これがアクティブ = target のクローズで選択は動かない
+            host.Backup.Reconcile();
+            var id = host.Writer.Writes.First(w => w.Content == "hello").Id;
+
+            Assert.True(host.Docs.TryClose(target, _ => true));
+
+            Assert.Contains(id, host.Writer.Deletes);
+        });
+
+    /// <summary>M-31 の対照: ゲート閉鎖中は従来どおり次 Reconcile まで残る。
+    /// (上のテストが即時経路ではなく既存経路で緑になっていないことの証明)</summary>
+    [Fact]
+    public void ClosingNonActiveDocument_BeforeStartupRestoreComplete_KeepsBackup() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var target = host.NewDoc("hello");
+            _ = host.NewDoc("other");
+            host.Backup.Reconcile();
+            int deletesBefore = host.Writer.Deletes.Count;
+
+            Assert.True(host.Docs.TryClose(target, _ => true));
+
+            Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
+        });
+
+    /// <summary>M-31: レイアウトからもタブが消えること(復元時に空枠が復活しない)。</summary>
+    [Fact]
+    public void ClosingNonActiveDocument_RemovesTabFromLayout() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.Backup.MarkStartupRestoreComplete();
+            var target = host.NewDoc("hello");
+            _ = host.NewDoc("other");
+            host.Backup.Reconcile();
+            var id = host.Writer.Writes.First(w => w.Content == "hello").Id;
+            Assert.Contains(host.Writer.LayoutWrites[^1].Tabs, t => t.BackupId == id); // 前提
+
+            Assert.True(host.Docs.TryClose(target, _ => true));
+
+            Assert.DoesNotContain(host.Writer.LayoutWrites[^1].Tabs, t => t.BackupId == id);
+        });
+
+    /// <summary>
+    /// dirty 化では即時反映を動かさない(= 余計なレイアウト書込を出さない)。
+    /// </summary>
+    /// <remarks>
+    /// 観測点がレイアウト書込なのは、<c>ReconcileMapMaintenance</c> が削除しかしないため
+    /// 「dirty 化でバックアップが書かれない」を assert しても<b>ガードの有無で差が出ない</b>
+    /// (guard を外しても Write は出ない = 網が分岐に当たらない)から。実際に差が出るのは
+    /// ReconcileLayout の呼び出しで、キャレット位置は署名に載るため、位置を変えてから
+    /// dirty 化すると tick 抑止をすり抜けて書込が出てしまう。
+    /// 前半の clean 化 assert は「この fixture でそもそも書込が出る」ことの対照
+    /// (後半の Equal が vacuous でないことの証明)。
+    /// </remarks>
+    [Fact]
+    public void DirtyTransition_DoesNotWriteLayout_Immediately() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello world");
+            host.Backup.Reconcile();
+
+            // 対照: キャレットを動かしてから clean 化すると即時反映で書込が出る。
+            int before = host.Writer.LayoutWrites.Count;
+            doc.Editor.SetCaretCharOffset(3);
+            doc.Editor.SetSavePoint();
+            int afterClean = host.Writer.LayoutWrites.Count;
+            Assert.True(afterClean > before);
+
+            // 本題: 同じくキャレットを動かしてから dirty 化しても書込は出ない。
+            doc.Editor.SetCaretCharOffset(7);
+            doc.Editor.ClearSavePoint();
+
+            Assert.Equal(afterClean, host.Writer.LayoutWrites.Count);
+        });
+
+    /// <summary>Shutdown 後は即時経路も無反応(既存 _shutDown ガードの共有)。</summary>
+    [Fact]
+    public void SavePoint_AfterShutdown_DoesNothing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            host.Backup.Shutdown(keepForRestore: true);
+            int deletesBefore = host.Writer.Deletes.Count;
+
+            doc.Editor.SetSavePoint();
+
+            Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
+        });
+
+    /// <summary>
+    /// 両機能 OFF(バックアップ無効 × セッション復元無効)では即時経路も動かない
+    /// = 既存 Reconcile 冒頭のガードと同じ条件であること。
+    /// </summary>
+    /// <remarks>
+    /// <b>ctor から OFF にしてはいけない</b>(コード品質レビュー I-1): その場合 ctor が
+    /// <c>if (!_enabled &amp;&amp; !_sessionRestoreEnabled) return;</c> で早期 return して
+    /// <c>_writer</c> を生成しないため、<c>_writer?.Delete(...)</c> は guard の有無に関係なく
+    /// no-op になり、ガードを外す変異が生き残る(実測で 503 件全緑を確認)。
+    /// ガードが実際に効くのは「writer 生成後に UpdateSettings で OFF にした」経路。
+    /// これは UpdateSettings の明示契約「無効化では既存バックアップファイルを削除しない
+    /// (次回起動の孤児提案に任せる・安全側)」の保存でもある。
+    /// </remarks>
+    [Fact]
+    public void SavePoint_AfterBothFeaturesTurnedOff_KeepsBackup() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // Write 発生 = _writer 生成済み + _map に HasBackup=true
+            var id = host.Writer.Writes[0].Id;
+            host.Backup.UpdateSettings(false, 30, restoreSessionEnabled: false); // writer は残る
+            int deletesBefore = host.Writer.Deletes.Count;
+
+            doc.Editor.SetSavePoint();
+
+            Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
+            Assert.True(host.Writer.Store.ContainsKey(id));
+        });
+
     // ===== 失敗回復(_failed → 次 Reconcile で ForceWrite) =====
 
     [Fact]

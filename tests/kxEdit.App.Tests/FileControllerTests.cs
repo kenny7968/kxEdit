@@ -31,6 +31,7 @@ public class FileControllerTests
         public FakePrompt Prompt { get; } = new();
         public FakeFileDialogService Dialogs { get; } = new();
         public FakeReachabilityProbe Probe { get; } = new();
+        public FakeFileTimestampProvider Timestamps { get; } = new();
         public int SaveSettingsCount;
         public int RecentChangedCount;
         public int MetaChangedCount;
@@ -51,7 +52,8 @@ public class FileControllerTests
                 openedFresh: d => OpenedFresh.Add(d),
                 prompt: Prompt,
                 fileDialogs: Dialogs,
-                reachabilityProbe: Probe
+                reachabilityProbe: Probe,
+                fileTimestamps: Timestamps
             );
         }
 
@@ -1041,6 +1043,140 @@ public class FileControllerTests
             Assert.Equal(LineEnding.Crlf, doc.State.LineEnding);
             Assert.True(doc.Editor.Modified);
             Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "Warn");
+        });
+
+    // ===== A-1 第 2 層: 復元時の陳腐化検出(設計 2026-08-22 §4) =====
+
+    private static readonly DateTime StaleBase = new(2026, 08, 22, 12, 00, 00, DateTimeKind.Utc);
+
+    /// <summary>ユーザ配下(TempPath 直下)= OriginalPathValidator.Check → Ok になる復元先。
+    /// 正規化後のパスで Fake を引くため、キーも GetFullPath を通して合わせる。</summary>
+    private static string SafeRestorePath(string name) =>
+        System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetTempPath(), name));
+
+    private static BackupRecord StaleRec(string? path, DateTime timestampUtc) =>
+        new(
+            Id: Guid.NewGuid().ToString("N"),
+            OriginalPath: path,
+            UntitledNumber: 0,
+            CodePage: 65001,
+            HasBom: false,
+            LineEndingId: 0,
+            Content: "backup content",
+            TimestampUtc: timestampUtc
+        );
+
+    /// <summary>ディスク側がバックアップ取得後に更新されていれば、警告対象として記録する。
+    /// A-1 の害は「Ctrl+S で<b>無警告</b>に新内容が消える」ことなので、記録 = 警告が出れば害は消える。</summary>
+    [Fact]
+    public void RestoreFromBackup_DiskNewerThanBackup_RecordsStalePath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var path = SafeRestorePath("kxEdit-stale-newer.txt");
+            host.Timestamps.Times[path] = StaleBase.AddMinutes(5); // ディスクの方が新しい
+
+            _ = host.File.RestoreFromBackup(StaleRec(path, StaleBase));
+
+            Assert.Equal(new[] { path }, host.File.TakeStaleRestoredPaths());
+        });
+
+    /// <summary>ディスクが古い(通常のクラッシュ復元)なら記録しない = 警告を出さない。</summary>
+    [Fact]
+    public void RestoreFromBackup_DiskOlderThanBackup_RecordsNothing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var path = SafeRestorePath("kxEdit-stale-older.txt");
+            host.Timestamps.Times[path] = StaleBase.AddMinutes(-5);
+
+            _ = host.File.RestoreFromBackup(StaleRec(path, StaleBase));
+
+            Assert.Empty(host.File.TakeStaleRestoredPaths());
+            Assert.Single(host.Timestamps.Queries); // 判定自体は走っている(空の理由が「未呼出」でない)
+        });
+
+    /// <summary>パス検証 NG(攻撃者 JSON 由来)では<b>そもそも I/O しない</b>。
+    /// 検証していないパスへ触らないのは HIGH-2 の思想。Queries が空であることで固定する。</summary>
+    [Fact]
+    public void RestoreFromBackup_RejectedPath_DoesNotQueryTimestamp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var attackPath = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "drivers",
+                "etc",
+                "hosts"
+            );
+
+            _ = host.File.RestoreFromBackup(StaleRec(attackPath, StaleBase));
+
+            Assert.Empty(host.Timestamps.Queries);
+            Assert.Empty(host.File.TakeStaleRestoredPaths());
+        });
+
+    /// <summary>無題レコード(OriginalPath=null)は判定対象外(比較すべきディスク実体が無い)。</summary>
+    [Fact]
+    public void RestoreFromBackup_UntitledRecord_DoesNotQueryTimestamp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+
+            _ = host.File.RestoreFromBackup(StaleRec(path: null, StaleBase));
+
+            Assert.Empty(host.Timestamps.Queries);
+        });
+
+    /// <summary>Take は読み取りと同時にクリアする = 同じ警告を二度出さない。</summary>
+    [Fact]
+    public void TakeStaleRestoredPaths_ClearsAfterRead() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var path = SafeRestorePath("kxEdit-stale-take.txt");
+            host.Timestamps.Times[path] = StaleBase.AddMinutes(5);
+
+            _ = host.File.RestoreFromBackup(StaleRec(path, StaleBase));
+
+            Assert.Single(host.File.TakeStaleRestoredPaths());
+            Assert.Empty(host.File.TakeStaleRestoredPaths()); // 2 回目は空
+        });
+
+    /// <summary>ON(hot exit silent)経路も同じ判定を通ること。A-1 の主経路はこちら
+    /// (RestoreSession → RestoreDirtyFromBackup)なので、OFF 経路のテストだけでは網にならない。</summary>
+    [Fact]
+    public void RestoreSession_DiskNewerThanBackup_RecordsStalePath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var path = SafeRestorePath("kxEdit-stale-session.txt");
+            host.Timestamps.Times[path] = StaleBase.AddMinutes(5);
+            var bk = StaleRec(path, StaleBase);
+            var layout = new SessionLayout(
+                new List<SessionLayoutRecord>
+                {
+                    new(
+                        Path: path,
+                        UntitledNumber: 0,
+                        BackupId: bk.Id,
+                        IsActive: true,
+                        CaretLine: 0,
+                        CaretColumn: 0,
+                        LineEnding: 0
+                    ),
+                },
+                StaleBase
+            );
+
+            _ = host.File.RestoreSession(
+                layout,
+                new[] { bk },
+                initialEmpty: null,
+                adoptRestored: null
+            );
+
+            Assert.Equal(new[] { path }, host.File.TakeStaleRestoredPaths());
         });
 
     // ===== EOL 非ロールバックの修正確認(Batch A Task 1・2026-07-15) =====

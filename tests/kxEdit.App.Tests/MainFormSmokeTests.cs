@@ -113,7 +113,7 @@ public class MainFormSmokeTests
     private static MainForm ShowMainForm_Unified(AppSettings settings, TempDir tmp)
     {
         var form = ShowMainForm(settings, tmp);
-        form.SetSuppressFailedRestoreDialogForTest(true);
+        form.SetSuppressRestoreDialogsForTest(true);
         PumpUntilShown();
         return form;
     }
@@ -475,6 +475,123 @@ public class MainFormSmokeTests
             // では vacuous になり RestoreOpenFilesOnStartup gate を mutation 検証できない)。
             using var form = ShowMainForm_Unified(settings, tmp);
             Assert.DoesNotContain(form.FileForTest.DocsForTest, d => d.State.Path == p1);
+        });
+
+    // ===== A-1 / M-31: 起動時ゲートと陳腐化警告の配線(設計 2026-08-22 §3.3 / §4.2) =====
+
+    /// <summary>MainForm.OnShown が MarkStartupRestoreComplete を呼び忘れると、A-1 / M-31 の
+    /// 修正が丸ごと死ぬ(BackupCoordinatorTests は seam を直接叩くため配線漏れを検出できない)。
+    /// ON 経路で実際にゲートが開くことを固定する。</summary>
+    [Fact]
+    public void OnShown_UnifiedOn_OpensImmediateReconcileGate() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            Assert.True(form.StartupRestoreGateOpenForTest);
+        });
+
+    /// <summary>OFF 経路(従来の復元提案)でもゲートは開く。ON 側だけに置くと、
+    /// バックアップのみ有効なユーザーで A-1 が直らない。</summary>
+    [Fact]
+    public void OnShown_UnifiedOff_OpensImmediateReconcileGate() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.RestoreOpenFilesOnStartup = false;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            Assert.True(form.StartupRestoreGateOpenForTest);
+        });
+
+    /// <summary>ゲートは復元<b>後</b>に開くこと。復元より前に開くと、ctor の NewFile →
+    /// SetSavePoint が空無題 1 タブのレイアウトを session-state.json へ書き、
+    /// OnShown がそれを読んで前回セッションを失う。ここでは「植えたレイアウトが
+    /// 復元される」ことで順序を固定する(OnShown_UnifiedOn_LayoutPresent_... の姉妹)。</summary>
+    [Fact]
+    public void OnShown_UnifiedOn_GateDoesNotClobberPlantedLayout() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("planted.txt");
+            File2.WriteAllText(p1, "planted-body");
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, null, true, 0, 0, 0));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal(p1, doc.State.Path);
+            Assert.True(form.StartupRestoreGateOpenForTest);
+        });
+
+    /// <summary>A-1 第 2 層の配線: ディスクがバックアップより新しいまま復元されたら、
+    /// OnShown が陳腐化警告へ到達し、FileController の記録を回収(クリア)すること。
+    /// 判定そのものは FileControllerTests が固定する(ここは配線=回収点の網)。</summary>
+    [Fact]
+    public void OnShown_UnifiedOn_StaleBackup_WarnsAndDrainsRecord() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("stale.txt");
+            // バックアップ取得時刻より後にディスクが更新された状態を作る
+            // (= 保存成功 → 削除がディスクへ届く前にクラッシュ、の再現)。
+            var backupTime = DateTime.UtcNow.AddMinutes(-10);
+            File2.WriteAllText(p1, "disk-newer");
+            var bk = Rec(NewId(), p1, 0, "backup-older") with { TimestampUtc = backupTime };
+            PlantBackup(tmp, bk);
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            Assert.Equal(1, form.StaleBackupWarningCountForTest); // 警告へ到達した
+            Assert.Empty(form.FileForTest.TakeStaleRestoredPaths()); // OnShown が回収済み
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal("backup-older", doc.Editor.SnapshotText); // 本文は捨てない(§4.2)
+            Assert.True(doc.Editor.Modified);
+        });
+
+    /// <summary>対照: ディスクがバックアップより古い通常のクラッシュ復元では警告を出さない。
+    /// (上のテストが「常に警告する」実装で緑になっていないことの証明)</summary>
+    [Fact]
+    public void OnShown_UnifiedOn_FreshBackup_DoesNotWarn() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("fresh.txt");
+            File2.WriteAllText(p1, "disk-older");
+            var bk = Rec(NewId(), p1, 0, "backup-newer") with
+            {
+                TimestampUtc = DateTime.UtcNow.AddMinutes(10),
+            };
+            PlantBackup(tmp, bk);
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+
+            Assert.Equal(0, form.StaleBackupWarningCountForTest);
+            // レビュー M-6: 復元自体が起きなくなっても 0 件で緑になるため、
+            // 「バックアップ本文で復元された」ことを併せて固定する(自己検証性)。
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal("backup-newer", doc.Editor.SnapshotText);
         });
 
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
