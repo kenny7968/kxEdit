@@ -310,8 +310,10 @@ public class MarkdownRendererTests
     // 変更点:
     //   - meta CSP と HTTP header 用の PreviewCspHeader 定数を single source of truth 化
     //   - img-src から data: を削除 (MD-L-1)
-    //   - base-uri/form-action/frame-ancestors/object-src/worker-src/manifest-src/connect-src
+    //   - form-action/frame-ancestors/object-src/worker-src/manifest-src/connect-src
     //     を追加 (全て 'none')
+    //   - A-2 (2026-08-22): base-uri だけは 'none' を撤回し preview 仮想ホスト限定へ
+    //     ('none' は <base href> を無効化し CSS / 相対画像が解決不能になるため)
     //   - style-src から 'unsafe-inline' を削除し 'self' https://kxedit.preview のみに
     //   - <style>{Css}</style> を <link rel="stylesheet" href="/_kxedit/styles.css"> へ外部化
     //     (実 file は PreviewCspHeaderInjector が virtual response で供給)
