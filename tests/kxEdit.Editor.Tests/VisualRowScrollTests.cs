@@ -1238,6 +1238,17 @@ public class VisualRowScrollTests
                 Wheel(c, -120);
                 int step = c.TopSegment; // 1 ノッチの視覚行数(環境の MouseWheelScrollLines 依存)
                 Assert.True(step > 0, "ホイール下方向で TopSegment が進んでいない");
+                // 1 ノッチの「絶対量」を固定する。以降の assert は notch * step の線形性と
+                // 往復の可逆性しか見ないため、送り量そのものがずれる変異(wheelLines のオフセット)
+                // を殺せない(Task 6 レビュー Minor 1 で実際に生存した)。
+                // ここは実装ロジックの複製ではなく、OnMouseWheel と同じ環境 API を参照している
+                // (SystemInformation.MouseWheelScrollLines は「1 ページ」設定で -1 を返す仕様なので
+                //  <= 0 は WinForms 標準の既定値 3 にフォールバックする)。
+                int expectedStep =
+                    SystemInformation.MouseWheelScrollLines <= 0
+                        ? 3
+                        : SystemInformation.MouseWheelScrollLines;
+                Assert.Equal(expectedStep, step);
                 Assert.Equal(0, c.TopLine); // 論理行は 1 本しかない
                 Assert.True(
                     4 * step < EnumerateRows(c, snap).Count,
