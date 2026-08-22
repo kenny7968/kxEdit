@@ -51,9 +51,10 @@ public class CaretScrollTests
 
                 // 末尾行(index 9)にキャレットを置いてから TopLine を先頭へ戻し、
                 // BringCaretIntoView 単体がスクロールを起こすことを検証する。
-                // 順序が逆(TopLine=0 → SetCaretCharOffset)だと、setter 自身の追従スクロール
-                // (A-3 修正)で先に TopLine が動いてしまい、BringCaretIntoView を壊しても
-                // 緑のまま通る=網が vacuous になる。
+                // 順序が逆(TopLine=0 → SetCaretCharOffset)だと、A-3 修正で setter 自身が
+                // 追従スクロールするため assertion は BringCaretIntoView を呼ぶ前に既に
+                // 満たされ、本テストの検証対象が BringCaretIntoView から SetCaretCharOffset へ
+                // すり替わる(実測: 旧順序では c.BringCaretIntoView() の行を消しても緑のまま通る)。
                 int lineStart = text.LastIndexOf('\n') + 1;
                 c.SetCaretCharOffset(lineStart);
                 c.TopLine = 0; // ★ caret を置いた「後」に可視域を先頭へ戻す
@@ -78,7 +79,8 @@ public class CaretScrollTests
             using (c)
             {
                 // 先頭行にキャレットを置いてから可視領域を下方向へずらす
-                // (順序が逆だと setter 自身の追従スクロールで網が vacuous になる=Task 1 参照)。
+                // (順序が逆だと setter 自身の追従スクロールで assertion が先に満たされ、
+                //  検証対象が BringCaretIntoView からすり替わる=上の ScrollsDown 版の注記参照)。
                 c.SetCaretCharOffset(0);
                 c.TopLine = 5; // ★ caret を置いた「後」に可視域をずらす
                 c.BringCaretIntoView();
@@ -255,7 +257,8 @@ public class CaretScrollTests
                 c.WrapColumns = 0; // 折り返し OFF(念のため明示・既定 0)
 
                 // 論理行 9(末尾)にキャレットを置いてから TopLine を先頭へ戻す
-                // (順序が逆だと setter 自身の追従スクロールで網が vacuous になる=Task 1 参照)。
+                // (順序が逆だと setter 自身の追従スクロールで assertion が先に満たされ、
+                //  検証対象が BringCaretIntoView からすり替わる=ScrollsDown 版の注記参照)。
                 int line9Start = text.LastIndexOf('\n') + 1;
                 c.SetCaretCharOffset(line9Start);
                 c.TopLine = 0; // ★ caret を置いた「後」に可視域を先頭へ戻す
