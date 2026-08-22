@@ -1455,6 +1455,44 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 確認後 `git checkout -- src/` で復元し(コミット済みなので実装は戻る)、全緑を再確認する。
 変異が生存したら網の穴なので、テストを足して**別コミット**を積む。
 
+#### 実施記録(2026-08-23)
+
+上記 2 件に加え、判定 2 分岐と `ScrollCharRangeIntoView` の各要素へ計 11 件の変異を当てた
+(Editor 全 412 件で実行=`--filter` で絞らない)。結果:
+
+| 変異 | 結果 |
+|------|------|
+| 1. `caretSeg < _topSegment` → `<=`(計画 1 件目) | **equivalent mutant=kill 不能** |
+| 2. `WalkBackVisualRows(..., visibleRows - 1)` → `visibleRows`(計画 2 件目・`BringCaretIntoView` 側) | kill(11 件・うち折り返し OFF の既存 7 件) |
+| 第 1 分岐から辞書順の節を落とす | kill(4 件) |
+| `caretLine < _topLine` → `<=` | kill(7 件) |
+| `>= visibleRows` → `> visibleRows` | kill(14 件) |
+| 2 分岐の記述順を入れ替える | **equivalent mutant=kill 不能** |
+| `ScrollCharRangeIntoView` の辞書順の節を落とす | 当初**生存** → 網を追加して kill(2 件) |
+| `ScrollCharRangeIntoView` の粗い否定を過剰発火(`line <= _topLine`) | 当初**生存** → 網を追加して kill(2 件) |
+| `ScrollCharRangeIntoView` の下端寄せ → `visibleRows`(遡り過ぎ) | **equivalent mutant=kill 不能** |
+| `ScrollCharRangeIntoView` の下端寄せ → `visibleRows - 2`(遡り不足) | kill(7 件) |
+| `ScrollCharRangeIntoView` の `alignToTop` 反転 | kill(12 件) |
+
+**計画 1 件目が equivalent である理由**: `<` と `<=` が分かれるのは
+`caretLine == _topLine && caretSeg == _topSegment` のときだけで、その場合
+`SetTopPosition(_topLine, _topSegment)` は無変化ゆえ早期 return する(副作用ゼロ)。
+`<` 側も距離 0 < visibleRows で第 2 分岐に入らない。よって両者は観測不能に等価。
+
+**記述順が equivalent である理由**: 2 条件は排他である(第 1 分岐が真のとき
+`CountVisualRowsForward` は必ず 0 を返し、`visibleRows >= 1` より第 2 分岐は偽)。
+load-bearing なのは**辞書順で弁別する分岐が存在すること**であって記述順ではない
+(落とす変異は 4 件が kill する)。`BringCaretIntoView` の remarks をこの実態に合わせて訂正した。
+
+**`ScrollCharRangeIntoView` の下端寄せが遡り過ぎ方向で equivalent な理由**:
+直後の `EnsureVisibleCharRange` → `BringCaretIntoView` 第 2 分岐が
+`targetRow - (visibleRows - 1)` へ引き戻す。遡り不足の方向は引き戻されないので kill できる。
+
+**当初生存した 2 件はいずれも fixture の狭さ**だった(対象を「起点と同じ論理行かつ
+TopSegment より上」に置いたケースが 1 本も無い / 「既に可視」テストが対象を可視域の
+最下段に置いていて下端寄せの誤実装と偶然一致する)。総当りオラクル
+`ScrollCharRangeIntoView_MatchesRowOracle_ForAllStartsAndTargets` を追加して塞いだ。
+
 ---
 
 ## Task 6: ホイールを視覚行送りにする
