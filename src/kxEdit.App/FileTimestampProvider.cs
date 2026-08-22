@@ -45,7 +45,7 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
                 string root = RootKey(path);
                 if (_unreachableRoots.Contains(root))
                     return null;
-                if (!_probe.ProbeWithTimeout(path, ProbeTimeout))
+                if (!_probe.ProbeFileExistsWithTimeout(path, ProbeTimeout))
                 {
                     _unreachableRoots.Add(root);
                     return null;

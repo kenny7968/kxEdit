@@ -17,8 +17,8 @@ namespace kxEdit.App.Tests;
 public class SerialBackupWriterTests
 {
     /// <summary>テスト毎に使い捨ての一時フォルダ(BackupStore の実 I/O が触るディスク領域)。
-    /// FileControllerTests.TempDir と同じ流儀。掃除失敗はテスト失敗にしない(ReadOnly 属性等)。</summary>
-    private sealed class TempDir : IDisposable
+    /// TempDir.cs と同じ流儀。掃除失敗はテスト失敗にしない(ReadOnly 属性等)。</summary>
+    private sealed class SbwTempDir : IDisposable
     {
         public string Root { get; } = Directory.CreateTempSubdirectory("kxEditSbw_").FullName;
 
@@ -70,7 +70,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void Write_ThenDispose_DrainsToDisk()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         var r1 = Rec("id-1", "one");
         var r2 = Rec("id-2", "two");
 
@@ -94,7 +94,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void WriteThenDelete_SameId_EndsAbsent()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         var rec = Rec("id-x", "will-be-deleted");
 
         using (var w = new SerialBackupWriter(tmp.Root))
@@ -113,7 +113,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void DeleteAll_RemovesEverything()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
 
         using (var w = new SerialBackupWriter(tmp.Root))
         {
@@ -151,7 +151,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void WriteFailure_InvokesOnWriteFailed_AndWorkerSurvives()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         // "<HashId(will-fail)>.json" と同名のディレクトリを事前作成 → File.Move が決定的に失敗する経路
         // (HIGH-1 導入後は Id が GUID N になるためファイル名も HashId 経由で組み立てる)。
         Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("will-fail") + ".json"));
@@ -211,7 +211,7 @@ public class SerialBackupWriterTests
     /// `OnWriteFailed?.Invoke(record.Id)` を null 差替/削除に変異させれば、本テストが red
     /// 化することを実測確認済み。
     ///
-    /// 失敗機構の注記: 計画書は「TempDir を削除して I/O 失敗を起こす」を提案していたが、
+    /// 失敗機構の注記: 計画書は「SbwTempDir を削除して I/O 失敗を起こす」を提案していたが、
     /// <see cref="BackupStore.Write"/> は先頭で <see cref="Directory.CreateDirectory(string)"/>
     /// を呼ぶため dir 削除では失敗しない(=書込は成功してしまう)。決定的に失敗を起こせるのは
     /// <c>&lt;id&gt;.json</c> 同名ディレクトリで File.Move をブロックする経路(複合テストと
@@ -221,7 +221,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void Write_Failure_Invokes_OnWriteFailed_WithRecordId()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         // 対象パス "<HashId(id-mre)>.json" と同名のディレクトリを事前作成 → BackupStore.Write の
         // 新規経路(AtomicFile.Write 内の File.Move)が決定的に IOException を投げる
         // (HIGH-1 導入後は Id が GUID N になるためファイル名も HashId 経由で組み立てる)。
@@ -273,7 +273,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void Enqueue_AfterDispose_DoesNotPropagateException()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         var w = new SerialBackupWriter(tmp.Root);
         w.Dispose();
 
@@ -301,7 +301,7 @@ public class SerialBackupWriterTests
     [Fact]
     public void Dispose_IsIdempotent()
     {
-        using var tmp = new TempDir();
+        using var tmp = new SbwTempDir();
         var w = new SerialBackupWriter(tmp.Root);
 
         w.Dispose();

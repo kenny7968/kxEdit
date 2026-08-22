@@ -29,8 +29,9 @@ public class FileReachabilityProbeTests
     [Fact]
     public void ProbeSaveTarget_NewNameInExistingDir_ReachableAndNotExists()
     {
-        // A-4 の核。旧 ProbeWithTimeout(File.Exists 意味論)はここで false を返し、
+        // A-4 の核。旧 ProbeFileExistsWithTimeout(File.Exists 意味論)はここで false を返し、
         // 「ネットワークパスに到達できません」でネットワーク共有への新規保存を止めていた。
+        // Reachable を `fileExists && dirExists` に変異させるとこのテストが kill する。
         using var tmp = new TempDir();
 
         var result = new FileReachabilityProbe().ProbeSaveTargetWithTimeout(
@@ -45,6 +46,8 @@ public class FileReachabilityProbeTests
     [Fact]
     public void ProbeSaveTarget_UnderMissingDir_NotReachable()
     {
+        // 親フォルダーが無ければ到達不能。親存在チェックを潰す変異
+        // (`!IsNullOrEmpty(dir) && Directory.Exists(dir)` → `||` 等)を kill する。
         using var tmp = new TempDir();
 
         var result = new FileReachabilityProbe().ProbeSaveTargetWithTimeout(
@@ -60,6 +63,9 @@ public class FileReachabilityProbeTests
     public void ProbeSaveTarget_DriveRoot_NotReachable()
     {
         // ルート自体("C:\")はファイルとして保存できない=親フォルダーが無い。
+        // このファイルで唯一 Path.GetDirectoryName が null を返す入力であり、
+        // 「親が無ければパス自身にフォールバック」(`GetDirectoryName(path) ?? path`)という
+        // 書き損じを kill するのはこのテストだけ(そう書くとルートが到達可能になる)。
         // ローカルパスをハードコードしない(pre-commit の no-local-paths 対策)ため
         // 一時フォルダのルートから導出する。
         using var tmp = new TempDir();
@@ -69,5 +75,99 @@ public class FileReachabilityProbeTests
         var result = new FileReachabilityProbe().ProbeSaveTargetWithTimeout(root, Timeout);
 
         Assert.False(result.Reachable);
+        Assert.False(result.FileExists);
+    }
+
+    [Fact]
+    public void ProbeSaveTarget_ExistingDirectory_ReportedAsNewFile_CurrentBehavior()
+    {
+        // 現状記録(意図した仕様ではない)。既存フォルダーのパスを保存先に渡すと
+        // File.Exists=false・親フォルダー存在=true となり「新規ファイル・確認不要」と答える。
+        // 設計書 §6(非目標)/ 申し送り S-1 が承知で範囲外にしている挙動。
+        // S-1(保存先がフォルダーのときの扱い)を回収するときは、このテストが比較対象になる。
+        using var tmp = new TempDir();
+
+        var result = new FileReachabilityProbe().ProbeSaveTargetWithTimeout(tmp.Root, Timeout);
+
+        Assert.True(result.Reachable);
+        Assert.False(result.FileExists);
+    }
+
+    // ===== 境界付き待ちのフェイルセーフ(I-1) =====
+    // 実 I/O 経由でタイムアウトを起こすテストはフレーキーなので、待ちの判断だけを
+    // WaitBounded に切り出して決定的に検証する。
+
+    [Fact]
+    public void WaitBounded_Timeout_ReturnsFailSafeValue()
+    {
+        // 一度も SetResult しない TCS なので Wait(Zero) は決定的に false(レースなし)。
+        var never = new TaskCompletionSource<SaveTargetProbeResult>();
+
+        var result = FileReachabilityProbe.WaitBounded(
+            never.Task,
+            TimeSpan.Zero,
+            new SaveTargetProbeResult(Reachable: false, FileExists: false)
+        );
+
+        Assert.False(result.Reachable);
+        Assert.False(result.FileExists); // タイムアウトを「未存在」と読ませない
+    }
+
+    [Fact]
+    public void WaitBounded_Completed_ReturnsTaskResult()
+    {
+        // 対照群。フェイルセーフ値を常に返す実装(= onTimeout を無条件 return)を kill する。
+        var done = Task.FromResult(new SaveTargetProbeResult(Reachable: true, FileExists: true));
+
+        var result = FileReachabilityProbe.WaitBounded(
+            done,
+            TimeSpan.Zero,
+            new SaveTargetProbeResult(Reachable: false, FileExists: false)
+        );
+
+        Assert.True(result.Reachable);
+        Assert.True(result.FileExists);
+    }
+
+    [Fact]
+    public void RunSaveTargetProbe_WorkExceedsTimeout_FailsSafeToUnreachable()
+    {
+        // I-1 の本体。WaitBounded の 2 本だけでは「フェイルセーフ値そのもの」が無被覆で、
+        // (false,false) → (true,false) の変異が生存していた(= タイムアウトを
+        // 「到達可能・未存在」と読み、Task 7 の上書き確認をスキップして無確認上書きになる)。
+        // work を gate で止めるので Wait は決定的にタイムアウトする(レースなし)。
+        // work は (true,true) を返すので、結果が (false,false) ならフェイルセーフ由来と確定する。
+        var gate = new TaskCompletionSource();
+        try
+        {
+            var result = FileReachabilityProbe.RunSaveTargetProbe(
+                () =>
+                {
+                    gate.Task.Wait();
+                    return new SaveTargetProbeResult(Reachable: true, FileExists: true);
+                },
+                TimeSpan.FromMilliseconds(50)
+            );
+
+            Assert.False(result.Reachable);
+            Assert.False(result.FileExists);
+        }
+        finally
+        {
+            gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
+        }
+    }
+
+    [Fact]
+    public void RunSaveTargetProbe_WorkCompletes_ReturnsWorkResult()
+    {
+        // 対照群。RunSaveTargetProbe が常にフェイルセーフ値を返す実装を kill する。
+        var result = FileReachabilityProbe.RunSaveTargetProbe(
+            () => new SaveTargetProbeResult(Reachable: true, FileExists: true),
+            Timeout
+        );
+
+        Assert.True(result.Reachable);
+        Assert.True(result.FileExists);
     }
 }

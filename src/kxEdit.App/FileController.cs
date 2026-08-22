@@ -966,7 +966,7 @@ public sealed class FileController
     {
         if (
             RemotePathDetector.IsRemote(path)
-            && !_reachabilityProbe.ProbeWithTimeout(path, TimeSpan.FromSeconds(5))
+            && !_reachabilityProbe.ProbeFileExistsWithTimeout(path, TimeSpan.FromSeconds(5))
         )
         {
             // CSV-L-5: path は grep/最近のファイル/BackupRecord 由来で攻撃者制御が届き得るため、

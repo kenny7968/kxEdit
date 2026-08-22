@@ -3,15 +3,41 @@ using System.IO;
 namespace kxEdit.App;
 
 /// <summary>
-/// <see cref="IReachabilityProbe"/> の本番実装。<see cref="System.IO.File.Exists"/> を
-/// <see cref="Task.Run(Func{bool})"/> でバックグラウンドスレッドに退避し、
-/// <see cref="Task.Wait(TimeSpan)"/> の短タイムアウトで UI スレッドをブロックしない。
+/// <see cref="IReachabilityProbe"/> の本番実装。読み取り側の
+/// <see cref="ProbeFileExistsWithTimeout"/> は <see cref="System.IO.File.Exists"/> を、
+/// 書き込み側の <see cref="ProbeSaveTargetWithTimeout"/> は File.Exists + 親フォルダーの
+/// <see cref="System.IO.Directory.Exists"/> を、それぞれ <see cref="Task.Run{TResult}(Func{TResult})"/> で
+/// バックグラウンドスレッドに退避し、<see cref="Task.Wait(TimeSpan)"/> の短タイムアウトで
+/// UI スレッドをブロックしない。どちらもタイムアウト時のフェイルセーフは
+/// <see cref="WaitBounded{T}"/> に集約する(= 到達不能側に倒す)。
 /// UNC 未到達時は 60 秒の SMB タイムアウトが走るスレッドが 1 本 leak するが、
 /// まれなケースのため許容(設計書 PR-5 節)。
 /// </summary>
 public sealed class FileReachabilityProbe : IReachabilityProbe
 {
-    public bool ProbeWithTimeout(string path, TimeSpan timeout)
+    /// <summary>
+    /// 境界付き待ちの判断。タイムアウトしたら <paramref name="onTimeout"/> を返す。
+    /// 2 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
+    /// (Task 1 コード品質レビュー I-1: タイムアウト値の変異が生存していた)。
+    /// </summary>
+    internal static T WaitBounded<T>(Task<T> task, TimeSpan timeout, T onTimeout) =>
+        task.Wait(timeout) ? task.Result : onTimeout;
+
+    /// <summary>
+    /// 保存先プローブの骨格。<paramref name="work"/> をバックグラウンドへ退避し、
+    /// 期限内に終わらなければ「到達不能」(false, false)へ倒す。
+    /// <see cref="WaitBounded{T}"/> が generic でフェイルセーフ値を持てない以上、
+    /// その値は呼出側に置くしかない。ここに置くのは <paramref name="work"/> を差し替えれば
+    /// タイムアウト経路を**決定的に**テストできるからで、実 I/O 経由では
+    /// フェイルセーフ値そのものが無被覆のまま残る(I-1 の実測: 変異が生存していた)。
+    /// </summary>
+    internal static SaveTargetProbeResult RunSaveTargetProbe(
+        Func<SaveTargetProbeResult> work,
+        TimeSpan timeout
+    ) => WaitBounded(Task.Run(work), timeout, new SaveTargetProbeResult(false, false));
+
+    /// <inheritdoc />
+    public bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout)
     {
         var task = Task.Run(() =>
         {
@@ -26,30 +52,32 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                 return false;
             }
         });
-        return task.Wait(timeout) && task.Result;
+        return WaitBounded(task, timeout, false);
     }
 
     /// <inheritdoc />
-    public SaveTargetProbe ProbeSaveTargetWithTimeout(string path, TimeSpan timeout)
-    {
-        var task = Task.Run(() =>
-        {
-            try
+    public SaveTargetProbeResult ProbeSaveTargetWithTimeout(string path, TimeSpan timeout) =>
+        RunSaveTargetProbe(
+            () =>
             {
-                bool fileExists = File.Exists(path);
-                string? dir = System.IO.Path.GetDirectoryName(path);
-                // dir が null/空 = ルート自体("C:\")を指す入力。ファイルとしては保存できないので
-                // 到達不能側に落とす(親フォルダーが無い=書き込み先が確定しない)。
-                bool dirExists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
-                return new SaveTargetProbe(fileExists || dirExists, fileExists);
-            }
-            catch
-            {
-                // File.Exists / Directory.Exists は通常投げないが、UNC 未到達などで稀に
-                // IOException 系が出る可能性を吸って「到達不能」に倒す(ProbeWithTimeout と同方針)。
-                return new SaveTargetProbe(false, false);
-            }
-        });
-        return task.Wait(timeout) ? task.Result : new SaveTargetProbe(false, false);
-    }
+                try
+                {
+                    bool fileExists = File.Exists(path);
+                    string? dir = Path.GetDirectoryName(path);
+                    // dir が null = ルート自体(C:\ / \\server\share)= 親が無い。
+                    // dir が空 = 相対パス(呼出側は正規化済み絶対パスを渡す契約)。
+                    // どちらも書き込み先が確定しないので到達不能へ倒す。
+                    bool dirExists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
+                    return new SaveTargetProbeResult(fileExists || dirExists, fileExists);
+                }
+                catch
+                {
+                    // File.Exists / Directory.Exists は通常投げないが、UNC 未到達などで稀に
+                    // IOException 系が出る可能性を吸って「到達不能」に倒す
+                    // (ProbeFileExistsWithTimeout と同方針)。
+                    return new SaveTargetProbeResult(false, false);
+                }
+            },
+            timeout
+        );
 }

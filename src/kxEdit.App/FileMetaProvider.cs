@@ -30,7 +30,10 @@ public sealed class FileMetaProvider : IFileMetaProvider
             // FileController は Load/Save で同じ前置を行っており、本経路だけが素通りしていた。
             // 失敗の落とし先は他の取得失敗と同じ null(=Formatter が「-」表示)なので、
             // FileController のようなエラーダイアログは出さない(致命度が低い付随情報のため)。
-            if (RemotePathDetector.IsRemote(path) && !_probe.ProbeWithTimeout(path, ProbeTimeout))
+            if (
+                RemotePathDetector.IsRemote(path)
+                && !_probe.ProbeFileExistsWithTimeout(path, ProbeTimeout)
+            )
                 return null;
 
             var fi = new FileInfo(path);
