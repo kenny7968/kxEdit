@@ -83,9 +83,11 @@ public class MarkdownRendererTests
     [Fact]
     public void PreviewBaseHref_ContainsOnly_HtmlAttrSafeChars()
     {
-        // MD-L-4 の allow-list は "baseHref は PreviewBaseHref か空文字のみ" を保証するので
-        // 直接 interpolate しても安全。ただし PreviewBaseHref 自体が将来 URL-safe 外の
-        // 文字を持つとその前提が崩れる。ここで機械固定して回帰を防ぐ。
+        // A-2 (案 B) で <base> の出力を廃止したので、baseHref が HTML へ interpolate される
+        // 経路はもう無い。それでも PreviewBaseHref は PreviewUrlResolver が
+        // new Uri(PreviewBase, url) の解決基準として使う URI であり、URL-safe 外の文字が
+        // 混ざると解決結果が壊れる (絶対化された URL は最終的に href/src 属性へ載る)。
+        // ここで機械固定して回帰を防ぐ。
         Assert.DoesNotContain('"', MarkdownRenderer.PreviewBaseHref);
         Assert.DoesNotContain('<', MarkdownRenderer.PreviewBaseHref);
         Assert.DoesNotContain('>', MarkdownRenderer.PreviewBaseHref);
@@ -566,7 +568,13 @@ public class MarkdownRendererTests
     // しまい、文書自身の URL が data:text/html;... のままなので同一文書内スクロールではなく
     // クロス文書遷移になる。PreviewNavigationPolicy.Classify は https + preview ホストを
     // MD-H-1 で Block するため、目次リンクと脚注の戻りリンクが全て無反応になる (FINDING 3)。
-    // 以下の「フラグメント不変」2 本がその回帰防止網。
+    //
+    // FINDING 3 の回帰防止網は次の 2 本 (ミューテーションで kill 確認済み):
+    //   - Render_FragmentLink_IsNotRewritten ... resolver が # 始まりを書き換えないこと
+    //     (PreviewUrlResolver の # ガードを消すと赤)
+    //   - Preview_base_href_emits_no_base_tag ... 文書に <base> を出力しないこと
+    //     (<base> を再注入すると赤)
+    // Render_FootnoteLinks_AreNotRewritten はこの網には入らない (同テストのコメント参照)。
     // ---------------------------------------------------------------------
 
     [Fact]
@@ -595,7 +603,11 @@ public class MarkdownRendererTests
     [Fact]
     public void Render_FootnoteLinks_AreNotRewritten()
     {
-        // FINDING 3 の回帰防止 (最重要)。脚注の参照リンクと戻りリンクの両方を固定する。
+        // FINDING 3 の網ではない。脚注リンクは LinkInline ではなく FootnoteLink で、href は
+        // HtmlFootnoteLinkRenderer が直書きするため PreviewRelativeUrlExtension が届かない。
+        // よって resolver の # ガードを消しても <base> を再注入しても赤くならない (実測済み)。
+        // 本テストの位置づけは脚注リンクの出力形式 (#fn:1 / #fnref:1) の仕様固定で、
+        // RemoveAll の述語に FootnoteExtension を足す変異を唯一 kill する網でもある。
         string html = MarkdownRenderer.Render("text[^1]\n\n[^1]: note\n", Base);
         Assert.Contains("href=\"#fn:1\"", html);
         Assert.Contains("href=\"#fnref:1\"", html);
@@ -626,6 +638,9 @@ public class MarkdownRendererTests
     public void Render_EmptyBaseHref_DoesNotRewriteRelativeUrls()
     {
         // 空 baseHref の経路は解決基準を持たないので書き換えない (パイプライン 2 本の境界)。
+        // 案 B 以降、SafeLinkExtension の whitelist が「scheme 無し相対 URL」を drop しない
+        // ことを固定する唯一の網でもある (preview 経路では絶対化が先に効いて href が https に
+        // なるため、Render_RelativeLink_KeepsHref 系は相対のケースを検証できなくなった)。
         string html = MarkdownRenderer.Render("![](pic.png)\n\n[y](other.md)\n", "");
         Assert.Contains("src=\"pic.png\"", html);
         Assert.Contains("href=\"other.md\"", html);
