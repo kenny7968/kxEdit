@@ -698,6 +698,27 @@ public class VisualRowScrollTests
     private static void AssertCaretVisible(EditorControl c, string because) =>
         Assert.True(c.ComputeCaretPoint(c.CaretCharOffset).Visible, because);
 
+    /// <summary>
+    /// ↓ を押し続ける間の起点の位置を全打鍵で固定する。可視域を 1 本ずつ送る実装では、
+    /// キャレットが初期可視域を出た後は<b>常に最下段</b>に居続ける(PR #45 が確立した
+    /// 「ジャンプ先は下端」の連続版)。最終状態だけを見ると、文書末では起点が上限に
+    /// 張り付いて<b>1 本ずれた実装でも同じ値に収束してしまう</b>ため、道中で押さえる。
+    /// </summary>
+    private static void AssertCaretOnBottomRow(
+        EditorControl c,
+        TextSnapshot snap,
+        List<(int Line, int Seg)> rows,
+        int visibleRows,
+        int step
+    )
+    {
+        int caretIdx = rows.IndexOf(LocateRow(c, snap, c.CaretCharOffset));
+        int topIdx = rows.IndexOf((c.TopLine, c.TopSegment));
+        Assert.True(caretIdx >= 0, $"{step} 回目: キャレットの視覚行が列挙に無い");
+        Assert.True(topIdx >= 0, $"{step} 回目: 起点が実在の視覚行でない");
+        Assert.Equal(Math.Max(0, caretIdx - (visibleRows - 1)), topIdx);
+    }
+
     [Fact]
     public void KeyDown_Down_WithWrap_KeepsCaretVisible() =>
         Sta.Run(() =>
@@ -1126,6 +1147,7 @@ public class VisualRowScrollTests
                 {
                     KeyDown(c, Keys.Down);
                     AssertCaretVisible(c, $"{i + 1} 回目の ↓ でキャレットが可視域外へ出た");
+                    AssertCaretOnBottomRow(c, snap, rows, VisibleRows, i + 1);
                 }
 
                 // (b) 最終視覚行へ到達し、起点も最大位置まで進んでいる。
@@ -1157,6 +1179,7 @@ public class VisualRowScrollTests
                 {
                     KeyDown(c, Keys.Down);
                     AssertCaretVisible(c, $"{i + 1} 回目の ↓ でキャレットが可視域外へ出た");
+                    AssertCaretOnBottomRow(c, snap, rows, VisibleRows, i + 1);
                 }
 
                 Assert.Equal(rows[^1], LocateRow(c, snap, c.CaretCharOffset));
