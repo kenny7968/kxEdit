@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Runtime.InteropServices;
+using kxEdit.Accessibility;
 
 namespace kxEdit.Editor.Tests;
 
@@ -480,6 +481,35 @@ public class CaretScrollTests
                 c.MoveCaretWithSelection(text.Length);
 
                 Assert.Equal(3, c.TopLine);
+            }
+        });
+
+    // M-32(2026-08-22): UIA Select() がキャレットを可視域へスクロールしない。
+    // Adapter の IUiaTextHost.SetSelection は BeginInvoke で UI スレッドへ渡した後
+    // EditorControl.SetSelectionCharRange を呼ぶため、A-3 の修正で同時に解消する。
+    // 本テストは UI スレッド上で呼ぶので InvokeRequired=false=直接経路を通る。
+    [Fact]
+    public void UiaSetSelection_ScrollsSelectionIntoView() =>
+        Sta.Run(() =>
+        {
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                c.TopLine = 0;
+                int visibleRows = Math.Max(1, c.ClientSize.Height / c.LineHeightPx);
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                // 範囲は行 0 から行 29 までまたがせる(Task 2 レビュー M-1 と同じ理由=
+                // start と end を別の論理行に置かないと「範囲末尾を可視化する」契約を検証できない)。
+                int lineStart = text.LastIndexOf('\n') + 1;
+                IUiaTextHost host = c;
+                host.SetSelection(0, lineStart + 4);
+
+                Assert.True(
+                    c.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {c.TopLine}"
+                );
             }
         });
 }
