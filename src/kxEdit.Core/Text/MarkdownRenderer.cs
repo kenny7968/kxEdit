@@ -31,9 +31,15 @@ public static class MarkdownRenderer
     /// 主要 directive:
     /// <list type="bullet">
     ///   <item><c>default-src 'none'</c>: 明示的に許可しない全 origin を block</item>
-    ///   <item>MD-M-2 追加: <c>base-uri/form-action/frame-ancestors/object-src/worker-src/
+    ///   <item>MD-M-2 追加: <c>form-action/frame-ancestors/object-src/worker-src/
     ///     manifest-src/connect-src</c> を全て <c>'none'</c> (fetch/submit/embed/worker 経路
     ///     を封鎖)</item>
+    ///   <item>A-2 (2026-08-22): <c>base-uri</c> だけは <c>'none'</c> にしない。
+    ///     <c>'none'</c> は CSP 仕様上 <see cref="PreviewBaseHref"/> の <c>&lt;base&gt;</c> を
+    ///     無効化し、<c>NavigateToString</c> (data: origin) では CSS も相対画像も解決不能に
+    ///     なる (v0.1.1 MD-M-2 からの退行)。本文から <c>&lt;base&gt;</c> 要素を注入する経路は
+    ///     <c>DisableHtml()</c> と GenericAttributes 除去 (A-21) により存在しないため、
+    ///     許可先を preview 仮想ホスト 1 つに絞れば MD-M-2 の意図は保たれる。</item>
     ///   <item>MD-L-1: <c>img-src</c> から <c>data:</c> を削除 (base64 SVG 埋め込み XSS 対策)</item>
     ///   <item><c>style-src 'self' https://kxedit.preview</c>: inline <c>&lt;style&gt;</c> 撤去
     ///     に伴い <c>'unsafe-inline'</c> を削除。<c>'self'</c> は data: URI 起点の
@@ -44,7 +50,9 @@ public static class MarkdownRenderer
     /// </summary>
     public const string PreviewCspHeader =
         "default-src 'none'; "
-        + "base-uri 'none'; "
+        + "base-uri https://"
+        + PreviewVirtualHost
+        + "; "
         + "form-action 'none'; "
         + "frame-ancestors 'none'; "
         + "object-src 'none'; "

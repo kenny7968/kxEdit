@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using kxEdit.Core.Text;
 
 namespace kxEdit.Core.Tests.Text;
@@ -331,8 +332,32 @@ public class MarkdownRendererTests
     }
 
     [Fact]
-    public void Meta_Contains_BaseUri_None() =>
-        Assert.Contains("base-uri 'none'", MarkdownRenderer.Render("x", Base));
+    public void Meta_BaseUri_Is_Limited_To_PreviewHost()
+    {
+        // A-2 (2026-08-22): base-uri 'none' は仕様上 <base href> を無効化するため使えない。
+        // directive 全体を切り出し、source が preview 仮想ホスト 1 つだけであることを
+        // 機械固定する (Meta_ImgSrc_Excludes_Data_Scheme と同じ insertion mutation 耐性)。
+        string html = MarkdownRenderer.Render("x", Base);
+        var m = Regex.Match(html, @"base-uri\s+([^;]*);");
+        Assert.True(m.Success, "base-uri directive が見つからない");
+        Assert.Equal("https://kxedit.preview", m.Groups[1].Value.Trim());
+    }
+
+    [Fact]
+    public void Meta_BaseUri_Matches_PreviewBaseHref()
+    {
+        // A-2 の再発防止: CSP の base-uri と <base href> が食い違うと <base> が無効化され、
+        // CSS も相対画像も解決できなくなる。この「CSP と base の食い合い」のうち、
+        // 自動テストで捕まえられるのはこの対応関係だけなので網を張る。
+        // (ブラウザ実挙動そのものは L5 でしか検証できない。)
+        string html = MarkdownRenderer.Render("x", Base);
+        var m = Regex.Match(html, @"base-uri\s+([^;]*);");
+        Assert.True(m.Success, "base-uri directive が見つからない");
+        string source = m.Groups[1].Value.Trim();
+        string normalized = source.EndsWith('/') ? source : source + "/";
+        Assert.Equal(MarkdownRenderer.PreviewBaseHref, normalized);
+        Assert.Contains($"<base href=\"{MarkdownRenderer.PreviewBaseHref}\">", html);
+    }
 
     [Fact]
     public void Meta_Contains_FormAction_None() =>
@@ -392,7 +417,9 @@ public class MarkdownRendererTests
         // 各 directive の存在 + 不要な緩和が入っていないことを機械固定。
         string csp = MarkdownRenderer.PreviewCspHeader;
         Assert.Contains("default-src 'none'", csp);
-        Assert.Contains("base-uri 'none'", csp);
+        // A-2: base-uri だけは 'none' ではなく preview 仮想ホスト限定 (詳細は
+        // Meta_BaseUri_Is_Limited_To_PreviewHost / Meta_BaseUri_Matches_PreviewBaseHref)。
+        Assert.Contains("base-uri https://kxedit.preview", csp);
         Assert.Contains("form-action 'none'", csp);
         Assert.Contains("frame-ancestors 'none'", csp);
         Assert.Contains("object-src 'none'", csp);
