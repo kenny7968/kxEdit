@@ -876,11 +876,17 @@ public class VisualRowScrollTests
         });
 
     /// <summary>
-    /// 設計書 §4.2 の判定<b>順序</b>(まず辞書順で「起点より上」を弁別 → その後に距離)を固定する。
+    /// 「起点より上か」を<b>辞書順比較で弁別する第 1 分岐が存在すること</b>を固定する。
     /// 距離だけで判断すると <c>CountVisualRowsForward</c> は前方距離しか返さない
     /// (同一論理行は <c>Math.Max(0, toSeg - fromSeg)</c>・手前の論理行は 0)ため、
     /// キャレットが起点より<b>上</b>にあっても距離 0 =「可視」と誤判定し画面が追従しない。
     /// 同一論理行内・論理行跨ぎの両方を 1 本で押さえる。
+    /// <para>
+    /// load-bearing なのは<b>分岐の存在</b>であって<b>2 分岐の記述順ではない</b>。
+    /// 両条件は排他(第 1 分岐が真のとき距離は必ず 0 で、<c>visibleRows &gt;= 1</c> より
+    /// 第 2 分岐は偽)なので、記述順を入れ替える変異は equivalent mutant で kill できない
+    /// (実装側 remarks と同じ結論。当初「順序が load-bearing」と書いていたのは誤り)。
+    /// </para>
     /// </summary>
     [Fact]
     public void BringCaretIntoView_ScrollsUp_WhenCaretIsAboveTop() =>
@@ -920,8 +926,17 @@ public class VisualRowScrollTests
     /// <c>ComputeCaretPoint</c> の <c>segIdx &lt; _topSegment</c> はその最終セグメントも
     /// 不可視と報告する。編集経路(<c>AfterEdit</c>)が必ず呼ぶ <see cref="EditorControl.BringCaretIntoView"/> の
     /// <b>第 1 分岐(辞書順で「起点より上」)</b>が発火して起点をキャレットの実在視覚行へ
-    /// 寄せ直すことで、1 フレーム内に整合が回復する。判定順序を距離優先にすると
-    /// 距離 0 =「可視」と誤判定して修復しない。
+    /// 寄せ直すことで、1 フレーム内に整合が回復する。この第 1 分岐<b>そのものを落とす</b>と
+    /// 距離 0 =「可視」と誤判定して修復しない(load-bearing なのは分岐の存在であって
+    /// 2 分岐の記述順ではない=<see cref="BringCaretIntoView_ScrollsUp_WhenCaretIsAboveTop"/> の
+    /// doc 参照)。
+    /// <para>
+    /// 自己修復が働くのは<b>キャレットが起点の論理行(またはそれより上)にある場合に限る</b>。
+    /// キャレットが <c>_topLine</c> より後の論理行にあると第 1 分岐は発火せず、第 2 分岐も
+    /// <c>CountVisualRowsForward</c> が陳腐化した起点セグメントを最終セグメントへ寄せて
+    /// 数えるため「可視」と判定するので、陳腐化した <c>_topSegment</c> はそのまま残る
+    /// (設計書 申し送り S-6)。本テストの fixture は前者の条件を踏んでいる。
+    /// </para>
     /// </summary>
     [Fact]
     public void BringCaretIntoView_SelfHealsStaleTopSegment() =>

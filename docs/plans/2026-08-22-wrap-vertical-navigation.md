@@ -2050,21 +2050,81 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --wrapscroll
 (`git diff efd2127..HEAD -- tests/ | grep '^-' | grep -v '^---'` で機械的に確認できる)。
 折り返し OFF の挙動を固定している既存の期待値は、Core / Editor とも一切触れていない。
 
-### 5. Task 6 のミューテーション記録の数値訂正
+### 5. Task 6 のミューテーション記録の数値訂正(**訂正の訂正**)
 
 Task 6 実施時に「`ScrollByVisualRows` の折り返し OFF 委譲ブロック
-(`TopLine = _topLine + deltaRows`)の符号を反転する変異は **4 件 red**」と報告したが、
-レビュアーの実測では **3 件 red** が正しい。結論(= OFF 経路にも網が掛かっている)は
-変わらないが、数値は訂正しておく。
+(`TopLine = _topLine + deltaRows`)の符号を反転する変異は **4 件 red**」と報告し、
+その後「レビュアーの実測では **3 件 red** が正しい」と訂正した。
+**この訂正の方が誤りだった。当初の 4 件が正しい。**
+
+最終ブランチレビュー(コード品質パス)の再検算と、その後の本セッションでの再実測
+(`--filter` なし・Editor 全 420 件を Release で 1 回実行)で確定した内訳:
+
+| # | テスト |
+|---|--------|
+| 1 | `MouseInputTests.MouseWheel_ScrollsDown_WithSystemInformationLines` |
+| 2 | `MouseInputTests.MouseWheel_ScrollsUp_WithSystemInformationLines` |
+| 3 | `MouseInputTests.MouseWheel_AccumulatesSmallDeltas` |
+| 4 | `VisualRowScrollTests.MouseWheel_WithoutWrap_StillMovesTopLine` |
+
+実測は `失敗: 4、合格: 416、合計: 420`。4 本目は Task 6 の実装 commit `c4c6827` で
+`VisualRowScrollTests.cs` に追加されており(`git show c4c6827:...` で存在を確認)、
+**Task 6 時点でも存在していた**。結論(= 折り返し OFF 経路にも網が掛かっている)は
+一貫して変わらない。
+
+**なぜ誤ったか**: 「3 件」は `MouseInputTests` だけを数えた値である。折り返し OFF の
+委譲は「既存テストが守っている」という文脈で語られていたため、**同じ変異で赤くなる
+新規テスト(`VisualRowScrollTests.MouseWheel_WithoutWrap_StillMovesTopLine`)が
+数え落とされた**。網の所在をファイル単位の先入観で切り分けたことが原因で、
+本ブランチが繰り返し踏んだ「`--filter` を絞るとミューテーションの結論を誤る」
+の同型である。**赤の件数は必ず `--filter` なしの 1 回の実行結果から読む**。
 
 ### 6. 品質ゲート
 
 `powershell -File tools\pre-merge-check.ps1` → **EXIT 0**
 (Local tool restore → CSharpier check → Release ビルド 0 警告 → Core / Editor / App 全緑)。
 
-### 7. 残作業
+### 7. 最終ブランチレビュー 2 パスの反映(2026-08-23)
+
+CLAUDE.md §3-5 に従い、コード品質パスと脆弱性パスを**別エージェント**で独立に実施した。
+指摘はすべて元 commit を書き換えず fixup commit で積んだ(§4)。
+
+| commit | パス | 内容 |
+|--------|------|------|
+| `35e0464` | 脆弱性 (Low 2 件) | 視覚行の歩き / 距離の int オーバーフローを long で塞ぐ |
+| `8872a33` | 脆弱性 (Medium) | SR 経路の打ち切り不能を申し送り S-10 に記録し L5 ⑨ を追加 |
+| `b35a565` | 品質 (Important 2 件) | 生存変異 2 件に網を張る(下記 ① ②・src 変更なし) |
+| `1c9b78e` | 品質 (Minor 4 + 記録 1) | `MaxWrapWidthPx` seam の重複解消・`SegmentCountCapped` の死んだ API 面(`Exact`)除去・`OffsetFromClientPoint` の着地行 Wrap を I-4 化・`CountVisualRowsForward` のループ内打ち切りが値ベースで守れない旨の明記・remarks 2 件の陳腐化/過小申告の訂正 |
+| (本 commit) | 品質 (Minor 4 件) | 設計書 S-6 の事実誤り訂正・実施記録 §5 の訂正の訂正・テスト doc の「順序が load-bearing」除去・I-3 の証拠範囲の限定(設計書 S-11) |
+
+**コード品質パスが実証した生存変異 2 件**(どちらも Core / Editor 全緑で生き残っていた):
+
+① `ComputeCaretPoint` の積み上げループの Wrap 予算から `+ skip` を落とす変異。
+既存 fixture はどれも「可視行数 ≧ 先頭論理行のセグメント数」で**打ち切りが一度も噛まず**、
+過小な予算が観測できなかった。可視 3 行・先頭行 10 視覚行・`TopSegment=5` で噛ませると、
+予算不足が直後の `Math.Min(skip, segs.Count - 1)` の誤クランプを誘発し、
+**可視域の外にある視覚行を「可視」として返す**(UIA `GetBoundingRectangles` /
+`PointFromCharOffset` / システムキャレット位置が誤った行を指す = SR 経路)。
+同型の `+ skip` は `CountVisualRowsForward` と `ViewportLayout.Build` には網があり、
+**3 兄弟のうちここだけが穴**だった。実装計画が §3 で抽象化した「単一の fixture が
+狙った境界に当たらない」パターンそのものが、最終レビューでもう 1 件見つかった形である。
+
+② `SetTopPosition` の `_vscroll.Value` 同期 2 行を削除する変異。
+**リポジトリ全体で `_vscroll` を読むテストが 1 件も無かった**。折り返し ON では
+`SetTopPosition` が主スクロール経路であり、`UpdateVerticalScrollbar` は編集 / リサイズ時に
+しか走らないため、純粋なナビゲーション中はサムが本文に追従しなくなる
+(症状=「↓ を押し続けても / ホイールを回してもサムが動かず、次にサムを掴むと画面が飛ぶ」)。
+
+**等価変換と確定したもの**(kill 不能・網を張らないと決めた):
+折り返し OFF の 4 短絡(`LocateVisualRow` / `SegmentCountCapped` / `ScrollByVisualRows` /
+`ScrollCharRangeIntoView`)、`BringCaretIntoView` の 2 分岐の**記述順**、
+`CountVisualRowsForward` のループ内 `if (rows >= cap) return cap;`(値としては等価で、
+守っているのは反復数=I-4)。最後のものはコードコメントに「値ベースのテストでは
+原理的に守れない」と明記した(嘘の安全宣言を作らない)。
+
+### 8. 残作業
 
 - **L5 実機 SR 検証は未実施**。`docs/plans/2026-08-22-wrap-vertical-navigation-l5-checklist.md`
-  の 8 項目(計画の 6 項目 + ⑦ 段落途中の描画 + ⑧ スクロールバーのサム)をユーザーが実施する。
+  の 9 項目(計画の 6 項目 + ⑦ 段落途中の描画 + ⑧ スクロールバーのサム + ⑨ SR の体感)を
+  ユーザーが実施する。
   **⑦ は自動テストでは原理的に確認できない**(オフスクリーン Form に WM_PAINT が来ない)。
-- 最終ブランチレビュー(コード品質パス / 脆弱性パスの 2 パス・別エージェント)。
