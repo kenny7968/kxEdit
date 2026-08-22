@@ -95,24 +95,50 @@ public SaveTargetProbe ProbeSaveTargetWithTimeout(string path, TimeSpan timeout)
 - `FileExists` が **A-7 (a) の入力**。I/O は 1 回のタスクの中で完結するので、
   遠隔共有でも待ちは 5 秒 1 回に収まる。
 
-### 3.3 ローカルパスも同じ経路を通す
+### 3.3 リモートゲートは維持する(ローカルは直接 I/O)
 
 現行 `TryProbeReachability` は `RemotePathDetector.IsRemote` でプローブをゲートしている。
-新しい保存先判定は**ゲートせず常にプローブを通す**。理由:
+**このゲートは維持する**。保存先の検査はこう分岐する:
 
-- A-7 (a) はローカル・リモートの別なく存在確認を要する。分岐を作ると
-  「ローカルは実ファイル・リモートは Fake」で網が二重になり、片側が抜ける。
-- ローカルパスの `Task.Run` + `Wait` は即完了する(実測は実装時に確認)。
+```csharp
+/// <summary>保存先の既存有無を得る。到達不能(リモートのみ)なら false。</summary>
+private bool TryInspectSaveTarget(string path, out bool exists)
+{
+    if (RemotePathDetector.IsRemote(path))
+    {
+        var probe = _reachabilityProbe.ProbeSaveTargetWithTimeout(path, TimeSpan.FromSeconds(5));
+        exists = probe.FileExists;
+        return probe.Reachable;
+    }
+    exists = File.Exists(path);   // ローカルは SMB 凍結の懸念がない
+    return true;                  // 従来もローカルの到達性は検査していない = 挙動不変
+}
+```
 
-ただし**エラー文言だけは `IsRemote` で分ける**。到達不能の理由がリモートとローカルで違うため:
+**ゲートを外してはいけない理由**(策定時に「常にプローブを通す」と書いたのは誤り。
+実装計画の執筆中に発見した):
 
-| 判定 | 文言 |
-|------|------|
-| `IsRemote(path)` かつ `!Reachable` | `ネットワークパスに到達できません: {path}`(既存文言を踏襲) |
-| それ以外で `!Reachable` | `保存先のフォルダーが見つかりません: {path}` |
+- ローカルパスには**現状そもそも到達性検査が存在しない**。ゲートを外すと
+  「存在しないフォルダー配下への保存」がプローブ段階で弾かれ、
+  既存テスト `SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath`
+  (`WriteToPath` 失敗時に Encoding/BOM/EOL をロールバックする=データ破損防止の要)が
+  **`WriteToPath` に到達しなくなる**。挙動不変の原則(CLAUDE.md §2)に反する。
+- A-4 の症状は「**ネットワーク共有**へ新規保存できない」であり、ローカル新規保存は
+  今も正常に動く。ローカル側に検査を足すのは修正ではなく scope creep。
 
-パスは外部入力(SR ユーザーの直入力 / grep 由来)なので、既存規約どおり
-`SanitizeForDisplay.OneLine(path, 200)` を通してから prompt に載せる(CSV-L-5)。
+分岐が 2 本になるが、どちらも網を張れる。UNC 判定は純粋な文字列述語
+(`UncPathDetector.IsUnc` = 先頭 `\\`)なので、`\\server\share\a.txt` を渡せば
+実ネットワークなしで**リモート枝を Fake プローブで駆動できる**。ローカル枝は
+既存テストと同じ実一時ファイルで駆動する。
+
+到達不能の文言は既存を踏襲する(リモート枝でしか発火しないため分岐不要):
+
+```
+ネットワークパスに到達できません: {SanitizeForDisplay.OneLine(path, 200)}
+```
+
+パスは外部入力(SR ユーザーの直入力)なので、既存規約どおり
+`SanitizeForDisplay.OneLine` を通してから prompt に載せる(CSV-L-5)。
 
 ## 4. `SaveAsDocument` をループにする
 
@@ -129,9 +155,8 @@ while (true):
     (2) TryNormalize(picked.Path, out full)  -> 失敗なら Warn("パスが正しくありません: …")     -> continue   # A-19
         seed = seed with { Path = full }
     (3) _docs.FindByPath(full) が doc 以外   -> Error("別のタブで開いています…")               -> continue   # A-7 (b)
-    (4) probe = ProbeSaveTargetWithTimeout(full, 5s)
-        !probe.Reachable                     -> Error(§3.3 の文言)                             -> continue   # A-4
-        probe.FileExists && !OkCancel(上書き) -> continue                                                     # A-7 (a)
+    (4) !TryInspectSaveTarget(full, out exists) -> Error(§3.3 の文言)                          -> continue   # A-4
+        exists && !OkCancel(上書き)             -> continue                                                   # A-7 (a)
     (5) 文字コード劣化警告 いいえ            -> continue
 
     State を更新 -> WriteToPath(doc, full) -> 失敗ならロールバックして return false
@@ -195,17 +220,22 @@ if (other is not null && !ReferenceEquals(other, doc)) { Error(...); continue; }
 
 `WriteToPath` 冒頭の `TryProbeReachability(path)`(`FileController.cs:439-445` 付近)を
 保存先意味論へ切り替える。**A-4 が現に発火しているのはここ**で、
-`SaveAsDocument` の事前判定だけを直しても新規ファイルは書けない。
+`SaveAsDocument` の事前判定だけを直しても新規ファイルは書けない
+(Ctrl+S でパス未確定 → SaveAs にフォールバックする経路も同じ `WriteToPath` を通る)。
 
 ```csharp
-// WriteToPath 冒頭
-if (!TryProbeSaveTarget(path, out _))   // Reachable のみ見る。FileExists は使わない
+// WriteToPath 冒頭。IsRemote ゲートは §3.3 と同じ理由で維持する。
+if (!TryInspectSaveTarget(path, out _))   // Reachable のみ見る。exists は使わない
     return false;
 ```
 
 `LoadInto` の `TryProbeReachability` は**不変**(読む側は存在しないと意味がない)。
+ローカルパスでは `TryInspectSaveTarget` は常に true を返すので、
+「存在しないフォルダー配下への保存」は従来どおり `TextFileService.Save` の
+`DirectoryNotFoundException` として `WriteToPath` の catch に落ち、
+ロールバック導線(既存テスト `SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath`)が保たれる。
 
-SaveAs 経路ではプローブが 2 回走る(§4.1 (4) と `WriteToPath` 冒頭)。
+SaveAs 経路ではリモートパスでプローブが 2 回走る(§4.1 (4) と `WriteToPath` 冒頭)。
 `WriteToPath` は **Ctrl+S が直接呼ぶ**入口でもあるため自己完結を崩さない、という判断で受容する。
 1 回目が通った直後の 2 回目なので実質即答で、共有が 2 回の間に落ちた場合のみ追加で 5 秒待つ。
 `skipProbe` のようなバイパス引数は導入しない(将来の呼出が誤って素通りできる seam を作らない)。
@@ -225,8 +255,13 @@ SaveAs 経路ではプローブが 2 回走る(§4.1 (4) と `WriteToPath` 冒�
 ### 7.1 層
 
 - **L1(Core)**: 変更なし。`RemotePathDetector` / `PathKey` は触らない。
-- **L3(App)**: `FileControllerTests` に追加。`FakeFileDialogService` / `FakePrompt` /
-  `FakeReachabilityProbe` の既存シームで全ケースを閉じられる。
+- **L3(App)**: 2 ファイル。
+  - `FileReachabilityProbeTests`(新設): **本番プローブの意味論**を実一時ディレクトリで固定する。
+    監査が「`FakeReachabilityProbe` で固定値を返すため実 Probe の意味論は未検証」と
+    名指しした穴(A-4 の既存テスト欄)をここで塞ぐ。`Reachable = FileExists || dirExists`
+    の `||` を kill できるのはこのファイルだけ。
+  - `FileControllerTests`(追記): 配線・制御フロー。`FakeFileDialogService` / `FakePrompt` /
+    `FakeReachabilityProbe` の既存シームで閉じる。
 
 ### 7.2 `FakeFileDialogService` の拡張(ループの暴走を構造で防ぐ)
 
@@ -263,12 +298,22 @@ public SaveAsResult? PickSaveAs(IWin32Window owner, SaveAsRequest current)
 | 5 | `SaveAs_OwnPath_IsNotTreatedAsDuplicate` | 自タブのパスへの保存は通る |
 | 6 | `SaveAs_RelativePath_StoresAbsolutePath` | `State.Path` が絶対・実ファイルが解決先に作られる |
 | 7 | `SaveAs_UnnormalizablePath_WarnsAndReopens` | 正規化失敗 → Warn + 書かれない + 再表示 |
-| 8 | `SaveAs_NewFileOnRemotePath_Succeeds` | probe が `(Reachable: true, FileExists: false)` → 保存が通る(**A-4 の回帰**) |
-| 9 | `SaveAs_UnreachableTarget_ShowsErrorAndReopens` | `(false, false)` → Error + 再表示 |
+| 8 | `SaveAs_NewFileOnUncPath_PassesReachabilityGate` | `\\server\share\a.txt` + probe `(Reachable: true, FileExists: false)` → 到達性エラーが**出ない**(書込自体は実ネットワーク不在で失敗するので、失敗理由が「保存できませんでした」であることを assert する)。**A-4 の回帰** |
+| 9 | `SaveAs_UnreachableUncPath_ShowsErrorAndReopens` | `(false, false)` → 到達性 Error + 再表示 |
 | 10 | `SaveAs_BlankPath_WarnsAndReopens` | 従来 Warn + 中止 → Warn + 再表示 |
 | 11 | `SaveAs_Cancelled_WritesNothing` | `PickSaveAsCount == 1`・書かれない |
-| 12 | `SaveAs_ProbesSaveTargetWithFiveSecondTimeout` | timeout の pin(既存 `LastTimeout` 観測点と対称) |
+| 12 | `SaveAs_UncPath_ProbesWithFiveSecondTimeout` | timeout の pin(既存 `LastTimeout` 観測点と対称) |
 | 13 | `SaveAs_EncodingWarningDeclined_ReopensDialog` | 文字コード警告キャンセル → 再表示 |
+| 14 | `SaveAs_LocalNewFile_DoesNotProbe` | ローカル枝は `IsRemote` ゲートで素通り(`Probe.CallCount == 0`)= §3.3 の挙動不変を固定 |
+
+`FileReachabilityProbeTests`(本番プローブ・実一時ディレクトリ):
+
+| # | 名前(仮) | 検証 |
+|---|-----------|------|
+| P1 | `ProbeSaveTarget_ExistingFile_ReachableAndExists` | `(true, true)` |
+| P2 | `ProbeSaveTarget_NewNameInExistingDir_ReachableAndNotExists` | `(true, false)`(**A-4 の核**) |
+| P3 | `ProbeSaveTarget_UnderMissingDir_NotReachable` | `(false, false)` |
+| P4 | `ProbeSaveTarget_ZeroTimeout_ReturnsUnreachable` | タイムアウト時の既定値 |
 
 ### 7.4 網の穴を作らないための注意(執筆時に固定する)
 
@@ -292,11 +337,12 @@ public SaveAsResult? PickSaveAs(IWin32Window owner, SaveAsRequest current)
 | # | 変異 | kill を期待するテスト |
 |---|------|----------------------|
 | 1 | `!ReferenceEquals(other, doc)` をガードから除去 | #5 |
-| 2 | `probe.FileExists` を `false` に固定 | #1 / #2 |
-| 3 | `!probe.Reachable` を `false` に固定 | #9 |
-| 4 | `Reachable = FileExists \|\| dirExists` → `Reachable = FileExists` | #8(A-4 の再導入) |
+| 2 | `TryInspectSaveTarget` の `exists` を `false` に固定 | #1 / #2 |
+| 3 | `TryInspectSaveTarget` の戻り値を `true` に固定 | #9 |
+| 4 | `Reachable = FileExists \|\| dirExists` → `Reachable = FileExists` | **P2**(A-4 の再導入)。#8 は Fake 経由なので kill できない |
 | 5 | `TryNormalize` の結果を捨てて `picked.Path` を使う | #6 |
 | 6 | 各 `continue` を `return false` へ | #2 / #4 / #7 / #9 / #10 / #13 |
+| 7 | `TryInspectSaveTarget` の `IsRemote` ゲートを外して常にプローブ | #14 |
 
 ## 8. L5(実機 SR 検証)
 
