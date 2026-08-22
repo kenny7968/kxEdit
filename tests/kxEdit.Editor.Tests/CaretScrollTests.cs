@@ -46,13 +46,17 @@ public class CaretScrollTests
             using (f)
             using (c)
             {
-                c.TopLine = 0;
                 int lineHeight = c.LineHeightPx;
                 int visibleRows = Math.Max(1, c.ClientSize.Height / lineHeight);
 
-                // 末尾行(index 9)にキャレットを置いて BringCaretIntoView 呼び出し
+                // 末尾行(index 9)にキャレットを置いてから TopLine を先頭へ戻し、
+                // BringCaretIntoView 単体がスクロールを起こすことを検証する。
+                // 順序が逆(TopLine=0 → SetCaretCharOffset)だと、setter 自身の追従スクロール
+                // (A-3 修正)で先に TopLine が動いてしまい、BringCaretIntoView を壊しても
+                // 緑のまま通る=網が vacuous になる。
                 int lineStart = text.LastIndexOf('\n') + 1;
                 c.SetCaretCharOffset(lineStart);
+                c.TopLine = 0; // ★ caret を置いた「後」に可視域を先頭へ戻す
                 c.BringCaretIntoView();
 
                 // TopLine は少なくとも「末尾行が可視領域末尾に入る」位置に調整される
@@ -73,10 +77,10 @@ public class CaretScrollTests
             using (f)
             using (c)
             {
-                c.TopLine = 5; // 可視領域を下方向にずらす
-
-                // 先頭行にキャレットを置いて呼び出し
+                // 先頭行にキャレットを置いてから可視領域を下方向へずらす
+                // (順序が逆だと setter 自身の追従スクロールで網が vacuous になる=Task 1 参照)。
                 c.SetCaretCharOffset(0);
+                c.TopLine = 5; // ★ caret を置いた「後」に可視域をずらす
                 c.BringCaretIntoView();
 
                 Assert.Equal(0, c.TopLine); // 上端に張り付く
@@ -249,11 +253,12 @@ public class CaretScrollTests
                 f.PerformLayout();
 
                 c.WrapColumns = 0; // 折り返し OFF(念のため明示・既定 0)
-                c.TopLine = 0;
 
-                // 論理行 9(末尾)にキャレット
+                // 論理行 9(末尾)にキャレットを置いてから TopLine を先頭へ戻す
+                // (順序が逆だと setter 自身の追従スクロールで網が vacuous になる=Task 1 参照)。
                 int line9Start = text.LastIndexOf('\n') + 1;
                 c.SetCaretCharOffset(line9Start);
+                c.TopLine = 0; // ★ caret を置いた「後」に可視域を先頭へ戻す
                 c.BringCaretIntoView();
 
                 // Bug/Fix の TopLine 期待値を計算
