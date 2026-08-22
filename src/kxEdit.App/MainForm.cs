@@ -141,7 +141,8 @@ public sealed partial class MainForm : Form
             openedFresh: AutoEnterCsvMode,
             prompt: new MessageBoxUserPrompt(),
             fileDialogs: new WinFormsFileDialogService(),
-            reachabilityProbe: new FileReachabilityProbe()
+            reachabilityProbe: new FileReachabilityProbe(),
+            fileTimestamps: new FileTimestampProvider()
         );
         _search = new SearchController(_docs, this, _announcer, cb => new FindReplaceDialog(cb));
         _grep = new GrepController(

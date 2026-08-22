@@ -24,7 +24,13 @@ public sealed class FileController
     private readonly IUserPrompt _prompt; // 確認・警告の注入点（テストでは FakePrompt）
     private readonly IFileDialogService _fileDialogs; // ファイル系ダイアログの注入点（テストでは FakeFileDialogService）
     private readonly IReachabilityProbe _reachabilityProbe; // HIGH-6: UNC ロードの短タイムアウトプローブ(テストでは Fake)
+    private readonly IFileTimestampProvider _fileTimestamps; // A-1: 復元時の陳腐化検出(テストでは Fake)
     private int _untitledSeq; // 無題タブの連番（新規作成毎に増加・セッション内で再利用しない）
+
+    /// <summary>A-1 第 2 層(設計 2026-08-22 §4): 直近の復元で「ディスク側がバックアップより
+    /// 新しい」と判定されたパス。ON(hot exit silent)/ OFF(起動時提案)双方の復元経路が
+    /// ここへ積み、MainForm.OnShown が回収して集約警告を 1 個出す。</summary>
+    private readonly List<string> _staleRestoredPaths = new();
 
     // Task 4: 復元経路(RestoreSession)専用の内部 seam。LoadInto の catch 内 _prompt.Error を一時抑止し、
     // 失敗パスを failedPaths に集約する(単発ダイアログを避けまとめて 1 個で通知するため)。
@@ -45,7 +51,8 @@ public sealed class FileController
         Action<Document> openedFresh,
         IUserPrompt prompt,
         IFileDialogService fileDialogs,
-        IReachabilityProbe reachabilityProbe
+        IReachabilityProbe reachabilityProbe,
+        IFileTimestampProvider fileTimestamps
     )
     {
         _docs = docs;
@@ -58,6 +65,38 @@ public sealed class FileController
         _prompt = prompt;
         _fileDialogs = fileDialogs;
         _reachabilityProbe = reachabilityProbe;
+        _fileTimestamps = fileTimestamps;
+    }
+
+    /// <summary>A-1 第 2 層: 陳腐化が疑われるパスを取り出す(取得と同時にクリア =
+    /// 同じ警告を二度出さない)。MainForm.OnShown が ON / OFF いずれの復元後にも回収する。</summary>
+    public IReadOnlyList<string> TakeStaleRestoredPaths()
+    {
+        var result = _staleRestoredPaths.ToArray();
+        _staleRestoredPaths.Clear();
+        return result;
+    }
+
+    /// <summary>
+    /// 検証済みパスに対してのみディスクの更新時刻を見て、バックアップが陳腐化していれば記録する
+    /// (設計 2026-08-22 §4.3)。
+    /// </summary>
+    /// <remarks>
+    /// <b>検証 NG のパスへは呼ばないこと</b>: 攻撃者 JSON 由来のパスへ I/O させない(HIGH-2 の思想)。
+    /// ディスク版を優先してバックアップを捨てる判断はしない。ディスクが新しい理由が
+    /// 「kxEdit 自身の保存(A-1)」か「他アプリの更新」かを区別できず、捨てる実装は
+    /// 新しい無言喪失経路になるため(設計 §4.2)。
+    /// </remarks>
+    private void NoteIfBackupStale(string validatedPath, BackupRecord bk)
+    {
+        if (
+            BackupStaleness.IsDiskNewer(
+                _fileTimestamps.GetLastWriteTimeUtc(validatedPath),
+                bk.TimestampUtc,
+                BackupStaleness.DefaultTolerance
+            )
+        )
+            _staleRestoredPaths.Add(validatedPath);
     }
 
     /// <summary>
@@ -494,6 +533,7 @@ public sealed class FileController
             if (status == PathValidation.Ok)
             {
                 safePath = normalized;
+                NoteIfBackupStale(normalized, rec); // A-1 第 2 層(設計 2026-08-22 §4.3)
             }
             else
             {
@@ -760,6 +800,7 @@ public sealed class FileController
         {
             doc.State.Path = normalized;
             doc.State.UntitledNumber = 0;
+            NoteIfBackupStale(normalized, bk); // A-1 第 2 層(設計 2026-08-22 §4.3)
         }
         else
         {
