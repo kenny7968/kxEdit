@@ -1565,7 +1565,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 #pragma warning disable S1144 // reason: 本コミットは状態と seam だけを入れる挙動不変の段であり、
     // LocateVisualRow / CountVisualRowsForward / WalkForwardVisualRows / WalkBackVisualRows は
     // まだ呼び出し元を持たない(スクロール判断・座標算出・ホイールの各経路を後続で移すため)。
-    // 4 本すべてに呼び出し元が入った時点でこの抑止は外すこと。
+    // 呼び出し元が 4 本すべて揃うのはホイールを視覚行送りにする段(実装計画
+    // docs/plans/2026-08-22-wrap-vertical-navigation.md の Task 6)であり、
+    // その完了時にこの抑止を外すこと。
 
     /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
     private int MaxWrapWidthPx => _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
@@ -1637,13 +1639,26 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// Exact=false なら実際の本数は Count より多い。
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// 折り返し OFF(<c>_wrapColumns &lt;= 0</c>)では 1 論理行 = 1 視覚行が確定しているので、
+    /// <see cref="LineTextOf"/> による行全文の materialize すらせずに即答する(I-3)。これは
+    /// <c>LineLayout.WrapCore</c> の OFF 分岐(<c>maxWidthPx &lt;= 0</c> なら必ず
+    /// <c>[(0, line.Length)]</c> と <c>ReachedLineEnd: true</c> を返す)と<b>厳密に等価</b>な短絡で
+    /// あり、挙動は変わらない。この短絡が無いと、OFF でも視覚行を数えるたびに論理行全文の
+    /// string を確保することになる(巨大 1 行で 1 回 1MB 級=PR #35 が潰したコスト階級の再導入)。
+    /// </para>
+    /// <para>
     /// <paramref name="cap"/> は 1 未満でも 1 として扱う(<see cref="LineLayout.Wrap"/> は必ず
     /// 1 個以上返す契約であり、<see cref="LineLayout.WrapFirstSegments"/> は 0 以下で投げるため)。
     /// 打ち切りが起きたときの Count は要求値に厳密に等しい(WrapCore の打ち切り判定が
     /// <c>result.Add</c> の直後にしかないため。<see cref="ViewportLayout.Build"/> の同旨のコメント参照)。
+    /// </para>
     /// </remarks>
     private (int Count, bool Exact) SegmentCountCapped(TextSnapshot snap, int line, int cap)
     {
+        // 折り返し OFF は 1 論理行 = 1 視覚行(WrapCore の OFF 分岐と等価)。行全文を取らない。
+        if (_wrapColumns <= 0)
+            return (1, true);
         var r = LineLayout.WrapFirstSegments(
             LineTextOf(snap, line),
             MaxWrapWidthPx,
@@ -1702,12 +1717,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>視覚行を n 本ぶん前へ進めた位置を返す。文書末で打ち切る。</summary>
     /// <remarks>
-    /// <b>既知の制約</b>: <paramref name="seg"/> がその行の実セグメント数以上(編集で段落が縮み
-    /// <c>_topSegment</c> が陳腐化した状態)のとき、行を跨ぐ 1 本の消費が
-    /// <c>count - seg</c>(負)になり、要求より下へ寄る。例外にはならず描画も
-    /// <see cref="ViewportLayout.Build"/> のクランプで破綻しないが、
-    /// <see cref="CountVisualRowsForward"/> が同じ状況を <c>Math.Min(skip, count - 1)</c> で
-    /// 寄せているのに対し非対称である。
+    /// <paramref name="seg"/> がその行の実セグメント数以上(編集で段落が縮み <c>_topSegment</c> が
+    /// 陳腐化した状態)なら最終セグメントへ寄せて数える=<see cref="ViewportLayout.Build"/> の
+    /// topSegment クランプおよび <see cref="CountVisualRowsForward"/> と挙動が一致する。
+    /// ここで寄せられるのは、その行の<b>真の</b>総数 <c>count</c> が既に手元にあり追加コストが
+    /// ゼロだからである。総数を得るのに追加の Wrap が要る <see cref="WalkBackVisualRows"/> は
+    /// 寄せない=非対称は意図的であり、理由は同メソッドの remarks を参照。
     /// </remarks>
     private (int Line, int Seg) WalkForwardVisualRows(TextSnapshot snap, int line, int seg, int n)
     {
@@ -1722,7 +1737,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             );
             if (seg + n < count)
                 return (line, seg + n);
-            n -= count - seg; // この行の残り本数 + 次行先頭へ移る 1 本
+            // ここに到達した時点の count は打ち切られていない=その行の真の総数である
+            // (打ち切られていれば count == seg + n + 1 > seg + n となり上で早期 return する)。
+            // よって count - 1 は真の最終セグメント index であり、陳腐化した seg をそこへ
+            // 寄せるのは ViewportLayout.Build の topSegment クランプと同じ意味になる。
+            // seg <= count - 1(正常時)では eff == seg なので現行式と完全に同一。
+            int eff = Math.Min(seg, count - 1);
+            n -= count - eff; // この行の残り本数 + 次行先頭へ移る 1 本
             if (line + 1 >= snap.LineCount)
                 return (line, count - 1); // 文書末で打ち切り
             line++;
@@ -1733,9 +1754,25 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>視覚行を n 本ぶん遡った位置を返す。文書頭で打ち切る。</summary>
     /// <remarks>
+    /// <para>
     /// 前の論理行へ入るときだけ<b>正確な</b>視覚行数が要る(最終セグメントから数えるため)ので、
     /// そこは打ち切れない完全 Wrap になる。巨大行を下から遡る場合の 1 回だけで、
     /// PR #35 の幅メモ化により CJK 500K 行で約 30 ms(設計書 §5)。
+    /// </para>
+    /// <para>
+    /// <paramref name="seg"/> が現在行の実セグメント数以上(陳腐化した <c>_topSegment</c>)でも
+    /// <b>クランプしない</b>=<see cref="WalkForwardVisualRows"/> との意図的な非対称である。
+    /// 陳腐化の検出には現在行の実セグメント数が要り、そのための
+    /// <c>SegmentCountCapped(snap, line, seg + 1)</c> は O(seg) の Wrap を毎回払う。本メソッドは
+    /// 折り返し ON の常用経路(キャレットの追従スクロール)から呼ばれるため、巨大段落では
+    /// 1 打鍵あたりもう 1 回ぶんの Wrap が乗ることになる。<b>有効な seg を渡すのは呼び出し側の
+    /// 責務</b>とする(キャレット由来の seg は <see cref="LocateVisualRow"/> が返すので常に有効。
+    /// 陳腐化しうるのは <c>_topSegment</c> を渡すホイール経路だけ)。
+    /// 帰結は「大量削除の直後にホイール上方向が数ノッチ空振りしうる」程度で、描画は
+    /// <see cref="ViewportLayout.Build"/> のクランプにより破綻しない。しかも <c>seg - n</c> が
+    /// いずれ実セグメント数を下回るため<b>自己修復する</b>(キャレット追従は起点をキャレット位置へ
+    /// 寄せるので修復を早める)。
+    /// </para>
     /// </remarks>
     private (int Line, int Seg) WalkBackVisualRows(TextSnapshot snap, int line, int seg, int n)
     {
@@ -1747,8 +1784,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (line == 0)
                 return (0, 0); // 文書頭で打ち切り
             line--;
-            var segs = LineLayout.Wrap(LineTextOf(snap, line), MaxWrapWidthPx, _metrics);
-            seg = segs.Count - 1; // 前行の最終視覚行へ移る = さらに 1 本
+            // LineLayout.Wrap は WrapCore(minSegments: int.MaxValue, minCoverOffset: -1) と
+            // 同一実装なので、cap に int.MaxValue を渡す SegmentCountCapped と厳密に等価
+            // (どちらも「打ち切りが起きない」)。こちら経由にすることで折り返し OFF のガード
+            // (行全文を取らない)を継承し、捨てるだけのセグメントリスト構築も省ける。
+            var (count, _) = SegmentCountCapped(snap, line, int.MaxValue);
+            seg = count - 1; // 前行の最終視覚行へ移る = さらに 1 本
             n--;
         }
         return (line, seg);
