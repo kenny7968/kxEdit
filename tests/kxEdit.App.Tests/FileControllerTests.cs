@@ -652,7 +652,14 @@ public class FileControllerTests
             Assert.Equal("tabA-content", File2.ReadAllText(shared));
             Assert.Contains(
                 host.Prompt.Log,
-                e => e.Kind == "Error" && e.Text.Contains("別のタブでも開いています")
+                e => e.Kind == "Error" && e.Text.Contains("別のタブが同じファイルを開いています")
+            );
+            // 文言が Task 6(SaveAs)のものと別であることを固定する。Ctrl+S では呼び出し元の
+            // タブ自身もそのパスを持っているので「そのタブで保存してください」は成立しない
+            // (コピペで Task 6 の文言を持ち込むと SR ユーザーが実行不能な指示を聞かされる)。
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.Contains("そのタブで保存してください")
             );
             Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へは落ちない
             Assert.True(tabB.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
@@ -692,7 +699,7 @@ public class FileControllerTests
             Assert.Equal("tabA-saved", File2.ReadAllText(shared));
             Assert.DoesNotContain(
                 host.Prompt.Log,
-                e => e.Text.Contains("別のタブでも開いています")
+                e => e.Text.Contains("別のタブが同じファイルを開いています")
             );
             Assert.False(tabA.Editor.Modified); // SetSavePoint 済み=書き込み経路を通っている
         });
