@@ -862,13 +862,22 @@ public class VisualRowScrollTests
                 Assert.Equal(segs + 20, c.TopSegment); // SetTopPosition 自体は寄せない
 
                 // 陳腐化した状態=描画(Build)と可視判定(ComputeCaretPoint)が食い違う。
+                int drawnRowStart = snap.GetLineStart(lastLine) + 2 * (segs - 1);
                 Assert.Equal(
-                    snap.GetLineStart(lastLine) + 2 * (segs - 1),
+                    drawnRowStart,
                     c.GetVisibleCharRange().Start // Build は最終セグメントへクランプして描く
+                );
+                // 食い違いの<b>本体</b>: Build が最上段に描いているセグメント (segs-1) 自身を、
+                // ComputeCaretPoint の segIdx < _topSegment が不可視と報告する。
+                // (キャレット側のセグメント 2 は描画起点より実際に上なので、陳腐化が無くても
+                //  不可視になる=それだけでは食い違いの証明にならない。)
+                Assert.False(
+                    c.ComputeCaretPoint(drawnRowStart).Visible,
+                    "fixture 前提: 描画中の行そのものが不可視と報告される(=食い違いの本体)"
                 );
                 Assert.False(
                     c.ComputeCaretPoint(caret).Visible,
-                    "fixture 前提: 陳腐化した起点では可視判定が「不可視」を返す"
+                    "fixture 前提: 陳腐化した起点ではキャレットも「不可視」になる"
                 );
 
                 c.BringCaretIntoView();
@@ -1083,6 +1092,75 @@ public class VisualRowScrollTests
                 // 装飾スクロールなのでキャレット / アンカーは動かない。
                 Assert.Equal(0, c.CaretCharOffset);
                 Assert.Equal(0, c.SelectionAnchor);
+            }
+        });
+
+    /// <summary>
+    /// A-6 の<b>中核症状</b>=「先頭 visibleRows 本より下が恒久的に到達不能」を固定する。
+    /// 論理行 1 本の文書では TopLine が原理的に動かせないため、修正前は ↓ を何度押しても
+    /// 起点が 1 度も動かず、4 回目でキャレットが可視域外へ出たまま戻らなかった。
+    /// 最終視覚行へ届く回数まで押し切り、(a) 毎回可視であること (b) 最終視覚行に到達し
+    /// 起点が最大位置(最終視覚行が最下段)まで進むこと の 2 つを assert する。
+    /// </summary>
+    [Fact]
+    public void KeyDown_Down_SingleHugeLogicalLine_ReachesLastVisualRow() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            const string Text = "aaaaaaaaaaaaaaaaaaaa";
+            var (f, c) = MakeControl(
+                string.Concat(Enumerable.Repeat(Text, 10)), // 200 文字 = 視覚行 100 本
+                wrap: 2,
+                visibleRows: VisibleRows
+            );
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.Equal(1, snap.LineCount); // fixture 前提: 論理行は 1 本だけ
+                Assert.True(rows.Count > VisibleRows * 4, "fixture 前提: 視覚行が十分多い");
+
+                c.SetCaretCharOffset(0);
+                for (int i = 0; i < rows.Count + VisibleRows * 10; i++)
+                {
+                    KeyDown(c, Keys.Down);
+                    AssertCaretVisible(c, $"{i + 1} 回目の ↓ でキャレットが可視域外へ出た");
+                }
+
+                // (b) 最終視覚行へ到達し、起点も最大位置まで進んでいる。
+                Assert.Equal(rows[^1], LocateRow(c, snap, c.CaretCharOffset));
+                Assert.Equal(rows[rows.Count - VisibleRows], (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// 段落版(複数論理行 × 複数視覚行)の到達テスト。
+    /// <see cref="KeyDown_Down_SingleHugeLogicalLine_ReachesLastVisualRow"/> と対称。
+    /// </summary>
+    [Fact]
+    public void KeyDown_Down_WithWrap_ReachesLastVisualRow() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 6;
+            var (f, c) = MakeControl(Paragraphs(8, 10), wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = c.Buffer!.Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.Equal(8, snap.LineCount); // fixture 前提: 論理行は複数本ある
+                Assert.True(rows.Count > VisibleRows * 4, "fixture 前提: 視覚行が十分多い");
+
+                c.SetCaretCharOffset(0);
+                for (int i = 0; i < rows.Count + VisibleRows * 10; i++)
+                {
+                    KeyDown(c, Keys.Down);
+                    AssertCaretVisible(c, $"{i + 1} 回目の ↓ でキャレットが可視域外へ出た");
+                }
+
+                Assert.Equal(rows[^1], LocateRow(c, snap, c.CaretCharOffset));
+                Assert.Equal(rows[rows.Count - VisibleRows], (c.TopLine, c.TopSegment));
             }
         });
 }

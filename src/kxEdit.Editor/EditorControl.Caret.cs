@@ -382,6 +382,21 @@ public sealed partial class EditorControl
     /// <see cref="ComputeCaretPoint"/> の <c>segIdx &lt; _topSegment</c> はその最終セグメントも
     /// 不可視と報告する。キャレットが先頭論理行にある限り第 1 分岐が発火して起点を
     /// 実在の視覚行へ寄せ直すので、<c>AfterEdit</c> の 1 フレーム内で整合が戻る。
+    ///
+    /// <b>性能(2026-08-22 A-6 の増分・レビュー実測)。</b>
+    /// 折り返し ON では 1 打鍵あたり <c>LineLayout.WrapThroughOffset</c> が<b>2 回</b>増える。
+    /// 1 回ぶんではないのは、<b>1 打鍵で本メソッドが 2 回呼ばれる</b>ためである
+    /// (<see cref="SetCaretCharOffset"/> 内の追従と、<c>InputRouter.ApplyNavMove</c> 末尾の
+    /// 明示呼び出し)。この二重呼び出しは本 PR 以前からの構造で、本 PR は呼び出し元を変えていない
+    /// =重複の解消は別テーマ(実装計画の申し送り)。
+    /// 起点が実際に動く打鍵では <see cref="SetTopPosition"/> → <c>PositionCaret</c> →
+    /// <see cref="ComputeCaretPoint"/> でさらに 1 回、<b>計最大 3 回</b>になる
+    /// (折り返し ON の巨大 1 行では修正前は起点がまったく動かなかった=それが A-6 なので、
+    /// この 1 回は本 PR で新たに毎打鍵発生するようになった分である)。
+    /// 加えて論理行境界を跨ぐ遡りでは <see cref="WalkBackVisualRows"/> が前行の
+    /// <b>cap 無しの完全 Wrap</b> を 1 回払う(巨大段落の直後の最大 visibleRows - 1 打鍵ぶん)。
+    /// <b>折り返し OFF では増分ゼロ</b>(<see cref="LocateVisualRow"/> /
+    /// <see cref="SegmentCountCapped"/> とも Wrap を呼ばずに即答する=実測 0 件)。
     /// </remarks>
     public void BringCaretIntoView()
     {
@@ -502,9 +517,12 @@ public sealed partial class EditorControl
     /// <see cref="BringCaretIntoView"/> と同じ値を見ることを構造で担保する
     /// =ここだけ別計算にすると 2 つの可視判定が食い違う。
     ///
-    /// <b>2026-08-22 A-6:</b> 可視判定を論理行から視覚行へ移した(設計書 §4.2)。判定の順序
-    /// (まず辞書順で「起点より上」を弁別 → その後に距離)も <see cref="BringCaretIntoView"/> と
-    /// 揃える。折り返し ON の「既に可視」判定には<b>対象行の Wrap 1 回ぶん</b>のコストが乗るが、
+    /// <b>2026-08-22 A-6:</b> 可視判定を論理行から視覚行へ移した(設計書 §4.2)。
+    /// <see cref="BringCaretIntoView"/> と同じく<b>辞書順の節が存在すること</b>が load-bearing
+    /// (距離だけだと起点より上の位置に 0 が返り、誤って「既に可視」になる)。ただしこちらの
+    /// 2 条件は <c>&amp;&amp;</c> の被演算子でどちらも副作用が無いため、<b>結果は評価順に依存しない</b>
+    /// =短絡順は性能と可読性の話である。
+    /// 折り返し ON の「既に可視」判定には<b>対象行の Wrap 1 回ぶん</b>のコストが乗るが、
     /// 対象論理行が [<see cref="TopLine"/>, +visibleRows) の外なら粗い否定で弾いて Wrap を省く
     /// (各論理行は 1 本以上の視覚行を占めるので、可視域が跨ぐ論理行は高々 visibleRows 本)。
     /// 折り返し OFF は導入前と同一式で Wrap を一切呼ばない(I-3)。
@@ -576,8 +594,9 @@ public sealed partial class EditorControl
         {
             var row = LocateVisualRow(snap, target);
             targetRow = row;
-            // 順序は BringCaretIntoView と同じ(設計書 §4.2)=まず辞書順で「起点より上」を
-            // 弁別してから距離を測る。距離だけだと起点より上の位置に 0 が返り誤って可視になる。
+            // 辞書順の節が load-bearing(BringCaretIntoView と同じ)。距離だけだと起点より
+            // 上の位置に 0 が返り誤って可視になる。両被演算子とも副作用が無いので、
+            // 結果は評価順に依存しない(短絡順は性能と可読性の話)。
             alreadyVisible =
                 (row.Line > _topLine || (row.Line == _topLine && row.Seg >= _topSegment))
                 && CountVisualRowsForward(

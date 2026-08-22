@@ -1493,6 +1493,43 @@ TopSegment より上」に置いたケースが 1 本も無い / 「既に可視
 最下段に置いていて下端寄せの誤実装と偶然一致する)。総当りオラクル
 `ScrollCharRangeIntoView_MatchesRowOracle_ForAllStartsAndTargets` を追加して塞いだ。
 
+#### 性能の増分(2026-08-23・レビュー実測で訂正)
+
+当初の申し送りは「1 打鍵あたり `WrapThroughOffset` が 1 回増える」としていたが、
+**これは過小申告だった**。`WrapThroughOffset` / `SegmentCountCapped` へ一時計装を仕込んだ
+レビュー実測では **1 打鍵あたり 2 回**である。
+
+| fixture | `BringCaretIntoView` 呼び出し | `LocateVisualRow` の Wrap |
+|---|---|---|
+| 巨大 1 行 wrap=2 | 40(2/打鍵) | **40(2/打鍵)** |
+| 40 段落 wrap=2 | 40 | **40(2/打鍵)** |
+| 巨大 1 行 wrap=0 | 20 | **0** |
+| 40 段落 wrap=0 | 40 | **0** |
+
+(20 打鍵・下端に張り付いた定常状態)
+
+**正しい増分**:
+
+> 折り返し ON では 1 打鍵あたり `WrapThroughOffset` が **2 回**増える
+> (`BringCaretIntoView` が 1 打鍵で 2 回呼ばれるため)。起点が実際に動く打鍵では
+> `PositionCaret` 経由でさらに 1 回、**計最大 3 回**。加えて論理行境界を跨ぐ遡りでは
+> `WalkBackVisualRows` が前行の完全 Wrap を 1 回払う。
+> **折り返し OFF では増分ゼロ**(実測 0 件)。
+
+- **2 回になる理由**: 1 打鍵で `BringCaretIntoView` が 2 回呼ばれる
+  (`EditorControl.Caret.cs` の `SetCaretCharOffset` 内と `InputRouter.cs` の `ApplyNavMove` 末尾)。
+  **本 PR 以前からの構造で、本 PR は呼び出し元を変えていない**。
+- **3 回目**は実アプリ(フォーカスあり)でのみ乗る。テストでは `PositionCaret` が
+  `!_hasFocus` で即 return するため計上されない。折り返し ON の巨大 1 行では
+  修正前は起点がまったく動かなかった(それが A-6)ので、**この 1 回は本 PR で新たに
+  毎打鍵発生するようになった分**である。
+- `WalkBackVisualRows` は前の論理行へ入るとき **cap 無しの完全 Wrap** を払う
+  (`EditorControl.cs` の該当箇所)。巨大段落の直後の数行(最大 `visibleRows - 1` 打鍵ぶん)は
+  1 打鍵ごとにこれを踏む。
+
+**申し送り(本 PR のスコープ外)**: 「1 打鍵で `BringCaretIntoView` が 2 回呼ばれる」構造自体は
+本 PR では直さない。Task 7 の性能実測の前提として、また将来の重複解消の起点として記録に残す。
+
 ---
 
 ## Task 6: ホイールを視覚行送りにする
