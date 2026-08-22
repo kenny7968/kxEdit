@@ -12,6 +12,15 @@
 
 ## 事前に頭へ入れること
 
+> **Task 1 のレビューで seam 名が変わりました(2026-08-23)。**
+> `ProbeWithTimeout` → **`ProbeFileExistsWithTimeout`**(A-4 の機構は「到達性の名前で存在確認を
+> 実装したメソッドを書き込み側が名前を信じて再利用した」ことなので、述語をそのまま名前にした)、
+> `SaveTargetProbe` → **`SaveTargetProbeResult`**(同フォルダーの `Result`/`Outcome` 接尾に合わせた)。
+> Task 2 以降のコードブロックは新名に更新済み。**Task 1 節だけは策定時のまま**残してある
+> (何を指示したかの記録)ので、そこを読むときは読み替えること。
+> 実装は `WaitBounded<T>` / `RunSaveTargetProbe` という internal seam も持つ(タイムアウト経路を
+> 決定的にテストするため)。詳細は commit `c9193da` を参照。
+
 - **CLAUDE.md §3 が本計画に優先する。** 各タスク = 実装 → 仕様レビュー。前倒しレビューの指定があるタスク(Task 1 / Task 5)はそこで追加レビューを行う。
 - **`File.Exists` を素で書かない。** 切断済み SMB 共有では UI スレッドが 60 秒固まる(PR #42 の脆弱性レビュー H-1 で踏んだ罠)。保存先への I/O は `TryInspectSaveTarget` を通す。
 - **`--filter` を絞ったままミューテーション検証の結論を出さない**(過去に誤った結論を出した実績あり)。変異の生死は App プロジェクト全体を走らせて判定する。
@@ -288,7 +297,7 @@ git commit -m "feat(app): 保存先の到達性と既存有無を 1 回の境界
     // ===== A-4: ネットワーク共有への新規保存(保存先意味論のプローブ) =====
 
     /// <summary>
-    /// A-4 の回帰。旧 ProbeWithTimeout(File.Exists 意味論)を使い続けていると、
+    /// A-4 の回帰。読み取り側の ProbeFileExistsWithTimeout(File.Exists 意味論)を使い続けていると、
     /// 存在しない新規パスは到達可能でも常に false=「ネットワークパスに到達できません」で止まる。
     /// Fake の Result(旧)を false・SaveTargetResult(新)を到達可能にすることで、
     /// **どちらのメソッドを使っているか**を判別する(同値だと判別できない)。
@@ -302,7 +311,7 @@ git commit -m "feat(app): 保存先の到達性と既存有無を 1 回の境界
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = "abc";
             host.Probe.Result = false; // 旧メソッドを使っていたら到達性エラーで止まる
-            host.Probe.SaveTargetResult = new SaveTargetProbe(Reachable: true, FileExists: false);
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(Reachable: true, FileExists: false);
             host.Dialogs.SaveAs = new SaveAsResult(
                 @"\\no-such-server\share\a.txt",
                 65001,
@@ -1008,7 +1017,7 @@ git commit -m "fix(app): 他タブで開いているファイルへの名前を�
             using var host = new Host();
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = "abc";
-            host.Probe.SaveTargetResult = new SaveTargetProbe(Reachable: false, FileExists: false);
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(Reachable: false, FileExists: false);
             host.Dialogs.SaveAsQueue.Enqueue(
                 new SaveAsResult(@"\\no-such-server\share\a.txt", 65001, false, LineEnding.Crlf)
             );
