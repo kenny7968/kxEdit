@@ -599,6 +599,13 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
         int csx = _clientToScreenX,
             csy = _clientToScreenY;
+        // A-12 (2026-08-22): ComputeCaretPointForUia は _scrollX 適用前の X (描画原点座標) を返す。
+        // 描画 (EditorControl.Paint.cs)・PointFromCharOffset・逆変換 OffsetFromClientPoint は
+        // いずれも _scrollX を引いており、ここだけ引いていないと往復が非対称になる
+        // (折り返し OFF で右へスクロールした状態で NVDA のハイライト矩形が右にずれる)。
+        // 本メソッドは GetBoundingRectangles の InvokeRequired 判定の内側=UI スレッド上でのみ
+        // 走るため、_host.ScrollX の読みは a11y 鉄則に抵触しない。
+        int sx = _host.ScrollX;
         int lineHeight = _host.Metrics.LineHeightPx;
         var rects = new List<double>(16);
 
@@ -614,8 +621,9 @@ internal class UiaTextHostAdapter : IUiaTextHost
             var (x2, _, _) = _host.ComputeCaretPointForUia(rangeEnd);
             if (visible)
             {
+                // 幅 w は差分なので _scrollX の影響を受けない (両端から同量を引くため)。
                 double w = Math.Max(1, x2 - x1);
-                rects.Add(csx + x1);
+                rects.Add(csx + x1 - sx);
                 rects.Add(csy + y1);
                 rects.Add(w);
                 rects.Add(lineHeight);

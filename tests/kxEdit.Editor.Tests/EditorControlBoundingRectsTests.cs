@@ -82,4 +82,56 @@ public class EditorControlBoundingRectsTests
             }
         });
     }
+
+    // A-12(2026-08-22): GetBoundingRectangles が _scrollX を引かず、折り返し OFF で
+    // 右へスクロールした状態では NVDA のフォーカスハイライト矩形が実描画より右にずれる。
+    // 描画(Paint.cs)・PointFromCharOffset・逆変換 OffsetFromClientPoint は引いており、
+    // ここだけが往復非対称だった。
+    [Fact]
+    public void GetBoundingRectangles_SubtractsScrollX()
+    {
+        Sta.Run(() =>
+        {
+            // 長文行 1 本 + 短い行数本。幅を絞って hscroll を表示状態にする。
+            // 長文行は line 0 に置く(UpdateHorizontalScrollbar は TopLine から probeHeight 分の
+            // 視覚行しか走査しないため、可視域に無いと hscroll が出ない)。
+            var text = new string('x', 400) + "\nl1\nl2\nl3";
+            using var form = HostForm.CreateVisible();
+            var ctrl = new EditorControl { Dock = DockStyle.Fill };
+            form.Controls.Add(ctrl);
+            ctrl.SetSource(TextBuffer.FromString(text));
+            try
+            {
+                form.ClientSize = new System.Drawing.Size(120, 100);
+                form.PerformLayout();
+                ctrl.WrapColumns = 0; // 折り返し OFF
+                ctrl.TopLine = 0;
+                ctrl.Invalidate();
+                Application.DoEvents(); // 描画を 1 回起こしてレイアウトを確定
+
+                IUiaTextHost host = ctrl;
+                var before = host.GetBoundingRectangles(0, 4);
+                Assert.NotEmpty(before); // fixture 前提: 行 0 は可視
+
+                ctrl.ScrollX = 50;
+                // fixture 前提: hscroll が表示されていないと ScrollX setter は no-op。
+                Assert.True(
+                    ctrl.ScrollX > 0,
+                    "fixture 前提崩れ: hscroll 非表示で ScrollX を置けない"
+                );
+
+                var after = host.GetBoundingRectangles(0, 4);
+                Assert.NotEmpty(after);
+
+                // X は ScrollX 分だけ左へ寄る。幅は差分なので不変。
+                Assert.Equal(before[0] - ctrl.ScrollX, after[0]);
+                Assert.Equal(before[2], after[2]);
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
 }
