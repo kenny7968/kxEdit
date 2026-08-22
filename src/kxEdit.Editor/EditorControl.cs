@@ -40,6 +40,14 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     private readonly HScrollBar _hscroll;
     private TextBuffer? _buffer;
     private int _topLine;
+
+    // 2026-08-22 A-6: 可視域最上段が属する視覚セグメント index(設計書 不変条件 I-2)。
+    // 折り返し OFF では常に 0=全式が導入前に退化する(I-3)。
+    // 「セグメント index の意味が変わる契機」では 0 に戻す(SetSource / ReplaceSource /
+    // TopLine セッター / WrapColumns セッター / ApplyAppearance / VScrollBar の防御クランプ)。
+    // 編集ではリセットしない(巨大段落の途中を編集するたび段落先頭へ飛ぶのを避ける。
+    // 実セグメント数を超えた場合は ViewportLayout.Build 側でクランプされる)。
+    private int _topSegment;
     private int _wrapColumns;
     private int _scrollX;
     private bool _showLineNumbers;
@@ -213,6 +221,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             throw new InvalidOperationException("SetSource は 1 度だけ");
         _buffer = buffer;
         _topLine = 0;
+        _topSegment = 0;
         UpdateVerticalScrollbar();
         UpdateHorizontalScrollbar();
         if (_hasFocus)
@@ -271,6 +280,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _buffer = buffer;
         _caretCtrl.SetTo(0, _buffer.Current);
         _topLine = 0;
+        _topSegment = 0;
         _scrollX = 0;
         _caretCtrl.DesiredXpx = -1;
         _cellHighlight = null; // 旧バッファのオフセット由来のセル強調は無効化
@@ -736,14 +746,44 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         set
         {
             int clamped = ClampTopLine(value);
-            if (clamped == _topLine)
+            // 同じ論理行への代入でも「その行の先頭視覚行から」の意味を回復させるため、
+            // _topSegment != 0 のときは早期 return しない(2026-08-22 A-6)。
+            if (clamped == _topLine && _topSegment == 0)
                 return;
             _topLine = clamped;
+            _topSegment = 0;
             if (_vscroll.Value != clamped)
                 _vscroll.Value = clamped;
             PositionCaret();
             Invalidate();
         }
+    }
+
+    /// <summary>可視域最上段の視覚セグメント index(設計書 I-2)。折り返し OFF では常に 0。</summary>
+    internal int TopSegment => _topSegment;
+
+    /// <summary>
+    /// 可視域の起点を<b>視覚行</b>単位で設定する(設計書 I-2)。<see cref="TopLine"/> セッターと違い
+    /// <see cref="TopSegment"/> を保つ=巨大段落の途中を先頭に置ける。
+    /// 論理行がクランプされた場合はセグメント index の意味が失われるので 0 に落とす。
+    /// </summary>
+    /// <remarks>
+    /// VScrollBar は論理行基準のまま(Value = TopLine)である。段落の途中をスクロールしている間
+    /// サムは動かず、論理行 1 本の文書ではバーが無効のままになる=意識的な近似
+    /// (全文の視覚行数を数えると O(文書) になり PR #35 の退行になるため。設計書 §4.4 / 申し送り S-3)。
+    /// </remarks>
+    internal void SetTopPosition(int line, int segment)
+    {
+        int clampedLine = ClampTopLine(line);
+        int clampedSeg = clampedLine == line ? Math.Max(0, segment) : 0;
+        if (clampedLine == _topLine && clampedSeg == _topSegment)
+            return;
+        _topLine = clampedLine;
+        _topSegment = clampedSeg;
+        if (_vscroll.Value != clampedLine)
+            _vscroll.Value = clampedLine;
+        PositionCaret();
+        Invalidate();
     }
 
     /// <summary>
@@ -762,6 +802,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (_wrapColumns == clamped)
                 return;
             _wrapColumns = clamped;
+            // 2026-08-22 A-6: 折り返し幅が変わればセグメント分割そのものが変わる=index の意味が失われる。
+            _topSegment = 0;
             // P8 Minor-5 / Task 3d: wrap 値変化で Adapter の _lastLineSegs キャッシュ破棄。
             _uia.InvalidateLastLineSegs();
             _scrollX = 0;
@@ -1046,7 +1088,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // 直前の buffer 縮小分が _topLine に反映されていないためここで補正する必要がある
         // (Task 13 EmptyLineNavigationTests の Enter→Undo 経路で顕在化した既存潜在バグ)。
         if (_topLine > maxLine)
+        {
             _topLine = maxLine;
+            // 2026-08-22 A-6: 行が消えた後のセグメント index は無意味(設計書 §4.1)。
+            _topSegment = 0;
+        }
         int visibleLines = Math.Max(1, ClientSize.Height / Math.Max(1, _metrics.LineHeightPx));
         _vscroll.Maximum = maxLine + Math.Max(0, visibleLines - 1);
         _vscroll.LargeChange = visibleLines;
@@ -1512,6 +1558,203 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // マスク挙動を検証するための最小の受け口。
     internal void __TestProcessMessage(ref Message m) => WndProc(ref m);
 
+    // ── 視覚行ヘルパ(2026-08-22 A-6 / 設計書 不変条件 I-2・I-4)─────────────────────
+    // 可視判定・スクロール判断・座標算出・ヒットテストが「起点から視覚行数で数える」ための共有部品。
+    // 「どのセグメントに属するか」の規約を二重化しないため、判定は LocateSegmentIndex 1 箇所に置く。
+    // 歩き/数えは I-4 に従い必要本数で打ち切る(文書全体・論理行全体を無条件に Wrap しない)。
+#pragma warning disable S1144 // reason: 本コミットは状態と seam だけを入れる挙動不変の段であり、
+    // LocateVisualRow / CountVisualRowsForward / WalkForwardVisualRows / WalkBackVisualRows は
+    // まだ呼び出し元を持たない(スクロール判断・座標算出・ホイールの各経路を後続で移すため)。
+    // 4 本すべてに呼び出し元が入った時点でこの抑止は外すこと。
+
+    /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
+    private int MaxWrapWidthPx => _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
+
+    /// <summary>論理行 1 本の本文(改行を含まない)。空行は空文字列。</summary>
+    private static string LineTextOf(TextSnapshot snap, int line)
+    {
+        int ls = snap.GetLineStart(line);
+        int le = snap.GetLineEnd(line, includeBreak: false);
+        return le == ls ? string.Empty : snap.GetText(ls, le - ls);
+    }
+
+    /// <summary>
+    /// 論理行内オフセットが属する視覚セグメントの index を返す(設計書 I-2 の単一定義)。
+    /// 最終セグメントに限り「末尾ちょうど」も許容する(EOL キャレット位置)。
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="reachedLineEnd"/> が false(打ち切られた結果)のとき、最後の要素は
+    /// 論理行の最終セグメントとは限らないため EOL 分岐を発火させてはならない。
+    /// 詳細は <see cref="ComputeCaretPoint"/> 本体のコメント(「本当に load-bearing なのは
+    /// LineLayout.WrapCore の &gt; 1 文字」)を参照。
+    /// </remarks>
+    private static int LocateSegmentIndex(
+        IReadOnlyList<WrapSegment> segments,
+        bool reachedLineEnd,
+        int offsetInLine
+    )
+    {
+        int segIdx = segments.Count - 1;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            int segEnd = seg.OffsetInLine + seg.Length;
+            if (
+                offsetInLine < segEnd
+                || (reachedLineEnd && i == segments.Count - 1 && offsetInLine == segEnd)
+            )
+            {
+                segIdx = i;
+                break;
+            }
+        }
+        return segIdx;
+    }
+
+    /// <summary>
+    /// char offset の視覚行位置 (論理行, セグメント index) を返す(設計書 I-2)。
+    /// 折り返し OFF は Wrap を一切呼ばず (論理行, 0) を返す=I-3。
+    /// </summary>
+    private (int Line, int Seg) LocateVisualRow(TextSnapshot snap, int offset)
+    {
+        int line = snap.GetLineIndexOfChar(offset);
+        if (_wrapColumns <= 0)
+            return (line, 0);
+        int lineStart = snap.GetLineStart(line);
+        int offsetInLine = offset - lineStart;
+        var wrapped = LineLayout.WrapThroughOffset(
+            LineTextOf(snap, line),
+            MaxWrapWidthPx,
+            _metrics,
+            offsetInLine
+        );
+        return (line, LocateSegmentIndex(wrapped.Segments, wrapped.ReachedLineEnd, offsetInLine));
+    }
+
+    /// <summary>
+    /// 論理行 <paramref name="line"/> の視覚行数を最大 <paramref name="cap"/> 本まで数える
+    /// (設計書 I-4: 打ち切れる歩きは必ず打ち切る)。
+    /// Exact=false なら実際の本数は Count より多い。
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="cap"/> は 1 未満でも 1 として扱う(<see cref="LineLayout.Wrap"/> は必ず
+    /// 1 個以上返す契約であり、<see cref="LineLayout.WrapFirstSegments"/> は 0 以下で投げるため)。
+    /// 打ち切りが起きたときの Count は要求値に厳密に等しい(WrapCore の打ち切り判定が
+    /// <c>result.Add</c> の直後にしかないため。<see cref="ViewportLayout.Build"/> の同旨のコメント参照)。
+    /// </remarks>
+    private (int Count, bool Exact) SegmentCountCapped(TextSnapshot snap, int line, int cap)
+    {
+        var r = LineLayout.WrapFirstSegments(
+            LineTextOf(snap, line),
+            MaxWrapWidthPx,
+            _metrics,
+            Math.Max(1, cap)
+        );
+        return (r.Segments.Count, r.ReachedLineEnd);
+    }
+
+    /// <summary>
+    /// (fromLine, fromSeg) から (toLine, toSeg) までの視覚行距離を数える。
+    /// <paramref name="cap"/> 本を超えたら <paramref name="cap"/> を返して打ち切る(I-4)。
+    /// 「可視域 visibleRows 本に収まるか」の判定にだけ使うため、cap 超過の正確な値は要らない。
+    /// </summary>
+    /// <remarks>
+    /// 前方距離しか意味を持たないため、(toLine, toSeg) が起点より<b>手前</b>のときは 0 を返す
+    /// (呼び出し側が先に辞書順比較で「起点より上」を弁別している前提。設計書 §4.2 の 2→3 の順)。
+    /// <paramref name="fromSeg"/> が先頭行の実セグメント数以上なら最終セグメントへ寄せて数える
+    /// (<see cref="ViewportLayout.Build"/> の topSegment クランプと同じ寄せ方)。
+    /// </remarks>
+    private int CountVisualRowsForward(
+        TextSnapshot snap,
+        int fromLine,
+        int fromSeg,
+        int toLine,
+        int toSeg,
+        int cap
+    )
+    {
+        if (toLine < fromLine)
+            return 0;
+        if (toLine == fromLine)
+            return Math.Min(cap, Math.Max(0, toSeg - fromSeg));
+
+        int rows = 0;
+        for (int line = fromLine; line < toLine; line++)
+        {
+            if (rows >= cap)
+                return cap;
+            int skip = line == fromLine ? fromSeg : 0;
+            // 読み飛ばす skip 本も Wrap の要求本数に足す(打ち切り結果は完全結果の prefix)。
+            // rows < cap がここで保証されているので needed >= skip + 1 > skip=
+            // 打ち切り時に skip >= count は成立しない(下の Math.Min が最終セグメントを
+            // 誤認しないことの根拠。ViewportLayout.Build の同旨のコメント参照)。
+            long needed = (long)(cap - rows) + skip;
+            var (count, _) = SegmentCountCapped(
+                snap,
+                line,
+                needed > int.MaxValue ? int.MaxValue : (int)needed
+            );
+            int eff = Math.Min(skip, count - 1);
+            rows += count - eff;
+        }
+        return Math.Min(cap, rows + toSeg);
+    }
+
+    /// <summary>視覚行を n 本ぶん前へ進めた位置を返す。文書末で打ち切る。</summary>
+    /// <remarks>
+    /// <b>既知の制約</b>: <paramref name="seg"/> がその行の実セグメント数以上(編集で段落が縮み
+    /// <c>_topSegment</c> が陳腐化した状態)のとき、行を跨ぐ 1 本の消費が
+    /// <c>count - seg</c>(負)になり、要求より下へ寄る。例外にはならず描画も
+    /// <see cref="ViewportLayout.Build"/> のクランプで破綻しないが、
+    /// <see cref="CountVisualRowsForward"/> が同じ状況を <c>Math.Min(skip, count - 1)</c> で
+    /// 寄せているのに対し非対称である。
+    /// </remarks>
+    private (int Line, int Seg) WalkForwardVisualRows(TextSnapshot snap, int line, int seg, int n)
+    {
+        while (n > 0)
+        {
+            // この行に「seg + n」本目があるかだけ判れば良いので打ち切って数える(I-4)。
+            long cap = (long)seg + n + 1;
+            var (count, _) = SegmentCountCapped(
+                snap,
+                line,
+                cap > int.MaxValue ? int.MaxValue : (int)cap
+            );
+            if (seg + n < count)
+                return (line, seg + n);
+            n -= count - seg; // この行の残り本数 + 次行先頭へ移る 1 本
+            if (line + 1 >= snap.LineCount)
+                return (line, count - 1); // 文書末で打ち切り
+            line++;
+            seg = 0;
+        }
+        return (line, seg);
+    }
+
+    /// <summary>視覚行を n 本ぶん遡った位置を返す。文書頭で打ち切る。</summary>
+    /// <remarks>
+    /// 前の論理行へ入るときだけ<b>正確な</b>視覚行数が要る(最終セグメントから数えるため)ので、
+    /// そこは打ち切れない完全 Wrap になる。巨大行を下から遡る場合の 1 回だけで、
+    /// PR #35 の幅メモ化により CJK 500K 行で約 30 ms(設計書 §5)。
+    /// </remarks>
+    private (int Line, int Seg) WalkBackVisualRows(TextSnapshot snap, int line, int seg, int n)
+    {
+        while (n > 0)
+        {
+            if (seg >= n)
+                return (line, seg - n);
+            n -= seg; // (line, 0) までで seg 本
+            if (line == 0)
+                return (0, 0); // 文書頭で打ち切り
+            line--;
+            var segs = LineLayout.Wrap(LineTextOf(snap, line), MaxWrapWidthPx, _metrics);
+            seg = segs.Count - 1; // 前行の最終視覚行へ移る = さらに 1 本
+            n--;
+        }
+        return (line, seg);
+    }
+#pragma warning restore S1144
+
     /// <summary>
     /// 与えられた UTF-16 char offset のクライアント座標(px)と可視性を算出する純ロジック。
     /// - Visible=false: TopLine 未到達 / paintHeight を超える論理行 / y &gt;= paintHeight
@@ -1781,6 +2024,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _wrapColumns = Math.Max(0, settings.WrapColumnEnabled ? settings.WrapColumn : 0);
         if (_wrapColumns != oldWrapColumns)
             _scrollX = 0;
+        // 2026-08-22 A-6: フォント/metrics/折り返し幅のいずれが変わってもセグメント分割が変わる=
+        // セグメント index の意味が失われるので無条件に 0 へ戻す(設計書 §4.1)。
+        _topSegment = 0;
 
         // LineHeightPx / 折り返し設定が変わった可能性があるので両スクロールバーを再計算 →
         // キャレット再配置。
