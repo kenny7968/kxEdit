@@ -91,13 +91,7 @@ public class VisualRowScrollTests
 
     /// <summary>論理行 line の視覚行数(打ち切りなし)。</summary>
     private static int SegCount(EditorControl c, TextSnapshot snap, int line) =>
-        CallHelper<(int Count, bool Exact)>(
-            c,
-            "SegmentCountCapped",
-            snap,
-            line,
-            int.MaxValue
-        ).Count;
+        CallHelper<int>(c, "SegmentCountCapped", snap, line, int.MaxValue);
 
     /// <summary>
     /// fixture の視覚行を (論理行, セグメント index) の昇順に全列挙したオラクル。

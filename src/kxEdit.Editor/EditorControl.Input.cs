@@ -197,7 +197,11 @@ public sealed partial class EditorControl
     /// Task 3c: InputRouter の HandleMouseDown/Move/DoubleClick から呼ぶため internal 化。
     /// </summary>
     /// <remarks>
-    /// 折り返し ON 時は 1 論理行ずつ <see cref="LineLayout.Wrap"/> を呼び直しつつ視覚行を歩く。
+    /// 折り返し ON 時の視覚行の歩きは <c>WalkForwardVisualRows</c> →
+    /// <see cref="LineLayout.WrapFirstSegments"/> の打ち切りに載せてあり(2026-08-22 A-6)、
+    /// 通り過ぎる論理行は「その行に何本目があるか」が判る本数までしか Wrap しない。
+    /// 完全な Wrap は<b>着地行 1 本も含めて</b>行わない=着地行も <c>segIdx + 1</c> 本で
+    /// 打ち切る(設計書 I-4)。
     /// Task 14 のベンチで顕在化するようなら Frame 再利用等で最適化(<see cref="ComputeCaretPoint"/>
     /// の Task 9 レビュー M-3 と同じ申し送り)。
     /// </remarks>
@@ -213,7 +217,7 @@ public sealed partial class EditorControl
         if (visualRowFromTop < 0)
             visualRowFromTop = 0;
 
-        int maxWidthPx = _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
+        int maxWidthPx = MaxWrapWidthPx;
 
         // (TopLine, TopSegment) の視覚行から visualRowFromTop 個進む。前進規約は seam に一本化する
         // (規約を二重定義しない・折り返し OFF ガードと打ち切りを継承する)。
@@ -234,7 +238,20 @@ public sealed partial class EditorControl
         int lineEnd = snap.GetLineEnd(line, includeBreak: false);
         string lineText =
             lineEnd == lineStart ? string.Empty : snap.GetText(lineStart, lineEnd - lineStart);
-        var segs = LineLayout.Wrap(lineText, maxWidthPx, _metrics);
+        // 着地行も打ち切って Wrap する(I-4)。要るのは segIdx 本目までなので segIdx + 1 本で足りる。
+        // 打ち切りが起きたときの Count は要求値に厳密に等しい(= segIdx + 1)ため、下の
+        // Math.Min は「打ち切られた最終要素」ではなく segIdx 自身を選ぶ=陳腐化クランプの根拠は保たれる。
+        // segIdx + 1 は long 経由(WalkForwardVisualRows / CountVisualRowsForward と同じ理由=
+        // int.MaxValue 級の陳腐化 seg で負へ回り込むと WrapFirstSegments が投げる)。
+        long landingCap = (long)segIdx + 1;
+        var segs = LineLayout
+            .WrapFirstSegments(
+                lineText,
+                maxWidthPx,
+                _metrics,
+                landingCap > int.MaxValue ? int.MaxValue : (int)landingCap
+            )
+            .Segments;
         // 防御的にクランプ(通常は segIdx < segs.Count が保たれる)。
         // visualRowFromTop == 0 のとき WalkForwardVisualRows は while に入らず _topSegment を
         // そのまま返すため、陳腐化した _topSegment(編集で段落が縮んだ)を最終セグメントへ

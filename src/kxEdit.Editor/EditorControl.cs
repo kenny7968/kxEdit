@@ -1587,10 +1587,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>折り返し幅(px)。折り返し OFF は 0(=LineLayout.Wrap が単一セグメントを返す)。</summary>
     /// <remarks>
-    /// OFF 側の三項は<b>現状の呼び出し元からは到達しない</b>(<see cref="LocateVisualRow"/> も
-    /// <see cref="SegmentCountCapped"/> も <c>_wrapColumns &lt;= 0</c> を先に短絡するため)。
-    /// 将来 OFF でも呼ぶ経路が増えたときのための契約であり、<see cref="ViewportLayout.Build"/> の
-    /// 「到達可能な生きた防御(外してはならない)」とは性質が違う。
+    /// OFF 側の三項は<b>到達する</b>。<see cref="LocateVisualRow"/> と
+    /// <see cref="SegmentCountCapped"/> は <c>_wrapColumns &lt;= 0</c> を先に短絡するので
+    /// この 2 経路からは踏まないが、<see cref="ComputeCaretPoint"/> と
+    /// <see cref="OffsetFromClientPoint"/> は折り返し OFF でも走り、0 を
+    /// <c>LineLayout</c> へ渡して「折り返し無し」を表現する(=<c>maxWidthPx &lt;= 0</c> の
+    /// 契約に乗る)。したがって <see cref="ViewportLayout.Build"/> の
+    /// 「到達可能な生きた防御」と同じく<b>外してはならない</b>。
     /// </remarks>
     private int MaxWrapWidthPx => _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
 
@@ -1678,7 +1681,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <summary>
     /// 論理行 <paramref name="line"/> の視覚行数を最大 <paramref name="cap"/> 本まで数える
     /// (設計書 I-4: 打ち切れる歩きは必ず打ち切る)。
-    /// Exact=false なら実際の本数は Count より多い。
+    /// 戻り値が <paramref name="cap"/> に等しいときは打ち切られている可能性があり、
+    /// 実際の本数はそれ以上である(下の「打ち切りが起きたときの Count」の項を参照)。
     /// </summary>
     /// <remarks>
     /// <para>
@@ -1699,19 +1703,25 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 打ち切りが起きたときの Count は要求値に厳密に等しい(WrapCore の打ち切り判定が
     /// <c>result.Add</c> の直後にしかないため。<see cref="ViewportLayout.Build"/> の同旨のコメント参照)。
     /// </para>
+    /// <para>
+    /// <b>打ち切りの有無は返さない</b>。<c>WrapFirstSegments</c> の
+    /// <c>ReachedLineEnd</c> を素通しする設計だったが、3 呼び出し元とも捨てており
+    /// テストも見ていなかった(死んだ API 面=最終レビュー品質パス)。呼び出し元は
+    /// いずれも「要求値に達したか」を自前の文脈から導けている:
+    /// <see cref="WalkForwardVisualRows"/> は <c>landing &lt; count</c> の分岐で、
+    /// <see cref="CountVisualRowsForward"/> は <c>rows &lt; cap</c> の不変条件で、
+    /// <see cref="WalkBackVisualRows"/> は <c>cap = int.MaxValue</c>(打ち切りが起きない)で。
+    /// 必要になったら <c>WrapResult</c> をそのまま返す形に戻せばよい。
+    /// </para>
     /// </remarks>
-    private (int Count, bool Exact) SegmentCountCapped(TextSnapshot snap, int line, int cap)
+    private int SegmentCountCapped(TextSnapshot snap, int line, int cap)
     {
         // 折り返し OFF は 1 論理行 = 1 視覚行(WrapCore の OFF 分岐と等価)。行全文を取らない。
         if (_wrapColumns <= 0)
-            return (1, true);
-        var r = LineLayout.WrapFirstSegments(
-            LineTextOf(snap, line),
-            MaxWrapWidthPx,
-            _metrics,
-            Math.Max(1, cap)
-        );
-        return (r.Segments.Count, r.ReachedLineEnd);
+            return 1;
+        return LineLayout
+            .WrapFirstSegments(LineTextOf(snap, line), MaxWrapWidthPx, _metrics, Math.Max(1, cap))
+            .Segments.Count;
     }
 
     /// <summary>
@@ -1748,6 +1758,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         int rows = 0;
         for (int line = fromLine; line < toLine; line++)
         {
+            // この打ち切りは<b>値としては等価</b>(下の Math.Min が同じ cap に丸める)ため、
+            // 落とす変異を値ベースのテストで殺すことは原理的にできない=網は張れない。
+            // それでも外してはならない: 各論理行が必ず 1 本以上を寄与するので、この return が
+            // 反復数を cap 本に抑えている。外すと O(toLine - fromLine) になり、100 万行文書の
+            // Ctrl+End 1 回で 100 万回の SegmentCountCapped を払う(I-4 の実効的な砦)。
             if (rows >= cap)
                 return cap;
             int skip = line == fromLine ? fromSeg : 0;
@@ -1756,7 +1771,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             // 打ち切り時に skip >= count は成立しない(下の Math.Min が最終セグメントを
             // 誤認しないことの根拠。ViewportLayout.Build の同旨のコメント参照)。
             long needed = (long)(cap - rows) + skip;
-            var (count, _) = SegmentCountCapped(
+            int count = SegmentCountCapped(
                 snap,
                 line,
                 needed > int.MaxValue ? int.MaxValue : (int)needed
@@ -1800,7 +1815,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         {
             // この行に「seg + n」本目があるかだけ判れば良いので打ち切って数える(I-4)。
             long cap = (long)seg + n + 1;
-            var (count, _) = SegmentCountCapped(
+            int count = SegmentCountCapped(
                 snap,
                 line,
                 cap > int.MaxValue ? int.MaxValue : (int)cap
@@ -1842,10 +1857,15 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 1 打鍵あたりもう 1 回ぶんの Wrap が乗ることになる。<b>有効な seg を渡すのは呼び出し側の
     /// 責務</b>とする(キャレット由来の seg は <see cref="LocateVisualRow"/> が返すので常に有効。
     /// 陳腐化しうるのは <c>_topSegment</c> を渡すホイール経路だけ)。
-    /// 帰結は「大量削除の直後にホイール上方向が数ノッチ空振りしうる」程度で、描画は
+    /// 帰結は「大量削除の直後にホイール上方向が空振りする」ことで、描画は
     /// <see cref="ViewportLayout.Build"/> のクランプにより破綻しない。しかも <c>seg - n</c> が
     /// いずれ実セグメント数を下回るため<b>自己修復する</b>(キャレット追従は起点をキャレット位置へ
     /// 寄せるので修復を早める)。
+    /// <b>空振りの上界は「数ノッチ」ではない</b>: 陳腐化の超過分(<c>seg</c> − 実セグメント数)を
+    /// 1 ノッチの視覚行数で割った切り上げ回数ぶん空振りし、超過分そのものに上限は無い
+    /// (実測: <c>_topSegment</c>=99 / 実セグメント 5 本 / 1 ノッチ 3 行で、5 ノッチ回しても
+    /// <c>GetVisibleCharRange().Start</c> が動かない)。当初「数ノッチ程度」と書いていたのは
+    /// 過小申告だった(最終レビュー品質パス)。
     /// </para>
     /// </remarks>
     private (int Line, int Seg) WalkBackVisualRows(TextSnapshot snap, int line, int seg, int n)
@@ -1862,7 +1882,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             // 同一実装なので、cap に int.MaxValue を渡す SegmentCountCapped と厳密に等価
             // (どちらも「打ち切りが起きない」)。こちら経由にすることで折り返し OFF のガード
             // (行全文を取らない)を継承し、捨てるだけのセグメントリスト構築も省ける。
-            var (count, _) = SegmentCountCapped(snap, line, int.MaxValue);
+            int count = SegmentCountCapped(snap, line, int.MaxValue);
             seg = count - 1; // 前行の最終視覚行へ移る = さらに 1 本
             n--;
         }
@@ -1882,7 +1902,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <para>
     /// 上方向の <see cref="WalkBackVisualRows"/> には陳腐化しうる <c>_topSegment</c> を渡す
     /// (キャレット由来ではないため)。同メソッドの remarks のとおりクランプしない設計で、
-    /// 帰結は「大量削除の直後に上方向が数ノッチ空振りしうる」程度・描画は
+    /// 帰結は「大量削除の直後に上方向が空振りする」こと(空振り回数の上界は陳腐化の超過分に
+    /// 比例し、上限は無い=同 remarks 参照)・描画は
     /// <see cref="ViewportLayout.Build"/> のクランプで破綻せず自己修復する。
     /// </para>
     /// <para>
@@ -1947,7 +1968,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         int lineEnd = snap.GetLineEnd(logicalLine, includeBreak: false);
         int lineLen = lineEnd - lineStart;
         string lineText = lineLen == 0 ? string.Empty : snap.GetText(lineStart, lineLen);
-        int maxWidthPx = _wrapColumns > 0 ? _wrapColumns * _metrics.MeasureRun("0") : 0;
+        int maxWidthPx = MaxWrapWidthPx;
         int caretInLine = offset - lineStart;
 
         // 2026-08-02 変更 B-2: キャレットを含むセグメントが確定した時点で Wrap を打ち切る。
