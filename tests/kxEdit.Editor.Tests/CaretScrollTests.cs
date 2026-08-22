@@ -40,9 +40,11 @@ public class CaretScrollTests
     public void BringCaretIntoView_ScrollsDown_WhenCaretBelowVisible() =>
         Sta.Run(() =>
         {
-            // 10 行の文書、可視領域が 3 行程度になるように高さを絞る
+            // 10 行の文書、可視領域を 1 視覚行ぶんまで絞る(末尾行が必ず可視域外になる)。
             var text = string.Join("\n", Enumerable.Range(0, 10).Select(i => $"line{i}"));
-            var (f, c) = MakeControl(text, width: 400, height: 60); // 60px なら MS ゴシック 12pt で ~3行
+            // height は Form.Size なので ClientSize.Height は約 21 px=可視行数 1
+            // (実測の詳細は MakeTallDocument の remarks 参照)。
+            var (f, c) = MakeControl(text, width: 400, height: 60);
             using (f)
             using (c)
             {
@@ -354,7 +356,17 @@ public class CaretScrollTests
     //       アンカー相対で動かす API は呼び出し側がスクロールを判断する。
     // 検索ジャンプ / Ctrl+G / grep ジャンプ / UIA Select() はすべてこの 2 メソッドを通る。
 
-    /// <summary>30 行の文書と 3 行程度の可視域を作る(末尾行が必ず初期ビューポート外になる)。</summary>
+    /// <summary>
+    /// 30 行の文書と 1 視覚行ぶんの可視域を作る(末尾行が必ず初期ビューポート外になる)。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="MakeControl"/> に渡す height は <c>Form.Size</c> なので、タイトルバーと枠を
+    /// 引いた <c>ClientSize.Height</c> は 60 ではなく約 21 px = <c>LineHeightPx</c>(20)とほぼ同じ。
+    /// 実測: ClientSize 384×21 / LineHeightPx 20 / visibleRows 1(2026-08-22 Task 2 レビュー)。
+    /// 可視行数が 1 でも各テストの閾値式は成立する(むしろ「TopLine が対象行ちょうどに張り付く」
+    /// まで要求する強い網になる)。height をいじると閾値の意味が変わるので、変えるなら
+    /// 各テストの assertion を測り直すこと。
+    /// </remarks>
     private static (Form f, EditorControl c, string text) MakeTallDocument()
     {
         var text = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line{i}"));
@@ -398,9 +410,14 @@ public class CaretScrollTests
                 int visibleRows = Math.Max(1, c.ClientSize.Height / c.LineHeightPx);
                 Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
 
+                // 範囲は行 0 から行 29 までまたがせる。start と end を別の論理行に置かないと
+                // 「範囲末尾を可視化する」契約(Caret = Max(start, end) にマップ)を検証できない
+                // ——両端が同じ行にある fixture では、実装を「範囲先頭を可視化」へ差し替えても
+                // 緑のまま通る(Task 2 レビューの変異 (c) が実際に生存した)。
                 int lineStart = text.LastIndexOf('\n') + 1;
-                c.SetSelectionCharRange(lineStart, lineStart + 4); // ★ 検索ヒット選択と同じ経路
+                c.SetSelectionCharRange(0, lineStart + 4); // ★ 検索ヒット選択と同じ経路
 
+                // 先頭可視化なら TopLine=0 のまま・末尾可視化なら行 29 へ張り付く=両者を判別できる。
                 Assert.True(
                     c.TopLine >= 29 - visibleRows + 1,
                     $"expected TopLine >= {29 - visibleRows + 1}, got {c.TopLine}"
