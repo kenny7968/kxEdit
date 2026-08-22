@@ -372,3 +372,116 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   保存先意味論とは無関係(読み取り側)。統合はしない。
 - **S-4**: 監査 §8 が同テーマとした **A-8**(hot exit の確認なしクローズがバックアップ書込失敗を
   待たない)は未着手。本書とは別ブランチ。
+- **S-5**(Task 2 のレビューで追加・2026-08-23): `TryInspectSaveTarget` のローカル枝は素の
+  `System.IO.File.Exists` を打つ。`RemotePathDetector.IsRemote` は UNC とマップドネットワーク
+  ドライブを見るが、**固定ドライブ上のジャンクション/シンボリックリンクがネットワーク先を指す場合**
+  (`mklink /D C:\link \\server\share`)は検出しない。この穴自体は読み取り側
+  (`TryProbeFileExists` / `FileMetaProvider` / `FileTimestampProvider`)にも既存で、Task 2 は
+  穴を作っていない。Task 2 時点では**直後に必ず同じパスへ書きに行く**ので上限は既存凍結の
+  約 2 倍にとどまり、新規の凍結クラスではない。
+  **ただし Task 7(上書き確認)が入ると性質が変わる**: 確認で「いいえ」を選ぶと書き込みが
+  発生しない=対応する凍結が無いため「書き込みと同じ待ちだから相殺」という論拠が崩れ、
+  さらにループなので N 回繰り返せる。**Task 7 で明示的に再評価すること。**
+  低コストな案として「ローカル枝も `ProbeSaveTargetWithTimeout` を通し、`Reachable` は無視して
+  `exists` だけ採る」がある(制御フローも文言も不変のまま 5 秒上限になる)が、採ると Task 7 の
+  上書き確認テストが「実ファイルがディスクに在る → 確認が出る」から「Fake が在ると言った →
+  確認が出る」に変わり、**本ブランチで最も重要な網が弱まる**。このトレードオフを Task 7 で判断する。
+
+## 10. 実施記録
+
+本節は**実施記録の追記**(CLAUDE.md §8 が認める)。§1〜§9 は策定時のまま(S-5 の追加を除く)。
+
+### 10.1 seam の名前が変わった(Task 1 のコード品質レビュー)
+
+§3.2 のコードスケッチは策定時のまま残してあるので、読むときは次の対応で読み替えること。
+
+| 策定時 | 実装 | 変更理由 |
+|--------|------|----------|
+| `SaveTargetProbe` | `SaveTargetProbeResult` | 「probe が probe を返す」形になっていた。同フォルダーの先例は全部 `Result` / `Outcome` 接尾(`SaveAsResult` / `RestoreOutcome` / `CellPickResult`) |
+| `IReachabilityProbe.ProbeWithTimeout` | `ProbeFileExistsWithTimeout` | **A-4 の機構は「到達性の名前で存在確認を実装したメソッドを、書き込み側が名前を信じて再利用した」こと**。正しい名前のメソッドを足すだけでは罠が立ったまま残る(doc は一度しか読まれず、名前は毎回読まれる) |
+| `FileController.TryProbeReachability` | `TryProbeFileExists` | 同じ理由。1 段上の私有ヘルパにも同型の問題があり、`TryInspectSaveTarget` と並ぶと対比が紛らわしい |
+
+あわせて `TryProbeFileExists` の doc から「`LoadInto` / `WriteToPath` 双方から共有し『Save と Load で
+同じ到達性ポリシー』を 1 箇所で表現する」という一文を削除した。**これは次の読者に読み取り側の述語を
+書き込み側と再共有するよう勧める文面で、A-4 の発生源そのものだった。**
+
+実装は §3.2 に無い internal seam を 2 本持つ(`WaitBounded<T>` / `RunSaveTargetProbe` /
+`RunFileExistsProbe`)。タイムアウト経路のフェイルセーフ値を決定的にテストするためで、経緯は 10.3。
+
+### 10.2 §3.3 が挙げたゲート維持の根拠は誤りだった(Task 2 の実測)
+
+§3.3 は「リモートゲートを外すと、既存テスト `SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath`
+が `WriteToPath` に到達しなくなる」と書いた。**これは二重に誤っている。**
+
+1. テストは `FakeReachabilityProbe` を注入し、その既定 `SaveTargetResult` は `Reachable: true`。
+   したがって**ゲートを外してもこのテストは緑のまま**で、変異を kill しない(実測で確認)。
+2. **実プローブを使った場合でもロールバック導線は失われない。** `SaveAsDocument` の
+   Encoding / HasBom / LineEnding / Path のロールバックは `WriteToPath` の **false 戻り値**で駆動される。
+   ゲートを外して実プローブが `Reachable=false` を返しても `WriteToPath` は false を返すので
+   ロールバックはそのまま発火する。しかも短絡は `ApplyEol` / `ConvertEols` より手前なので、
+   本文側の巻き戻し対象すら発生しない。実際に壊れるのは assertion 1 行だけ。
+
+**ゲート維持という判断は変えない。真の理由は次のとおり:**
+
+- **決定的な理由 = 誤ったエラーメッセージ。** `ReportUnreachable` の文言は「ネットワークパスに
+  到達できません」の 1 種類しかない。ゲートを外すと、ローカルの存在しないフォルダー配下への保存に
+  対してこの文言が出る。**SR ユーザーが直入力でタイプミスした典型ケースがこれ**で、現行の
+  `DirectoryNotFoundException` 由来の「保存できませんでした: 指定されたパスが見つかりません」より
+  明確に劣化する。文言を分岐させれば直るが、それは §6 が YAGNI として除外した範囲。
+- 副次的理由: 挙動変更であること(CLAUDE.md §2)、Ctrl+S ごとに `Task.Run` + `Wait` が 1 回増えること。
+
+**このゲートを実際に守っているテストは `Save_SkipsProbe_ForLocalPath` と
+`SaveAs_LocalNewFile_DoesNotProbe` の 2 本。** 実装計画 Task 2 Step 5 の「(ロールバックテストが)
+赤ならリモートゲートを外してしまっている」という安全確認は**機能しない検査**なので、
+その手順に従わないこと。
+
+**手法上の教訓**: Fake を注入するテストは「本番の実装が持つ性質」を証人にできない。
+設計書に「この変更はこのテストが守る」と書くときは、そのテストが**実際に何を注入しているか**まで
+遡って確かめる。
+
+### 10.3 抽象化が網を弱めた(Task 1 のレビュー往復)
+
+「タイムアウト時のフェイルセーフ値が無被覆」という指摘に応えて、境界付き待ちの判断を
+`WaitBounded<T>` に集約した。**集約は達成したが、片方の定数が以前より壊しやすくなった。**
+
+- 集約前 `task.Wait(timeout) && task.Result` … フェイルセーフが `&&` の短絡に**構造的に埋め込まれて**
+  いた。`||` に変異させるとタイムアウト済みタスクの `task.Result` を読んで**ブロックする**ので、
+  静かには壊せない。
+- 集約後 `WaitBounded(task, timeout, false)` … 定数が 1 トークンの引数になり、`true` に書き換えても
+  **コンパイルが通り・ハングもせず・全緑**になる(実測で生存)。帰結はタイムアウトを
+  「ファイルは在る」と読んで実 read へ進むこと = HIGH-6 の 60 秒凍結の再導入。
+
+最終的に `RunSaveTargetProbe` / `RunFileExistsProbe`(`work` を注入できる internal seam)を足し、
+完了しない `TaskCompletionSource` で止めた `work` を渡すことで、両側のフェイルセーフ値を
+決定的に pin した。
+
+**教訓: 「重複を消す」リファクタは、消した重複が網の役目を兼ねていないかを変異で確かめてから入れる。**
+
+### 10.4 受容した無被覆(known-unkillable)
+
+最終品質パスがミューテーションスコアを誤読しないよう記録する。
+
+| 箇所 | 変異 | 状態 |
+|------|------|------|
+| `FileReachabilityProbe` の `!string.IsNullOrEmpty(dir) &&` | ガードごと削除 | **等価変異**。`Directory.Exists(null)` も `("")` も false を返すので観測可能な差が出ない。ガードが守る挙動(ルートは保存先でない)自体は `DriveRoot` が pin 済み |
+| 両プローブの `catch` 節の フェイルセーフ | 戻り値の変更 | **原理的に到達不能**。.NET Core 以降の `File.Exists` / `Directory.Exists` はマネージドコードから構成できるどんな入力でも投げない。「書き忘れ」ではなく「書けない」 |
+| public プローブメソッドから seam への `timeout` の受け渡し | 受け取った値を捨てて固定値にする | **原理的に pin 不能**(実 I/O の所要時間を制御できない)。上流半分は Task 2 の 5 秒 pin テストが守る |
+
+`!IsNullOrEmpty(dir) && Directory.Exists(dir)` に対する変異は 3 種あり、**それぞれ別のテストが kill する**
+(台帳に書くときは「どの変異か」を式ごと書くこと。「ガードの変異」では特定できない):
+
+| 変異 | kill するテスト |
+|------|-----------------|
+| 否定反転 `!IsNullOrEmpty(dir)` → `IsNullOrEmpty(dir)` | `NewNameInExistingDir` / `ExistingDirectory_ReportedAsNewFile_CurrentBehavior` |
+| `&&` → `\|\|` | `UnderMissingDir` |
+| `GetDirectoryName(path) ?? path` | `DriveRoot` |
+| ガードごと削除 | 生存(上記のとおり等価) |
+
+### 10.5 ミューテーションを当てる際の注意(実測で判明)
+
+- **`dotnet test --no-build` はビルド失敗後に古いバイナリを走らせて緑を報告する。** 本ブランチだけで
+  捏造された「変異が生存」が 3 回発生した。`ビルドに成功しました` を確認してから走らせること。
+- **計画が例示した形の変異は `-warnaserror` でビルドが通らない**ものがある
+  (`WriteToPath` の直接差し替え = S1144 / ゲートを `if (true)` にする = CS0162 /
+  `path.Length >= 0` = RCS1215・S3981)。挙動等価な別形で当てること。
+- 変異で変数が未使用になるとビルドが落ち、上記 1 点目と組み合わさって偽の「生存」を作る。
