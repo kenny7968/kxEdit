@@ -318,6 +318,36 @@ public class VisualRowScrollTests
         });
 
     /// <summary>
+    /// 陳腐化したセグメント index を渡されたとき、CountVisualRowsForward も最終セグメントへ
+    /// 寄せて数える=WalkForwardVisualRows と同じ寄せ方になり、可視判定(距離)と着地(歩き)が
+    /// 食い違わない。寄せを外すと負の距離を返し、可視判定が反転する。
+    /// </summary>
+    /// <remarks>
+    /// 総当りオラクル(<see cref="CountVisualRowsForward_MatchesRowDistance_ForAllPairsAndCaps"/>)は
+    /// 実在する視覚行しか起点にしないため陳腐化を作れない=この境界は本テストだけが守る。
+    /// 実際、寄せを外す変異は総当りテストでは生存し、本テストでのみ kill される。
+    /// </remarks>
+    [Fact]
+    public void CountVisualRowsForward_ClampsStaleSegment_MatchesLastSegmentDistance() =>
+        Sta.Run(() =>
+        {
+            const string Text = "abcdefghij\nklmnop";
+            var (f, c) = MakeControl(Text, wrap: 2, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(Text).Current;
+                int segs0 = SegCount(c, snap, 0);
+                Assert.True(segs0 >= 2, "fixture 前提: 行 0 は複数の視覚行に折り返される");
+
+                // 行 0 の最終セグメントから行 1 の先頭までは 1 本(基準)。
+                Assert.Equal(1, CountForward(c, snap, 0, segs0 - 1, 1, 0, 99));
+                // 実セグメント数を超える起点でも同じ距離になること。
+                Assert.Equal(1, CountForward(c, snap, 0, segs0 + 2, 1, 0, 99));
+            }
+        });
+
+    /// <summary>
     /// 前方の歩きを全起点 × 全距離で総当りし、視覚行を列挙したオラクルと一致することを固定する。
     /// 文書末を越える要求では最終視覚行で止まり Exhausted=true になること(=要求 n 本を
     /// 歩き切れなかったことを呼び出し側が区別できること)も併せて固定する。
