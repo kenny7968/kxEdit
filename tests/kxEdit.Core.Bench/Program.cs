@@ -288,9 +288,18 @@ if (largeLineMode)
             var llSnap = TextBuffer.FromString(MakeSingleLine(len, kind)).Current;
             foreach (int wrap in new[] { 0, 80 })
             {
-                llSink += ViewportLayout.Build(llSnap, 0, llHeightPx, wrap, llMetrics).Count; // ウォームアップ(JIT)
+                llSink += ViewportLayout
+                    .Build(llSnap, 0, topSegment: 0, llHeightPx, wrap, llMetrics)
+                    .Count; // ウォームアップ(JIT)
                 var llSw = Stopwatch.StartNew();
-                var llRows = ViewportLayout.Build(llSnap, 0, llHeightPx, wrap, llMetrics);
+                var llRows = ViewportLayout.Build(
+                    llSnap,
+                    0,
+                    topSegment: 0,
+                    llHeightPx,
+                    wrap,
+                    llMetrics
+                );
                 llSw.Stop();
                 Console.WriteLine(
                     $"{kind},{len},{wrap},{llSw.Elapsed.TotalMilliseconds:F1},{llRows.Count}"
@@ -599,13 +608,27 @@ if (layoutMode)
     // ウォームアップ(JIT + キャッシュ暖め・計測外)
     for (int w = 0; w < 32; w++)
     {
-        var _ = ViewportLayout.Build(layoutSnap, topLines[w % LayoutIters], heightPx, 0, metrics);
+        var _ = ViewportLayout.Build(
+            layoutSnap,
+            topLines[w % LayoutIters],
+            topSegment: 0,
+            heightPx,
+            0,
+            metrics
+        );
         sink += _.Count;
     }
     sw.Restart();
     for (int i = 0; i < LayoutIters; i++)
     {
-        var rows = ViewportLayout.Build(layoutSnap, topLines[i], heightPx, 0, metrics);
+        var rows = ViewportLayout.Build(
+            layoutSnap,
+            topLines[i],
+            topSegment: 0,
+            heightPx,
+            0,
+            metrics
+        );
         sink += rows.Count;
     }
     sw.Stop();
@@ -620,13 +643,27 @@ if (layoutMode)
     // ---- L2) 折り返し ON(WrapColumns=80): ViewportLayout.Build 1000 回 ----
     for (int w = 0; w < 32; w++)
     {
-        var _ = ViewportLayout.Build(layoutSnap, topLines[w % LayoutIters], heightPx, 80, metrics);
+        var _ = ViewportLayout.Build(
+            layoutSnap,
+            topLines[w % LayoutIters],
+            topSegment: 0,
+            heightPx,
+            80,
+            metrics
+        );
         sink += _.Count;
     }
     sw.Restart();
     for (int i = 0; i < LayoutIters; i++)
     {
-        var rows = ViewportLayout.Build(layoutSnap, topLines[i], heightPx, 80, metrics);
+        var rows = ViewportLayout.Build(
+            layoutSnap,
+            topLines[i],
+            topSegment: 0,
+            heightPx,
+            80,
+            metrics
+        );
         sink += rows.Count;
     }
     sw.Stop();
@@ -647,6 +684,7 @@ if (layoutMode)
         var rows = ViewportLayout.Build(
             layoutSnap,
             topLines[w % LayoutIters],
+            topSegment: 0,
             heightPx,
             0,
             metrics
@@ -669,7 +707,14 @@ if (layoutMode)
     sw.Restart();
     for (int i = 0; i < LayoutIters; i++)
     {
-        var rows = ViewportLayout.Build(layoutSnap, topLines[i], heightPx, 0, metrics);
+        var rows = ViewportLayout.Build(
+            layoutSnap,
+            topLines[i],
+            topSegment: 0,
+            heightPx,
+            0,
+            metrics
+        );
         var frame = FrameBuilder.Build(
             layoutSnap,
             rows,
@@ -692,7 +737,7 @@ if (layoutMode)
     // ---- L5) PixelMapper.OffsetToPx 相当計算 1000 回 ----
     // 代表 1 セグメント(可視 1 行目相当・平均行長)を対象に、末尾位置までの OffsetToPx を測る。
     // 空行ばかりに当たると偏るので topLine=0 の先頭視覚行を使う。
-    var probeRows = ViewportLayout.Build(layoutSnap, 0, heightPx, 0, metrics);
+    var probeRows = ViewportLayout.Build(layoutSnap, 0, topSegment: 0, heightPx, 0, metrics);
     string probeText =
         probeRows.Count > 0 && probeRows[0].SegmentLength > 0
             ? layoutSnap.GetText(probeRows[0].SegmentStartChar, probeRows[0].SegmentLength)

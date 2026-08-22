@@ -34,7 +34,14 @@ public class ViewportLayoutPrefixTests
         var snap = TextBuffer.FromString(new string('a', 100_000)).Current;
         var counting = new CountingMetrics(M);
 
-        var rows = ViewportLayout.Build(snap, 0, heightPx: 400, wrapColumns: 10, counting);
+        var rows = ViewportLayout.Build(
+            snap,
+            0,
+            topSegment: 0,
+            heightPx: 400,
+            wrapColumns: 10,
+            counting
+        );
 
         Assert.Equal(40, rows.Count);
         // 可視 40 行 × 10 文字 = 400 文字ぶん + maxWidthPx 算出の 1 回 + 余裕。
@@ -46,7 +53,7 @@ public class ViewportLayoutPrefixTests
     public void Build_returns_the_same_rows_as_a_full_Wrap_would()
     {
         var snap = TextBuffer.FromString(new string('a', 100_000)).Current;
-        var rows = ViewportLayout.Build(snap, 0, heightPx: 400, wrapColumns: 10, M);
+        var rows = ViewportLayout.Build(snap, 0, topSegment: 0, heightPx: 400, wrapColumns: 10, M);
 
         var full = LineLayout.Wrap(new string('a', 100_000), 10 * M.MeasureRun("0"), M);
         Assert.Equal(40, rows.Count);
@@ -63,7 +70,7 @@ public class ViewportLayoutPrefixTests
     public void Build_across_multiple_logical_lines_is_unchanged()
     {
         var snap = TextBuffer.FromString("aaaaaaaaaaaaaaa\nbbbbb\nccccccccccccccc").Current;
-        var rows = ViewportLayout.Build(snap, 0, heightPx: 1000, wrapColumns: 10, M);
+        var rows = ViewportLayout.Build(snap, 0, topSegment: 0, heightPx: 1000, wrapColumns: 10, M);
 
         // 行 0: 15 文字 → 2 seg / 行 1: 5 文字 → 1 seg / 行 2: 15 文字 → 2 seg
         Assert.Equal(5, rows.Count);
@@ -91,7 +98,7 @@ public class ViewportLayoutPrefixTests
     public void Build_row_count_follows_the_height_boundary(int heightPx, int expectedRows)
     {
         var snap = TextBuffer.FromString(new string('a', 100_000)).Current;
-        var rows = ViewportLayout.Build(snap, 0, heightPx, wrapColumns: 10, M);
+        var rows = ViewportLayout.Build(snap, 0, topSegment: 0, heightPx, wrapColumns: 10, M);
 
         Assert.Equal(expectedRows, rows.Count);
 
@@ -113,7 +120,14 @@ public class ViewportLayoutPrefixTests
         var snap = TextBuffer.FromString(new string('a', 100_000)).Current;
         var counting = new CountingMetrics(M);
 
-        var rows = ViewportLayout.Build(snap, 0, heightPx, wrapColumns: 10, counting);
+        var rows = ViewportLayout.Build(
+            snap,
+            0,
+            topSegment: 0,
+            heightPx,
+            wrapColumns: 10,
+            counting
+        );
 
         Assert.Empty(rows);
         // 1 文字も測らずに返す(maxWidthPx の算出にすら到達しない)。
@@ -132,7 +146,14 @@ public class ViewportLayoutPrefixTests
             .Current;
         var counting = new CountingMetrics(M);
 
-        var rows = ViewportLayout.Build(snap, 0, heightPx: 10, wrapColumns: 10, counting);
+        var rows = ViewportLayout.Build(
+            snap,
+            0,
+            topSegment: 0,
+            heightPx: 10,
+            wrapColumns: 10,
+            counting
+        );
 
         Assert.Single(rows);
         Assert.Equal(0, rows[0].LogicalLine);
@@ -151,7 +172,14 @@ public class ViewportLayoutPrefixTests
         var snap = TextBuffer.FromString(new string('a', 100_000) + "\nb").Current;
         var counting = new CountingMetrics(M);
 
-        var rows = ViewportLayout.Build(snap, 0, heightPx: 100, wrapColumns: 0, counting);
+        var rows = ViewportLayout.Build(
+            snap,
+            0,
+            topSegment: 0,
+            heightPx: 100,
+            wrapColumns: 0,
+            counting
+        );
 
         Assert.Equal(2, rows.Count);
         Assert.Equal(

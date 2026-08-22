@@ -31,7 +31,14 @@ public sealed partial class EditorControl
             // ローカルへ 1 度だけ受けるのは、以降 2 箇所 (ViewportLayout.Build / FrameBuilder.Build)
             // で同一値を使うことを保証するため(式自体は移設前と同一=挙動不変)。
             int paintHeight = PaintHeightPx;
-            var rows = ViewportLayout.Build(snap, _topLine, paintHeight, _wrapColumns, _metrics);
+            var rows = ViewportLayout.Build(
+                snap,
+                _topLine,
+                topSegment: 0,
+                paintHeight,
+                _wrapColumns,
+                _metrics
+            );
             int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
 
             // 選択がある間は現在行強調 FillRect を抑止する(選択矩形と重ねると

@@ -387,7 +387,14 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_buffer is null)
             return (0, 0);
         var snap = _buffer.Current;
-        var rows = ViewportLayout.Build(snap, _topLine, PaintHeightPx, _wrapColumns, _metrics);
+        var rows = ViewportLayout.Build(
+            snap,
+            _topLine,
+            topSegment: 0,
+            PaintHeightPx,
+            _wrapColumns,
+            _metrics
+        );
         if (rows.Count == 0)
             return (0, 0);
         var first = rows[0];
@@ -1069,7 +1076,14 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // HScroll 表示可否を決めるための計算では、まだ表示していない前提で高さいっぱいを見る
         // (可視行がわずかに多めになるだけで最長幅の推定には害がない)。
         int probeHeight = Math.Max(0, ClientSize.Height);
-        var rows = ViewportLayout.Build(snap, _topLine, probeHeight, wrapColumns: 0, _metrics);
+        var rows = ViewportLayout.Build(
+            snap,
+            _topLine,
+            topSegment: 0,
+            probeHeight,
+            wrapColumns: 0,
+            _metrics
+        );
         int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
         int maxLineWidthPx = 0;
         foreach (var row in rows)
