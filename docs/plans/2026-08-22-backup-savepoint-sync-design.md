@@ -303,3 +303,44 @@ assert してもガードの有無で差が出ない(網が分岐に当たって
 - `BackupCoordinator.OfferRestoreOnStartup` の `confirm=false` 分岐はレコード件数が**無制限**
   (ON 経路の `SessionLayoutStore.MaxTabs=200` に相当する打ち切りがない)。本 PR の範囲外の
   既存事項だが、リモート I/O やタブ生成の増幅器になる。次テーマで上限の要否を判断する。
+
+### 9.5 コード品質レビューの反映(2 パス目)
+
+- **I-1(Important)**: `SavePoint_WhenBothFeaturesDisabled_DoesNothing` が vacuous だった。
+  `Host(enabled: false)` は ctor が早期 return して `_writer` を生成しないため、
+  `_writer?.Delete(...)` はガードの有無に関係なく no-op になり、
+  `(!_enabled && !_sessionRestoreEnabled)` を落とす変異が **503 件全緑で生存**した(自分でも再現)。
+  ガードが実際に効くのは「**writer 生成後に `UpdateSettings` で OFF にした**」経路なので、
+  `SavePoint_AfterBothFeaturesTurnedOff_KeepsBackup` へ差し替えて kill を確認した。
+  これは `UpdateSettings` の明示契約「無効化では既存バックアップファイルを削除しない
+  (次回起動の孤児提案に任せる・安全側)」の保存テストでもある。
+  **表の作り方の教訓**: ガードが複数条件の OR のときは、**条件ごとに 1 行ずつ**変異させる。
+  §6 のミューテーション表はこの節を丸ごと落としていた。
+- **M-2**: `OnCleanedOrClosed(bool clean)` → `OnBackupBecameUnneeded(bool becameUnneeded)` へ改名。
+  M-31 が直すのは「dirty タブを Ctrl+W の『いいえ』で破棄した」ケースなので、
+  クローズ経路の `clean: true` は読み手に嘘になっていた。
+  なお設計書 §3.2 の名前(`OnDocumentSavePointOrClose`)からの改名は計画からの逸脱にあたる(CLAUDE.md §2)。
+- **M-3**: `MainForm.BackupForTest`(Coordinator 全体の露出)を
+  `StartupRestoreGateOpenForTest`(観測点 1 個)へ狭めた。
+- **M-4**: 抑止シームのコメントの由来表記を「Task 7 + A-1 第 2 層」へ更新。
+- **M-5**: `TakeStaleRestoredPaths` に `Distinct(OrdinalIgnoreCase)` を追加。
+  同一パスのレコードは複数ありうる(レイアウトの重複レコード・レイアウト由来 + extras 由来)ため、
+  警告に同じ行が並んで表示上限 10 件の枠を食い潰す。
+- **M-6**: 対照テスト `OnShown_UnifiedOn_FreshBackup_DoesNotWarn` に本文の assert を追加(自己検証性)。
+- **M-7**: 実装計画 §Task 7 のミューテーション表のテスト名は策定時のまま
+  (`DirtyTransition_DoesNotWriteBackup_Immediately` → 実際は `..._DoesNotWriteLayout_...`、
+  `Startup_OpensImmediateReconcileGate` → 実際は `OnShown_UnifiedOn/Off_...`)。
+  日付付き計画書は策定時スナップショット(CLAUDE.md §8)のため表は書き換えず、本節を正とする。
+
+### 9.6 ミューテーション検証の最終結果(8 点・全 kill)
+
+| # | 変異 | kill したテスト |
+|---|------|-----------------|
+| 1 | `if (!becameUnneeded) return;` 除去 | `DirtyTransition_DoesNotWriteLayout_Immediately`(当初生存 → 網を修正) |
+| 2 | `!_startupRestoreDone` をガードから除去 | 15 件(Coordinator 3 + MainFormSmoke 12) |
+| 3 | `MarkStartupRestoreComplete()` 呼出削除 | 3 件 |
+| 4 | `IsDiskNewer` の `>` → `>=` | 2 件 |
+| 5 | `IsDiskNewer` の許容加算削除 | 2 件 |
+| 6 | `NoteIfBackupStale` を検証分岐の外へ | `RestoreFromBackup_RejectedPath_DoesNotQueryTimestamp` |
+| 7 | ON 経路の `NoteIfBackupStale` 削除 | 2 件 |
+| 8 | `(!_enabled && !_sessionRestoreEnabled)` をガードから除去 | `SavePoint_AfterBothFeaturesTurnedOff_KeepsBackup`(当初生存 → I-1) |

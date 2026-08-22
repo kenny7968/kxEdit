@@ -434,20 +434,35 @@ public class BackupCoordinatorTests
             Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
         });
 
-    /// <summary>両機能 OFF(バックアップ無効 × セッション復元無効)では即時経路も動かない
-    /// = 既存 Reconcile 冒頭のガードと同じ条件であること。</summary>
+    /// <summary>
+    /// 両機能 OFF(バックアップ無効 × セッション復元無効)では即時経路も動かない
+    /// = 既存 Reconcile 冒頭のガードと同じ条件であること。
+    /// </summary>
+    /// <remarks>
+    /// <b>ctor から OFF にしてはいけない</b>(コード品質レビュー I-1): その場合 ctor が
+    /// <c>if (!_enabled &amp;&amp; !_sessionRestoreEnabled) return;</c> で早期 return して
+    /// <c>_writer</c> を生成しないため、<c>_writer?.Delete(...)</c> は guard の有無に関係なく
+    /// no-op になり、ガードを外す変異が生き残る(実測で 503 件全緑を確認)。
+    /// ガードが実際に効くのは「writer 生成後に UpdateSettings で OFF にした」経路。
+    /// これは UpdateSettings の明示契約「無効化では既存バックアップファイルを削除しない
+    /// (次回起動の孤児提案に任せる・安全側)」の保存でもある。
+    /// </remarks>
     [Fact]
-    public void SavePoint_WhenBothFeaturesDisabled_DoesNothing() =>
+    public void SavePoint_AfterBothFeaturesTurnedOff_KeepsBackup() =>
         Sta.Run(() =>
         {
-            using var host = new Host(enabled: false);
+            using var host = new Host();
             host.Backup.MarkStartupRestoreComplete();
             var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // Write 発生 = _writer 生成済み + _map に HasBackup=true
+            var id = host.Writer.Writes[0].Id;
+            host.Backup.UpdateSettings(false, 30, restoreSessionEnabled: false); // writer は残る
+            int deletesBefore = host.Writer.Deletes.Count;
 
             doc.Editor.SetSavePoint();
 
-            Assert.Empty(host.Writer.Deletes);
-            Assert.Empty(host.Writer.LayoutWrites);
+            Assert.Equal(deletesBefore, host.Writer.Deletes.Count);
+            Assert.True(host.Writer.Store.ContainsKey(id));
         });
 
     // ===== 失敗回復(_failed → 次 Reconcile で ForceWrite) =====

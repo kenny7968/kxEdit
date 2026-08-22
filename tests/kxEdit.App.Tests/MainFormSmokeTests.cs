@@ -493,7 +493,7 @@ public class MainFormSmokeTests
 
             using var form = ShowMainForm_Unified(settings, tmp);
 
-            Assert.True(form.BackupForTest.StartupRestoreDoneForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest);
         });
 
     /// <summary>OFF 経路(従来の復元提案)でもゲートは開く。ON 側だけに置くと、
@@ -508,7 +508,7 @@ public class MainFormSmokeTests
 
             using var form = ShowMainForm_Unified(settings, tmp);
 
-            Assert.True(form.BackupForTest.StartupRestoreDoneForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest);
         });
 
     /// <summary>ゲートは復元<b>後</b>に開くこと。復元より前に開くと、ctor の NewFile →
@@ -532,7 +532,7 @@ public class MainFormSmokeTests
 
             var doc = Assert.Single(form.FileForTest.DocsForTest);
             Assert.Equal(p1, doc.State.Path);
-            Assert.True(form.BackupForTest.StartupRestoreDoneForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest);
         });
 
     /// <summary>A-1 第 2 層の配線: ディスクがバックアップより新しいまま復元されたら、
@@ -588,6 +588,10 @@ public class MainFormSmokeTests
             using var form = ShowMainForm_Unified(settings, tmp);
 
             Assert.Equal(0, form.StaleBackupWarningCountForTest);
+            // レビュー M-6: 復元自体が起きなくなっても 0 件で緑になるため、
+            // 「バックアップ本文で復元された」ことを併せて固定する(自己検証性)。
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal("backup-newer", doc.Editor.SnapshotText);
         });
 
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====

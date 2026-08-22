@@ -67,7 +67,7 @@ public sealed class BackupCoordinator : IDisposable
 
     /// <summary>起動時復元(MainForm.OnShown)が完了したか。完了までは保存点/クローズの
     /// 即時反映を止める(設計 2026-08-22 §3.3)。MainForm ctor の NewFile は SetSavePoint 経由で
-    /// <see cref="OnCleanedOrClosed"/> へ到達するため、ゲートが無いと空無題 1 タブのレイアウトを
+    /// <see cref="OnBackupBecameUnneeded"/> へ到達するため、ゲートが無いと空無題 1 タブのレイアウトを
     /// 復元前に session-state.json へ書き込み、前回セッションを失う。既存の
     /// ActiveDocumentChanged 経路が同じ事故を起こしていないのは、ctor 時点で TabControl の
     /// ハンドルが未生成で WinForms の Selected が発火しないため(= 偶然に守られている)。</summary>
@@ -133,8 +133,12 @@ public sealed class BackupCoordinator : IDisposable
         // A-1 / M-31(設計 2026-08-22 §3.1): 「バックアップが不要になった」瞬間を即時反映する。
         // Timer と ActiveDocumentChanged だけでは、保存直後 / 破棄直後〜次 tick(既定 300 秒)の
         // クラッシュ窓で、古いバックアップが dirty 復元され Ctrl+S で新内容を上書きする。
-        _docs.DocumentDirtyChanged += (_, doc) => OnCleanedOrClosed(!doc.Editor.Modified);
-        _docs.DocumentClosed += (_, _) => OnCleanedOrClosed(clean: true);
+        _docs.DocumentDirtyChanged += (_, doc) =>
+            OnBackupBecameUnneeded(becameUnneeded: !doc.Editor.Modified);
+        // クローズは内容の dirty / clean を問わず「この文書のバックアップは不要」。
+        // M-31 が直すのは dirty タブを Ctrl+W の「いいえ」で破棄したケースなので、
+        // ここを clean と呼ぶと読み手に嘘になる(コード品質レビュー M-2)。
+        _docs.DocumentClosed += (_, _) => OnBackupBecameUnneeded(becameUnneeded: true);
         // レイアウトのみモード(設計 §5.2 OFF×ON)でも writer と timer は動かす。
         if (!_enabled && !_sessionRestoreEnabled)
             return;
@@ -417,7 +421,7 @@ public sealed class BackupCoordinator : IDisposable
     /// A-1 / M-31(設計 2026-08-22 §3.2): clean 化・クローズだけを即時反映する。
     /// </summary>
     /// <remarks>
-    /// dirty 化(clean=false)では何もしない。dirty 化で不要になるものは何も無い一方、
+    /// dirty 化(becameUnneeded=false)では何もしない。dirty 化で不要になるものは何も無い一方、
     /// <see cref="ReconcileLayout"/> はキャレット位置を署名に含むため、対称に配線すると
     /// 「保存後の 1 打鍵目」ごとに session-state.json の背景書込が増えるだけになる
     /// (レイアウトは次 tick と終了時の FinalFlush が確定させる)。
@@ -433,9 +437,9 @@ public sealed class BackupCoordinator : IDisposable
     /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害
     /// (次に dirty 化したとき 1 回余分に書くだけ = 安全側)。
     /// </remarks>
-    private void OnCleanedOrClosed(bool clean)
+    private void OnBackupBecameUnneeded(bool becameUnneeded)
     {
-        if (!clean)
+        if (!becameUnneeded)
             return;
         if (_shutDown || !_startupRestoreDone || (!_enabled && !_sessionRestoreEnabled))
             return;

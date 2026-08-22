@@ -72,7 +72,10 @@ public sealed class FileController
     /// 同じ警告を二度出さない)。MainForm.OnShown が ON / OFF いずれの復元後にも回収する。</summary>
     public IReadOnlyList<string> TakeStaleRestoredPaths()
     {
-        var result = _staleRestoredPaths.ToArray();
+        // レビュー M-5: 同一パスのレコードは複数ありうる(レイアウトの重複レコード・
+        // レイアウト由来 + extras 由来)。重複したまま渡すと警告に同じ行が並び、
+        // 表示上限 10 件の枠を重複が食い潰す。
+        var result = _staleRestoredPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         _staleRestoredPaths.Clear();
         return result;
     }

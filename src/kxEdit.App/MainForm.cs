@@ -65,7 +65,8 @@ public sealed partial class MainForm : Form
     // できた時のみ破棄される契約(Task 5 review M-2)。ctor 末尾で 1 度だけ代入し以後不変。
     private readonly Document? _startupEmptyDoc;
 
-    // Task 7 テスト用: 起動時復元の Warn ダイアログ (MessageBox.Show=blocking) をテストで抑止する seam。
+    // Task 7 + A-1 第 2 層テスト用: 起動時復元の Warn ダイアログ (MessageBox.Show=blocking) を
+    // テストで抑止する seam。
     // 対象は 2 種 = FailedPaths の集約警告(ShowFailedRestoreDialog)と、A-1 第 2 層の陳腐化警告
     // (ShowStaleBackupWarning)。MessageBox が UI スレッドを塞ぐのを避けるため。
     // 実運用経路では常に false=ダイアログは出る。
@@ -81,7 +82,11 @@ public sealed partial class MainForm : Form
     private int _staleBackupWarningCountForTest;
     internal int StaleBackupWarningCountForTest => _staleBackupWarningCountForTest;
 
-    internal BackupCoordinator BackupForTest => _backup;
+    /// <summary>A-1 / M-31 テスト用: OnShown が即時反映ゲートを開いたか
+    /// (<see cref="BackupCoordinator.StartupRestoreDoneForTest"/> の中継)。Coordinator 側の
+    /// テストは seam を直接叩くため、MainForm の配線漏れをそちらでは検出できない。
+    /// Coordinator 全体を露出せず観測点 1 個に絞る(レビュー M-3)。</summary>
+    internal bool StartupRestoreGateOpenForTest => _backup.StartupRestoreDoneForTest;
 
     // Task 13 テスト用: OnFormClosing が silent path(§8.2 fast-path)を通ったかを観測する。
     // null = OnFormClosing 未実行 / true = silent (ConfirmDiscardIfDirty loop skip) / false = fall-through。
