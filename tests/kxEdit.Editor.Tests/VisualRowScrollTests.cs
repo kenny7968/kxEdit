@@ -964,7 +964,9 @@ public class VisualRowScrollTests
             using (c)
             {
                 c.SetTopPosition(0, 10);
-                c.ScrollCharRangeIntoView(24, 26, alignToTop: false); // 視覚行 13 = 可視域の 4 本目
+                // 可視域の<b>途中</b>(2 本目)を狙う。最下段(視覚行 13)を狙うと
+                // 「下端へ寄せ直す」誤実装が偶然同じ起点を出してしまい変異を弁別できない。
+                c.ScrollCharRangeIntoView(20, 22, alignToTop: false); // 視覚行 11
                 Assert.Equal((0, 10), (c.TopLine, c.TopSegment));
             }
         });
@@ -997,6 +999,90 @@ public class VisualRowScrollTests
                 // 上方向: 文書頭の視覚行 1 を最上段へ。
                 c.ScrollCharRangeIntoView(2, 2, alignToTop: true);
                 Assert.Equal((0, 1), (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// 対象が起点と<b>同じ論理行</b>にあり、かつ TopSegment より上にあるケース。
+    /// <c>ScrollCharRangeIntoView</c> の粗い否定は論理行でしか弾かないので、この位置は
+    /// 辞書順の弁別(<c>row.Seg &gt;= _topSegment</c>)だけが「不可視」と判定できる。
+    /// 距離だけで判定すると <c>CountVisualRowsForward</c> が 0 を返して「既に可視」となり、
+    /// 早期リターンで画面が動かない=SR のレビューカーソルが画面外に取り残される。
+    /// </summary>
+    [Fact]
+    public void ScrollCharRangeIntoView_WithWrap_ScrollsUp_WhenTargetIsAboveTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 50);
+                c.ScrollCharRangeIntoView(40, 40, alignToTop: true); // 視覚行 20 を最上段へ
+                Assert.Equal((0, 20), (c.TopLine, c.TopSegment));
+
+                c.SetTopPosition(0, 50);
+                c.ScrollCharRangeIntoView(40, 40, alignToTop: false); // 視覚行 20 を最下段へ
+                Assert.Equal((0, 20 - (4 - 1)), (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// <c>ScrollCharRangeIntoView</c> を全 (起点視覚行 × 対象位置 × alignToTop) で総当りし、
+    /// 視覚行を列挙したオラクルと一致することを固定する
+    /// (<see cref="BringCaretIntoView_MatchesRowOracle_ForAllStartsAndCarets"/> の UIA 版)。
+    /// 「既に可視なら垂直は動かさない」契約もこの網に含まれる。
+    /// キャレット / アンカーを動かさないこと(装飾スクロール)も併せて確認する。
+    /// </summary>
+    [Fact]
+    public void ScrollCharRangeIntoView_MatchesRowOracle_ForAllStartsAndTargets() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            var (f, c) = MakeControl(OracleText, wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(OracleText).Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.True(
+                    rows.Count > VisibleRows + 2,
+                    "fixture 前提: 可視行数より十分多い視覚行がある"
+                );
+
+                for (int offset = 0; offset <= snap.CharLength; offset++)
+                {
+                    int targetIdx = rows.IndexOf(LocateRow(c, snap, offset));
+                    Assert.True(targetIdx >= 0, $"offset {offset} の視覚行が列挙に無い");
+
+                    for (int startIdx = 0; startIdx < rows.Count; startIdx++)
+                    {
+                        foreach (bool alignToTop in new[] { true, false })
+                        {
+                            c.SetTopPosition(rows[startIdx].Line, rows[startIdx].Seg);
+                            c.ScrollCharRangeIntoView(offset, offset, alignToTop);
+
+                            int expectedIdx;
+                            if (targetIdx >= startIdx && targetIdx - startIdx < VisibleRows)
+                                expectedIdx = startIdx; // 既に可視=動かさない
+                            else if (alignToTop)
+                                expectedIdx = targetIdx; // 対象を最上段へ
+                            else
+                                expectedIdx = Math.Max(0, targetIdx - (VisibleRows - 1)); // 最下段へ
+
+                            Assert.Equal(rows[expectedIdx], (c.TopLine, c.TopSegment));
+                            Assert.True(
+                                c.ComputeCaretPoint(offset).Visible,
+                                $"offset {offset} / 起点 {rows[startIdx]} / alignToTop={alignToTop} "
+                                    + "で対象が可視域外"
+                            );
+                        }
+                    }
+                }
+
+                // 装飾スクロールなのでキャレット / アンカーは動かない。
+                Assert.Equal(0, c.CaretCharOffset);
+                Assert.Equal(0, c.SelectionAnchor);
             }
         });
 }

@@ -366,11 +366,15 @@ public sealed partial class EditorControl
     /// 一致していないと、最下論理行にキャレットが来たとき「垂直はまだ可視」と誤判断され
     /// hscroll の下に張り付いたまま TopLine が動かないケースが発生する。
     ///
-    /// <b>判定の順序が load-bearing(設計書 §4.2 の 2 → 3)。</b>
-    /// 「起点より上か」を<b>先に</b>辞書順比較で弁別してから距離を測る。
+    /// <b>「起点より上か」を辞書順比較で弁別する第 1 分岐が load-bearing。</b>
     /// <see cref="CountVisualRowsForward"/> は前方距離しか意味を持たず、起点より手前の位置には
     /// 0 を返す(同一論理行内は <c>Math.Max(0, toSeg - fromSeg)</c>・手前の論理行は 0)ため、
-    /// 距離だけで判定すると<b>キャレットが起点より上にあるのに「可視」と誤判定</b>する。
+    /// 距離だけで判定すると<b>キャレットが起点より上にあるのに「可視」と誤判定</b>して
+    /// 画面が追従しない(この分岐を落とす変異は 4 本のテストが kill する)。
+    /// 一方、<b>2 つの分岐の記述順そのものは観測できない</b>=両条件は排他だからである
+    /// (第 1 分岐が真のとき距離は必ず 0 で、<c>visibleRows &gt;= 1</c> より第 2 分岐は偽)。
+    /// 順序を入れ替える変異は equivalent mutant で kill できない。設計書 §4.2 の 2 → 3 の順に
+    /// 書いてあるのは<b>可読性のため</b>であり、正しさの依存関係ではない。
     ///
     /// この第 1 分岐は、陳腐化した <c>_topSegment</c>(編集で先頭段落が縮んでも
     /// リセットしない設計=設計書 §4.1)からの<b>自己修復</b>も担う。陳腐化時は
@@ -396,7 +400,7 @@ public sealed partial class EditorControl
         if (caretLine < _topLine || (caretLine == _topLine && caretSeg < _topSegment))
         {
             // 上へはみ出している=キャレットの視覚行を最上段にする。
-            // 距離判定より先に置くこと(remarks の「判定の順序が load-bearing」)。
+            // この辞書順の弁別を落として距離だけにしてはならない(remarks 参照)。
             SetTopPosition(caretLine, caretSeg);
         }
         else if (
@@ -601,6 +605,10 @@ public sealed partial class EditorControl
                 SetTopPosition(tl, ts);
             else
             {
+                // 下端寄せ。ここを「より多く遡る」方向へ変異させても、直後の
+                // EnsureVisibleCharRange → BringCaretIntoView の第 2 分岐が
+                // targetRow - (visibleRows - 1) へ引き戻すため観測できない
+                // (equivalent mutant)。逆に「遡り足りない」方向は引き戻されず観測できる。
                 var (nl, ns) = WalkBackVisualRows(snap, tl, ts, visibleRows - 1);
                 SetTopPosition(nl, ns);
             }
