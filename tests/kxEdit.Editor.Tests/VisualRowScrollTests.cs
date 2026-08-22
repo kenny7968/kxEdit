@@ -658,4 +658,345 @@ public class VisualRowScrollTests
                 Assert.Equal(1 * lh, y);
             }
         });
+
+    // ===== A-6: 折り返し ON の追従スクロール =====
+
+    /// <summary>各段落が複数視覚行になる文書。段落数 × 段落あたりの文字数で作る。</summary>
+    private static string Paragraphs(int count, int charsPerParagraph) =>
+        string.Join(
+            "\n",
+            Enumerable
+                .Range(0, count)
+                .Select(i => new string((char)('a' + (i % 26)), charsPerParagraph))
+        );
+
+    /// <summary>OnKeyDown(protected)を 1 回叩く。</summary>
+    private static void KeyDown(EditorControl c, Keys keys)
+    {
+        var mi = typeof(EditorControl).GetMethod(
+            "OnKeyDown",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(mi is not null, "EditorControl に protected OnKeyDown が見つからない");
+        try
+        {
+            mi!.Invoke(c, new object[] { new KeyEventArgs(keys) });
+        }
+        catch (TargetInvocationException e) when (e.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            throw; // 到達しない
+        }
+    }
+
+    /// <summary>
+    /// キャレットが可視域に入っていること。<c>PointFromCharOffset</c> は不可視を
+    /// <c>Point.Empty</c> で表すが <c>Point.Empty == new Point(0, 0)</c> なので、
+    /// 可視域最上段の行頭(座標も (0,0))と区別できない。可視性は必ずフラグで見る
+    /// (<see cref="PointFromCharOffset_ReturnsEmpty_ForRowsAboveTopSegment"/> と同じ理由)。
+    /// </summary>
+    private static void AssertCaretVisible(EditorControl c, string because) =>
+        Assert.True(c.ComputeCaretPoint(c.CaretCharOffset).Visible, because);
+
+    [Fact]
+    public void KeyDown_Down_WithWrap_KeepsCaretVisible() =>
+        Sta.Run(() =>
+        {
+            // 1 段落 = 5 視覚行(10 文字 / wrap=2)、可視 6 行。
+            // 修正前は論理行が可視行数(6)に達するまで TopLine が動かず、
+            // 2 段落目の途中でキャレットが可視域外へ出たまま戻らなかった。
+            var (f, c) = MakeControl(Paragraphs(8, 10), wrap: 2, visibleRows: 6);
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                for (int i = 0; i < 20; i++)
+                {
+                    KeyDown(c, Keys.Down);
+                    AssertCaretVisible(c, $"{i + 1} 回目の ↓ でキャレットが可視域外へ出た");
+                }
+                Assert.True(c.TopLine > 0 || c.TopSegment > 0, "画面が 1 度も追従していない");
+            }
+        });
+
+    [Fact]
+    public void KeyDown_Down_SingleHugeLogicalLine_ScrollsByVisualRows() =>
+        Sta.Run(() =>
+        {
+            // 論理行 1 本だけの文書。修正前は TopLine が 0 から動かず(maxLine=0)、
+            // 先頭 visibleRows 本より下へ到達する手段が無かった。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(0);
+                for (int i = 0; i < 10; i++)
+                    KeyDown(c, Keys.Down);
+
+                Assert.Equal(0, c.TopLine); // 論理行は 1 本しかない
+                Assert.True(
+                    c.TopSegment > 0,
+                    "TopSegment が進んでいない=視覚行スクロールしていない"
+                );
+                AssertCaretVisible(c, "巨大 1 行でキャレットが可視域外へ出た");
+            }
+        });
+
+    [Fact]
+    public void KeyDown_Up_WithWrap_ScrollsBackToTop() =>
+        Sta.Run(() =>
+        {
+            // 下端まで降りてから ↑ で戻り、TopSegment が 0 まで戻ること。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 20);
+                c.SetCaretCharOffset(40); // 視覚行 20 の先頭
+                Assert.Equal(20, c.TopSegment); // fixture 前提: 既に可視なので追従で動かない
+                for (int i = 0; i < 25; i++)
+                    KeyDown(c, Keys.Up);
+
+                Assert.Equal(0, c.TopSegment);
+                Assert.Equal(0, c.CaretCharOffset);
+            }
+        });
+
+    [Fact]
+    public void BringCaretIntoView_WithWrap_NoOp_WhenCaretAlreadyVisible() =>
+        Sta.Run(() =>
+        {
+            // no-change テストは非既定位置から始める(既定 0 と区別する)。
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 10);
+                c.SetCaretCharOffset(22); // 視覚行 11 = 可視域の 2 本目
+                c.SetTopPosition(0, 10); // SetCaretCharOffset 自体の追従で動いた分を戻す
+                c.BringCaretIntoView();
+                Assert.Equal(10, c.TopSegment);
+            }
+        });
+
+    [Fact]
+    public void EnsureVisibleCharRange_WithWrap_PutsTargetAtBottom() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.EnsureVisibleCharRange(100, 0); // 視覚行 50
+                // 対象を下端に寄せる=起点は 50 - (4 - 1) = 47
+                Assert.Equal(0, c.TopLine);
+                Assert.Equal(47, c.TopSegment);
+            }
+        });
+
+    /// <summary>
+    /// 設計書 §4.2 の判定<b>順序</b>(まず辞書順で「起点より上」を弁別 → その後に距離)を固定する。
+    /// 距離だけで判断すると <c>CountVisualRowsForward</c> は前方距離しか返さない
+    /// (同一論理行は <c>Math.Max(0, toSeg - fromSeg)</c>・手前の論理行は 0)ため、
+    /// キャレットが起点より<b>上</b>にあっても距離 0 =「可視」と誤判定し画面が追従しない。
+    /// 同一論理行内・論理行跨ぎの両方を 1 本で押さえる。
+    /// </summary>
+    [Fact]
+    public void BringCaretIntoView_ScrollsUp_WhenCaretIsAboveTop() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(OracleText, wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(OracleText).Current;
+                int lastLine = snap.LineCount - 1;
+                Assert.True(SegCount(c, snap, lastLine) >= 7, "fixture 前提: 末尾行は視覚行が多い");
+                int lastLineStart = snap.GetLineStart(lastLine);
+
+                // (a) 同一論理行内で起点より上。距離は Math.Max(0, 2 - 6) = 0 になる。
+                c.SetCaretCharOffset(lastLineStart + 4); // 末尾行の視覚行 2
+                c.SetTopPosition(lastLine, 6);
+                Assert.Equal((lastLine, 6), (c.TopLine, c.TopSegment));
+                c.BringCaretIntoView();
+                Assert.Equal((lastLine, 2), (c.TopLine, c.TopSegment));
+                AssertCaretVisible(c, "同一論理行内で上へ追従していない");
+
+                // (b) 起点より上の論理行。CountVisualRowsForward は toLine < fromLine で 0 を返す。
+                c.SetCaretCharOffset(2); // 論理行 0 の視覚行 1
+                c.SetTopPosition(lastLine, 4);
+                Assert.Equal((lastLine, 4), (c.TopLine, c.TopSegment));
+                c.BringCaretIntoView();
+                Assert.Equal((0, 1), (c.TopLine, c.TopSegment));
+                AssertCaretVisible(c, "論理行跨ぎで上へ追従していない");
+            }
+        });
+
+    /// <summary>
+    /// 陳腐化した <c>_topSegment</c>(編集で先頭段落が縮んでも _topSegment はリセットしない設計)
+    /// からの<b>自己修復</b>を固定する。この状態では描画と可視判定が食い違う:
+    /// <c>ViewportLayout.Build</c> は最終セグメントへクランプして描くが、
+    /// <c>ComputeCaretPoint</c> の <c>segIdx &lt; _topSegment</c> はその最終セグメントも
+    /// 不可視と報告する。編集経路(<c>AfterEdit</c>)が必ず呼ぶ <see cref="EditorControl.BringCaretIntoView"/> の
+    /// <b>第 1 分岐(辞書順で「起点より上」)</b>が発火して起点をキャレットの実在視覚行へ
+    /// 寄せ直すことで、1 フレーム内に整合が回復する。判定順序を距離優先にすると
+    /// 距離 0 =「可視」と誤判定して修復しない。
+    /// </summary>
+    [Fact]
+    public void BringCaretIntoView_SelfHealsStaleTopSegment() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(OracleText, wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(OracleText).Current;
+                int lastLine = snap.LineCount - 1;
+                int segs = SegCount(c, snap, lastLine);
+                Assert.True(segs >= 3, "fixture 前提: 末尾行は複数の視覚行を持つ");
+                int lastLineStart = snap.GetLineStart(lastLine);
+                int caret = lastLineStart + 4; // 末尾行の視覚行 2
+
+                c.SetCaretCharOffset(caret);
+                c.SetTopPosition(lastLine, segs + 20); // 実セグメント数を超える陳腐化した起点
+                Assert.Equal(segs + 20, c.TopSegment); // SetTopPosition 自体は寄せない
+
+                // 陳腐化した状態=描画(Build)と可視判定(ComputeCaretPoint)が食い違う。
+                Assert.Equal(
+                    snap.GetLineStart(lastLine) + 2 * (segs - 1),
+                    c.GetVisibleCharRange().Start // Build は最終セグメントへクランプして描く
+                );
+                Assert.False(
+                    c.ComputeCaretPoint(caret).Visible,
+                    "fixture 前提: 陳腐化した起点では可視判定が「不可視」を返す"
+                );
+
+                c.BringCaretIntoView();
+
+                Assert.Equal((lastLine, 2), (c.TopLine, c.TopSegment)); // 実在の視覚行へ寄った
+                AssertCaretVisible(c, "陳腐化した TopSegment から自己修復していない");
+            }
+        });
+
+    /// <summary>
+    /// スクロール判断を全 (起点視覚行 × キャレット位置) で総当りし、視覚行を列挙したオラクルと
+    /// 一致することを固定する。オラクルは <see cref="EnumerateRows"/> の平坦な index 差だけで
+    /// 組むので、判定順序・距離計算・遡り歩きのどれを変異させても伝播しない。
+    /// fixture は複数論理行 × 複数視覚行 × 空行 2 連 × 文書頭 / 文書末をすべて踏む。
+    /// </summary>
+    [Fact]
+    public void BringCaretIntoView_MatchesRowOracle_ForAllStartsAndCarets() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            var (f, c) = MakeControl(OracleText, wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(OracleText).Current;
+                var rows = EnumerateRows(c, snap);
+                Assert.True(
+                    rows.Count > VisibleRows + 2,
+                    "fixture 前提: 可視行数より十分多い視覚行がある"
+                );
+
+                for (int offset = 0; offset <= snap.CharLength; offset++)
+                {
+                    c.SetCaretCharOffset(offset);
+                    int caretIdx = rows.IndexOf(LocateRow(c, snap, offset));
+                    Assert.True(caretIdx >= 0, $"offset {offset} の視覚行が列挙に無い");
+
+                    for (int startIdx = 0; startIdx < rows.Count; startIdx++)
+                    {
+                        c.SetTopPosition(rows[startIdx].Line, rows[startIdx].Seg);
+                        c.BringCaretIntoView();
+
+                        int expectedIdx;
+                        if (caretIdx < startIdx)
+                            expectedIdx = caretIdx; // 上へはみ出し=キャレット行を最上段へ
+                        else if (caretIdx - startIdx >= VisibleRows)
+                            expectedIdx = Math.Max(0, caretIdx - (VisibleRows - 1)); // 下端へ寄せる
+                        else
+                            expectedIdx = startIdx; // 既に可視=動かさない
+
+                        Assert.Equal(rows[expectedIdx], (c.TopLine, c.TopSegment));
+                        Assert.True(
+                            c.ComputeCaretPoint(offset).Visible,
+                            $"offset {offset} / 起点 {rows[startIdx]} でキャレットが可視域外"
+                        );
+                    }
+                }
+            }
+        });
+
+    /// <summary>
+    /// UIA <c>ScrollIntoView</c> 経路(<c>ScrollCharRangeIntoView</c>)も同じ判定を使うこと。
+    /// alignToTop=true は対象の視覚行を最上段へ、false は最下段へ寄せる。
+    /// 修正前は論理行だけで判定していたため、巨大 1 行の文書では TopLine が動かせず
+    /// SR のレビューカーソルが画面外へ出たままになった。
+    /// </summary>
+    [Fact]
+    public void ScrollCharRangeIntoView_WithWrap_UsesVisualRows() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.ScrollCharRangeIntoView(100, 120, alignToTop: true); // 視覚行 50 を最上段へ
+                Assert.Equal((0, 50), (c.TopLine, c.TopSegment));
+
+                c.ScrollCharRangeIntoView(100, 120, alignToTop: false); // 視覚行 60 を最下段へ
+                Assert.Equal((0, 60 - (4 - 1)), (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// <c>ScrollCharRangeIntoView</c> の「既に可視なら垂直は動かさない」契約(SR が歩くたびに
+    /// 画面が飛ばないための判断)が折り返し ON でも保たれること。非既定位置から始める。
+    /// </summary>
+    [Fact]
+    public void ScrollCharRangeIntoView_WithWrap_KeepsTop_WhenTargetAlreadyVisible() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl(new string('a', 200), wrap: 2, visibleRows: 4);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(0, 10);
+                c.ScrollCharRangeIntoView(24, 26, alignToTop: false); // 視覚行 13 = 可視域の 4 本目
+                Assert.Equal((0, 10), (c.TopLine, c.TopSegment));
+            }
+        });
+
+    /// <summary>
+    /// <c>ScrollCharRangeIntoView</c> の粗い否定(対象論理行が [TopLine, TopLine+visibleRows) の
+    /// 外なら視覚行を計算せず不可視と断じる)が、論理行跨ぎでも正しい起点へ寄せること。
+    /// 空行 2 連を含む fixture で、対象論理行が可視域より下・上の両方を踏む。
+    /// </summary>
+    [Fact]
+    public void ScrollCharRangeIntoView_WithWrap_ScrollsAcrossLogicalLines() =>
+        Sta.Run(() =>
+        {
+            const int VisibleRows = 4;
+            var (f, c) = MakeControl(OracleText, wrap: 2, visibleRows: VisibleRows);
+            using (f)
+            using (c)
+            {
+                var snap = TextBuffer.FromString(OracleText).Current;
+                var rows = EnumerateRows(c, snap);
+                int lastLine = snap.LineCount - 1;
+                int target = snap.GetLineStart(lastLine) + 6; // 末尾行の視覚行 3
+                int targetIdx = rows.IndexOf((lastLine, 3));
+                Assert.True(targetIdx >= VisibleRows, "fixture 前提: 対象は初期可視域より下");
+
+                // 下方向: 対象を最下段へ寄せる。
+                c.ScrollCharRangeIntoView(target, target, alignToTop: false);
+                Assert.Equal(rows[targetIdx - (VisibleRows - 1)], (c.TopLine, c.TopSegment));
+
+                // 上方向: 文書頭の視覚行 1 を最上段へ。
+                c.ScrollCharRangeIntoView(2, 2, alignToTop: true);
+                Assert.Equal((0, 1), (c.TopLine, c.TopSegment));
+            }
+        });
 }

@@ -325,10 +325,13 @@ public sealed partial class EditorControl
         Math.Max(0, ClientSize.Height - (_hscroll.Visible ? _hscroll.Height : 0));
 
     /// <summary>
-    /// <b>完全に可視な</b>論理行数(floor)。部分的に見えている最終行は含まない。
-    /// 折り返し ON では視覚行数を論理行数と見なす近似(<see cref="BringCaretIntoView"/> 以来の流儀)。
+    /// <b>完全に可視な視覚行数</b>(floor)。部分的に見えている最終行は含まない。
     /// </summary>
     /// <remarks>
+    /// 2026-08-22 A-6 以前は「折り返し ON では視覚行数を論理行数と見なす近似」だったが、
+    /// スクロール判断が視覚行基準になった(設計書 I-2)ため近似ではなくなった=
+    /// 本値はそのまま「可視域に何本の視覚行が入るか」を意味する。折り返し OFF では
+    /// 1 論理行 = 1 視覚行なので論理行数と一致する(I-3)。
     /// スクロール判断(<see cref="BringCaretIntoView"/> / <see cref="ScrollCharRangeIntoView"/>)は
     /// 保守的に floor を使う=対象行が完全に見える位置へ寄せる。
     /// 一方、可視域の<b>報告</b>(<see cref="GetVisibleCharRange"/>)は <c>ViewportLayout.Build</c>
@@ -341,7 +344,8 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// 現在のキャレット位置(<c>_caretCtrl.Caret</c>)を可視領域内に収める(P3 Task 7)。
-    /// - 垂直: キャレットの論理行が [TopLine, TopLine + visibleRows) の外なら <see cref="TopLine"/> を調整。
+    /// - 垂直: キャレットの<b>視覚行</b>が起点 (<see cref="TopLine"/>, <see cref="TopSegment"/>) から
+    ///   visibleRows 本の窓の外なら <see cref="SetTopPosition"/> で起点を調整(2026-08-22 A-6)。
     /// - 水平: 折り返し OFF かつ <see cref="_hscroll"/> 表示中で、キャレット X が
     ///   [ScrollX, ScrollX + paintWidth) の外なら <see cref="ScrollX"/> を調整。
     /// - SetSource 前 / 折り返し ON では水平調整は no-op。
@@ -361,6 +365,19 @@ public sealed partial class EditorControl
     /// 計算する(<see cref="ComputeCaretPoint"/> の可視性判定と一致させる=Task 7 レビュー I-1)。
     /// 一致していないと、最下論理行にキャレットが来たとき「垂直はまだ可視」と誤判断され
     /// hscroll の下に張り付いたまま TopLine が動かないケースが発生する。
+    ///
+    /// <b>判定の順序が load-bearing(設計書 §4.2 の 2 → 3)。</b>
+    /// 「起点より上か」を<b>先に</b>辞書順比較で弁別してから距離を測る。
+    /// <see cref="CountVisualRowsForward"/> は前方距離しか意味を持たず、起点より手前の位置には
+    /// 0 を返す(同一論理行内は <c>Math.Max(0, toSeg - fromSeg)</c>・手前の論理行は 0)ため、
+    /// 距離だけで判定すると<b>キャレットが起点より上にあるのに「可視」と誤判定</b>する。
+    ///
+    /// この第 1 分岐は、陳腐化した <c>_topSegment</c>(編集で先頭段落が縮んでも
+    /// リセットしない設計=設計書 §4.1)からの<b>自己修復</b>も担う。陳腐化時は
+    /// <c>ViewportLayout.Build</c> が最終セグメントへクランプして描く一方、
+    /// <see cref="ComputeCaretPoint"/> の <c>segIdx &lt; _topSegment</c> はその最終セグメントも
+    /// 不可視と報告する。キャレットが先頭論理行にある限り第 1 分岐が発火して起点を
+    /// 実在の視覚行へ寄せ直すので、<c>AfterEdit</c> の 1 フレーム内で整合が戻る。
     /// </remarks>
     public void BringCaretIntoView()
     {
@@ -368,18 +385,28 @@ public sealed partial class EditorControl
             return;
         var snap = _buffer.Current;
 
-        int logicalLine = snap.GetLineIndexOfChar(_caretCtrl.Caret);
         // I-1 対応: paintHeight ベースで可視行数を算出(ComputeCaretPoint の可視性判定と一致)。
         int visibleRows = VisibleRowCount;
 
-        // 垂直: caret 論理行が [TopLine, TopLine+visibleRows) に入るように TopLine 調整
-        if (logicalLine < _topLine)
+        // 垂直: caret の視覚行が [(TopLine,TopSegment), +visibleRows 本) に入るように起点を調整。
+        // 折り返し OFF では LocateVisualRow が (論理行, 0) を返し、CountVisualRowsForward は
+        // 論理行差になるため、式は導入前(logicalLine < _topLine / >= _topLine + visibleRows)と
+        // 同値に退化する(設計書 I-3)。
+        var (caretLine, caretSeg) = LocateVisualRow(snap, _caretCtrl.Caret);
+        if (caretLine < _topLine || (caretLine == _topLine && caretSeg < _topSegment))
         {
-            TopLine = logicalLine;
+            // 上へはみ出している=キャレットの視覚行を最上段にする。
+            // 距離判定より先に置くこと(remarks の「判定の順序が load-bearing」)。
+            SetTopPosition(caretLine, caretSeg);
         }
-        else if (logicalLine >= _topLine + visibleRows)
+        else if (
+            CountVisualRowsForward(snap, _topLine, _topSegment, caretLine, caretSeg, visibleRows)
+            >= visibleRows
+        )
         {
-            TopLine = logicalLine - visibleRows + 1;
+            // 下へはみ出している=キャレットの視覚行が最下段に来る位置まで遡る
+            var (newLine, newSeg) = WalkBackVisualRows(snap, caretLine, caretSeg, visibleRows - 1);
+            SetTopPosition(newLine, newSeg);
         }
 
         // 水平: 折り返し OFF かつ HScroll 表示中のみ有効
@@ -467,9 +494,16 @@ public sealed partial class EditorControl
     /// 呼び出し元 (<c>TextRangeProviderV2</c>) が範囲を作った後にバッファが縮むと stale に
     /// なり得るため、ここで <see cref="SnapAndClamp"/> を通す(二重防御)。
     ///
-    /// 可視行数は <see cref="VisibleRowCount"/>(可視判定の単一定義)を使う。折り返し ON では
-    /// 近似になるが、<see cref="BringCaretIntoView"/> と同じ値を見ることを構造で担保する
+    /// 可視行数は <see cref="VisibleRowCount"/>(可視判定の単一定義)を使う。
+    /// <see cref="BringCaretIntoView"/> と同じ値を見ることを構造で担保する
     /// =ここだけ別計算にすると 2 つの可視判定が食い違う。
+    ///
+    /// <b>2026-08-22 A-6:</b> 可視判定を論理行から視覚行へ移した(設計書 §4.2)。判定の順序
+    /// (まず辞書順で「起点より上」を弁別 → その後に距離)も <see cref="BringCaretIntoView"/> と
+    /// 揃える。折り返し ON の「既に可視」判定には<b>対象行の Wrap 1 回ぶん</b>のコストが乗るが、
+    /// 対象論理行が [<see cref="TopLine"/>, +visibleRows) の外なら粗い否定で弾いて Wrap を省く
+    /// (各論理行は 1 本以上の視覚行を占めるので、可視域が跨ぐ論理行は高々 visibleRows 本)。
+    /// 折り返し OFF は導入前と同一式で Wrap を一切呼ばない(I-3)。
     ///
     /// 水平方向と「対象行が可視域に入りきらない」端数の処理は
     /// <see cref="EnsureVisibleCharRange"/> に委ねる(caret / anchor の保存・復元も同メソッドが行う)。
@@ -493,8 +527,12 @@ public sealed partial class EditorControl
     /// 等価性の根拠(スクロールが起きないときに <see cref="EnsureVisibleCharRange"/> を
     /// 呼ばなくてよい理由):
     /// <list type="bullet">
-    /// <item><c>alreadyVisible</c> のとき <see cref="BringCaretIntoView"/> の垂直分岐は
-    /// <c>logicalLine &lt; _topLine</c> / <c>&gt;= _topLine + visibleRows</c> の両方とも不発。</item>
+    /// <item><c>alreadyVisible</c> のとき <see cref="BringCaretIntoView"/> の垂直分岐は両方とも不発。
+    /// 折り返し ON では <c>alreadyVisible</c> の 2 つの連言が、第 1 分岐の条件
+    /// (<c>caretLine &lt; _topLine || (caretLine == _topLine &amp;&amp; caretSeg &lt; _topSegment)</c>)
+    /// の否定と第 2 分岐の条件(<c>CountVisualRowsForward(...) &gt;= visibleRows</c>)の否定に
+    /// <b>そのまま一対一で対応する</b>。折り返し OFF では <c>line &lt; _topLine</c> /
+    /// <c>&gt;= _topLine + visibleRows</c> の両方とも不発(導入前と同じ)。</item>
     /// <item><see cref="BringCaretIntoView"/> の水平分岐は <c>_wrapColumns == 0 &amp;&amp; _hscroll.Visible</c>
     /// が条件。早期リターンの条件 <c>_wrapColumns &gt; 0 || !_hscroll.Visible</c> はその否定。</item>
     /// <item><see cref="TopLine"/> / <see cref="ScrollX"/> を動かしていないので
@@ -517,7 +555,37 @@ public sealed partial class EditorControl
         int line = snap.GetLineIndexOfChar(target);
 
         int visibleRows = VisibleRowCount;
-        bool alreadyVisible = line >= _topLine && line < _topLine + visibleRows;
+        bool alreadyVisible;
+        (int Line, int Seg)? targetRow = null;
+        if (_wrapColumns <= 0)
+        {
+            // 折り返し OFF: 導入前と同一式(I-3)。Wrap を一切呼ばない。
+            alreadyVisible = line >= _topLine && line < _topLine + visibleRows;
+        }
+        else if (line < _topLine || line >= _topLine + visibleRows)
+        {
+            // 各論理行は 1 本以上の視覚行を占めるので、可視域が跨ぐ論理行は高々 visibleRows 本。
+            // この粗い否定で弾ければ視覚行の計算(=対象行の Wrap)を省ける。
+            alreadyVisible = false;
+        }
+        else
+        {
+            var row = LocateVisualRow(snap, target);
+            targetRow = row;
+            // 順序は BringCaretIntoView と同じ(設計書 §4.2)=まず辞書順で「起点より上」を
+            // 弁別してから距離を測る。距離だけだと起点より上の位置に 0 が返り誤って可視になる。
+            alreadyVisible =
+                (row.Line > _topLine || (row.Line == _topLine && row.Seg >= _topSegment))
+                && CountVisualRowsForward(
+                    snap,
+                    _topLine,
+                    _topSegment,
+                    row.Line,
+                    row.Seg,
+                    visibleRows
+                ) < visibleRows;
+        }
+
         // 垂直に動かす必要が無く、水平も動く余地が無いなら完全 no-op で抜ける。
         // EnsureVisibleCharRange は finally で PositionCaret() を呼び、その先の
         // ComputeCaretPoint が対象論理行を丸ごと再折り返しするため、無変化呼び出しでも
@@ -527,7 +595,16 @@ public sealed partial class EditorControl
 
         // 既に可視なら垂直は動かさない(視界の揺れ防止)
         if (!alreadyVisible)
-            TopLine = alignToTop ? line : line - visibleRows + 1;
+        {
+            var (tl, ts) = targetRow ?? LocateVisualRow(snap, target);
+            if (alignToTop)
+                SetTopPosition(tl, ts);
+            else
+            {
+                var (nl, ns) = WalkBackVisualRows(snap, tl, ts, visibleRows - 1);
+                SetTopPosition(nl, ns);
+            }
+        }
 
         // 水平 + 保険。caret / anchor は EnsureVisibleCharRange が try/finally で復元する
         EnsureVisibleCharRange(target, 0);
