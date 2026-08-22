@@ -4,9 +4,7 @@ using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
-using Directory = System.IO.Directory;
 using File2 = System.IO.File;
-using IOException = System.IO.IOException;
 
 namespace kxEdit.App.Tests;
 
@@ -58,25 +56,6 @@ public class FileControllerTests
         }
 
         public void Dispose() => Form.Dispose();
-    }
-
-    /// <summary>テスト毎に使い捨ての一時フォルダ(実ファイル I/O 用)。</summary>
-    private sealed class TempDir : IDisposable
-    {
-        public string Root { get; } = Directory.CreateTempSubdirectory("kxEditAppTests_").FullName;
-
-        public string File(string name) => System.IO.Path.Combine(Root, name);
-
-        public void Dispose()
-        {
-            try
-            {
-                Directory.Delete(Root, recursive: true);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            { /* 掃除失敗はテスト失敗にしない(読み取り専用属性等は UnauthorizedAccessException) */
-            }
-        }
     }
 
     // ===== SaveAs ロールバック(データ破損防止の要=最優先) =====

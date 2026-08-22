@@ -28,4 +28,28 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
         });
         return task.Wait(timeout) && task.Result;
     }
+
+    /// <inheritdoc />
+    public SaveTargetProbe ProbeSaveTargetWithTimeout(string path, TimeSpan timeout)
+    {
+        var task = Task.Run(() =>
+        {
+            try
+            {
+                bool fileExists = File.Exists(path);
+                string? dir = System.IO.Path.GetDirectoryName(path);
+                // dir が null/空 = ルート自体("C:\")を指す入力。ファイルとしては保存できないので
+                // 到達不能側に落とす(親フォルダーが無い=書き込み先が確定しない)。
+                bool dirExists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
+                return new SaveTargetProbe(fileExists || dirExists, fileExists);
+            }
+            catch
+            {
+                // File.Exists / Directory.Exists は通常投げないが、UNC 未到達などで稀に
+                // IOException 系が出る可能性を吸って「到達不能」に倒す(ProbeWithTimeout と同方針)。
+                return new SaveTargetProbe(false, false);
+            }
+        });
+        return task.Wait(timeout) ? task.Result : new SaveTargetProbe(false, false);
+    }
 }

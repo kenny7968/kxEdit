@@ -20,4 +20,23 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
         LastTimeout = timeout;
         return Result;
     }
+
+    /// <summary>
+    /// <c>ProbeSaveTargetWithTimeout</c> の応答。既定は「到達可能・未存在」= 新規保存が通る形。
+    /// 旧 <see cref="Result"/>(bool)とは**独立**に設定できる必要がある: 同値に縛ると
+    /// A-4 の本質(到達可能かつ非存在)を表現できない。
+    /// </summary>
+    public SaveTargetProbe SaveTargetResult { get; set; } = new(Reachable: true, FileExists: false);
+
+    public int SaveTargetCallCount { get; private set; }
+
+    /// <summary>直近の <c>ProbeSaveTargetWithTimeout</c> 呼出で渡された timeout(5s 契約の pin)。</summary>
+    public TimeSpan SaveTargetLastTimeout { get; private set; }
+
+    public SaveTargetProbe ProbeSaveTargetWithTimeout(string path, TimeSpan timeout)
+    {
+        SaveTargetCallCount++;
+        SaveTargetLastTimeout = timeout;
+        return SaveTargetResult;
+    }
 }
