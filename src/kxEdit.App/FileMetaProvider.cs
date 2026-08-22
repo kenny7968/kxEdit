@@ -7,7 +7,7 @@ namespace kxEdit.App;
 /// <summary><see cref="IFileMetaProvider"/> の本番実装(<see cref="FileInfo"/> の薄いラッパ)。</summary>
 public sealed class FileMetaProvider : IFileMetaProvider
 {
-    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeReachability と対称)。</summary>
+    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeFileExists と対称)。</summary>
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>既定インスタンス(状態を持たないため共有して構わない)。</summary>

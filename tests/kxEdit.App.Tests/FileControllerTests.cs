@@ -157,6 +157,94 @@ public class FileControllerTests
             );
         });
 
+    // ===== A-4: ネットワーク共有への新規保存(保存先意味論のプローブ) =====
+
+    /// <summary>
+    /// A-4 の回帰。読み取り側の ProbeFileExistsWithTimeout(File.Exists 意味論)を使い続けていると、
+    /// 存在しない新規パスは到達可能でも常に false=「ネットワークパスに到達できません」で止まる。
+    /// Fake の Result(読み取り側)を false・SaveTargetResult(保存側)を到達可能にすることで、
+    /// **どちらのメソッドを使っているか**を判別する(同値だと判別できない)。
+    /// 実ネットワークは無いので書込自体は失敗する。検証するのは「止まった理由」。
+    /// </summary>
+    [Fact]
+    public void SaveAs_NewFileOnUncPath_PassesReachabilityGate() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.Result = false; // 読み取り側を使っていたら到達性エラーで止まる
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: false
+            );
+            host.Dialogs.SaveAs = new SaveAsResult(
+                @"\\no-such-server\share\a.txt",
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            Assert.False(host.File.SaveAs()); // 実ネットワーク不在なので書込は失敗する
+
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+        });
+
+    /// <summary>5 秒契約の pin(読み取り側 LastTimeout の観測点と対称)。</summary>
+    [Fact]
+    public void SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                @"\\no-such-server\share\a.txt",
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            host.File.SaveAs();
+
+            Assert.True(host.Probe.SaveTargetCallCount >= 1);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout);
+        });
+
+    /// <summary>
+    /// 設計書 §3.3: ローカルパスはリモートゲートで素通りする(挙動不変)。
+    /// ゲートを外すと「存在しないフォルダー配下への保存」がプローブで弾かれ、
+    /// SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath が WriteToPath に届かなくなる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_LocalNewFile_DoesNotProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                tmp.File("a.txt"),
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
@@ -467,12 +555,19 @@ public class FileControllerTests
             doc.Editor.ReplaceCharRange(0, 1, ""); // "abc", Modified=true(_savedRoot からズレたまま)
             Assert.True(doc.Editor.Modified); // 前提: Save 前は dirty
             doc.State.Path = @"\\nonexistent-host-42\share\x.txt";
-            host.Probe.Result = false; // プローブがタイムアウト/到達不可を返す
+            // A-4: 書込側は保存先意味論のプローブを使う。読み取り側の Result は既定 true のまま
+            // 残す=「書込側が読み取り側を呼んでいたら素通りして書込に進み、
+            // 到達性エラーではなく "保存できませんでした" になる」ので、どちらを使っているか判別できる。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: false
+            );
 
             Assert.False(host.File.Save());
 
-            Assert.Equal(1, host.Probe.CallCount); // Save 経路も UNC は必ずプローブを通す(HIGH-6 と対称)
-            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.LastTimeout); // 5s → 5min mutation の kill
+            // Save 経路も UNC は必ずプローブを通す(HIGH-6 と対称)
+            Assert.Equal(1, host.Probe.SaveTargetCallCount);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout); // 5s → 5min mutation の kill
             // "ネットワークパスに到達できません" が Save 経路でも 1 件だけ発火する(Load と Save の
             // 二重発火を避ける=WriteToPath 冒頭ガードのみで完結する契約)。
             var reachErrors = host.Prompt.Log.Where(e =>
@@ -512,7 +607,10 @@ public class FileControllerTests
 
             Assert.True(host.File.Save()); // 通常経路で成功
 
-            Assert.Equal(0, host.Probe.CallCount); // ローカルパスはプローブを回さない(挙動不変)
+            // ローカルパスはプローブを回さない(挙動不変)。A-4 で書込側が保存先意味論へ移ったので
+            // 観測点も SaveTargetCallCount にする(CallCount は書込側から呼ばれなくなり
+            // ローカル/リモートを問わず 0=リモートゲートの変異を殺せない vacuous な網になる)。
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
             Assert.Equal("abc", File2.ReadAllText(path)); // 実際にディスクへ書き出し完了
         });
 
@@ -534,12 +632,18 @@ public class FileControllerTests
                 HasBom: true,
                 LineEnding.Lf
             );
-            host.Probe.Result = false;
+            // A-4: 書込側は保存先意味論のプローブ。読み取り側の Result は既定 true のままにして
+            // 「どちらを呼んでいるか」を判別可能にする(Save 経路の同型テストと対称)。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: false
+            );
 
             Assert.False(host.File.SaveAs());
 
-            Assert.Equal(1, host.Probe.CallCount); // SaveAs でも WriteToPath 経由で 1 回だけプローブが走る
-            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.LastTimeout); // 5s pin
+            // SaveAs でも WriteToPath 経由で 1 回だけプローブが走る
+            Assert.Equal(1, host.Probe.SaveTargetCallCount);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout); // 5s pin
             // State ロールバック(WriteToPath が false を返した経路が SaveAsDocument のロールバックを発火)
             Assert.Null(doc.State.Path); // Path は旧のまま(後続 Ctrl+S の別エンコード上書き事故防止)
             Assert.Equal(65001, doc.State.Encoding.CodePage); // ロールバック(932→65001)

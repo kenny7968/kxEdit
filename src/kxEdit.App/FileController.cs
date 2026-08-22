@@ -224,8 +224,9 @@ public sealed class FileController
         try
         {
             // HIGH-6 + CSV-M-1: UNC / マップドネットワークドライブは 5 秒プローブで到達不能なら
-            // 即エラー(60 秒 UI 凍結を回避)。ポリシーは Save 側と共有=TryProbeReachability。
-            if (!TryProbeReachability(path))
+            // 即エラー(60 秒 UI 凍結を回避)。読む側は「既存ファイルがあるか」が知りたいので
+            // File.Exists 意味論のプローブでよい(書く側=TryInspectSaveTarget とは意味論が違う: A-4)。
+            if (!TryProbeFileExists(path))
                 return false;
 
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
@@ -423,9 +424,12 @@ public sealed class FileController
     /// 例外は _prompt.Error で通知し false を返す。
     /// </summary>
     /// <remarks>
-    /// CSV-M-2(2026-07-20): 冒頭に <see cref="TryProbeReachability"/> を追加し、UNC / マップドネットワーク
+    /// CSV-M-2(2026-07-20): 冒頭に到達性プローブを追加し、UNC / マップドネットワーク
     /// ドライブは 5 秒プローブで到達不能なら以下のロールバック導線を発火する前に return false する
     /// (Load 側 HIGH-6 と対称=Save でも 60 秒 UI 凍結を回避)。
+    /// A-4(2026-08-23): そのプローブを <see cref="TryInspectSaveTarget"/>(保存先意味論)へ切り替えた。
+    /// 読み取り側の <see cref="TryProbeFileExists"/> は File.Exists 意味論のため、まだ存在しない
+    /// 新規ファイルを常に到達不能と誤判定していた(= ネットワーク共有へ新規保存できない症状)。
     ///
     /// Batch A Task 1(2026-07-15): WriteToPath 失敗時に ConvertEols で書き換わった本文と保存点(Modified)
     /// をロールバックする。ConvertEols(非 fast-path)は <c>ReplaceSource(builder.Build())</c> で新規
@@ -438,11 +442,12 @@ public sealed class FileController
     /// </remarks>
     private bool WriteToPath(Document doc, string path)
     {
-        // CSV-M-2: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで到達不能なら
-        // 即エラー(HIGH-6 の LoadInto 側と対称)。snapshotBefore を握る前・ConvertEols 副作用を
-        // 起こす前に短絡することで、プローブ失敗時に「本文の EOL が書き換わる」「新規バッファに
-        // 差し替わる」を発生させない。ポリシーは Load 側と共有=TryProbeReachability。
-        if (!TryProbeReachability(path))
+        // CSV-M-2 → A-4: リモートは 5 秒プローブ。存在確認ではなく「書き込み先が確定できるか」を見る
+        // (読み取り側の TryProbeFileExists は File.Exists 意味論で、新規ファイルを常に到達不能と誤判定した)。
+        // snapshotBefore を握る前・ConvertEols 副作用を起こす前に短絡することで、プローブ失敗時に
+        // 「本文の EOL が書き換わる」「新規バッファに差し替わる」を発生させない。
+        // exists は書込側では使わない(上書き確認は SaveAsDocument が事前に済ませる)。
+        if (!TryInspectSaveTarget(path, out _))
             return false;
 
         // ConvertEols 前のバッファ参照を保持(失敗時ロールバック用=バグ 1+2 対策)。
@@ -918,7 +923,7 @@ public sealed class FileController
 
     /// <summary>
     /// action の実行中は復元経路専用の抑止フラグをまとめて ON にする:
-    /// (a) LoadInto/TryProbeReachability の catch 内 _prompt.Error を抑止(失敗パスを集約通知するため)
+    /// (a) LoadInto/TryProbeFileExists の catch 内 _prompt.Error を抑止(失敗パスを集約通知するため)
     /// (b) LoadInto の RegisterRecent を抑止(復元は「ユーザーが開いた」相当でないため RecentFiles を汚さない)
     /// Task 5 で名前は変えずスコープを (a)+(b) に拡張(既存 seam の呼び出し側=Task 4 テストも
     /// (b) の抑止動作を暗黙に受けるが、テスト対象の path はダミー=RecentFiles 検証していないため無害)。
@@ -956,33 +961,69 @@ public sealed class FileController
     private static void ApplyEol(Document doc) => doc.Editor.EolMode = doc.State.LineEnding;
 
     /// <summary>
-    /// HIGH-6 + CSV-M-1/M-2: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで
-    /// 到達不能なら即 <c>_prompt.Error</c> を出して false を返す。ローカルは true を返して通常経路へ。
-    /// LoadInto / WriteToPath 双方から共有し「Save と Load で同じ到達性ポリシー」を 1 箇所で表現する。
+    /// HIGH-6 + CSV-M-1: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで
+    /// 既存ファイルを確認できなければ即 <c>_prompt.Error</c> を出して false を返す。
+    /// ローカルは true を返して通常経路へ。
+    /// **読み取り側専用**(現在の呼出は <see cref="LoadInto"/> のみ)。名前に反して実体は
+    /// 存在確認(File.Exists 意味論)であり、まだ存在しない新規ファイルを到達不能と誤判定するため、
+    /// 書き込み側は共有できない(= A-4 の機構)。書き込み側は
+    /// <see cref="TryInspectSaveTarget"/>(到達性と既存有無を分けて返す)を使う。
     /// 判定は <see cref="RemotePathDetector.IsRemote(string)"/>(UNC + DriveInfo.DriveType==Network)。
     /// ローカル固定/リムーバブルは判定を skip(挙動不変)、リモート正常経路は reachable=true で通過(挙動不変)。
     /// </summary>
-    private bool TryProbeReachability(string path)
+    private bool TryProbeFileExists(string path)
     {
         if (
             RemotePathDetector.IsRemote(path)
             && !_reachabilityProbe.ProbeFileExistsWithTimeout(path, TimeSpan.FromSeconds(5))
         )
         {
-            // CSV-L-5: path は grep/最近のファイル/BackupRecord 由来で攻撃者制御が届き得るため、
-            // SanitizeForDisplay.OneLine で RLO/改行/長大 path を無害化してから prompt に載せる。
-            // Task 4: 復元経路(WithLoadErrorPromptSuppressed 実行中)は per-file ダイアログを抑止し、
-            // 呼出元で失敗パスを集約通知させる(戻り値 false は伝播)。
-            if (!_suppressLoadErrorPrompt)
-            {
-                _prompt.Error(
-                    $"ネットワークパスに到達できません: {SanitizeForDisplay.OneLine(path, 200)}",
-                    "エラー"
-                );
-            }
+            ReportUnreachable(path);
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// 保存先の既存有無を得る。到達不能なら false(エラー表示済み)。
+    /// リモート(UNC / マップドネットワークドライブ)だけを 5 秒プローブに載せる。
+    /// ローカルを素通りさせるのは意図的(設計書 §3.3): ローカルには従来から到達性検査が無く、
+    /// ここでゲートを外すと「存在しないフォルダー配下への保存」が WriteToPath の
+    /// ロールバック導線に届かなくなる=挙動が変わる。
+    /// </summary>
+    private bool TryInspectSaveTarget(string path, out bool exists)
+    {
+        if (RemotePathDetector.IsRemote(path))
+        {
+            var probe = _reachabilityProbe.ProbeSaveTargetWithTimeout(
+                path,
+                TimeSpan.FromSeconds(5)
+            );
+            exists = probe.FileExists;
+            if (!probe.Reachable)
+            {
+                ReportUnreachable(path);
+                return false;
+            }
+            return true;
+        }
+        // ローカルは SMB 60 秒凍結の懸念がない。
+        exists = System.IO.File.Exists(path);
+        return true;
+    }
+
+    /// <summary>
+    /// 到達不能の通知。CSV-L-5: path は外部入力(SR ユーザーの直入力・grep / BackupRecord 由来)なので
+    /// SanitizeForDisplay で無害化する。Task 4: 復元経路は per-file ダイアログを抑止する。
+    /// </summary>
+    private void ReportUnreachable(string path)
+    {
+        if (_suppressLoadErrorPrompt)
+            return;
+        _prompt.Error(
+            $"ネットワークパスに到達できません: {SanitizeForDisplay.OneLine(path, 200)}",
+            "エラー"
+        );
     }
 
     /// <summary>

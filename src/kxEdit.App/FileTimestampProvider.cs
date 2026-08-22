@@ -20,7 +20,7 @@ namespace kxEdit.App;
 /// </remarks>
 public sealed class FileTimestampProvider : IFileTimestampProvider
 {
-    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeReachability・
+    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeFileExists・
     /// FileMetaProvider と対称)。</summary>
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
 
