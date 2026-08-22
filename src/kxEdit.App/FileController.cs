@@ -333,65 +333,81 @@ public sealed class FileController
     public bool SaveDocument(Document doc) =>
         doc.State.Path is null ? SaveAsDocument(doc) : WriteToPath(doc, doc.State.Path);
 
-    /// <summary>指定ドキュメントを名前を付けて保存。成功で State.Path/Encoding/LineEnding とラベルを更新する。</summary>
+    /// <summary>
+    /// 指定ドキュメントを名前を付けて保存。成功で State.Path/Encoding/LineEnding とラベルを更新する。
+    /// A-7 / A-4 / A-19(2026-08-23): 保存先を確定するまでダイアログを繰り返し表示する。
+    /// 「ダイアログの中で選んだ値への警告なら、そのダイアログへ戻す」= 打ち直しを強いない
+    /// (SR ユーザーの主経路はテキストボックス直入力なので、中止して開き直させる代償が大きい)。
+    /// ループの途中出口はキャンセルだけで、すべての continue は PickSaveAs(ユーザー操作)を挟む。
+    /// </summary>
     private bool SaveAsDocument(Document doc)
     {
-        var picked = _fileDialogs.PickSaveAs(
-            _owner,
-            new SaveAsRequest(
-                doc.State.Path,
-                doc.State.Encoding.CodePage,
-                doc.State.HasBom,
-                doc.State.LineEnding
-            )
+        var seed = new SaveAsRequest(
+            doc.State.Path,
+            doc.State.Encoding.CodePage,
+            doc.State.HasBom,
+            doc.State.LineEnding
         );
-        if (picked is null)
-            return false;
-        if (string.IsNullOrWhiteSpace(picked.Path))
+
+        while (true)
         {
-            _prompt.Warn("ファイル名を指定してください。", "エラー");
-            return false;
-        }
+            var picked = _fileDialogs.PickSaveAs(_owner, seed);
+            if (picked is null)
+                return false;
+            // 入力を次回の初期値として保つ。
+            seed = new SaveAsRequest(
+                picked.Path,
+                picked.CodePage,
+                picked.HasBom,
+                picked.LineEnding
+            );
 
-        var newEncoding = EncodingCatalog.Get(picked.CodePage);
+            if (string.IsNullOrWhiteSpace(picked.Path))
+            {
+                _prompt.Warn("ファイル名を指定してください。", "エラー");
+                continue;
+            }
 
-        // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
-        // Load 経路の HadReplacementChar 警告と対称。UTF-8(65001) は BMP+astral 全表現可でスキップ。
-        if (
-            picked.CodePage != 65001
-            && !CanEncodeBuffer(doc.Editor.CurrentBuffer, newEncoding)
-            && !_prompt.OkCancel(
-                "選択した文字コードで表せない文字が含まれています。'?' として保存されデータが失われます。続行しますか?",
-                "文字コードの警告"
+            var newEncoding = EncodingCatalog.Get(picked.CodePage);
+
+            // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
+            // Load 経路の HadReplacementChar 警告と対称。UTF-8(65001) は BMP+astral 全表現可でスキップ。
+            if (
+                picked.CodePage != 65001
+                && !CanEncodeBuffer(doc.Editor.CurrentBuffer, newEncoding)
+                && !_prompt.OkCancel(
+                    "選択した文字コードで表せない文字が含まれています。'?' として保存されデータが失われます。続行しますか?",
+                    "文字コードの警告"
+                )
             )
-        )
-        {
-            return false;
-        }
+            {
+                return false; // Task 8 で continue へ変える
+            }
 
-        // 新エンコード/改行/BOM を State に反映してから WriteToPath へ(既存 WriteToPath は State を参照する)。
-        // C-2 追補 I-1: WriteToPath 失敗時は元の Encoding/LineEnding/HasBom へロールバック
-        // (State だけ更新済で Path が旧のままだと後続の Ctrl+S が元ファイルを別エンコードで
-        // サイレント上書きする=データ破損)。
-        var oldEncoding = doc.State.Encoding;
-        var oldLineEnding = doc.State.LineEnding;
-        var oldHasBom = doc.State.HasBom;
-        doc.State.Encoding = newEncoding;
-        doc.State.LineEnding = picked.LineEnding;
-        doc.State.HasBom = picked.HasBom;
+            // 新エンコード/改行/BOM を State に反映してから WriteToPath へ(既存 WriteToPath は State を参照する)。
+            // C-2 追補 I-1: WriteToPath 失敗時は元の Encoding/LineEnding/HasBom へロールバック
+            // (State だけ更新済で Path が旧のままだと後続の Ctrl+S が元ファイルを別エンコードで
+            // サイレント上書きする=データ破損)。
+            var oldEncoding = doc.State.Encoding;
+            var oldLineEnding = doc.State.LineEnding;
+            var oldHasBom = doc.State.HasBom;
+            doc.State.Encoding = newEncoding;
+            doc.State.LineEnding = picked.LineEnding;
+            doc.State.HasBom = picked.HasBom;
 
-        if (!WriteToPath(doc, picked.Path))
-        {
-            doc.State.Encoding = oldEncoding;
-            doc.State.LineEnding = oldLineEnding;
-            doc.State.HasBom = oldHasBom;
-            return false;
+            if (!WriteToPath(doc, picked.Path))
+            {
+                doc.State.Encoding = oldEncoding;
+                doc.State.LineEnding = oldLineEnding;
+                doc.State.HasBom = oldHasBom;
+                return false;
+            }
+            doc.State.Path = picked.Path;
+            DocumentManager.UpdateLabel(doc);
+            _metaChanged();
+            RegisterRecent(picked.Path); // 保存先も最近のファイルへ
+            return true;
         }
-        doc.State.Path = picked.Path;
-        DocumentManager.UpdateLabel(doc);
-        _metaChanged();
-        RegisterRecent(picked.Path); // 保存先も最近のファイルへ
-        return true;
     }
 
     /// <summary>指定エンコードでバッファ全文が損失なく符号化できるかを事前判定する(SaveAs のダウングレード警告用)。</summary>

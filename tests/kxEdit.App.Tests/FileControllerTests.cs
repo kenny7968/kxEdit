@@ -157,6 +157,76 @@ public class FileControllerTests
             );
         });
 
+    // ===== ダイアログ再表示ループ =====
+
+    /// <summary>
+    /// 空白パスの警告後に SaveAs 全体を中止せず、入力し直せるようにダイアログを再表示する。
+    /// 「Warn が出たこと」だけを見ると continue → return false の変異が生き残るので、
+    /// PickSaveAsCount で再表示そのものを固定する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_BlankPath_WarnsAndReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            string path = tmp.File("a.txt");
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("   ", 65001, false, LineEnding.Crlf)
+            );
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(path, 65001, false, LineEnding.Crlf));
+
+            Assert.True(host.File.SaveAs()); // 2 回目の入力で保存が成立する
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Warn" && e.Text.Contains("ファイル名")
+            );
+            Assert.True(File2.Exists(path));
+        });
+
+    /// <summary>キャンセルはループの唯一の途中出口。再表示しない。</summary>
+    [Fact]
+    public void SaveAs_Cancelled_WritesNothingAndDoesNotReopen() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = null; // キャンセル
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(1, host.Dialogs.PickSaveAsCount);
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>再表示のとき、直前に入力した値が初期値として戻る(打ち直しを強いない)。</summary>
+    [Fact]
+    public void SaveAs_Reopened_SeedsDialogWithPreviousInput() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc"; // 既定 State = UTF-8 / BOM なし / CRLF
+            // 非既定のエンコード・改行で入力する(既定と同値だと seed の伝播を検証できない)。
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("   ", 932, HasBom: true, LineEnding.Lf)
+            );
+
+            host.File.SaveAs(); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            var second = host.Dialogs.SaveAsRequests[1];
+            Assert.Equal("   ", second.Path);
+            Assert.Equal(932, second.CodePage);
+            Assert.True(second.HasBom);
+            Assert.Equal(LineEnding.Lf, second.LineEnding);
+        });
+
     // ===== A-4: ネットワーク共有への新規保存(保存先意味論のプローブ) =====
 
     /// <summary>
