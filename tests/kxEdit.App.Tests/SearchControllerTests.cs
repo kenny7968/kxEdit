@@ -1,3 +1,4 @@
+using System.Linq;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Csv;
 
@@ -1010,5 +1011,34 @@ public class SearchControllerTests
             Assert.True(host.Search.FindNext());
 
             Assert.Same(searcher, host.Search.SearcherForTest); // キャッシュは生きたまま
+        });
+
+    // ===== A-3(2026-08-22): 検索ジャンプの追従スクロール =====
+
+    [Fact]
+    public void FindNext_ScrollsHitIntoView() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // 200 行 + 末尾に唯一のヒット。既定サイズのホストフォームでも必ず可視域外になる。
+            var doc = host.NewDoc(
+                string.Join("\n", Enumerable.Range(0, 200).Select(i => $"line{i}")) + "\nNEEDLE"
+            );
+            doc.Editor.TopLine = 0;
+            host.View.Pattern = "NEEDLE";
+            host.Search.OpenFind();
+
+            Assert.True(host.Search.FindNext());
+
+            // 追従が無いと TopLine=0 のまま=晴眼ユーザーにはヒットが見えない(A-3)。
+            // 「動いた」だけでなく「ヒット行が可視域に入っている」ことまで固定する。
+            int visibleRows = Math.Max(
+                1,
+                doc.Editor.ClientSize.Height / Math.Max(1, doc.Editor.LineHeightPx)
+            );
+            int hitLine = doc.Editor.CurrentLine; // SelectCharRange 後のキャレット=ヒット末尾
+            Assert.Equal(200, hitLine); // ヒットは最終行(fixture の前提を固定する)
+            Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
+            Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
         });
 }

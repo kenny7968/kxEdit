@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Windows.Forms;
 using kxEdit.Core.Buffers;
 using kxEdit.Editor;
@@ -51,6 +52,23 @@ public class EditorControlCompatApiTests
             ctrl.SetSource(TextBuffer.FromString("hello world"));
             ctrl.SelectCharRange(6, -3);
             Assert.Equal((6, 6), ctrl.GetSelectionCharRange());
+        });
+    }
+
+    // 最終ブランチレビュー(脆弱性パス)L-2: start + length の int 加算が溢れると、
+    // 負値になった端が SetSelectionCharRange の Min/Max 正規化で 0 側へ落ち「全文選択」になっていた。
+    // 姉妹 API の EnsureVisibleCharRange は同じ加算を long 経由で守っている。
+    // 本 API は grep 結果由来のオフセットを受ける外部入力面(MainForm.OpenAndSelect)。
+    [Fact]
+    public void SelectCharRange_OverflowingLength_ClampsToEnd()
+    {
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("hello world")); // CharLength = 11
+            ctrl.SelectCharRange(int.MaxValue, 10); // start + length が int を溢れる
+            // 全文選択 (0, 11) ではなく、契約どおり末尾へクランプされること。
+            Assert.Equal((11, 11), ctrl.GetSelectionCharRange());
         });
     }
 
@@ -327,6 +345,87 @@ public class EditorControlCompatApiTests
             var replaced = TextBuffer.FromString("world");
             ctrl.ReplaceSource(replaced);
             Assert.Same(replaced, ctrl.CurrentBuffer);
+        });
+    }
+
+    // A-3(2026-08-22): Ctrl+G「行へ移動」で画面が追従することの固定。
+    // 監査書 docs/plans/2026-08-22-v0.2-release-bug-audit.md の A-3 が名指しした被覆。
+    // GoToLine は SetCaretCharOffset へ委譲するので、追従自体は setter 側の実装が担う。
+    // 既存の GoToLine_MovesCaretToLineStart はハンドル無しの裸コントロールでスクロールを
+    // 観測できないため、サイズを持つコントロールで別テストとして張る(既存テストは変更しない)。
+    //
+    // NOTE: Size は Form.Size なので実際の ClientSize.Height は約 21 px = 可視行数 1
+    // (2026-08-22 Task 2 レビューの実測)。閾値式はそれでも成立する——むしろ
+    // 「TopLine が対象行ちょうどに張り付く」まで要求する強い網になる。
+    [Fact]
+    public void GoToLine_ScrollsTargetLineIntoView()
+    {
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line{i}"));
+            using var form = new Form { Size = new System.Drawing.Size(400, 60) };
+            var ctrl = new EditorControl { Dock = DockStyle.Fill };
+            form.Controls.Add(ctrl);
+            _ = form.Handle;
+            ctrl.SetSource(TextBuffer.FromString(text));
+            try
+            {
+                ctrl.TopLine = 0;
+                int visibleRows = Math.Max(1, ctrl.ClientSize.Height / ctrl.LineHeightPx);
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                ctrl.GoToLine(29);
+
+                Assert.True(
+                    ctrl.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {ctrl.TopLine}"
+                );
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
+
+    // A-3(2026-08-22)最終ブランチレビュー Minor 6: キャレットが既にその行にある状態で
+    // もう一度「行へ移動」しても可視化されること。
+    // 導線: Ctrl+G で行 29 へ → ホイール等で先頭までスクロール → もう一度 Ctrl+G で行 29。
+    // SetCaretCharOffset の追従は無変化の早期 return に当たって効かないので、GoToLine 側が
+    // 明示的に BringCaretIntoView を呼んで補う。ユーザーから見れば A-3 の再発に等しい導線。
+    [Fact]
+    public void GoToLine_SameLineAfterScrollAway_StillScrollsIntoView()
+    {
+        Sta.Run(() =>
+        {
+            var text = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line{i}"));
+            using var form = new Form { Size = new System.Drawing.Size(400, 60) };
+            var ctrl = new EditorControl { Dock = DockStyle.Fill };
+            form.Controls.Add(ctrl);
+            _ = form.Handle;
+            ctrl.SetSource(TextBuffer.FromString(text));
+            try
+            {
+                int visibleRows = Math.Max(1, ctrl.ClientSize.Height / ctrl.LineHeightPx);
+                Assert.True(visibleRows < 29, $"fixture 前提崩れ: visibleRows={visibleRows}");
+
+                ctrl.GoToLine(29); // 1 回目=キャレットが行 29 へ動く
+                ctrl.TopLine = 0; // ユーザーがホイールで先頭まで戻した状態を再現
+                Assert.Equal(29, ctrl.CurrentLine); // 前提: キャレットは行 29 のまま
+
+                ctrl.GoToLine(29); // 2 回目=キャレット位置は無変化
+
+                Assert.True(
+                    ctrl.TopLine >= 29 - visibleRows + 1,
+                    $"expected TopLine >= {29 - visibleRows + 1}, got {ctrl.TopLine}"
+                );
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
         });
     }
 }
