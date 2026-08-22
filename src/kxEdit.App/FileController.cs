@@ -455,11 +455,25 @@ public sealed class FileController
     /// <summary>
     /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
     /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
-    /// 例外(null 文字・無効文字・長大パス)は握って呼出側で「入力し直し」に落とす:
-    /// SR ユーザーの直入力がそのまま届く面なので未捕捉例外ダイアログにしない。
+    /// 例外は握って呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
+    /// 未捕捉例外ダイアログにしない。
     /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
     /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
     /// </summary>
+    /// <remarks>
+    /// .NET 9 での実測(Task 5 実装時): <c>Path.GetFullPath</c> が投げるのは実質
+    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>(本テストの pin)、
+    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>(手前の空白チェックが先に捕まえる)、
+    /// (c) 総長 &gt; 32767 → <see cref="System.IO.PathTooLongException"/> の 3 つ。
+    /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」や予約デバイス名(CON / NUL)は
+    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない。
+    /// <b>申し送り(未修正)</b>: 総長が 32767 の直下に収まる窓(実測 CWD 110 文字 + 相対 32660 文字)
+    /// では <c>GetFullPathNameW</c> が ERROR_INVALID_NAME を返し、**素の
+    /// <see cref="System.IO.IOException"/>** が飛ぶ。<see cref="System.IO.PathTooLongException"/> は
+    /// その派生だが逆は成り立たないため、このフィルタを抜けて未捕捉例外ダイアログになる。
+    /// 塞ぐなら <c>PathTooLongException</c> を <c>IOException</c> に広げる(厳密な上位集合)。
+    /// 設計書 §4.3 の列挙をそのまま実装しているので、変更は脆弱性レビューの判断に委ねる。
+    /// </remarks>
     private static bool TryNormalizeSavePath(string input, out string full)
     {
         try
