@@ -113,14 +113,14 @@ Markdig 1.3.2 の DLL で確認済み。`MarkdownPipelineBuilder.Extensions` は
 
 **機能影響**: `{#id}` / `{.class}` 記法が本文にリテラル表示されるようになる。
 見出しの id は別拡張 `UseAutoIdentifiers` が生成し続けるためアンカーは維持される。
+プレビューの CSS は固定(ユーザーがスタイルシートを差し替える経路がない)ので、
+class 指定に実用価値はない。既存テストに generic attributes 依存は 0 件。
 
 > **実装時の訂正(2026-08-22 / Task 1 仕様レビュー)**: 「アンカーは維持される」は誤り。
 > id は生成され続けるが**値が変わる**(`# Title {#custom}` は `id="custom"` → `id="title-custom"`)。
 > 既存 .md 内の `[link](#custom)` は切れる。策定時に fixture `# 見出し {#custom}` で検算したが、
 > 非 ASCII の見出しは slug 生成で捨てられ base / 修正後とも `id="custom"` になる**偶然の一致**で、
 > 検算が成立していなかった。
-プレビューの CSS は固定(ユーザーがスタイルシートを差し替える経路がない)ので、
-class 指定に実用価値はない。既存テストに generic attributes 依存は 0 件。
 
 ## 3. 範囲外(明示)
 
@@ -185,3 +185,105 @@ CLAUDE.md §3「簡略化の基準」に該当する小変更(src 変更は `Mar
   説明書はユーザー編集版が正(CLAUDE.md §8)なので本ブランチでは改稿せず、ユーザーへ提起のみ行う。
 - **案 C(実 URL への Navigate)**: CSP を HTTP header で一次配布できる・`<base>` 依存を消せる、
   という構造上の利点は残る。プレビューを次に大きく触るときの選択肢として記録する。
+
+---
+
+## 7. 実装時の設計変更(2026-08-22): 案 B へ切り替え
+
+最終ブランチレビュー(脆弱性パス)で、§2.1 の案 A に**設計段階で見落としていた副作用**が見つかったため、
+ユーザー判断により §2.1 の代替案 B を採用する。本節が以降の正。
+
+### 7.1 案 A を捨てた理由 — ページ内アンカーが全滅する
+
+`<base href="https://kxedit.preview/">` が復活すると、裸のフラグメント URL も base 基準で解決される
+(HTML 仕様。`<base>` の古典的な落とし穴)。実測した出力:
+
+```
+[目次](#midashi)  → <a href="#midashi">目次</a>
+text[^1]          → <a id="fnref:1" href="#fn:1" class="footnote-ref">
+```
+
+これらは `<base>` があると `https://kxedit.preview/#midashi` に解決され、文書自身の URL は
+`data:text/html;...` のままなので**同一文書内スクロールではなくクロス文書遷移**になる。
+`PreviewNavigationPolicy.Classify` は https + preview ホストを MD-H-1 で Block するため、
+**目次リンクと脚注の戻りリンクが全て無反応になる**。
+
+修正前は `base-uri 'none'` が `<base>` を殺していたためフラグメントは data: URL 基準で解決され、
+普通にスクロールしていた。つまり案 A は「CSS と画像を回復する代わりにページ内ナビゲーションを失う」
+トレードだった。SR 利用者にとってプレビュー内の移動手段が消えるため受容しない。
+
+### 7.2 案 B の設計
+
+`<base>` 要素を**一切出力しない**。相対 URL の解決を描画前に済ませる。
+
+1. **相対 URL の解決を Markdig の AST 段で行う** — 新設 `PreviewUrlResolver`(純粋関数)と
+   `PreviewRelativeUrlExtension`(`DocumentProcessed` で `LinkInline` を走査)。
+   `LinkInline` はリンクと画像の両方を表すので 1 箇所で足りる。
+2. **スタイルシートの `<link>` は絶対 URL で出力する** — `https://kxedit.preview/_kxedit/styles.css`。
+   `<base>` に依存しなくなるので、`baseHref` が空文字の経路でも CSS が解決できる(§7.5 の Minor-4 解消)。
+3. **CSP の `base-uri` は `'none'` に戻す** — 文書に `<base>` が存在しないので最も強い設定でよい。
+
+#### `PreviewUrlResolver` の規則(上から順に評価)
+
+| # | 条件 | 動作 | 理由 |
+|---|------|------|------|
+| 1 | null / 空 | 書き換えない | |
+| 2 | `#` 始まり | **書き換えない** | **同一文書内アンカーを守る(§7.1 の要点)** |
+| 3 | `//` 始まり | 書き換えない | protocol-relative。`new Uri(base, "//host/p")` は別ホストへ飛ぶので触らない |
+| 4 | `Uri.TryCreate(url, Absolute)` が真 | 書き換えない | scheme 付きは `SafeLinkExtension` の管轄(`javascript:` 等) |
+| 5 | それ以外 | `new Uri(PreviewBaseHref, url)` で解決 | `pic.png` / `sub/a.md` / `/root.png` を吸収 |
+
+解決が `UriFormatException` になった場合は書き換えない(安全側)。
+
+#### `SafeLinkExtension` との関係
+
+書き換えは `DocumentProcessed`(描画前)、`SafeLinkExtension` の scheme whitelist は描画時。
+規則 4 により scheme 付き URL は書き換え対象外なので、`javascript:` の drop は不変。
+相対 URL は書き換え前も後も whitelist を通る(`/` 始まり・相対 → 許可 / https → 許可)ので
+判定結果も不変。
+
+### 7.3 案 B で消える問題
+
+- **FINDING 2**(`<base>` 注入で誤った安全根拠) — 文書に `<base>` が無いので論点ごと消滅する。
+  `base-uri 'none'` に戻すため、`Render(md, "")` 経路に残っていた潜在差分も閉じる。
+- **Important-1**(`<base>` の出力位置を守る網が無い) — `<base>` が無くなり、`<link>` が絶対 URL
+  になるので、順序への依存自体が消える。
+- **Minor-4**(空 baseHref 経路で CSS が永久に解決できない) — `<link>` の絶対化で解消。
+
+### 7.4 案 B の代償
+
+- 新規の型が 2 つ増える(`PreviewUrlResolver` / `PreviewRelativeUrlExtension`)。
+- Markdig の `DocumentProcessed` と `LinkInline` に依存する。Markdig の major 更新時に
+  追従が要る(`SafeLinkExtension` が既に `ObjectRenderers.Replace` へ依存しているのと同程度)。
+- 静的パイプラインを 2 本(preview 用 / 素の用)持つ。
+
+### 7.5 同時に対処する既存の脆弱性(FINDING 1・High)
+
+Markdig の `AbbreviationExtension`(`UseAdvancedExtensions()` 同梱)が略語**ラベル**を
+エスケープせずに出力し、`DisableHtml()` が全面バイパスされる。実測:
+
+```
+*[<script>fetch(1)</script>]: x   +本文に同じ文字列
+→ <p><abbr title="x"><script>fetch(1)</script></abbr></p>
+```
+
+`title`(展開文)側は `WriteEscape` される。ラベル側だけが素通し。起点 main でも同じで
+**本ブランチの退行ではない**が、A-21 とまったく同じ類型(advanced 拡張が生 HTML を出す)で、
+同じ 1 行に手を入れれば塞げる。
+
+CSP がほぼ全て止めるが、`<meta http-equiv="refresh">` だけは該当 directive が CSP に無く、
+`MarkdownPreviewForm.OnNavigationStarting` → `Classify` = LaunchExternal →
+`TryLaunchExternal` の経路で**プレビューを開くだけで既定ブラウザが攻撃者 URL を開く**
+(ブラウザ側の挙動は推論・L5 未検証)。「外部起動はユーザーのクリック起点」という
+App 層の暗黙の前提が崩れる。
+
+対処: `RemoveAll` の述語に `AbbreviationExtension` を追加する。略語記法は `説明書/` に記載なし・
+テスト 0 件・repo 内参照ゼロなので機能影響は事実上ゼロ。
+
+### 7.6 申し送りに回す指摘
+
+| # | 内容 | 判断 |
+|---|------|------|
+| FINDING 4 | 未保存タブ(仮想ホスト未マップ)のプレビューで `pic.png` が実 DNS へ出る。`.preview` は未委任 TLD だが企業 DNS の search suffix 等で漏れうる | ② 受容・PR 記載。案 B でも同じ(絶対 URL になるだけ)。緩和案=`_baseDir` が無いとき書き換えない / `.internal` へ改名 |
+| FINDING 5 | `RemoveAll` が削除件数を検証していない(`SafeLinkExtension` の `Replace` fail-fast と非対称) | ③ 却下。behavioral テストが網を張っている |
+| 参考 3 件 | `style-src 'self'` は data: origin では無意味 / meta 配信の `frame-ancestors` は無視される / CSS 応答の CSP ヘッダは強制されない | 次にプレビューを触るときの出発点として記録 |

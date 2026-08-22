@@ -454,3 +454,322 @@ gh pr create --base main
 - **説明書 148 行の齟齬**: ユーザーへ提起のみ。本ブランチでは改稿しない。
 - **案 C(仮想ホスト上の実 URL へ Navigate)**: CSP を HTTP header で一次配布でき、
   `<base>` 依存を消せるという構造上の利点は残る。プレビューを次に大きく触るときの選択肢。
+
+---
+
+# 追加タスク(最終ブランチレビュー由来・2026-08-22)
+
+最終レビューの 2 パスで、設計段階の見落とし 1 件と既存脆弱性 1 件が出た。
+設計書 §7(実装時の設計変更)が以降の正。**Task 7 → Task 8 の順で実施する。**
+
+## Task 7: FINDING 1 — 略語ラベルの未エスケープを塞ぐ
+
+**Files:** Modify `src/kxEdit.Core/Text/MarkdownRenderer.cs`(`BuildPipeline` の `RemoveAll` 1 行)
+/ Test `tests/kxEdit.Core.Tests/Text/MarkdownRendererTests.cs`
+
+### 背景
+
+`UseAdvancedExtensions()` 同梱の `AbbreviationExtension` が略語**ラベル**をエスケープせずに
+出力し、`DisableHtml()` が全面バイパスされる(設計書 §7.5)。起点 main でも同じで本ブランチの
+退行ではないが、A-21 と同じ類型・同じ行で塞げる。
+
+### Step 1: 失敗するテストを書く
+
+A-21 のテスト群の隣に追加する。
+
+```csharp
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_RawHtml()
+    {
+        // FINDING 1: Markdig の HtmlAbbreviationRenderer はラベルを WriteEscape せず出力するため、
+        // DisableHtml() が全面バイパスされていた (title 側は正しくエスケープされる)。
+        string md = "*[<script>fetch(1)</script>]: x\n\n<script>fetch(1)</script>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<script", html);
+    }
+
+    [Fact]
+    public void Render_AbbreviationLabel_DoesNotEmit_MetaRefresh()
+    {
+        // 最も実害のある注入。CSP に該当 directive が無いため、プレビューを開くだけで
+        // MarkdownPreviewForm の LaunchExternal 経路が発火し既定ブラウザが開く。
+        string md =
+            "*[<meta http-equiv=refresh content=0;url=https://evil.example/pwn>]: x\n\n"
+            + "<meta http-equiv=refresh content=0;url=https://evil.example/pwn>\n";
+        string html = MarkdownRenderer.Render(md, Base);
+        Assert.DoesNotContain("<meta http-equiv=refresh", html);
+    }
+```
+
+### Step 2: 赤を確認
+
+```
+dotnet test tests/kxEdit.Core.Tests/kxEdit.Core.Tests.csproj --filter "FullyQualifiedName~MarkdownRendererTests"
+```
+
+期待: 新規 2 本が FAIL。
+
+### Step 3: 実装
+
+`using Markdig.Extensions.Abbreviations;` を追加し、述語を拡張する。
+
+```csharp
+        builder.Extensions.RemoveAll(e =>
+            e is GenericAttributesExtension || e is AbbreviationExtension
+        );
+```
+
+### Step 4: 緑を確認 + **OR ガードの条件別ミューテーション**
+
+⚠️ **OR ガードは条件ごとに 1 行ずつ変異させる**(過去に「両方の条件を同時に消しても全緑」で
+vacuous な網を通してしまった事故がある)。
+
+1. `|| e is AbbreviationExtension` だけを削る → 新規 2 本が赤・A-21 の 5 本は緑 を確認
+2. `e is GenericAttributesExtension ||` だけを削る → A-21 の 5 本が赤・新規 2 本は緑 を確認
+3. 両方復元し、`git diff` で変異が残っていないことを目視確認
+4. `MarkdownRendererTests` 全体で緑を確認(**`--filter` で 2 本に絞らない**)
+
+### Step 5: コミット
+
+コミットメッセージ: `fix(core): Markdig AbbreviationExtension を除去して生 HTML 出力を塞ぐ(FINDING 1)`
+
+---
+
+## Task 8: 案 B — `<base>` を捨てて相対 URL を描画前に絶対化する
+
+**Files:**
+- Create: `src/kxEdit.Core/Text/PreviewUrlResolver.cs`、`src/kxEdit.Core/Text/PreviewRelativeUrlExtension.cs`
+- Modify: `src/kxEdit.Core/Text/MarkdownRenderer.cs`
+- Test: `tests/kxEdit.Core.Tests/Text/PreviewUrlResolverTests.cs`(新規)、
+  `tests/kxEdit.Core.Tests/Text/MarkdownRendererTests.cs`
+
+### 背景
+
+設計書 §7 を読むこと。要点は「`<base>` があると裸のフラグメント URL まで base 基準で解決され、
+目次リンクと脚注の戻りリンクが MD-H-1 の Block に巻き込まれて全滅する」。
+`<base>` を出力せず、相対 URL を AST 段で絶対化する。
+
+### Step 1: `PreviewUrlResolver` のテストを書く(新規ファイル)
+
+規則は設計書 §7.2 の表。**規則 2(`#` 始まりは書き換えない)が FINDING 3 の要**。
+
+```csharp
+using kxEdit.Core.Text;
+
+namespace kxEdit.Core.Tests.Text;
+
+public class PreviewUrlResolverTests
+{
+    [Theory]
+    [InlineData("pic.png", "https://kxedit.preview/pic.png")]
+    [InlineData("sub/other.md", "https://kxedit.preview/sub/other.md")]
+    [InlineData("/root.png", "https://kxedit.preview/root.png")]
+    [InlineData("./pic.png", "https://kxedit.preview/pic.png")]
+    public void Relative_IsResolved(string input, string expected)
+    {
+        Assert.True(PreviewUrlResolver.TryResolve(input, out string? actual));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("#midashi")]          // FINDING 3: 同一文書内アンカーを守る
+    [InlineData("#fn:1")]             // 脚注の戻りリンク
+    [InlineData("//evil.example/p")]  // protocol-relative は別ホストへ飛ぶので触らない
+    [InlineData("https://example.com/")]
+    [InlineData("http://example.com/")]
+    [InlineData("mailto:a@b.c")]
+    [InlineData("javascript:alert(1)")] // scheme 付きは SafeLinkExtension の管轄
+    [InlineData("data:text/html,x")]
+    public void NotRewritten(string? input)
+    {
+        Assert.False(PreviewUrlResolver.TryResolve(input, out string? actual));
+        Assert.Null(actual);
+    }
+}
+```
+
+### Step 2: 赤を確認(型が無いのでコンパイルエラー)
+
+### Step 3: `PreviewUrlResolver` を実装
+
+```csharp
+namespace kxEdit.Core.Text;
+
+/// <summary>
+/// プレビュー本文中の URL を、preview 仮想ホスト基準の絶対 URL へ解決する純粋ロジック。
+/// <para>
+/// A-2 / 設計書 §7: プレビュー文書は <c>NavigateToString</c> 経由で origin が
+/// <c>data:text/html;...</c> になるため、相対 URL の解決基準を持たない。
+/// <c>&lt;base href&gt;</c> を置く案は、裸のフラグメント URL (<c>#section</c>) まで base 基準で
+/// 解決してしまい、目次リンクと脚注の戻りリンクが MD-H-1 の Block に巻き込まれて全滅するため
+/// 採らない。代わりに描画前の AST 段でここが絶対化する。
+/// </para>
+/// </summary>
+internal static class PreviewUrlResolver
+{
+    private static readonly Uri PreviewBase = new(MarkdownRenderer.PreviewBaseHref);
+
+    /// <summary>
+    /// 相対 URL なら preview 仮想ホスト基準の絶対 URL を返す。書き換え不要なら false。
+    /// 判定順は設計書 §7.2 の表のとおり。
+    /// </summary>
+    internal static bool TryResolve(string? url, out string? absolute)
+    {
+        absolute = null;
+        if (string.IsNullOrEmpty(url))
+        {
+            return false;
+        }
+        // FINDING 3: 裸のフラグメントは同一文書内スクロールなので絶対に触らない。
+        if (url[0] == '#')
+        {
+            return false;
+        }
+        // protocol-relative は new Uri(base, "//host/p") が別ホストへ飛ぶので触らない。
+        if (url.StartsWith("//", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        // scheme 付きは SafeLinkExtension の whitelist が扱う (javascript: 等)。
+        if (Uri.TryCreate(url, UriKind.Absolute, out _))
+        {
+            return false;
+        }
+        try
+        {
+            absolute = new Uri(PreviewBase, url).ToString();
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            return false; // 解決不能は安全側に倒して書き換えない
+        }
+    }
+}
+```
+
+⚠️ Core のテストから `internal` が見えるかを確認すること。既存の `SafeLinkExtension` が
+`internal sealed` でテストされているので同じ構成でよい。見えなければ `public` 化ではなく
+`InternalsVisibleTo` の追加で解決する。
+
+### Step 4: `PreviewRelativeUrlExtension` を実装
+
+```csharp
+using Markdig;
+using Markdig.Renderers;
+using Markdig.Syntax;
+using Markdig.Syntax.Inlines;
+
+namespace kxEdit.Core.Text;
+
+/// <summary>
+/// 本文中の相対 URL を <see cref="PreviewUrlResolver"/> で絶対化する Markdig 拡張。
+/// <c>LinkInline</c> はリンクと画像の両方を表すので 1 箇所で足りる。
+/// 書き換えは <c>DocumentProcessed</c> (描画前) で行うため、描画時に効く
+/// <see cref="SafeLinkExtension"/> の scheme whitelist より前段になる。
+/// scheme 付き URL は <see cref="PreviewUrlResolver"/> が触らないので whitelist の判定は不変。
+/// </summary>
+internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
+{
+    public void Setup(MarkdownPipelineBuilder pipeline)
+    {
+        pipeline.DocumentProcessed -= OnDocumentProcessed;
+        pipeline.DocumentProcessed += OnDocumentProcessed;
+    }
+
+    public void Setup(MarkdownPipeline pipeline, IMarkdownRenderer renderer) { }
+
+    private static void OnDocumentProcessed(MarkdownDocument document)
+    {
+        foreach (var link in document.Descendants<LinkInline>())
+        {
+            if (PreviewUrlResolver.TryResolve(link.Url, out string? absolute))
+            {
+                link.Url = absolute;
+            }
+        }
+    }
+}
+```
+
+Markdig の API 名(`DocumentProcessed` / `Descendants` / `LinkInline` / `IMarkdownExtension`)は
+1.3.2 の DLL で存在確認済み。**シグネチャが違ったら止めて報告すること**(推測で直さない)。
+
+### Step 5: `MarkdownRenderer` を変更
+
+1. **パイプラインを 2 本にする** — preview 経路は相対 URL を絶対化、`baseHref` 空文字の経路は
+   解決基準が無いので書き換えない。`BuildPipeline(bool rewriteRelativeUrls)` にして
+   `rewriteRelativeUrls` なら `builder.Extensions.AddIfNotAlready<PreviewRelativeUrlExtension>()` を
+   `SafeLinkExtension` の**前**に足す。
+2. **`Render` で使い分ける**: `baseHref == PreviewBaseHref` なら preview 用、空文字なら素の方。
+3. **`<base>` タグの出力を削除する**(`baseTag` 変数ごと)。
+4. **スタイルシートの `<link>` を絶対 URL にする**。定数を追加:
+
+```csharp
+    /// <summary>プレビュー CSS の絶対 URL。<c>&lt;base&gt;</c> に依存せず解決させるため絶対で出す。</summary>
+    public const string PreviewStylesheetUrl =
+        "https://" + PreviewVirtualHost + PreviewStylesheetPath;
+```
+
+`PreviewStylesheetPath` は `PreviewCspHeaderInjector` が filter に使うので**残す**。
+
+5. **CSP の `base-uri` を `'none'` へ戻す**(Task 2 の変更を差し戻す)。文書に `<base>` が
+   存在しなくなるので最も強い設定でよい。
+6. XML doc を実態に合わせる(`<base href>` を備えた… という記述を削る)。
+
+### Step 6: `MarkdownRendererTests` を更新
+
+Task 2 で入れたテストのうち base-uri 関連を差し戻し、案 B の不変条件を固定する。
+
+- `Meta_BaseUri_Is_Limited_To_PreviewHost` / `Meta_BaseUri_Matches_PreviewBaseHref` を削除し、
+  `base-uri 'none'` を固定するテストへ戻す(directive 全体を regex で切り出す形は維持してよい)
+- `PreviewCspHeader_ContainsAllDirectives` の assertion を `base-uri 'none'` へ戻す
+- `Base_href_is_injected` / `Empty_base_href_omits_base_tag` / `Render_Accepts_PreviewBaseHref` を
+  **`<base` タグが一切出力されないこと**を固定するテストへ置き換える
+- 新規:
+  - `Document_StylesheetLink_IsAbsolutePreviewUrl`
+  - `![](pic.png)` → `src="https://kxedit.preview/pic.png"`
+  - `[y](other.md)` → `href="https://kxedit.preview/other.md"`
+  - **`[目次](#midashi)` → `href="#midashi"` が不変**(FINDING 3 の回帰防止・最重要)
+  - **脚注の戻りリンクが `#fn:1` / `#fnref:1` のまま**(同上)
+  - `[y](https://example.com/)` が不変
+  - `[y](javascript:alert(1))` の href drop が維持(`SafeLinkExtension` 不変の証拠)
+  - 空 baseHref では書き換えが起きないこと
+
+### Step 7: ミューテーション検証
+
+⚠️ **`--filter` で絞らず `MarkdownRendererTests` + `PreviewUrlResolverTests` 全体で走らせる。**
+
+1. `PreviewUrlResolver` の `if (url[0] == '#') return false;` を削る
+   → **フラグメント不変のテストが赤になること**(FINDING 3 の網が実在する証拠)
+2. `if (url.StartsWith("//"))` を削る → protocol-relative のテストが赤
+3. `if (Uri.TryCreate(url, UriKind.Absolute, out _))` を削る → 絶対 URL 不変のテストが赤
+4. `<link>` の href を相対に戻す → `Document_StylesheetLink_IsAbsolutePreviewUrl` が赤
+5. すべて復元し `git diff` で残骸ゼロを確認
+
+### Step 8: App 側の確認
+
+`PreviewCspHeaderInjectorTests` が `PreviewStylesheetPath` / `PreviewCspHeader` を参照している。
+`dotnet test tests/kxEdit.App.Tests/kxEdit.App.Tests.csproj --filter "FullyQualifiedName~Preview"` で緑を確認。
+
+### Step 9: コミット
+
+コミットメッセージ: `fix(core): <base> を捨てて相対 URL を描画前に絶対化する(案 B・FINDING 3)`
+
+---
+
+## L5 チェック項目の差し替え(案 B 版)
+
+| # | 項目 | 期待 |
+|---|------|------|
+| L5-1 | 相対パス画像(既存チェックリスト ④) | 画像が表示される |
+| L5-2 | CSS 適用(blockquote の左ボーダー・本文パディング) | 効いている |
+| L5-3 | 未保存タブのプレビュー | CSS が適用される |
+| L5-4 | 相対リンク `[link](other.md)` のクリック | 遷移しない(MD-H-1 の仕様)。クラッシュせず外部ブラウザも起動しない |
+| L5-5 | `{#custom}` / `{.cls}` の表示(**ASCII 見出しで**) | 本文にリテラル表示される |
+| L5-6 | `[jump](#custom)` のクリック | 飛ばない(自動生成 id が変わるため)。A-21 の代償の確認 |
+| L5-7 | **目次リンク `[目次](#見出し)` のクリック** | **その見出しへスクロールする**(FINDING 3 の実機確認) |
+| L5-8 | **脚注の戻りリンクのクリック** | **本文の参照位置へ戻る**(同上) |
+| L5-9 | 略語記法 `*[HTML]: HyperText...` を含む .md | 展開されない(Task 7 の代償)。生 HTML が出ない |
