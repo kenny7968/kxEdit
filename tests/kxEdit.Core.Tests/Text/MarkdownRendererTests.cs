@@ -433,4 +433,42 @@ public class MarkdownRendererTests
         string html = MarkdownRenderer.Render("x", Base);
         Assert.Contains(MarkdownRenderer.PreviewCspHeader, html);
     }
+
+    // ---------------------------------------------------------------------
+    // A-21 (v0.2 リリース前バグ監査): UseAdvancedExtensions 同梱の GenericAttributes を
+    // 除去し、`{...}` 属性記法が HTML 属性として出力されないことを機械固定する。
+    // 現状は CSP (script-src なし) が実行を止めているだけで、SafeLinkExtension の
+    // 二層目 (scheme whitelist) は `{href="javascript:..."}` で上書きできてしまっていた。
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Render_GenericAttributes_DoesNotEmit_OnClickOnLink()
+    {
+        string html = MarkdownRenderer.Render("[y](x){onclick=\"evil()\"}", Base);
+        Assert.DoesNotMatch(@"<a[^>]*onclick", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_DoesNotEmit_OnErrorOnImage()
+    {
+        string html = MarkdownRenderer.Render("![a](x){onerror=alert(1)}", Base);
+        Assert.DoesNotMatch(@"<img[^>]*onerror", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_CannotRestoreDroppedHref()
+    {
+        // SafeLinkExtension が落とした href を {href="javascript:..."} で上書きできないこと。
+        string html = MarkdownRenderer.Render("[y](x){href=\"javascript:alert(1)\"}", Base);
+        Assert.DoesNotMatch(@"<a[^>]*javascript:", html);
+    }
+
+    [Fact]
+    public void Render_GenericAttributes_Syntax_BecomesLiteralText()
+    {
+        // 拡張除去に伴う挙動変化を仕様として固定する ({#id} は本文にそのまま出る)。
+        // 見出しの id は UseAutoIdentifiers が別途生成するのでアンカーは失われない。
+        string html = MarkdownRenderer.Render("# 見出し {#custom}", Base);
+        Assert.Contains("{#custom}", html);
+    }
 }
