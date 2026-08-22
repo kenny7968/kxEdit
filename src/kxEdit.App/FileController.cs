@@ -368,7 +368,18 @@ public sealed class FileController
                 continue;
             }
 
-            if (!TryNormalizeSavePath(picked.Path, out string full))
+            // V-1: 正規化できても「親フォルダーが取れない」入力は書き込み先が確定しないので弾く。
+            // 該当するのはドライブルート(C:\ / Q:\)・予約デバイス名(CON → \\.\CON)・
+            // \\?\C:\ のような拡張ルート・共有ルート(\\server\share)。
+            // 通すと AtomicFile.Write の `Path.Combine(Path.GetDirectoryName(...)!, ...)` に null が
+            // 渡って ArgumentNullException になる。WriteToPath の catch フィルタと合わせて
+            // 二重に守る理由: フィルタだけだと ConvertEols で保存点が壊れた後に捕まるため、
+            // ここで先に止めた方が本文にもキャレットにも触れない。
+            // 述語(親フォルダーの有無)は FileReachabilityProbe.ProbeSaveTargetWithTimeout と同じ。
+            if (
+                !TryNormalizeSavePath(picked.Path, out string full)
+                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(full))
+            )
             {
                 _prompt.Warn(
                     $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
@@ -466,13 +477,17 @@ public sealed class FileController
     /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>(手前の空白チェックが先に捕まえる)、
     /// (c) 総長 &gt; 32767 → <see cref="System.IO.PathTooLongException"/> の 3 つ。
     /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」や予約デバイス名(CON / NUL)は
-    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない。
-    /// <b>申し送り(未修正)</b>: 総長が 32767 の直下に収まる窓(実測 CWD 110 文字 + 相対 32660 文字)
-    /// では <c>GetFullPathNameW</c> が ERROR_INVALID_NAME を返し、**素の
-    /// <see cref="System.IO.IOException"/>** が飛ぶ。<see cref="System.IO.PathTooLongException"/> は
-    /// その派生だが逆は成り立たないため、このフィルタを抜けて未捕捉例外ダイアログになる。
-    /// 塞ぐなら <c>PathTooLongException</c> を <c>IOException</c> に広げる(厳密な上位集合)。
-    /// 設計書 §4.3 の列挙をそのまま実装しているので、変更は脆弱性レビューの判断に委ねる。
+    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない
+    /// (デバイス名・ドライブルートは呼出側の「親フォルダーが取れるか」ガードが弾く)。
+    /// <b>V-2(脆弱性レビューで解消済み)</b>: 総長が 32767 の直下に収まる窓
+    /// (実測 CWD 110 文字 + 相対 32660 文字)では <c>GetFullPathNameW</c> が
+    /// ERROR_INVALID_NAME を返し、<see cref="System.IO.PathTooLongException"/> ではなく
+    /// **素の <see cref="System.IO.IOException"/>** が飛ぶ。派生関係は一方向なので
+    /// <c>PathTooLongException</c> だけを列挙するとこの窓が抜けて未捕捉例外ダイアログになった。
+    /// 設計書 §4.3 の列挙は実測と食い違っていたため、<c>IOException</c>(厳密な上位集合)へ
+    /// 広げて訂正する。<see cref="System.IO.Path.GetFullPath(string)"/> は
+    /// <c>GetFullPathNameW</c> による名前解決のみで実 I/O を行わないので、握り潰しては
+    /// いけない実 I/O エラーを飲み込む余地はない。
     /// </remarks>
     private static bool TryNormalizeSavePath(string input, out string full)
     {
@@ -485,7 +500,7 @@ public sealed class FileController
             when (ex
                     is ArgumentException
                         or NotSupportedException
-                        or System.IO.PathTooLongException
+                        or System.IO.IOException
                         or System.Security.SecurityException
             )
         {
@@ -557,12 +572,20 @@ public sealed class FileController
             _metaChanged();
             return true;
         }
+        // V-1: ArgumentException を握る = Load 側(LoadInto の Task 5 review I-1)との非対称を戻す。
+        // SaveAsDocument の前段ガードを通らない経路が 2 本ある: Ctrl+S(SaveDocument は
+        // State.Path をそのまま WriteToPath へ渡す)と、悪意ある backup JSON 由来の復元タブ
+        // (OriginalPathValidator の BlockedRoots は C:\Windows 等なので `C:\` は Ok で通る)。
+        // そこから AtomicFile.Write の Path.Combine(null, ...) に届くと ArgumentNullException が
+        // 素通りし、**ConvertEols 後のロールバックが発火しないまま Modified=false が残る**
+        // = 保存していない本文が確認なしで閉じられる(ConfirmDiscardIfDirty は !Modified で即 true)。
         catch (Exception ex)
             when (ex
                     is System.IO.IOException
                         or UnauthorizedAccessException
                         or System.Security.SecurityException
                         or NotSupportedException
+                        or ArgumentException
             )
         {
             // バグ 1+2 修正: ConvertEols が非 fast-path で新規 TextBuffer に差し替えている場合は

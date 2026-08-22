@@ -397,6 +397,116 @@ public class FileControllerTests
             Assert.Null(doc.State.Path);
         });
 
+    // ===== V-1 / V-3(脆弱性レビュー): 親フォルダーが取れない保存先 =====
+
+    /// <summary>
+    /// V-1(High)。ドライブルート(C:\)は正規化できるが親フォルダーが無い=書き込み先が確定しない。
+    /// 前段ガードが無いと AtomicFile.Write の <c>Path.Combine(GetDirectoryName(...)!, ...)</c> に
+    /// null が渡って ArgumentNullException になり、しかも ConvertEols が保存点を壊した後なので
+    /// **保存していないのに Modified=false** が残る(ConfirmDiscardIfDirty が素通りし、
+    /// 以後タブを閉じても終了しても確認なしで本文が失われる)。
+    /// ローカルパスをハードコードしないため root は TempDir から導出する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_DriveRoot_WarnsAndReopens_AndKeepsModified() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+            Assert.False(string.IsNullOrEmpty(root));
+
+            var doc = host.Docs.CreateNew();
+            // 本文に CRLF を入れ、要求 EOL を LF にする = ガードを外したとき ConvertEols が
+            // **非 fast-path**でバッファを差し替え、保存点が実際に壊れる条件を作る。
+            // これを作らないと Modified の assert が空振りする(fast-path は no-op)。
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // dirty= 非既定状態から検証を始める
+            Assert.True(doc.Editor.Modified);
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(root, 65001, false, LineEnding.Lf));
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount); // 中止せず再表示する
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.Editor.Modified); // V-1 の本体: 未保存の本文が dirty のまま残る
+        });
+
+    /// <summary>
+    /// V-1 / V-3。予約デバイス名は GetFullPath が <c>\\.\CON</c> へ正規化するため、先頭 <c>\\</c> で
+    /// リモート扱いになる。ガードが無いと保存先プローブまで進み「ネットワークパスに到達できません」
+    /// という的外れな文言になる(V-3)。親フォルダー無しとして先に弾けば正しい文言になる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_ReservedDeviceName_WarnsWithPathMessage_NotNetworkMessage() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x");
+            Assert.True(doc.Editor.Modified);
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult("CON", 65001, false, LineEnding.Lf));
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.Equal(0, host.Probe.SaveTargetCallCount); // プローブまで届かせない
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.Editor.Modified);
+        });
+
+    /// <summary>
+    /// V-1 修正 (b)。SaveAsDocument の前段ガードを**通らない**経路の網: Ctrl+S は
+    /// State.Path をそのまま WriteToPath へ渡す。攻撃 backup JSON の
+    /// <c>OriginalPath: "C:\\"</c> は OriginalPathValidator の BlockedRoots(C:\Windows 等)に
+    /// 該当しないため Ok で通り、State.Path=ドライブルートの復元タブが成立しうる。
+    /// WriteToPath の catch フィルタが ArgumentException を持たないと未捕捉例外になり、
+    /// ConvertEols のロールバックが発火せず Modified=false のまま残る。
+    /// </summary>
+    [Fact]
+    public void Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x");
+            doc.State.LineEnding = LineEnding.Lf; // ConvertEols を非 fast-path にする
+            doc.State.Path = root; // 復元タブ相当(SaveAs ダイアログを経由しない)
+            Assert.True(doc.Editor.Modified);
+
+            Assert.False(host.File.Save()); // Ctrl+S 経路
+
+            Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へ落ちない
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+            Assert.True(doc.Editor.Modified); // ロールバック発火=未保存の本文が失われない
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
