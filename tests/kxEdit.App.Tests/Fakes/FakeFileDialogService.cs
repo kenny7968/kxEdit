@@ -10,13 +10,21 @@ public sealed class FakeFileDialogService : IFileDialogService
 {
     public string? OpenPath { get; set; }
 
-    /// <summary>単一値の応答(従来 API)。**1 回目の呼出でだけ**返し、以降はキャンセル扱い。</summary>
+    /// <summary>
+    /// 単一値の応答(従来 API)。**1 回目の呼出でだけ**返し、以降はキャンセル扱い。
+    /// Task 8(2026-08-23)以降、この 1-shot 性は <see cref="SaveAsQueue"/> の枯渇と並ぶ
+    /// **停止保証**でもある(劣化警告も continue するようになり、`FakePrompt.OkCancelResult` は
+    /// 固定フィールドで永久に同じ答を返すため、同じ値を返し続ける Fake は無限ループになる)。
+    /// **「最後の値を繰り返す」モードをここにも <see cref="SaveAsQueue"/> にも足さないこと。**
+    /// </summary>
     public SaveAsResult? SaveAs { get; set; }
 
     /// <summary>
     /// 複数回の応答(ダイアログ再表示のテスト用)。先頭から 1 件ずつ払い出す。
     /// **枯渇したらキャンセル(null)**にすることで、網の書き間違いが無限ループではなく
     /// 「PickSaveAsCount が想定と違う」という失敗として出る。
+    /// Task 8 以降これは唯一の停止保証なので、**「最後の値を繰り返す」モードを足さないこと**
+    /// (<see cref="SaveAs"/> の 1-shot 性についても同じ)。
     /// </summary>
     public Queue<SaveAsResult?> SaveAsQueue { get; } = new();
 

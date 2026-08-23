@@ -1040,6 +1040,17 @@ public class FileControllerTests
 
     // ===== 符号化劣化警告(CanEncodeBuffer 経由) =====
 
+    /// <summary>
+    /// 劣化警告に「キャンセル」と答えると、ファイルにも State にも一切触れない。
+    /// Task 8(2026-08-23)以降、この <c>false</c> は「警告して中止した」結果ではない:
+    /// 警告後は <c>continue</c> してダイアログを再表示し、2 回目に 1-shot の
+    /// <see cref="Fakes.FakeFileDialogService.SaveAs"/> が払い出しを終えてキャンセル扱いに
+    /// なった結果である。**再表示そのものの pin は
+    /// <see cref="SaveAs_EncodingWarningDeclined_ReopensDialog"/>** が持つ。
+    /// (先例 = <see cref="SaveAs_WhitespacePath_WarnsWithExactMessage_AndLeavesStateUnchanged"/>。
+    /// テスト名の Cancel は**警告への答**であって SaveAs の中止ではない。名前が
+    /// 「中止」を主張すると、<c>continue</c> を <c>return false</c> へ戻す改悪を名前が追認する)
+    /// </summary>
     [Fact]
     public void SaveAs_LossyEncoding_CancelKeepsStateAndWritesNothing() =>
         Sta.Run(() =>
@@ -1060,9 +1071,13 @@ public class FileControllerTests
                 host.Prompt.Log,
                 e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
             );
-            // S-12: 既定フォーカスをキャンセル側へ倒したのは**上書き確認だけ**(こちらは現状維持)。
-            // 非対称が意図的であることを固定する = OkCancel の既定引数を true へ変える変異を殺す。
-            Assert.Equal(("文字コードの警告", false), Assert.Single(host.Prompt.OkCancelCalls));
+            // S-12 と**対称**: 破壊的な確認は両方とも既定フォーカスをキャンセル側に置く。
+            // Task 8 で警告のキャンセルが「入力を保ったまま再表示」になり、誤爆した Enter の
+            // コストが消えたので、劣化警告だけ既定 OK にしておく根拠がなくなった
+            // (コンボの初期値は seed 由来なので、ユーザーが文字コードに触れていなくても
+            // 警告条件は成立しうる = 「直前に自分で選んだ」前提が成り立たない)。
+            // defaultCancel を false へ戻す変異をここで殺す。
+            Assert.Equal(("文字コードの警告", true), Assert.Single(host.Prompt.OkCancelCalls));
         });
 
     /// <summary>
