@@ -164,6 +164,37 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
         );
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <b>フィルタの実測(net9.0.8)</b> — 移設元 <c>FileController.TryNormalizeSavePath</c> の
+    /// 記録を引き継ぐ。<see cref="Path.GetFullPath(string)"/> が投げるのは実質
+    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>、
+    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>、
+    /// (c) 総長超過 → 下の V-2 の表、の 3 つだけ。
+    /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」・予約デバイス名(CON / NUL)・
+    /// 拡張ルート(<c>\\?\</c>)は<b>投げずに素通りする</b>ので、このフィルタは無効文字の門番ではない
+    /// (実測: <c>GetFullPath("CON")</c> → <c>\\.\CON</c>、<c>GetFullPath(@"\\?\")</c> →
+    /// <c>\\?\</c> がどちらも <see cref="PathNormalizeStatus.Ok"/> で返る)。
+    /// つまり <c>Ok</c> は<b>「文字列として正規化できた」以上の意味を持たない</b>。
+    /// 書き込み先が確定するか(デバイス名・ドライブルート・共有ルートを弾く)は呼出側の
+    /// 「親フォルダーが取れるか」ガード(#47 の V-1)が別途見る契約で、
+    /// <b>境界付きにしてもこのガードは正規化の後ろに残さなければならない</b>。
+    /// <para>
+    /// <b>V-2(#47 の脆弱性レビューで解消)の実測マップ</b> — 相対入力の文字数 → 例外型:
+    /// <list type="bullet">
+    /// <item>32765 / 32766 → 素の <see cref="IOException"/>(<c>is PathTooLongException</c> は false)</item>
+    /// <item>32767 / 40000 → <see cref="PathTooLongException"/></item>
+    /// </list>
+    /// 前者は総長が 32767 の直下に収まる窓で、<c>GetFullPathNameW</c> が ERROR_INVALID_NAME を
+    /// 返すために起きる。派生関係は一方向なので <c>PathTooLongException</c> だけを列挙すると
+    /// この窓が抜けて未捕捉例外ダイアログになる。設計書 §4.3 の列挙は実測と食い違っていたため
+    /// <see cref="IOException"/>(厳密な上位集合)へ広げてある。
+    /// <b>この窓の上端は入力長だけで決まり CWD 長に依存しない</b>(総長 = CWD + 1 + 入力長 なので、
+    /// 入力長 32766 ならどんな CWD でも 32767 を超える)。「CWD 長に依存する fixture になるので
+    /// 自動テストにできない」と書いていたのは誤りで、網は
+    /// <c>FileReachabilityProbeTests.NormalizePath_OverLongPath_ReturnsInvalid</c> の
+    /// <c>[Theory]</c> にある。
+    /// </para>
+    /// </remarks>
     public PathNormalizeResult NormalizePathWithTimeout(string path, TimeSpan timeout) =>
         RunNormalizeProbe(
             () =>
@@ -173,10 +204,8 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                     return new PathNormalizeResult(PathNormalizeStatus.Ok, Path.GetFullPath(path));
                 }
                 // フィルタは FileController.TryNormalizeSavePath から**そのまま移設**した。
-                // PR #47 の V-2 対策を落とさないこと: 総長が 32767 の直下に収まる窓では
-                // GetFullPathNameW が ERROR_INVALID_NAME を返し、PathTooLongException ではなく
-                // 素の IOException が飛ぶ。PathTooLongException だけを列挙するとこの窓が抜けて
-                // 未捕捉例外ダイアログになる。
+                // PR #47 の V-2 対策(素の IOException の窓)を落とさないこと。
+                // どの入力がどの例外型を投げるかの実測マップは本メソッドの remarks にある。
                 //
                 // **既存 2 本と違って素の catch を後ろに置かないのは意図的**(I-6)。
                 // 素の catch を足すと、予期しない例外型=ロジックバグまで「パスが正しくありません」

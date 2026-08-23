@@ -419,17 +419,33 @@ public sealed class FileController
             // 二重に守る理由: フィルタだけだと ConvertEols で保存点が壊れた後に捕まるため、
             // ここで先に止めた方が本文にもキャレットにも触れない。
             // 述語(親フォルダーの有無)は FileReachabilityProbe.ProbeSaveTargetWithTimeout と同じ。
+            // ガードを**正規化の後ろに残すのは load-bearing**(Issue #48): seam の Ok は
+            // 「文字列として正規化できた」以上の意味を持たない(実測: CON → \\.\CON も
+            // \\?\ もそのまま Ok で返る)ので、境界付きにしても V-1 の門番は要る。
+            var norm = NormalizeSavePath(picked.Path);
             if (
-                !TryNormalizeSavePath(picked.Path, out string full)
-                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(full))
+                norm.Status != PathNormalizeStatus.Ok
+                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(norm.Full))
             )
             {
+                // S-15: 到達不能(タイムアウト)と打ち間違い(Invalid)で文言を分ける。
+                // 同じ文言だと、原因がネットワークなのに利用者が入力を疑い続ける。
+                // 親フォルダーが取れない場合(V-1)は Ok なので既定枝=「正しくありません」に入る。
+                // switch 式にしてあるのは、PathNormalizeStatus に 4 値目を足したとき
+                // 三項だと黙って既定枝へ倒れるため。
                 _prompt.Warn(
-                    $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    norm.Status switch
+                    {
+                        PathNormalizeStatus.TimedOut =>
+                            $"保存先に到達できませんでした(5 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                        _ =>
+                            $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    },
                     "エラー"
                 );
                 continue;
             }
+            string full = norm.Full;
             // 以降の判定・保存・State 反映はすべて正規化済みの full を使う。
             // 再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)。
             // 位置も load-bearing: 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、
@@ -571,44 +587,25 @@ public sealed class FileController
     /// 未捕捉例外ダイアログにしない。
     /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
     /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
+    /// <para>
+    /// <b>Issue #48 (S-15)</b>: 以前ここは <see cref="System.IO.Path.GetFullPath(string)"/> を
+    /// 直接呼び、remarks に「GetFullPath は <c>GetFullPathNameW</c> による名前解決のみで
+    /// 実 I/O を行わないので、握り潰してはいけない実 I/O エラーを飲み込む余地はない」と
+    /// 書いていた。<b>これは誤り</b>で、正規化後のパスに <c>~</c> が含まれると
+    /// <c>GetLongPathName</c>(境界の無い実 FS / ネットワーク呼び出し)が走り、不達の共有に対して
+    /// 約 21 秒 UI スレッドを止める(実測 21,002 ms・2026-08-23)。この誤認が S-15 を通した。
+    /// 実 I/O を伴う以上、結果は例外の有無ではなく 3 状態(Ok / Invalid / TimedOut)になる。
+    /// 境界は <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> 側で張る。
+    /// </para>
+    /// <para>
+    /// 例外の握り潰し(SR ユーザーの直入力面を未捕捉例外ダイアログにしない)は seam の中へ移した。
+    /// <c>GetFullPath</c> がどの入力でどの例外型を投げるかの実測記録・V-2 の経緯も、フィルタの
+    /// 実体と離れないよう移設先 <see cref="FileReachabilityProbe.NormalizePathWithTimeout"/> の
+    /// remarks へ移してある。
+    /// </para>
     /// </summary>
-    /// <remarks>
-    /// .NET 9 での実測(Task 5 実装時): <c>Path.GetFullPath</c> が投げるのは実質
-    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>(本テストの pin)、
-    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>(手前の空白チェックが先に捕まえる)、
-    /// (c) 総長 &gt; 32767 → <see cref="System.IO.PathTooLongException"/> の 3 つ。
-    /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」や予約デバイス名(CON / NUL)は
-    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない
-    /// (デバイス名・ドライブルートは呼出側の「親フォルダーが取れるか」ガードが弾く)。
-    /// <b>V-2(脆弱性レビューで解消済み)</b>: 総長が 32767 の直下に収まる窓
-    /// (実測 CWD 110 文字 + 相対 32660 文字)では <c>GetFullPathNameW</c> が
-    /// ERROR_INVALID_NAME を返し、<see cref="System.IO.PathTooLongException"/> ではなく
-    /// **素の <see cref="System.IO.IOException"/>** が飛ぶ。派生関係は一方向なので
-    /// <c>PathTooLongException</c> だけを列挙するとこの窓が抜けて未捕捉例外ダイアログになった。
-    /// 設計書 §4.3 の列挙は実測と食い違っていたため、<c>IOException</c>(厳密な上位集合)へ
-    /// 広げて訂正する。<see cref="System.IO.Path.GetFullPath(string)"/> は
-    /// <c>GetFullPathNameW</c> による名前解決のみで実 I/O を行わないので、握り潰しては
-    /// いけない実 I/O エラーを飲み込む余地はない。
-    /// </remarks>
-    private static bool TryNormalizeSavePath(string input, out string full)
-    {
-        try
-        {
-            full = System.IO.Path.GetFullPath(input);
-            return true;
-        }
-        catch (Exception ex)
-            when (ex
-                    is ArgumentException
-                        or NotSupportedException
-                        or System.IO.IOException
-                        or System.Security.SecurityException
-            )
-        {
-            full = string.Empty;
-            return false;
-        }
-    }
+    private PathNormalizeResult NormalizeSavePath(string input) =>
+        _reachabilityProbe.NormalizePathWithTimeout(input, TimeSpan.FromSeconds(5));
 
     /// <summary>
     /// 改行を State.LineEnding に正規化してから本文を取得し、原子的に保存する。

@@ -454,18 +454,31 @@ public class FileControllerTests
         });
 
     /// <summary>
-    /// V-2 の網。<c>TryNormalizeSavePath</c> の catch フィルタから <c>IOException</c> を外す変異
-    /// (例えば <c>FileNotFoundException</c> へ狭める = 挙動としては「IOException を握らない」)が
-    /// **全緑で生存していた**(最終品質パス I-3)。上の <c>bad\0name.txt</c> は
-    /// <c>ArgumentException</c> 枝しか通らないため、<c>IOException</c> 側が無網だった。
-    /// **本テストが塞ぐのは設計書 §4.3 が挙げる 2 つの窓のうち
-    /// <see cref="System.IO.PathTooLongException"/>(総長超過)の方**。実測(.NET 9)で
-    /// 40,000 文字の相対入力はこれを投げる。もう一方の**素の <c>IOException</c>**
-    /// (総長が 32,767 の直下に収まり <c>GetFullPathNameW</c> が ERROR_INVALID_NAME を返す窓。
-    /// CWD 110 文字 + 相対 32,660 文字で実測)は CWD 長に依存する fixture になるため
-    /// 自動テストにせず、<c>TryNormalizeSavePath</c> の remarks を読むことで担保する。
-    /// PathTooLongException は IOException の派生なので、この 1 本でフィルタの
-    /// <c>or System.IO.IOException</c> という**記述そのもの**は pin できる。
+    /// 正規化できない入力のうち、<b>例外型が <see cref="ArgumentException"/> ではない</b>枝の網。
+    /// 上の <c>bad\0name.txt</c> は <c>ArgumentException</c> 枝しか通らないため、
+    /// 総長超過側が無網だった(#47 最終品質パス I-3)。
+    /// <para>
+    /// <b>Task 3(Issue #48)以降、本テストが担保するのはフィルタの記述ではなく配線である</b>:
+    /// 正規化と例外フィルタは <see cref="FileReachabilityProbe.NormalizePathWithTimeout"/> へ
+    /// 移設され、<c>FakeReachabilityProbe</c> は既定でその実実装へ委譲する。よってここが固定するのは
+    /// 「seam が <see cref="PathNormalizeStatus.Invalid"/> を返したら、SaveAs は未捕捉例外
+    /// ダイアログにせず『パスが正しくありません』でダイアログへ戻す」という
+    /// <b>FileController 側の分岐</b>。フィルタそのものの網は
+    /// <c>FileReachabilityProbeTests.NormalizePath_OverLongPath_ReturnsInvalid</c> にある。
+    /// </para>
+    /// <para>
+    /// <b>以前ここに書いていた 2 つの主張は Task 2 の実測で反証された</b>:
+    /// (1)「素の <see cref="System.IO.IOException"/> の窓は CWD 長に依存する fixture になるため
+    /// 自動テストにしない」→ <b>誤り</b>。窓の上端は<b>入力長だけで決まり CWD 非依存</b>
+    /// (総長 = CWD + 1 + 入力長 なので、入力長 32766 ならどんな CWD でも 32767 を超える)。
+    /// 上記 <c>[Theory]</c> に 32766 を入れて自動化済み。
+    /// (2)「<see cref="System.IO.PathTooLongException"/> は <c>IOException</c> の派生なので、
+    /// この 1 本でフィルタの <c>or IOException</c> という<b>記述そのもの</b>を pin できる」→
+    /// <b>誤り</b>。<c>or IOException</c> → <c>or PathTooLongException</c> の変異は
+    /// <b>全緑で生存する</b>(40,000 文字が投げるのは <c>PathTooLongException</c> なので、
+    /// 狭めた列挙でも捕まってしまう)。入力長と例外型の実測マップは
+    /// <see cref="FileReachabilityProbe.NormalizePathWithTimeout"/> の remarks にある。
+    /// </para>
     /// </summary>
     [Fact]
     public void SaveAs_OverLongPath_WarnsAndReopens() =>
@@ -598,6 +611,116 @@ public class FileControllerTests
                     && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
             );
             Assert.True(doc.Editor.Modified); // ロールバック発火=未保存の本文が失われない
+        });
+
+    // ===== 境界付き正規化(Issue #48 / S-15)=====
+
+    [Fact]
+    public void SaveAs_NormalizeTimesOut_ShowsReachabilityMessage_AndDoesNotSave() =>
+        Sta.Run(() =>
+        {
+            // S-15: 不達共有上の `~` を含むパスは GetFullPath が約 21 秒 UI を止める。
+            // seam のタイムアウトで中止し、**打ち間違いとは別の文言**を出すことを固定する
+            // (同じ文言だと、原因がネットワークなのに利用者が入力を疑い続ける)。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            // NormalizeResult は PathNormalizeResult? なので `default` と書くと null =
+            // 実装への委譲になり、この網が vacuous になる。必ず明示的に構築する。
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.TimedOut,
+                string.Empty
+            );
+            host.Dialogs.SaveAs = new SaveAsResult(@"C:\Temp\a.txt", 65001, false, LineEnding.Crlf);
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Null(doc.State.Path); // 保存されていない
+            // 文言の弁別: 到達不能側にだけ現れる語を見る
+            Assert.Contains(host.Prompt.Log, e => e.Text.Contains("到達できません"));
+        });
+
+    [Fact]
+    public void SaveAs_NormalizeInvalid_ShowsInvalidPathMessage() =>
+        Sta.Run(() =>
+        {
+            // 対照群。Invalid と TimedOut を同じ文言にする変異をここで kill する。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Invalid,
+                string.Empty
+            );
+            host.Dialogs.SaveAs = new SaveAsResult(@"C:\Temp\a.txt", 65001, false, LineEnding.Crlf);
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Null(doc.State.Path);
+            Assert.Contains(host.Prompt.Log, e => e.Text.Contains("正しくありません"));
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("到達できません"));
+        });
+
+    [Fact]
+    public void SaveAs_PassesFiveSecondTimeoutToNormalizeProbe() =>
+        Sta.Run(() =>
+        {
+            // 5 秒契約の pin(既存 2 本の LastTimeout と同じ思想)。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                tmp.File("a.txt"),
+                65001,
+                false,
+                LineEnding.Crlf
+            );
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.NormalizeLastTimeout);
+        });
+
+    /// <summary>
+    /// 「seam を経由していること」ではなく「<b>FileController が直接
+    /// <c>Path.GetFullPath</c> を呼んでいないこと</b>」の網。
+    /// <para>
+    /// 回数だけを見ると弱い(seam を呼んでから答を捨てて <c>GetFullPath</c> を呼ぶ変異が生き残る)
+    /// ので、<b>seam の答を実入力と食い違わせる</b>: ダイアログで打たれたのは
+    /// <c>typed.txt</c> だが seam は <c>redirected.txt</c> を返す。
+    /// 下流(V-1 ガード・重複判定・保存先プローブ・実書込・<c>State.Path</c>・最近のファイル)が
+    /// 本当に seam の出力を使っているなら、ファイルは <c>redirected.txt</c> にできる。
+    /// <c>GetFullPath</c> を直接呼ぶ実装なら <c>typed.txt</c> にできて落ちる。
+    /// </para>
+    /// <para>
+    /// あわせて <c>NormalizeCallCount == 1</c> を pin する。「1 操作あたり正規化 1 本」は
+    /// 設計書 §3 の不変条件で、境界付きにした意味(5 秒 × N にしない)がここに掛かっている。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SaveAs_UsesNormalizedPathFromProbe_NotDirectGetFullPath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string typed = tmp.File("typed.txt");
+            string redirected = tmp.File("redirected.txt");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Ok,
+                redirected
+            );
+            host.Dialogs.SaveAs = new SaveAsResult(typed, 65001, false, LineEnding.Crlf);
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.Equal(1, host.Probe.NormalizeCallCount); // 5 秒 × N にしない
+            Assert.Equal(typed, host.Probe.NormalizeLastPath); // 生入力がそのまま seam へ届く
+            Assert.Equal(redirected, doc.State.Path);
+            Assert.True(File2.Exists(redirected));
+            Assert.False(File2.Exists(typed));
         });
 
     // ===== A-7 (b): 他タブ重複の検知 =====
