@@ -882,6 +882,11 @@ public class FileControllerTests
 
             Assert.False(host.File.SaveAs());
 
+            // **assert の順序が load-bearing**(先例 =
+            // Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe): 短絡を外す変異では
+            // 再表示回数も落ちるので、粗い方を先に書くと契約違反そのものの網が隠れる。
+            // 到達不能のとき FileExists は無意味(SaveTargetProbeResult の契約)= 読んではいけない。
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
             Assert.Equal(2, host.Dialogs.PickSaveAsCount);
             Assert.Contains(
                 host.Prompt.Log,
@@ -892,9 +897,6 @@ public class FileControllerTests
                         StringComparison.Ordinal
                     )
             );
-            // 到達不能のとき FileExists は無意味(SaveTargetProbeResult の契約)。
-            // 戻り値を先に見ずに exists を読む変異は、ここで上書き確認が出ることで落ちる。
-            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
             // 書込は試みていない = WriteToPath の失敗エラーは出ない
             Assert.DoesNotContain(
                 host.Prompt.Log,
