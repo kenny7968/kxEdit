@@ -6,7 +6,7 @@
 
 **Architecture:** 「境界を張る前に回数を減らす」。`PathKey` を生入力用 `For` と正規化済み用 `ForNormalized`(ファイルシステムに触れない)に割り、`DocumentState.Path` を「null か正規化済み絶対パス」の不変条件にすることで、`FindByPath` / `RecentFilesList.Add` の 1+N 回の `GetFullPath` を 0 回にする。残る「操作あたり 1 本」を `IReachabilityProbe` の 3 つ目のメンバーとして境界付きにする。
 
-**Tech Stack:** .NET 10 / C# / WinForms / xUnit / CSharpier(pre-commit)/ Husky.Net
+**Tech Stack:** .NET 9(`net9.0-windows`・SDK は 10.x)/ C# / WinForms / xUnit / CSharpier(pre-commit)/ Husky.Net
 
 **設計書:** `docs/plans/2026-08-23-bounded-path-normalization-design.md`
 
@@ -35,7 +35,7 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 
 ### この問題の機構(なぜ 21 秒か)
 
-`Path.GetFullPath` は、正規化後のパスに `~` が含まれると Win32 の `GetLongPathName` を呼ぶ。これは実ファイルシステム / ネットワーク呼び出しで、タイムアウトの境界が無い。実測(2026-08-23・.NET 10.0.9):
+`Path.GetFullPath` は、正規化後のパスに `~` が含まれると Win32 の `GetLongPathName` を呼ぶ。これは実ファイルシステム / ネットワーク呼び出しで、タイムアウトの境界が無い。実測(2026-08-23・**.NET 10.0.9 のスクラッチパッド console app**。本体の `TargetFramework` は `net9.0-windows` だが、`~` 展開の機構は同一であることを Task 2 のレビュアーが 9.0.8 で確認済み):
 
 ```
 \\198.51.100.7\share\PROGRA~1\a.txt   21002 ms   <- ディレクトリー成分の ~
@@ -757,7 +757,19 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
         // ...以降は現行のまま...
 ```
 
-> **注意**: 復元経路(`:957` / `:1104`)からも `TryOpenOrActivate` が呼ばれる。これらは既に正規化済みのパスを渡すので、seam の追加呼出は速い(0 ms)。ただし**復元経路は `_suppressLoadErrorPrompt` でダイアログを抑止するスコープがある**。新しい `_prompt.Error` がそのスコープを尊重するかを確認し、既存の失敗経路(`LoadInto` の catch)と同じ扱いに揃えること。抑止スコープを見落とすと、起動時に復元ダイアログが増える。
+> **注意 1(訂正・Task 2 コード品質レビュー I-4)**: 当初この節には「復元経路は既に正規化済みのパスを渡すので seam の追加呼出は速い(0 ms)」と書いていた。**これは誤り。** `GetFullPath` の `~` 展開は**成功したときだけ** `~` を消す。不達共有では展開が失敗して**戻り値に `~` が残る**ため、「正規化済み」のパスでも呼ぶたびに同じコストを払う。実測(レビュアー・.NET 9.0.8):
+>
+> ```
+> C:\PROGRA~1\a.txt    -> C:\Program Files\a.txt   (展開成功 = 実 I/O している証拠)
+> C:\NOSUCH~1\a.txt    -> C:\NOSUCH~1\a.txt        (展開失敗・~ が残る)
+> \\?\C:\PROGRA~1\...  -> 変化なし                  (device path は展開自体をバイパス)
+> ```
+>
+> **正規化はコストの意味で冪等ではない。** 復元で不達共有上の `~` ファイルが K 件あれば、5 秒 × K を払う(main の 21 秒 × K よりは良いが「速い」ではない)。設計書 §3 の「操作あたり 1 本」は守られているが、「復元は速い」は成り立たない。
+
+> **注意 2**: 復元経路(`:957` / `:1104`)からも `TryOpenOrActivate` が呼ばれる。**復元経路は `_suppressLoadErrorPrompt` でダイアログを抑止するスコープがある**。新しい `_prompt.Error` がそのスコープを尊重するかを確認し、既存の失敗経路(`LoadInto` の catch)と同じ扱いに揃えること。抑止スコープを見落とすと、起動時に復元ダイアログが増える。
+
+> **注意 3(Task 2 コード品質レビュー m-7)**: `Path.GetFullPath` はデバイス名・デバイスパスを**例外を投げずに通す**。実測: `GetFullPath("CON")` → `\\.\CON`、`GetFullPath(@"\\?\")` → `\\?\` がどちらも `Ok` で返る。seam の `Ok` は「文字列として正規化できた」以上の意味を持たない。入口に正規化を差すと `State.Path` に `\\.\CON` が入りうるので、**PR #47 の V-1 相当の「親フォルダーが取れるか」ガードは正規化の後にも必要**。脆弱性レビューでここを重点的に見させること。
 
 **Step 4: テストが通ることを確認する**
 
