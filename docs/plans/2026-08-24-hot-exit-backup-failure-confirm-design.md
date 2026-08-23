@@ -334,7 +334,66 @@ Task 3 が足すのは機会 1 回だけで、新しい露出ではない。
   組み合わせのみ。§8 で非目標と明記したクラッシュ経路に属する。
 - 次 tick の `ForceWrite` 再試行が成功すれば自然に解消する。
 
-### 10.5 申し送りの追加・訂正
+### 10.5 ミューテーション検証の台帳(Task 5)
+
+計画 §7.3 の表を、実施中に判明した分も含めて式ごとに記録する。変異は「どの式を何に変えたか」
+まで書く(過去の教訓: 台帳が粗いと後日どの穴が塞がったか再現できない)。全実行は App
+プロジェクト全件・`--no-build` 不使用。復元は毎回 `git diff` が空であることまで確認した。
+
+| # | 変異(式ごと) | 結果 | 殺したテスト |
+|---|---|---|---|
+| M1 | `MainForm`: `if (!flushOk) silentPath = false;` の本体を削除 | **KILL** | `..._BackupWriteFails_FallsThroughToConfirm`(`LastCloseTookSilentPathForTest`) |
+| M2 | `BackupCoordinator`: `return _failed.IsEmpty;` → `return true;` | **KILL** | `WaitForFinalFlush_WriteFailed_ReturnsFalse` ほか 1 |
+| M3 | `BackupCoordinator`: `if (!_writer.WaitForPendingJobs(timeout)) return false;` を削除 | **KILL** | `WaitForFinalFlush_WaitTimesOut_ReturnsFalse` |
+| M4 | `BackupCoordinator`: `_failed.IsEmpty` の前に `while (_failed.TryDequeue(out _)) { }` を挿入(=§5.1 が禁じた dequeue) | **KILL** | `WaitForFinalFlush_DoesNotConsumeFailure_...` のみ(`_WriteFailed_` は緑=網が「消費しない」性質に乗っている証拠) |
+| M5 | `SerialBackupWriter`: `return barrier.Task.Wait(timeout);` → `return true;` | **KILL** | `WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked` |
+| M6 | `MainForm`: 末尾 flush の `&& !flushUpToDate` を削除 | **生存(想定どおり)** | — 挙動等価。二重 flush は追加の layout 書込 1 件を生むだけで観測点(ファイル内容)に差が出ない。**性能のための条件であり挙動の網は無い**と記録する |
+| M7 | `MainForm`: `FinalFlushForRestore()` / `WaitForFinalFlush()` の順序入れ替え | **KILL** | `..._BackupWriteFails_...`(`LastCloseFinalFlushOkForTest`)。S-A8-7 の契約が網に乗っている |
+| M8 | `BackupCoordinator`: `WaitForFinalFlush()` → 常に `true` | **KILL** | 4 本(うち**既存 2 本**)。計画が対照テストの根拠に書いた「これが無いと生存する」は**誤り** |
+| M9 | `SerialBackupWriter`: `WaitForPendingJobs` を「成功時だけ `Dispose()`」に変異 | **KILL** | `WaitForPendingJobs_DoesNotDisposeWriter_...`。**この網が無かった間は 3 本全緑で生存**していた(Task 1 レビューが発見) |
+| M10 | `BackupCoordinator`: `_shutDown \|\|` を短絡から削除 | **KILL** | `WaitForFinalFlush_AfterShutdown_ReturnsTrue_WithoutAskingWriter`。**計画の 5 本だけなら生存**していた |
+| M11 | `BackupCoordinator`: `FinalFlushWait` の**定数値**を変える | **KILL(Task 3 配線後)** | Task 2 時点は **6 本全緑で生存**。Task 3 で実配線が入り、`0` 秒では 5 本が赤・`60` 秒では `Assert.InRange` が赤 |
+| M12 | `MainForm`: `flushUpToDate = false;`(確認ループ進入時の無効化)を削除 | **KILL** | `..._BackupWriteFails_...`。§10.6 参照 |
+
+**最強の証拠形式**: Task 3 を修正前へ戻して全件実行すると、**新規 2 本だけが赤・既存 601 本は
+全緑**。新テストが本物の A-8 回帰テストであり、かつ既存スイートでは A-8 を捕まえられなかった
+ことを同時に示す。
+
+**副産物(テストスイートの地雷を 1 件除去)**: M11 を最初に当てたとき、テストが失敗せず
+**無限ハング**した。`OnShown_UnifiedOn_LegacyMigration_ThenHotExitClose_WritesRealBackup` が
+dirty 文書を確認オーバーライド無しで閉じ silent path に依存していたため、事後条件が偽に
+なると実 `MessageBox` がテストホストを不可視のモーダルで止める。CLAUDE.md §4 が
+ミューテーション検証を標準実践としている以上、後続の作業者が必ず踏む。override を置いて
+clean な失敗へ変えた(`67abce0`)。
+
+### 10.6 レビュー提案の 1 件が A-8 の実害を再導入するところだった
+
+Tasks 3+4 レビューの M-4(「`silentPath` の単調性は prose の約束にすぎず、破れると
+『flush していないのに飛ばす』側へ倒れる。`flushed` フラグへ機構化せよ」)は**問題意識は正しいが
+提案コードが誤っていた**。
+
+提案どおり「flush が走った」だけを追跡すると、A-8 フォールバック
+(ゲート true → `flushOk=false` → `silentPath=false`)では `flushed` が既に true なので
+**末尾 flush が飛ばされ、確認ループの保存 / 破棄がレイアウトへ反映されない**。実測:
+
+```
+失敗: 1 / 合格: 602
+Assert.Empty() Failure: Collection was not empty
+Collection: [SessionLayoutRecord { ..., BackupId = 55e1fb71..., ... }]
+```
+
+**A-8 の実害そのもの**(実体の無い `BackupId` を指す `session-state.json`)である。
+A-8 の喪失クラスに倒れないよう固める修正が、まさにその喪失を作っていた。
+
+採用したのは「flush が走り、**かつその後に文書の状態を変えていない**」を追跡する
+`flushUpToDate`(確認ループ進入時に無効化)。これを捕まえたのは、同じレビューで
+「表現は過大だが削るな」と判断した `Assert.Empty(layout!.Tabs)` の 1 行だった
+(空虚な `Directory.Exists` から置き換えられた assertion)。
+
+**教訓**: レビュー提案も実装と同じく実測で検証する。とくに「不変条件を機構化する」種類の
+提案は、機構が**すべての経路で**同じ意味を持つかを経路ごとに当てて確かめる。
+
+### 10.7 申し送りの追加・訂正
 
 | ID | 内容 |
 |---|---|
@@ -343,3 +402,5 @@ Task 3 が足すのは機会 1 回だけで、新しい露出ではない。
 | S-A8-7 | `WaitForFinalFlush` は `FinalFlushForRestore` と**対で・その直後に**呼ぶ契約。単独呼び出し・逆順は無効(§10.3) |
 | S-A8-8 | フォールバックでキャンセルすると、実体の無い `BackupId` を指す `session-state.json` がセッション中残りうる(§10.4)。Task 3 以前から在る状態で新しい露出ではない |
 | S-A8-9 | 順序契約(S-A8-7)の変異を殺しているのは e2e 1 本で、その kill はテスト中にバックアップ tick が起きないことに依存する。`Sta.Run` が non-pumping STA で `WM_TIMER` を配送しないため二重に守られてはいる |
+| S-A8-10 | 末尾 flush の `&& !flushUpToDate` は挙動等価のため**挙動テストでは原理的に殺せない**(M6)。性能のための条件であり網は無い |
+| S-A8-11 | 対照テスト `..._BackupWriteSucceeds_StaysSilent` は既存 `..._SilentClose_FlushesLayoutAndBackup` のほぼ部分集合。固有の価値は `LastCloseFinalFlushOkForTest == true` の 1 行のみ |
