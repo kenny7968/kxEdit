@@ -33,6 +33,17 @@ public enum PathValidation
 /// つまり事後条件は「形」しか保証せず、綴りの canonical 性は GetFullPath に依存する。
 /// 安全性は「形の検査 + canonical 化 + 前方一致」の 3 点セットで初めて成立する。
 ///
+/// V-m-1(最終ブランチレビュー・脆弱性パスの実測): その事後条件には**穴がある**。
+/// <see cref="IsUncRooted"/> の device 除外は \\?\ と \\.\ の**厳密 2 綴り**しか見ないので、
+/// \\??\ / \\.?\ / \\?.\ / \\?\UNC\C:\ / \\?\UNC\GLOBALROOT\ は「\\ 始まり + サーバー名と
+/// 共有名が非空」を満たして UNC と見なされ、Ok が返る。つまり
+/// 「ここまで来た形はドライブ文字ルートか UNC のどちらか」という上の記述は、
+/// **厳密には成立していない**。
+/// 実害が無いのは下流の事情による: 実測でこれらの綴りは MUP(Multiple UNC Provider)へ
+/// 回されて解決できず、実書き込みには至らない。したがって現状は「事後条件が破れているが
+/// 到達できない」状態であり、事後条件そのものを証人にした議論はできない
+/// (将来 UNC 側の扱いを変えるときは、ここが前提になっていないか必ず確認すること)。
+///
 /// (3) device プレフィックスの再出現も閉じる。「許可する形だけを書く」方式でも、
 ///     **許可した形に化ける綴り**は別途塞ぐ必要がある。実在した 2 経路:
 ///     - 再正規化が予約デバイス名を書き換えて \\.\NUL を作る(\\?\ 配下の NUL は
@@ -56,6 +67,12 @@ public enum PathValidation
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
 ///   (実運用の UNC を潰さない優先)。閉じる場合は BlockedRoots とは別の
 ///   UNC 用フィルタ(\\host\&lt;drive&gt;$\... を拒絶)で判定する。
+///   V-m-3(最終レビュー・実測): この受容範囲は上の例が示すより広い。**host はループバックで
+///   よい** — \\?\UNC\localhost\C$\ProgramData\... が Ok を返し、実際に BlockedRoot 配下へ
+///   書き込めることを実測した(\\127.0.0.1\C$\... も同様)。つまりネットワークも攻撃者の
+///   インフラも要らず、%AppData% の backup JSON を書ければ 1 台の中で完結する
+///   (admin share を開くので管理者権限は必要)。「リモート共有を使う攻撃だから遠い」と
+///   読まないこと。
 /// - OneDrive Files On-Demand 等 cloud placeholder は IO_REPARSE_TAG_CLOUD 系
 ///   reparse tag を持つため BK-M-1 実装で無条件 Rejected になる可能性がある
 ///   (false-positive 受容)。tag 別判定(GetFileInformationByHandleEx /
@@ -94,6 +111,16 @@ public static class OriginalPathValidator
             // Ok が返る)。判定用にコピーを 1 本作り、そこから 4 文字プレフィックスを剥がして評価する。
             // \\?\UNC\server\share\... は「本物の UNC を長パス表現した安全な形式」なので、
             // \\server\share\... に戻したうえで既存の UNC 経路と同じ扱い(BlockedRoots に非該当=Ok)にする。
+            //
+            // V-m-2(最終レビュー・実測): この説明が当てはまるのは **UNC が厳密に大文字**の
+            // 綴りだけ。剥がしの比較は Ordinal なので \\?\unc\... / \\?\Unc\... は
+            // ここを通らず、下の \\?\ 枝で 4 文字だけ剥がされて "unc\server\share\..." になり、
+            // 事後条件(ドライブ文字ルートでも UNC でもない)で Rejected になる。
+            // Windows 側は小文字綴りも解決できる(実測)ので、これは**過剰拒否**。
+            // フェイルセーフ方向なので安全上の問題は無く、症状は「その綴りの clean タブが
+            // 黙って復元されない(本文は元ファイルに在る)」まで。OrdinalIgnoreCase へ緩める
+            // 修正は、剥がし後の綴りが再び事後条件と BlockedRoots を通ることの確認込みで
+            // 別途行う(本ブランチでは形を変えない)。
             string forCheck = normalized;
             bool prefixStripped = true;
             if (forCheck.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
@@ -206,6 +233,15 @@ public static class OriginalPathValidator
     ///      普通のファイル名なので、通すと BlockedRoot 配下に実ファイルが作られる(実証済み)。
     /// (2) プレフィックスを**二重**にした入力 (<c>\\?\\\?\C:\Windows\...</c>)。剥がしは 1 回
     ///     だけなので <c>\\?\C:\Windows\...</c> が残る。
+    /// <para>
+    /// <b>限界(V-m-1・最終ブランチレビューの実測)</b>: 除外するのは上の<b>厳密 2 綴り</b>だけ。
+    /// <c>\\??\</c> / <c>\\.?\</c> / <c>\\?.\</c> / <c>\\?\UNC\C:\</c> /
+    /// <c>\\?\UNC\GLOBALROOT\</c> はここを素通りし、「サーバー名と共有名が非空」を満たして
+    /// <c>true</c> を返す = <see cref="Check"/> が <see cref="PathValidation.Ok"/> を返す。
+    /// クラス doc が謳う事後条件(「形はドライブ文字ルートか UNC のどちらか」)はこの範囲で破れている。
+    /// 実書込には至らない(実測: MUP へ回されて解決不能)ので実害は無いが、
+    /// <b>事後条件を証人にして安全を主張しないこと</b>。
+    /// </para>
     /// </summary>
     private static bool IsUncRooted(string path)
     {
