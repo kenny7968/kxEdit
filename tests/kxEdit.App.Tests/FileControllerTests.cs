@@ -3410,6 +3410,49 @@ public class FileControllerTests
         });
 
     [Fact]
+    public void RestoreSession_PathOnlyBackup_UnnormalizedRecordPath_ReusesTab_AndDoesNotAdopt() =>
+        Sta.Run(() =>
+        {
+            // Issue #48 Task 5 の門番: 「fast-path activate(既存タブ)には adopt しない」
+            // (= Id 上書きで既存 adopt を壊し別のゾンビを作らない)。
+            // rec.Path はレイアウト JSON 由来で、正規化されている保証が**無い**
+            // (LegacySessionConverter が旧 LastSessionSnapshot の Path を素通しで載せる)。
+            // Task 4 で TryOpenOrActivate が入口で正規化するようになり、Task 5 で FindByPath が
+            // ForNormalized 照合(区切り差を吸収しない)になったため、素朴に
+            // _docs.FindByPath(rec.Path) を打つと同じファイルなのに「既存タブ無し」へ倒れる。
+            // 上の姉妹テスト(既存タブ無し=adopt する)と対で、門番の両側を固定する。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string p = tmp.File("shared.txt");
+            File2.WriteAllText(p, "on disk");
+            string unnormalized = p.Replace('\\', '/'); // 同じファイルの非正規化綴り
+            Assert.NotEqual(p, unnormalized); // fixture の前提(綴りが実際に食い違う)
+            var initialEmpty = host.Docs.CreateNew();
+            string id = NewBackupId();
+            var backups = new[] { Backup(id, originalPath: p, content: null) }; // path-only=E11 demote
+            // 1 本目(正規化済み・BackupId なし)で p のタブを作り、2 本目(非正規化・path-only)が
+            // その既存タブを fast-path activate で再利用する形にする。
+            var layout = Layout(
+                LayoutRec(path: p),
+                LayoutRec(path: unnormalized, backupId: id, isActive: true)
+            );
+            var adopted = new List<(Document Doc, BackupRecord Rec)>();
+
+            var failed = host.File.RestoreSession(
+                layout,
+                backups,
+                initialEmpty,
+                (d, r) => adopted.Add((d, r))
+            );
+
+            Assert.Empty(failed);
+            Assert.Equal(1, host.Docs.Count); // 2 レコードが同じ 1 タブへ畳まれた=fast-path を通った
+            Assert.Equal(p, host.Docs.Documents[0].State.Path); // State.Path は正規化済み(§3.1)
+            // ★本テストの核。判定が「既存タブ無し」へ倒れるとここに 1 件入る。
+            Assert.Empty(adopted);
+        });
+
+    [Fact]
     public void RestoreSession_DirtyPathRecord_InvalidPath_FallsBackToUntitled_NoDialog() =>
         Sta.Run(() =>
         {
@@ -3514,6 +3557,34 @@ public class FileControllerTests
             var a = Assert.Single(adopted);
             Assert.Same(doc, a.Doc);
             Assert.Same(rec, a.Rec);
+        });
+
+    [Fact]
+    public void RestoreSession_ExtrasPathOnly_AlreadyOpenTab_ReusesTab_AndDoesNotAdopt() =>
+        Sta.Run(() =>
+        {
+            // extras 側にも同じ門番がある(fast-path activate には adopt しない)。
+            // ここは上のレイアウト側と対で、Task 5 で「既存タブを再利用したか」の判定機構を
+            // TryOpenOrActivate 自身へ移した後も両側が生きていることを固定する。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string p = tmp.File("shared.txt");
+            File2.WriteAllText(p, "on disk");
+            var initialEmpty = host.Docs.CreateNew();
+            // レイアウトが先に p を開き、レイアウト外(extras)の path-only が同じ p を指す。
+            var extra = Backup(NewBackupId(), originalPath: p, content: null);
+            var adopted = new List<(Document Doc, BackupRecord Rec)>();
+
+            host.File.RestoreSession(
+                Layout(LayoutRec(path: p, isActive: true)),
+                new[] { extra },
+                initialEmpty,
+                (d, r) => adopted.Add((d, r))
+            );
+
+            Assert.Equal(1, host.Docs.Count); // extras は既存タブを再利用(新タブを作らない)
+            Assert.Equal(p, host.Docs.Documents[0].State.Path);
+            Assert.Empty(adopted); // ★既存タブの adopt を上書きしない
         });
 
     [Fact]

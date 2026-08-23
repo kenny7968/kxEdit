@@ -167,8 +167,34 @@ public sealed class FileController
     /// 正規化済みパスを受け取る契約になる。
     /// </para>
     /// </summary>
-    public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false)
+    public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false) =>
+        TryOpenOrActivateCore(path, suppressAutoCsv, out _);
+
+    /// <summary>
+    /// <see cref="TryOpenOrActivate"/> の本体。<paramref name="reusedExisting"/> に
+    /// 「既存タブを再利用した(fast-path activate)」かどうかを返す。
+    /// <para>
+    /// <b>Issue #48 Task 5</b>: 復元経路には「fast-path activate した既存タブには adopt しない」
+    /// という門番が 2 箇所あり(<see cref="RestoreLayoutRecord"/> / <see cref="RestoreExtraBackup"/>)、
+    /// どちらも従来は<b>呼出前に</b> <c>_docs.FindByPath(引数)</c> を打って判定していた。これは
+    /// 「引数と State.Path が同じ綴りである」ことに依存する形で、<see cref="DocumentManager.FindByPath"/>
+    /// が区切り差を吸収しなくなった今は成り立たない(レイアウト JSON の <c>rec.Path</c> は
+    /// <c>LegacySessionConverter</c> 経由で未正規化でありうる)。判定が落ちると既存タブへ adopt が走り、
+    /// 既に adopt 済みのバックアップ Id を上書きして別のゾンビを作る。
+    /// </para>
+    /// <para>
+    /// 呼出点で先に正規化して <c>FindByPath</c> と本メソッドの両方へ渡す案も採れるが、それだと
+    /// 境界付き正規化が 1 レコードあたり 2 回になり、不達先ではタイムアウト待ちが倍になる。
+    /// 「再利用したか」は本メソッドしか知り得ない事実なので、ここから返す。
+    /// </para>
+    /// </summary>
+    private Document? TryOpenOrActivateCore(
+        string path,
+        bool suppressAutoCsv,
+        out bool reusedExisting
+    )
     {
+        reusedExisting = false;
         // Issue #48 / 設計書 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった
         // (保存側は SaveAsDocument が既に塞いである)。境界付きにする理由は S-15:
         // 正規化後のパスに `~` が残ると GetFullPath が GetLongPathName を呼び、不達の共有に
@@ -237,6 +263,7 @@ public sealed class FileController
         var existing = _docs.FindByPath(full);
         if (existing is not null)
         {
+            reusedExisting = true;
             _docs.Activate(existing);
             // Task 10 review I-2: 復元経路(_suppressRegisterRecent=true)では fast-path でも
             // RegisterRecent を抑止する(重複パスの LastSession 復元で RecentFiles が汚染されるのを防ぐ)。
@@ -553,8 +580,10 @@ public sealed class FileController
 
             // A-7 (b): 同一ファイルを 2 タブで編集させない。片方の Ctrl+S が
             // もう片方の内容を無警告で消す導線(hot exit レイアウトにも同一 Path が 2 件並ぶ)。
-            // FindByPath は PathKey(GetFullPath + ToLowerInvariant)照合なので
-            // 大小・区切りの揺れも同一と見なす。自分自身への上書きは正当なので除外する。
+            // FindByPath は PathKey.ForNormalized(ToLowerInvariant のみ)照合なので大小の揺れは
+            // 同一と見なす。区切りの揺れは吸収しないが、ここへ渡す full も比較先の State.Path も
+            // 正規化済み(設計書 §3.1 の不変条件・Issue #48 Task 5)なので揺れは残らない。
+            // 自分自身への上書きは正当なので除外する。
             var other = _docs.FindByPath(full);
             if (other is not null && !ReferenceEquals(other, doc))
             {
@@ -1045,8 +1074,16 @@ public sealed class FileController
                     "kxEdit: dirty-backup-missing, demoting to disk reopen: {0}",
                     kxEdit.Core.Text.SanitizeForDisplay.OneLine(rec.Path, 200)
                 );
-            bool existedBefore = _docs.FindByPath(rec.Path) is not null;
-            var opened = TryOpenOrActivate(rec.Path);
+            // Issue #48 Task 5: 「既存タブを再利用したか」は TryOpenOrActivate 自身に答えさせる。
+            // ここで _docs.FindByPath(rec.Path) を打つ旧形は、rec.Path が未正規化でありうる
+            // (LegacySessionConverter が旧 LastSessionSnapshot の Path を素通しで載せる)一方で
+            // FindByPath が区切り差を吸収しなくなったため、同じファイルなのに「既存タブ無し」へ
+            // 倒れる。判定の使い道は下の adopt 門番なので、崩れると既存タブの adopt を上書きする。
+            var opened = TryOpenOrActivateCore(
+                rec.Path,
+                suppressAutoCsv: false,
+                out bool reusedExisting
+            );
             if (opened is null)
             {
                 failedPaths.Add(rec.Path);
@@ -1060,7 +1097,7 @@ public sealed class FileController
             // 次 Reconcile(ReconcileContent の Decide / layout-only では ReconcileMapMaintenance)が
             // 既存機構で Delete する。fast-path activate(既存タブ)には adopt しない=既存タブが
             // 別バックアップで adopt 済みの場合に Id 上書きで別のゾンビを作らないため(残置受容)。
-            if (pathOnlyBk is not null && !existedBefore)
+            if (pathOnlyBk is not null && !reusedExisting)
                 adoptRestored?.Invoke(opened, pathOnlyBk);
             return opened;
         }
@@ -1192,8 +1229,15 @@ public sealed class FileController
                 );
                 return null;
             }
-            bool existedBefore = _docs.FindByPath(normalized) is not null;
-            var opened = TryOpenOrActivate(normalized);
+            // Issue #48 Task 5: レイアウト側(RestoreLayoutRecord)と同じ機構で判定する。
+            // ここの normalized は OriginalPathValidator.Check の出力=同じ GetFullPath 由来なので
+            // 旧形(呼出前の FindByPath)でも今のところ一致するが、「2 つの正規化器の出力が
+            // 綴りまで同じ」という暗黙の前提に門番を預けたままにしない。
+            var opened = TryOpenOrActivateCore(
+                normalized,
+                suppressAutoCsv: false,
+                out bool reusedExisting
+            );
             if (opened is null)
             {
                 failedPaths.Add(bk.OriginalPath);
@@ -1203,7 +1247,7 @@ public sealed class FileController
             // 最終品質パス I-1: path-only 消費レコードは adopt→clean 検出→次 tick 削除で
             // 残置させない(レイアウト外 Id は次回以降も毎起動 extras としてゾンビ復活するため)。
             // fast-path activate(既存タブ)には adopt しない=Id 上書きで既存 adopt を壊さない。
-            if (!existedBefore)
+            if (!reusedExisting)
                 adoptRestored?.Invoke(opened, bk);
             return opened;
         }

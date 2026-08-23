@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace kxEdit.App.Tests;
 
 /// <summary>
@@ -112,16 +114,49 @@ public class DocumentManagerTests
             Assert.Equal(0, caretChanged);
         });
 
-    // ===== FindByPath(PathKey 同一視) =====
+    // ===== FindByPath(PathKey.ForNormalized 照合)=====
+    // Issue #48: 以前は照会パスと**開いている全タブのパス**に PathKey.For を打っていた
+    // (= 呼び出しあたり GetFullPath が 1 + タブ数回)。不達共有上の `~` タブが 1 つあるだけで
+    // Ctrl+S / 開く / grep ジャンプ / 復元のすべてが約 21 秒固まった。
+    // 呼出側が正規化済みパスを渡す契約に変え、ここはファイルシステムに触れない。
 
     [Fact]
-    public void FindByPath_MatchesCaseAndSeparatorInsensitively() =>
+    public void FindByPath_MatchesCaseInsensitively() =>
         Sta.Run(() =>
         {
             using var host = new Host();
             var doc = host.Docs.CreateNew();
             doc.State.Path = @"C:\Temp\A.TXT";
-            Assert.Same(doc, host.Docs.FindByPath("c:/temp/a.txt")); // 大小文字・区切り差を同一視
+            Assert.Same(doc, host.Docs.FindByPath(@"c:\temp\a.txt")); // 大小文字は同一視
+        });
+
+    [Fact]
+    public void FindByPath_DoesNotNormalizeSeparators_CallerMustNormalize() =>
+        Sta.Run(() =>
+        {
+            // 新契約の pin(意図的な挙動変更)。ここで区切りを吸収させると
+            // GetFullPath が戻り、S-15 が丸ごと再発する。
+            // App レベルの呼出側は全員 TryOpenOrActivate / NormalizeSavePath を通るので
+            // 実害は無い(設計書 §3.3)。
+            // このテストが縛るのは**照会パス側**だけ(下の姉妹がタブ側を縛る)。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.State.Path = @"C:\Temp\a.txt";
+            Assert.Null(host.Docs.FindByPath("C:/Temp/a.txt"));
+        });
+
+    [Fact]
+    public void FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize() =>
+        Sta.Run(() =>
+        {
+            // 上の姉妹で、縛るのは**タブ側**(ループ内)。2 本要る理由: 照会側だけ / タブ側だけを
+            // PathKey.For へ戻す変異は、もう一方のテストでは緑のまま通り抜ける(片側が
+            // 区切りを吸収し、もう片側が吸収しないので結局一致しない)。
+            // S-15 の実害はタブ数に比例するループ側なので、ここを空けると主犯が戻る。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.State.Path = "C:/Temp/a.txt"; // 非正規化の綴り(旧レイアウト JSON 由来を模す)
+            Assert.Null(host.Docs.FindByPath(@"C:\Temp\a.txt"));
         });
 
     [Fact]
@@ -134,6 +169,72 @@ public class DocumentManagerTests
             doc.State.Path = @"C:\Temp\a.txt";
             Assert.Null(host.Docs.FindByPath(@"C:\Temp\other.txt"));
         });
+
+    /// <summary>
+    /// S-15 の主犯(<c>PathKey.For</c> = <c>GetFullPath</c>)が本当に消えたことを IL で直接固定する。
+    /// 上の挙動 2 本は「<b>結果に効く</b> GetFullPath」しか捕まえられず、結果を捨てる呼出
+    /// (挙動不変・コストだけが残る形)を見逃す。S-15 はコストの問題なので、
+    /// 「呼出が 1 つも無い」ことをここで見る。
+    /// 陽性対照(<c>ForNormalized</c> を拾えること)を同時に置くのは、走査が空を返しただけで
+    /// 緑になる vacuous 化を防ぐため。
+    /// </summary>
+    [Fact]
+    public void FindByPath_DoesNotCallFileSystemTouchingPathKeyFor()
+    {
+        var callees = CalleesOf(
+            typeof(DocumentManager).GetMethod(nameof(DocumentManager.FindByPath))!
+        );
+        // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の 2 本は無意味)。
+        Assert.Contains(
+            callees,
+            m =>
+                m.DeclaringType == typeof(kxEdit.Core.Text.PathKey)
+                && m.Name == nameof(kxEdit.Core.Text.PathKey.ForNormalized)
+        );
+        Assert.DoesNotContain(
+            callees,
+            m =>
+                m.DeclaringType == typeof(kxEdit.Core.Text.PathKey)
+                && m.Name == nameof(kxEdit.Core.Text.PathKey.For)
+        );
+        // PathKey を経由しない直接呼び(Path.GetFullPath / Path.GetLongPathName 相当)も塞ぐ。
+        Assert.DoesNotContain(callees, m => m.DeclaringType == typeof(System.IO.Path));
+    }
+
+    /// <summary>
+    /// method の IL から <c>call</c> / <c>callvirt</c> の対象として解決できたメソッドを集める。
+    /// オペランドを誤読した偽陽性はメタデータテーブル種別(MethodDef / MemberRef / MethodSpec)と
+    /// 解決可否で捨てる。残る偽陽性は「呼んでいないものが混ざる」方向にしか働かないので、
+    /// 「呼んでいない」の assert が偽陽性で<b>緑になることはない</b>
+    /// (逆に、将来の本体変更で偽陽性が当たれば赤で気付ける)。
+    /// </summary>
+    private static List<MethodBase> CalleesOf(MethodInfo method)
+    {
+        byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;
+        var typeArgs = method.DeclaringType!.GetGenericArguments();
+        var methodArgs = method.GetGenericArguments();
+        var result = new List<MethodBase>();
+        for (int i = 0; i + 4 < il.Length; i++)
+        {
+            if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt(いずれも 4 バイトのトークンを伴う)
+                continue;
+            int token = BitConverter.ToInt32(il, i + 1);
+            byte table = (byte)((uint)token >> 24);
+            if (table != 0x06 && table != 0x0A && table != 0x2B) // MethodDef/MemberRef/MethodSpec
+                continue;
+            try
+            {
+                var m = method.Module.ResolveMethod(token, typeArgs, methodArgs);
+                if (m is not null)
+                    result.Add(m);
+            }
+            catch (Exception e) when (e is ArgumentException or BadImageFormatException)
+            {
+                // 解決できないトークン=オペランドの誤読。呼出ではないので捨てる。
+            }
+        }
+        return result;
+    }
 
     // ===== TryClose =====
 
