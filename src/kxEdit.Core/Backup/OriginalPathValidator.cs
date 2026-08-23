@@ -20,6 +20,12 @@ public enum PathValidation
 /// で解決先を再度 BlockedRoots に照合。ローカルドライブのみ対象で
 /// UNC の Ok 契約は維持。
 ///
+/// Task 4B: プレフィックス除去後の形を事後条件で検査する。残りが「ドライブ文字ルート」か
+/// 「UNC」のどちらでもなければ Rejected(BlockedRoots の前方一致が意味を持つ形だけを通す)。
+/// これにより \\?\GLOBALROOT\Device\HarddiskVolumeN\... 経由の BlockedRoots 回避を塞ぐ。
+/// 副作用として \\?\Volume{GUID}\... (ドライブ文字未割当ボリューム)も Rejected になる
+/// = hot exit 復元で無題タブに降格する(本文は失われない・受容)。
+///
 /// 現状の許容(次リリース以降で再検討):
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
 ///   (実運用の UNC を潰さない優先)。閉じる場合は BlockedRoots とは別の
@@ -71,6 +77,18 @@ public static class OriginalPathValidator
             )
                 forCheck = forCheck[4..];
 
+            // Task 4B: 事後条件 — プレフィックス除去後に残るのは「ドライブ文字ルート (X:\...)」か
+            // 「UNC (\\server\share\...)」のどちらかでなければならない。
+            // 4 文字剥がしだけでは \\?\GLOBALROOT\Device\HarddiskVolumeN\Windows\... が
+            // GLOBALROOT\Device\... になり、BlockedRoots (C:\Windows\... 等)と決して前方一致しない=
+            // Ok が返っていた(実証: 攻撃者 JSON に上記綴りを植えると hosts を Ok として復元先に採れる)。
+            // ここを「拒否したい綴り (GLOBALROOT / Volume{GUID} / pipe / PhysicalDrive ...) の列挙」で
+            // 書くと原理的に漏れる。**許可する形だけ**を書くので、新しい device 名前空間が
+            // 増えても漏れない。BlockedRoots 判定はこの事後条件を満たしたパスにだけ適用される
+            // = 「前方一致が意味を持つ形」であることが保証される。
+            if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
+                return PathValidation.Rejected;
+
             // BK-M-1: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
             // UNC (\\server\share\...) はサーバ側 NTFS でありクライアントから検査不能=
             // 既存の「UNC は BlockedRoots 非該当で Ok」契約を維持する。
@@ -86,6 +104,36 @@ public static class OriginalPathValidator
         {
             return PathValidation.Rejected;
         }
+    }
+
+    /// <summary>
+    /// Task 4B: <c>X:\...</c> 形式か。区切りはバックスラッシュのみ許可する
+    /// (<c>\\?\</c> 付きのパスは <see cref="Path.GetFullPath(string)"/> が「正規化済み」とみなして
+    /// 素通しするため <c>\\?\C:/Windows/...</c> のようにスラッシュが残りうる。これを通すと
+    /// <see cref="StartsWithAnyBlockedRoot"/> の前方一致 (<c>C:\Windows\</c>) が空振りする)。
+    /// </summary>
+    private static bool IsDriveRooted(string path) =>
+        path.Length >= 3
+        && char.IsAsciiLetter(path[0])
+        && path[1] == ':'
+        && path[2] == Path.DirectorySeparatorChar;
+
+    /// <summary>
+    /// Task 4B: <c>\\server\share...</c> 形式か。サーバー名と共有名の**両方**が非空であることを
+    /// 要求する。ここを「<c>\\</c> で始まる」だけに緩めると、除去後に <c>\\</c> が残る綴りが
+    /// 素通りする。
+    /// </summary>
+    private static bool IsUncRooted(string path)
+    {
+        if (!path.StartsWith(@"\\", StringComparison.Ordinal))
+            return false;
+        int serverEnd = path.IndexOf(Path.DirectorySeparatorChar, 2);
+        // -1 = 共有名の区切りが無い(\\server だけ) / 2 = サーバー名が空(\\\share\...)。
+        // 後者は \\?\UNC\ の剥がしが \\ + 残り を作るだけなので degenerate な入力で生まれうる。
+        if (serverEnd <= 2)
+            return false;
+        int shareStart = serverEnd + 1;
+        return shareStart < path.Length && path[shareStart] != Path.DirectorySeparatorChar;
     }
 
     /// <summary>

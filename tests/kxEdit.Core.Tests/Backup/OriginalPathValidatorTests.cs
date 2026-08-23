@@ -109,6 +109,125 @@ public class OriginalPathValidatorTests
         Assert.Equal(PathValidation.Ok, status);
     }
 
+    // ---- Task 4B: プレフィックス除去後の「形」を事後条件で検査する ----
+    //
+    // 4 文字プレフィックスを剥がすだけでは
+    // \\?\GLOBALROOT\Device\HarddiskVolumeN\Windows\System32\drivers\etc\hosts が
+    // GLOBALROOT\Device\... になり、BlockedRoots (C:\Windows\... 等)と決して前方一致しない=
+    // Ok が返っていた(= BlockedRoots という既存のセキュリティ制御を丸ごと無効化する)。
+    //
+    // 「拒否したい綴りの列挙」は原理的に漏れるので、除去後が
+    // 「ドライブ文字ルート (X:\...)」か「UNC (\\server\share\...)」の**どちらかであること**を
+    // 要求する。以下はその許可形以外が落ちることの pin。
+
+    [Fact]
+    public void Check_Rejects_GlobalRootDevicePathToBlockedRoot()
+    {
+        // ボリューム番号は固定値でよい: 検査は文字列の形だけを見るので、この番号が
+        // 実在するか / どのドライブに解決するかは結果に影響しない。C: に解決する番号を
+        // 探しに行くとテストが環境依存になる。
+        var status = OriginalPathValidator.Check(
+            @"\\?\GLOBALROOT\Device\HarddiskVolume1\Windows\System32\drivers\etc\hosts",
+            out _
+        );
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_GlobalRootDevicePath_EvenOutsideBlockedRoots()
+    {
+        // 形で弾くので配下は問わない。BlockedRoots への前方一致に頼っていないことの pin
+        // (= 新しい device 名前空間が増えても漏れない)。
+        var status = OriginalPathValidator.Check(
+            @"\\?\GLOBALROOT\Device\HarddiskVolume1\Temp\a.txt",
+            out _
+        );
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_PhysicalDriveDevicePath()
+    {
+        var status = OriginalPathValidator.Check(@"\\.\PhysicalDrive0", out _);
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_NamedPipeDevicePath()
+    {
+        var status = OriginalPathValidator.Check(@"\\.\pipe\foo", out _);
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_VolumeGuidPath()
+    {
+        // 意図的な挙動変更(受容): ドライブ文字未割当ボリューム上のファイルは
+        // hot exit 復元で無題タブに降格する(本文は残る)。許可リストに Volume{GUID} を
+        // 足すと GLOBALROOT との弁別が形式的に難しくなり、事後条件方式の利点が薄れる。
+        var status = OriginalPathValidator.Check(
+            @"\\?\Volume{00000000-0000-0000-0000-000000000000}\a.txt",
+            out _
+        );
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_UncWithoutShareName()
+    {
+        // UNC は「サーバー名と共有名の両方がある」ことを要求する。ここを緩めると
+        // \\ で始まりさえすれば通る = 除去後に \\ が残る綴りの素通りを許す。
+        Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(@"\\server", out _));
+        Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(@"\\server\", out _));
+    }
+
+    [Fact]
+    public void Check_Rejects_UncWithoutServerName()
+    {
+        // \\?\UNC\ の剥がしは「\\ + 残り」を作るだけなので、残りが degenerate だと
+        // \\\share\... という「サーバー名が空の UNC もどき」が生まれる。
+        // \\?\ 付きは Path.GetFullPath が素通しする(=前段の正規化では落ちない)ので、
+        // ここに到達することの証人になる。
+        var status = OriginalPathValidator.Check(@"\\?\UNC\\share\a.txt", out _);
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_ExtendedDrivePathWithAltSeparators()
+    {
+        // \\?\ 付きのパスは Path.GetFullPath が「正規化済み」とみなして素通しするため、
+        // スラッシュがバックスラッシュに変換されない。C:/Windows/... は BlockedRoots
+        // (C:\Windows\)と前方一致しないので、GLOBALROOT と同じ機構の穴になる
+        // (この綴り自体は \\?\ が変換を止めるので実際には open できず実害は無いが、
+        //  事後条件は「BlockedRoots が評価できる形」だけを通す)。
+        var status = OriginalPathValidator.Check(
+            @"\\?\C:/Windows/System32/drivers/etc/hosts",
+            out _
+        );
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_ReturnsOk_ForExtendedDriveLetterPath()
+    {
+        // 回帰: \\?\ + ドライブ文字は従来どおり Ok。
+        // この網は同時に「C:\Windows\... の Rejected 理由が BlockedRoots のままである」ことの
+        // 証人でもある = 事後条件はドライブ文字形式を落とさないので、
+        // Check_Rejects_System32Path 等を赤にしているのは BlockedRoots 側でしかありえない。
+        var path = @"\\?\C:\kxedit_no_such_dir_" + Guid.NewGuid().ToString("N") + @"\a.txt";
+        var status = OriginalPathValidator.Check(path, out _);
+        Assert.Equal(PathValidation.Ok, status);
+    }
+
+    [Fact]
+    public void Check_ReturnsOk_ForDosDeviceDriveLetterPath()
+    {
+        // 回帰: \\.\ + ドライブ文字も従来どおり Ok。
+        var path = @"\\.\C:\kxedit_no_such_dir_" + Guid.NewGuid().ToString("N") + @"\a.txt";
+        var status = OriginalPathValidator.Check(path, out _);
+        Assert.Equal(PathValidation.Ok, status);
+    }
+
     // ---- BK-M-1: NTFS reparse point (junction / symlink) 経由バイパスの回帰ガード ----
 
     [Fact]
