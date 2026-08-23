@@ -561,7 +561,8 @@ o-such-dir.txt.silk1rmf.j15.tmp'`。
   正式な主経路へ格上げした結果、当たる頻度が上がる。対処は `AtomicFile` 側で tmp 名を含まない
   失敗契約にするか、`WriteToPath` で `.tmp` サフィックスを剥がすか。
 
-- **S-15**(最終レビュー脆弱性パスで発見・2026-08-23。**main に対する退行**・Medium):
+- **S-15**(最終レビュー脆弱性パスで発見・2026-08-23。**main に対する退行**・Medium。
+  **→ [Issue #48](https://github.com/kenny7968/kxEdit/issues/48) として切り出し済み**):
   **A-19 の正規化が、境界付きプローブの前に無制限のネットワーク呼び出しを置いた。**
   `Path.GetFullPath` は正規化後のパスに `~` が**どこかに**含まれると `GetLongPathName` を呼ぶ
   (実際の FS / ネットワーク呼び出し)。実測: `GetFullPath(\\192.0.2.1\share\plain.txt)` は 0 ms、
@@ -582,10 +583,11 @@ o-such-dir.txt.silk1rmf.j15.tmp'`。
   `file.txt~` のバックアップ。**S-5 とは別物**(あちらはローカル固定ドライブのジャンクションと
   `File.Exists`。呼び出しも機構も違う)。
 
-  **② 受容して PR に「main に対する既知の退行」として明記する。** 正しい修正は正規化自体を
-  境界付きにすること = `IReachabilityProbe` に新しいメンバーが要り、CLAUDE.md §3 では
+  **② 受容して PR に「main に対する既知の退行」として明記した(PR #47)。** 正しい修正は
+  正規化自体を境界付きにすること = `IReachabilityProbe` に新しいメンバーが要り、CLAUDE.md §3 では
   それ自体がコード品質レビューを要する。最終レビューの fixup として入れる形ではないので、
-  **独立したタスクとして回収する**。`UncPathDetector.IsUnc(picked.Path)` で前置ゲートを張るのは
+  **[Issue #48](https://github.com/kenny7968/kxEdit/issues/48) として切り出した**
+  (ユーザー判断・2026-08-23)。`UncPathDetector.IsUnc(picked.Path)` で前置ゲートを張るのは
   安いが不完全(相対入力のマップドドライブは正規化後にしか判定できない)。
   なお監査 A-16(マップドドライブの同期 I/O で UI が長時間凍結)は同じクラスの既知事項として
   優先度 2 に載っており、v0.2 はこのクラスを既に許容している。
