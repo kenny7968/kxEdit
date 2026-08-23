@@ -266,3 +266,85 @@ PR #36〜#47 分の L5 と合わせて 1 回で実施する(監査 §8 手順 5)
   境界付き I/O を持ち込むか、検証を App 層へ引き上げるかの設計判断が要る。
 - **S-2**: `RecentFiles` の未正規化レガシーエントリーは dedup されない(§3.4)。
   実害が観測されたら、読み込み時ではなく**メニュー構築時**に遅延正規化する案がある。
+
+---
+
+## 9. 実施記録(2026-08-24)
+
+本節は**策定後の追記**(CLAUDE.md §8 が認める実施記録)。§1〜§8 は策定時のまま変更していない。
+
+### 9.1 スコープの追加
+
+**Task 4B** を追加した。Task 4 の脆弱性レビューが**本ブランチ由来ではない既存の脆弱性**
+(`OriginalPathValidator` の `BlockedRoots` が `\?\GLOBALROOT\Device\HarddiskVolumeN\...` 綴りで
+回避できる)を発見し、ユーザー判断で本ブランチに含めた。詳細は実装計画の Task 4B 節。
+
+### 9.2 §3.1 の不変条件は「入口経由」に限る(訂正)
+
+§3.1 は「`DocumentState.Path` は null か正規化済み絶対パス」と書いたが、**復元経路では
+canonical になっていない**。`OriginalPathValidator.Check` の `out normalized` は
+`Path.GetFullPath` の出力だが、`GetFullPath` は `\?\` 付きのパスを素通しするため、
+`\?\C:\...` 綴りがそのまま `State.Path` に入る。`IsPathFullyQualified` は true なので
+Task 7 の `Debug.Assert` も通る。
+
+**正しい射程**: 不変条件が canonical まで保証しているのは**開く・保存の入口を経由した場合**
+だけで、復元経路は「絶対パスであること」までしか保証しない。
+
+最終レビューは「`Check` が返す値を再正規化後の `forCheck` に変えれば締まる」(全緑で生存する
+変異として実証済み)と提案したが、**`\?\` を剥がすと 260 文字超の長パスが壊れる**危険が
+あるため採らなかった。
+
+なお `\?\` 綴りと plain 綴りで同一ファイルの 2 タブが開ける現象は**本ブランチが作ったもの
+ではない**(旧 `PathKey.For` も `GetFullPath` 経由なので同じく素通ししていた)。
+
+### 9.3 「完了の定義」の literal を訂正
+
+「UI スレッドの無境界 `GetFullPath` が `OriginalPathValidator.Check` だけになる」は literal には
+偽。IL 走査で次が残る:
+
+- `AtomicFile.Write` ×2 — 保存先そのもの。ただし `WriteToPath` 冒頭の `TryInspectSaveTarget`
+  (5 秒プローブ)の**後ろ**なので、残る窓はプローブ通過〜書込の TOCTOU のみ。
+- `BackupStore.TryMoveToSessionDir` ×4 / `SessionLayoutStore.Save` ×1 — `%AppData%` 配下の
+  ローカルパスなので S-15 の機構(不達ネットワーク)に乗らない。
+
+**正確な言い方**: 「無境界のまま残る唯一の**ユーザー制御パス**経路は `OriginalPathValidator.Check`。
+`AtomicFile.Write` は残るが保存先プローブの後ろに置かれている」。
+
+### 9.4 §4 のスレッド leak の見積もりを更新
+
+§4 は「バックグラウンドスレッドが 1 本 leak する」と書いたが、復元経路では
+**同時 leak ≒ 寿命 ÷ 投入間隔**で数本〜十数本になる。クラス doc に算術を記載済み。
+実測でこの開発機の `ThreadPool` 最小ワーカーは `Environment.ProcessorCount` と同数(16)、
+上限 32767。
+
+## 10. 申し送り(追加)
+
+- **S-3**: `IReachabilityProbe` の**改名**。3 メンバー中 1 本だけ path 契約が反転しており
+  (正規化だけは生パスを受け取る)、doc が太字で 2 回その例外を宣言している。
+  `IBoundedFileSystemProbe` / `IBoundedPathProbe` のような「境界付き FS 問い合わせ」を表す名前が
+  正しい落とし所。本ブランチでやらない理由は PR #47 の教訓(改名は過剰置換事故を起こし、
+  残存確認 grep は一方向の網なので捕まえられない)と、終端で純粋に整形的な差分を混ぜないため。
+- **S-4**: **extras 復元ループの cap が時間を縛らない。** `FileController` の
+  `extrasOpened++` は `doc is not null` のときだけなので、到達不能パスはカウントされず
+  ループが止まらない。コードのコメントは「session-state.json の MaxTabs 切り詰めと対称の防御」と
+  書いているが、layout 側は**レコード数**を切り詰めるのに対し extras 側は**開けた件数**しか
+  数えないので対称ではない。第 1 節(「無制限のタブ生成をしない」)自体は正しく、破れているのは
+  **時間の境界**。`OriginalPathValidator.Check` の無境界 `GetFullPath`(実測 21,002 ms/件・
+  distinct host ではキャッシュ relief なし)と組み合わさると、攻撃者制御のバックアップ JSON で
+  起動時に無制限の凍結を作れる。**本ブランチ由来ではない**(diff で確認済み)。
+  cap 側だけなら「処理した件数」を数える 1 行で閉じられる。
+- **S-5**: `OriginalPathValidator` を**通らない**復元経路が 1 本ある(バックアップが無い
+  session-layout レコードの枝)。`TryOpenOrActivate` の親フォルダーガードしか通らないため、
+  `session-state.json` に任意パスを書けば起動時に無確認でタブに開ける。**BlockedRoots という
+  保存先制御そのものの迂回。** 本ブランチ由来ではない。**非公開で扱うこと**(`SECURITY.md`)。
+- **S-6**: `IsUncRooted` の device 除外は `\?\` / `\.\` の厳密 2 綴りのみなので、
+  `\??\` `\.?\` `\?.\` `\?\UNC\C:\` `\?\UNC\GLOBALROOT\` が「UNC」と判定されて `Ok` になり、
+  BK-M-1 の reparse 検査もスキップされる。**実測で MUP へ回されて解決不能=実書込不可**なので
+  実害はないが、事後条件「形はドライブ文字ルートか UNC のどちらか」は破れている。
+  恒久的に閉じるならサーバー名成分に妥当な文字集合を要求する形が素直。
+- **S-7**: `\?\UNC\` の剥がしが `Ordinal` なので、Windows が受理する小文字綴り
+  (`\?\unc\...`)を過剰拒否する。フェイルセーフ方向だが、正当な綴りの復元レコードが
+  無題降格 / skip になる。
+- **S-8**: IL 走査テストは**呼出を 1 段しか見ない**。private ヘルパ 1 段越しの `GetFullPath` は
+  生存する(実測)。`IlCallees` は App.Tests にあり、Core.Tests は別アセンブリなので
+  同じヘルパーが 2 つある(統合不可)。
