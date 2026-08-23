@@ -168,8 +168,9 @@ public sealed class SerialBackupWriter : IBackupWriter
         // 同期プリミティブに TaskCompletionSource を使う理由: ManualResetEventSlim + using だと
         // timeout 後にバリアが破棄済みインスタンスへ Set を打ち、ワーカー側 catch に例外を
         // 吸わせる設計になる。TrySetResult は timeout 後に呼ばれても無害。
-        // RunContinuationsAsynchronously は現状 no-op(Task.Wait の待ちは継続ではなく
-        // InvokeMayRunArbitraryCode=false の内部完了アクションで、フラグに関係なくインライン実行される)。
+        // RunContinuationsAsynchronously は現状 no-op(Task.Wait の待ちはユーザー継続
+        // (await / ContinueWith)ではなく InvokeMayRunArbitraryCode=false の内部完了アクションとして
+        // 登録されるため、FinishContinuations がフラグに関係なくインライン実行する)。
         // 将来 await する消費者が現れたとき継続がワーカースレッドで走るのを防ぐ防御として残す。
         var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         // 締切済み/破棄済み=**今後の**投入は無い(既に保留のジョブがあれば Dispose の Join が
