@@ -352,7 +352,14 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
 
 `docs/plans/2026-08-23-saveas-target-validation-l5-checklist.md` に以下を用意する:
 
-1. 既存ファイル名を直入力 → OK → 上書き確認が NVDA で読まれる
+1. 既存ファイル名を直入力 → OK → 上書き確認が NVDA で読まれる。
+   **あわせて、開いた直後のフォーカスが「キャンセル」側にあることを確認する**(S-12)。
+   `defaultCancel` が seam に渡っていることは L3 で pin したが、
+   **MessageBox が実際にどのボタンにフォーカスを置くかは実機でしか見えない**。
+   ここが OK 側だと、SR の主経路(打つ → Enter → 確認が開く → 反射的な 2 回目の Enter)で
+   確認が無力化される。
+   参考: 起票時に「Windows 純正の上書き確認は『いいえ』が既定」と書いたが**未検証**。
+   ついでに `main` か Notepad で純正の挙動も確認できると、S-12 の記述を事実に直せる。
 2. 「いいえ」→ SaveAs ダイアログが再表示され、**フォーカスがファイル名テキストボックスにあり**、
    入力していた値が残っていることが読まれる
 3. 他タブで開いているファイル名 → エラーが読まれ、再表示される
@@ -471,7 +478,7 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   `bool defaultCancel = false` を足し、上書き確認だけ `true` を渡す。呼出元は
   `FileController` の 2 箇所のみ(レビューが全 grep 済み)なので波及ゼロ。
   **これは網の面でも利得がある**: `OverwritePrompt = false` の行は `SaveAsDialog` が Form で
-  テスト参照ゼロのため原理的に kill 不能(§10.8)だが、`defaultCancel` は `FakePrompt` に
+  テスト参照ゼロのため原理的に kill 不能(§10.9)だが、`defaultCancel` は `FakePrompt` に
   記録できるので**安全側の既定が L3 の assertion になる**。L5 のみの保証を網のある保証へ変える。
 
   併記した文言の不整合(「上書きしますか?」に対してボタンが OK / キャンセルで
@@ -671,3 +678,17 @@ Ctrl+S は従来どおり確認しない(`WriteToPath` は `exists` を捨てる
 **L5 を実施するまで、この行は無保護であると認識すること。** CSharpier や整理で消えても
 自動テストは何も言わない。§10.4 の known-unkillable と同じ枠だが、あちらが「防御コードで
 到達不能」なのに対し、こちらは「production の挙動なのにテスト層が届かない」点で質が違う。
+
+### 10.10 アナライザが網になった 2 例目(Task 7)
+
+§10.3b の S1854 に続き、**S1006 が「インターフェースと実装の既定引数値のずれ」の網**になっている
+ことが判明した(S-12 の `defaultCancel` に変異を当てて発見)。既定値を片方だけ書き換える変異は
+`error S1006: Use the default parameter value defined in the overridden method` でビルドできない。
+
+`IUserPrompt` / `MessageBoxUserPrompt` / `FakePrompt` の 3 箇所を揃えて変異させる形が必要で、
+逆に言えば**実装が interface の既定値から黙って逸れることはコンパイラが許さない**。
+既定引数を持つ seam を足すときに覚えておく価値がある。
+
+**手法上の注意**: 変異がビルドできないとき、`--no-build` は前回の変異のバイナリで走って
+**古い結果を報告する**(Task 7 で実際に発生)。「ビルド失敗 → 前の結果」は
+「変異が生存した」と見分けがつかない。§10.5 の再掲になるが、ビルド出力を先に見ること。
