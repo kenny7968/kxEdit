@@ -433,6 +433,8 @@ public sealed class FileController
                 // 親フォルダーが取れない場合(V-1)は Ok なので既定枝=「正しくありません」に入る。
                 // switch 式にしてあるのは、PathNormalizeStatus に 4 値目を足したとき
                 // 三項だと黙って既定枝へ倒れるため。
+                // 文言の「5 秒」は NormalizeSavePath の TimeSpan と二重管理だが、その値は
+                // SaveAs_PassesFiveSecondTimeoutToNormalizeProbe が pin しているので嘘にならない。
                 _prompt.Warn(
                     norm.Status switch
                     {
@@ -583,8 +585,9 @@ public sealed class FileController
     /// <summary>
     /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
     /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
-    /// 例外は握って呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
-    /// 未捕捉例外ダイアログにしない。
+    /// 正規化できない入力は例外ではなく <see cref="PathNormalizeStatus.Invalid"/> で戻り、
+    /// 呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
+    /// 未捕捉例外ダイアログにしない(例外を握る実体は seam の中にある)。
     /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
     /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
     /// <para>
@@ -598,8 +601,7 @@ public sealed class FileController
     /// 境界は <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> 側で張る。
     /// </para>
     /// <para>
-    /// 例外の握り潰し(SR ユーザーの直入力面を未捕捉例外ダイアログにしない)は seam の中へ移した。
-    /// <c>GetFullPath</c> がどの入力でどの例外型を投げるかの実測記録・V-2 の経緯も、フィルタの
+    /// <c>GetFullPath</c> がどの入力でどの例外型を投げるかの実測記録・V-2 の経緯は、フィルタの
     /// 実体と離れないよう移設先 <see cref="FileReachabilityProbe.NormalizePathWithTimeout"/> の
     /// remarks へ移してある。
     /// </para>
