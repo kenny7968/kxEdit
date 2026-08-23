@@ -6,7 +6,7 @@
 
 | スクリプト | 役割 | 実行タイミング |
 |---|---|---|
-| `pre-merge-check.ps1` | main マージ前のローカルゲート(CSharpier check + Release 0 警告 + 全テスト緑) | **main マージ前 必須** |
+| `pre-merge-check.ps1` | main マージ前のローカルゲート(CSharpier check + Release 0 警告 + 全テスト緑 + App.Tests の Debug 実行) | **main マージ前 必須** |
 | `sr-regression.ps1` | SR 呼び出しパターン回帰スイート。`verify-uia-editor.ps1` + `word-sim.ps1` を一括実行するアグリゲータ | a11y 系変更のマージ前 + リリース前 |
 | `verify-uia-editor.ps1` | `kxEdit.Editor.Smoke --uia` を起動し、UIA クライアントとして TextPattern / GetSelection / RangeFromPoint の疎通を PASS/FAIL 判定 | 通常は `sr-regression.ps1` 経由で呼ばれる |
 | `word-sim.ps1` | 同じく `--uia` 起動先に対し NVDA の TextUnit.Word 呼び出しパターン(Expand/Move span/MoveEndpointByUnit)6 ケースを再現 | 通常は `sr-regression.ps1` 経由で呼ばれる |
@@ -17,9 +17,14 @@ main マージ前の**必須**ゲート。中身:
 
 1. `dotnet tool restore`(CSharpier 等の local tool)
 2. `dotnet csharpier check`(フォーマット検証)
-3. Debug ビルド(警告可視化)
-4. Release ビルド 0 警告
-5. 全テスト実行(フィルタなし・LocalOnly を含む全数)
+3. Release ビルド 0 警告(`-warnaserror`)
+4. Core / Editor / App の 3 テストプロジェクトを Release で実行(フィルタなし・LocalOnly を含む全数)
+5. App.Tests を **Debug でもう一度**実行
+
+5 が要る理由(Issue #48 最終レビュー Q-I-4): `Debug.Assert` は `[Conditional("DEBUG")]` なので
+Release バイナリに残らない。`DocumentState.Path` の不変条件のように `Debug.Assert` で守っている網は、
+Release だけのゲートでは 1 行も走らない=「網に見えるがゲート上は無効」になる。
+**Core.Tests の Debug は含めない**(既知 S-5 で 4 件赤になり、ゲートが常時 NG になるため)。
 
 CI(`.github/workflows/ci.yml`)は `Category!=LocalOnly` フィルタで走るため、`LocalOnly` の実ファイル I/O テストはこのローカルゲートでしか回らない。
 
