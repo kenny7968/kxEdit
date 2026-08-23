@@ -284,8 +284,36 @@ layoutWritten=True tabs=1 backupId=2159d3e31cc547bdb55edd76223b949b
 (`BackupStore.LoadAll` は `Directory.Exists` false で空・sweep 2 種は try/catch)。
 §7.1 が挙げていた代替((a) 存在しないドライブ / (b) writerFactory 注入 seam)は**不要**。
 
-### 10.3 申し送りの追加
+### 10.3 §5.1 が挙げた「代償」の機構は誤りだった — 実際の偽陽性はもっと狭い
+
+§5.1 と申し送り S-A8-1 は、dequeue しないことの代償を
+「**書込は失敗したがその後 clean になった文書**の Id が `_failed` に残っている場合の偽陽性」
+と書いた。**この機構は起きない。**
+
+その Id は同じ呼び出し連鎖の冒頭で消える。`FinalFlushForRestore()` → `ReconcileContent()` の
+先頭にある `while (_failed.TryDequeue(...))` は**無条件に全件を吸い出す**(`_map` に無い Id も
+含む)ので、直後の `WaitForFinalFlush()` が `_failed.IsEmpty` を読む時点では残っていない
+(Task 2 コード品質レビューが指摘)。
+
+**実際に残りうる偽陽性は 1 つだけ**:
+
+> 前 tick に投入されまだキューに残っていたジョブの失敗通知が、drain の**後**・バリア完了の
+> **前**に `_failed` へ届く。これが「今回の flush の失敗」として扱われる。
+
+安全側なので判断は変わらない(むしろ代償は §5.1 が書いたより**小さい**)。ただし誤った機構の
+説明を根拠に後日「直す」人が出ないよう、S-A8-1 を下表のとおり読み替える。
+
+**この訂正が示した構造**: `WaitForFinalFlush` の正しさは
+「**直前に `FinalFlushForRestore()` が走っていること**」に依存する。対で呼ばないと古い失敗を
+読む。とくに `_enabled == false`(BackupEnabled OFF)では `ReconcileContent` 側の枝に入らない
+ため drain が走らず、`_failed` の残留を恒久的に読み続ける経路が理論上ある
+(現配線では Task 3 の前提ゲートが `BackupEnabled` を要求するので到達しない)。
+この前提条件は `WaitForFinalFlush` の xmldoc に明記した。
+
+### 10.4 申し送りの追加・訂正
 
 | ID | 内容 |
 |---|---|
+| S-A8-1(訂正) | 偽陽性は「clean 化した文書の Id 残留」ではなく「**前 tick のジョブの失敗通知が drain 後・バリア完了前に届く**」場合のみ(§10.3)。安全側・実害は余分な確認 1 回 |
 | S-A8-6 | 終了時の UI スレッド最悪ブロックが 15 秒 → 20 秒(§10.1)。ワーカーが固まった失敗ケースのみ |
+| S-A8-7 | `WaitForFinalFlush` は `FinalFlushForRestore` と**対で・その直後に**呼ぶ契約。単独呼び出し・逆順は無効(§10.3) |
