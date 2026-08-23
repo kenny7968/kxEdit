@@ -16,9 +16,17 @@ public sealed class FakePrompt : IUserPrompt
 
     public void Error(string text, string caption) => Log.Add(("Error", text, caption));
 
-    public bool OkCancel(string text, string caption)
+    /// <summary>
+    /// <c>OkCancel</c> の呼出ごとの (Caption, defaultCancel)。破壊的な確認が安全側の既定
+    /// (キャンセルにフォーカス)で出ているかを L3 で pin するための観測点(S-12)。
+    /// <see cref="Log"/> のタプルへ足さないのは、形状を変えると既存の網が一斉に壊れるため。
+    /// </summary>
+    public List<(string Caption, bool DefaultCancel)> OkCancelCalls { get; } = new();
+
+    public bool OkCancel(string text, string caption, bool defaultCancel)
     {
         Log.Add(("OkCancel", text, caption));
+        OkCancelCalls.Add((caption, defaultCancel));
         return OkCancelResult;
     }
 

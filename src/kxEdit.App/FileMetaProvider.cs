@@ -7,7 +7,7 @@ namespace kxEdit.App;
 /// <summary><see cref="IFileMetaProvider"/> の本番実装(<see cref="FileInfo"/> の薄いラッパ)。</summary>
 public sealed class FileMetaProvider : IFileMetaProvider
 {
-    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeReachability と対称)。</summary>
+    /// <summary>HIGH-6 / CSV-M-1 と同じ 5 秒契約(FileController.TryProbeFileExists と対称)。</summary>
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>既定インスタンス(状態を持たないため共有して構わない)。</summary>
@@ -30,7 +30,10 @@ public sealed class FileMetaProvider : IFileMetaProvider
             // FileController は Load/Save で同じ前置を行っており、本経路だけが素通りしていた。
             // 失敗の落とし先は他の取得失敗と同じ null(=Formatter が「-」表示)なので、
             // FileController のようなエラーダイアログは出さない(致命度が低い付随情報のため)。
-            if (RemotePathDetector.IsRemote(path) && !_probe.ProbeWithTimeout(path, ProbeTimeout))
+            if (
+                RemotePathDetector.IsRemote(path)
+                && !_probe.ProbeFileExistsWithTimeout(path, ProbeTimeout)
+            )
                 return null;
 
             var fi = new FileInfo(path);

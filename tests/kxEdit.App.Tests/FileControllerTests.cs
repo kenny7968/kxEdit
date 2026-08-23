@@ -4,9 +4,7 @@ using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
-using Directory = System.IO.Directory;
 using File2 = System.IO.File;
-using IOException = System.IO.IOException;
 
 namespace kxEdit.App.Tests;
 
@@ -58,25 +56,6 @@ public class FileControllerTests
         }
 
         public void Dispose() => Form.Dispose();
-    }
-
-    /// <summary>テスト毎に使い捨ての一時フォルダ(実ファイル I/O 用)。</summary>
-    private sealed class TempDir : IDisposable
-    {
-        public string Root { get; } = Directory.CreateTempSubdirectory("kxEditAppTests_").FullName;
-
-        public string File(string name) => System.IO.Path.Combine(Root, name);
-
-        public void Dispose()
-        {
-            try
-            {
-                Directory.Delete(Root, recursive: true);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            { /* 掃除失敗はテスト失敗にしない(読み取り専用属性等は UnauthorizedAccessException) */
-            }
-        }
     }
 
     // ===== SaveAs ロールバック(データ破損防止の要=最優先) =====
@@ -160,8 +139,18 @@ public class FileControllerTests
             Assert.Empty(host.Settings.RecentFiles);
         });
 
+    /// <summary>
+    /// 空白パスは警告し、State を書き換えない。文言の全文と no-change を固定するのはこのテストだけ。
+    /// Task 4(2026-08-23)以降、この <c>false</c> は「警告して中止した」結果ではない:
+    /// 警告後は <c>continue</c> してダイアログを再表示し、2 回目に Fake のキューが枯渇して
+    /// キャンセル扱いになった結果である。**再表示そのものの pin は
+    /// <see cref="SaveAs_BlankPath_WarnsAndReopensDialog"/>** が持つ。
+    /// (旧名 `SaveAs_WhitespacePath_WarnsAndAborts` は「中止」を主張していたが、
+    /// `continue` を `return false` へ戻す改悪が入っても本テストは緑のままなので、名前が
+    /// 改悪を追認する状態だった。CLAUDE.md §4「assertion の前提と guard の発火条件を一致させる」)
+    /// </summary>
     [Fact]
-    public void SaveAs_WhitespacePath_WarnsAndAborts() =>
+    public void SaveAs_WhitespacePath_WarnsWithExactMessage_AndLeavesStateUnchanged() =>
         Sta.Run(() =>
         {
             using var host = new Host();
@@ -175,6 +164,948 @@ public class FileControllerTests
             Assert.Contains(
                 host.Prompt.Log,
                 e => e.Kind == "Warn" && e.Text == "ファイル名を指定してください。"
+            );
+        });
+
+    // ===== ダイアログ再表示ループ =====
+
+    /// <summary>
+    /// 空白パスの警告後に SaveAs 全体を中止せず、入力し直せるようにダイアログを再表示する。
+    /// 「Warn が出たこと」だけを見ると continue → return false の変異が生き残るので、
+    /// PickSaveAsCount で再表示そのものを固定する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_BlankPath_WarnsAndReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            string path = tmp.File("a.txt");
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("   ", 65001, false, LineEnding.Crlf)
+            );
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(path, 65001, false, LineEnding.Crlf));
+
+            Assert.True(host.File.SaveAs()); // 2 回目の入力で保存が成立する
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Warn" && e.Text.Contains("ファイル名")
+            );
+            Assert.True(File2.Exists(path));
+        });
+
+    /// <summary>キャンセルはループの唯一の途中出口。再表示しない。</summary>
+    [Fact]
+    public void SaveAs_Cancelled_WritesNothingAndDoesNotReopen() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = null; // キャンセル
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(1, host.Dialogs.PickSaveAsCount);
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>再表示のとき、直前に入力した値が初期値として戻る(打ち直しを強いない)。</summary>
+    [Fact]
+    public void SaveAs_Reopened_SeedsDialogWithPreviousInput() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc"; // 既定 State = UTF-8 / BOM なし / CRLF
+            // 非既定のエンコード・改行で入力する(既定と同値だと seed の伝播を検証できない)。
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("   ", 932, HasBom: true, LineEnding.Lf)
+            );
+
+            host.File.SaveAs(); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            var second = host.Dialogs.SaveAsRequests[1];
+            Assert.Equal("   ", second.Path);
+            Assert.Equal(932, second.CodePage);
+            Assert.True(second.HasBom);
+            Assert.Equal(LineEnding.Lf, second.LineEnding);
+        });
+
+    // ===== A-4: ネットワーク共有への新規保存(保存先意味論のプローブ) =====
+
+    /// <summary>
+    /// A-4 の回帰。読み取り側の ProbeFileExistsWithTimeout(File.Exists 意味論)を使い続けていると、
+    /// 存在しない新規パスは到達可能でも常に false=「ネットワークパスに到達できません」で止まる。
+    /// Fake の Result(読み取り側)を false・SaveTargetResult(保存側)を到達可能にすることで、
+    /// **どちらのメソッドを使っているか**を判別する(同値だと判別できない)。
+    /// 共有が実在しないので書込自体は失敗する。検証するのは「止まった理由」。
+    ///
+    /// ホストを 127.0.0.1 にするのは意図的: この 2 本は App スイートで唯一
+    /// **プローブを素通りさせて実 I/O まで到達する** UNC テストなので、所要時間がホストの
+    /// 名前解決に依存する。架空のホスト名はワイルドカード DNS ゾーンで実 IP に解決されると
+    /// 445 への TCP SYN 再送で 1 呼出あたり約 21 秒かかりうる。ループバックなら名前解決が
+    /// 消え、共有名不在が即座に返る。<c>UncPathDetector.IsUnc</c> は先頭 <c>\\</c> の
+    /// 純粋な文字列判定なので IsRemote=true は変わらない。
+    /// </summary>
+    [Fact]
+    public void SaveAs_NewFileOnUncPath_PassesReachabilityGate() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.Result = false; // 読み取り側を使っていたら到達性エラーで止まる
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: false
+            );
+            host.Dialogs.SaveAs = new SaveAsResult(
+                @"\\127.0.0.1\no-such-share\a.txt",
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            Assert.False(host.File.SaveAs()); // 共有が実在しないので書込は失敗する
+
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+        });
+
+    /// <summary>
+    /// 5 秒契約の pin(読み取り側 LastTimeout の観測点と対称)。
+    /// ホストが 127.0.0.1 な理由は上のテストの doc を参照(名前解決依存の排除)。
+    /// **回数も pin する**(A-7 (a) 追加時): 旧 <c>&gt;= 1</c> では、Fake の <c>FileExists</c> 既定が
+    /// 変わるなどして上書き確認が発火し、「いいえ → 再表示 → キュー枯渇」という**別の経路を
+    /// 通りながら緑のまま**になる。1 往復(ダイアログ 1 回・確認なし)であることを固定する。
+    /// プローブが **2 回**なのは設計どおり(設計書 §5): SaveAsDocument 段の事前判定と、
+    /// Ctrl+S も直接入る <see cref="FileController"/> 内 <c>WriteToPath</c> 冒頭の自己完結ガードで
+    /// 1 回ずつ。1 に減らす修正は WriteToPath の自己完結を壊すので、ここを 1 に書き換えないこと。
+    /// </summary>
+    [Fact]
+    public void SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                @"\\127.0.0.1\no-such-share\a.txt",
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            host.File.SaveAs();
+
+            Assert.Equal(2, host.Probe.SaveTargetCallCount); // 事前判定 + WriteToPath 冒頭
+            Assert.Equal(1, host.Dialogs.PickSaveAsCount); // 再表示していない = 1 往復
+            // 回数だけでは「確認が出て OK された」場合と区別できない(既定 OkCancelResult=true では
+            // 続行するので回数が変わらない)。確認が出ていないことも直接見る。
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout);
+        });
+
+    /// <summary>
+    /// 設計書 §3.3: ローカルパスはリモートゲートで素通りする(挙動不変)。
+    /// ゲートを外すと「存在しないフォルダー配下への保存」がプローブで弾かれ、
+    /// SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath が WriteToPath に届かなくなる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_LocalNewFile_DoesNotProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                tmp.File("a.txt"),
+                65001,
+                HasBom: false,
+                LineEnding.Crlf
+            );
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
+        });
+
+    // ===== A-19: 保存先パスの正規化 =====
+
+    /// <summary>
+    /// A-19。相対パスを未正規化のまま State.Path に残すと保存先が CWD 依存になり、
+    /// hot exit 復元で無言の無題化を招く。Environment.CurrentDirectory を触るが、
+    /// App.Tests は GlobalUsings.cs で並列実行を無効化済み(CollectionBehavior)なので安全。
+    /// </summary>
+    [Fact]
+    public void SaveAs_RelativePath_StoresAbsolutePath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            string saved = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = tmp.Root;
+                host.Dialogs.SaveAs = new SaveAsResult("memo.txt", 65001, false, LineEnding.Crlf);
+
+                Assert.True(host.File.SaveAs());
+            }
+            finally
+            {
+                Environment.CurrentDirectory = saved;
+            }
+
+            // CreateTempSubdirectory は 8.3 名や symlink 経由のパスを返しうるので、
+            // 期待値も GetFullPath を通してから比較する(区切り・大小の揺れは吸収しない)。
+            string expected = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(tmp.Root, "memo.txt")
+            );
+            Assert.Equal(expected, doc.State.Path);
+            Assert.Equal(expected, host.Settings.RecentFiles[0]); // RegisterRecent も正規化済みを使う
+            Assert.True(File2.Exists(expected));
+        });
+
+    /// <summary>
+    /// A-19 の**再表示側**。<c>SaveAsDocument</c> の <c>seed = seed with { Path = full };</c> は
+    /// 「再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)」と主張しているが、
+    /// この行は**丸ごと削除しても全緑だった**(最終品質パス m-2)。
+    /// 上の <see cref="SaveAs_RelativePath_StoresAbsolutePath"/> は 1 周で成功するので
+    /// 再表示の seed を観測できない。重複タブで <c>continue</c> を 1 回だけ起こして観測する。
+    /// SR ユーザーの表示面の性質であってデータ喪失ではないが、行のコメントが
+    /// 「位置も load-bearing」とまで書いている以上、無網のまま残さない。
+    /// </summary>
+    [Fact]
+    public void SaveAs_RelativePath_RedisplaysDialogWithAbsolutePath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string expected = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(tmp.Root, "memo.txt")
+            );
+
+            // 重複タブを在席させて continue を 1 回だけ起こす(2 回目の PickSaveAs を発生させる)。
+            var occupant = host.Docs.CreateNew();
+            occupant.State.Path = expected;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            string saved = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = tmp.Root;
+                host.Dialogs.SaveAsQueue.Enqueue(
+                    new SaveAsResult("memo.txt", 65001, false, LineEnding.Crlf)
+                );
+
+                Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+            }
+            finally
+            {
+                Environment.CurrentDirectory = saved;
+            }
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Null(host.Dialogs.SaveAsRequests[0].Path); // 1 回目は State 由来(無題)
+            // 2 回目の初期値が生入力 "memo.txt" ではなく正規化済みの絶対パスであること。
+            Assert.Equal(expected, host.Dialogs.SaveAsRequests[1].Path);
+        });
+
+    /// <summary>正規化不能な入力は握って「入力し直し」に落とす(未捕捉例外ダイアログにしない)。</summary>
+    [Fact]
+    public void SaveAs_UnnormalizablePath_WarnsAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult("bad\0name.txt", 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>
+    /// V-2 の網。<c>TryNormalizeSavePath</c> の catch フィルタから <c>IOException</c> を外す変異
+    /// (例えば <c>FileNotFoundException</c> へ狭める = 挙動としては「IOException を握らない」)が
+    /// **全緑で生存していた**(最終品質パス I-3)。上の <c>bad\0name.txt</c> は
+    /// <c>ArgumentException</c> 枝しか通らないため、<c>IOException</c> 側が無網だった。
+    /// **本テストが塞ぐのは設計書 §4.3 が挙げる 2 つの窓のうち
+    /// <see cref="System.IO.PathTooLongException"/>(総長超過)の方**。実測(.NET 9)で
+    /// 40,000 文字の相対入力はこれを投げる。もう一方の**素の <c>IOException</c>**
+    /// (総長が 32,767 の直下に収まり <c>GetFullPathNameW</c> が ERROR_INVALID_NAME を返す窓。
+    /// CWD 110 文字 + 相対 32,660 文字で実測)は CWD 長に依存する fixture になるため
+    /// 自動テストにせず、<c>TryNormalizeSavePath</c> の remarks を読むことで担保する。
+    /// PathTooLongException は IOException の派生なので、この 1 本でフィルタの
+    /// <c>or System.IO.IOException</c> という**記述そのもの**は pin できる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_OverLongPath_WarnsAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(new string('a', 40000), 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.Null(doc.State.Path);
+        });
+
+    // ===== V-1 / V-3(脆弱性レビュー): 親フォルダーが取れない保存先 =====
+
+    /// <summary>
+    /// V-1(High)。ドライブルート(C:\)は正規化できるが親フォルダーが無い=書き込み先が確定しない。
+    /// 前段ガードが無いと AtomicFile.Write の <c>Path.Combine(GetDirectoryName(...)!, ...)</c> に
+    /// null が渡って ArgumentNullException になり、しかも ConvertEols が保存点を壊した後なので
+    /// **保存していないのに Modified=false** が残る(ConfirmDiscardIfDirty が素通りし、
+    /// 以後タブを閉じても終了しても確認なしで本文が失われる)。
+    /// ローカルパスをハードコードしないため root は TempDir から導出する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_DriveRoot_WarnsAndReopens_AndKeepsModified() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+            Assert.False(string.IsNullOrEmpty(root));
+
+            var doc = host.Docs.CreateNew();
+            // 本文に CRLF を入れ、要求 EOL を LF にする = ガードを外したとき ConvertEols が
+            // **非 fast-path**でバッファを差し替え、保存点が実際に壊れる条件を作る。
+            // これを作らないと Modified の assert が空振りする(fast-path は no-op)。
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // dirty= 非既定状態から検証を始める
+            Assert.True(doc.Editor.Modified);
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(root, 65001, false, LineEnding.Lf));
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount); // 中止せず再表示する
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.Editor.Modified); // V-1 の本体: 未保存の本文が dirty のまま残る
+        });
+
+    /// <summary>
+    /// V-1 / V-3。予約デバイス名は GetFullPath が <c>\\.\CON</c> へ正規化するため、先頭 <c>\\</c> で
+    /// リモート扱いになる。ガードが無いと保存先プローブまで進み「ネットワークパスに到達できません」
+    /// という的外れな文言になる(V-3)。親フォルダー無しとして先に弾けば正しい文言になる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_ReservedDeviceName_WarnsWithPathMessage_NotNetworkMessage() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x");
+            Assert.True(doc.Editor.Modified);
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult("CON", 65001, false, LineEnding.Lf));
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Warn"
+                    && e.Text.StartsWith("パスが正しくありません", StringComparison.Ordinal)
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.Equal(0, host.Probe.SaveTargetCallCount); // プローブまで届かせない
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.Editor.Modified);
+        });
+
+    /// <summary>
+    /// V-1 修正 (b)。SaveAsDocument の前段ガードを**通らない**経路の網: Ctrl+S は
+    /// State.Path をそのまま WriteToPath へ渡す。攻撃 backup JSON の
+    /// <c>OriginalPath: "C:\\"</c> は OriginalPathValidator の BlockedRoots(C:\Windows 等)に
+    /// 該当しないため Ok で通り、State.Path=ドライブルートの復元タブが成立しうる。
+    /// WriteToPath の catch フィルタが ArgumentException を持たないと未捕捉例外になり、
+    /// ConvertEols のロールバックが発火せず Modified=false のまま残る。
+    /// </summary>
+    [Fact]
+    public void Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x");
+            doc.State.LineEnding = LineEnding.Lf; // ConvertEols を非 fast-path にする
+            doc.State.Path = root; // 復元タブ相当(SaveAs ダイアログを経由しない)
+            Assert.True(doc.Editor.Modified);
+
+            Assert.False(host.File.Save()); // Ctrl+S 経路
+
+            Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へ落ちない
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+            Assert.True(doc.Editor.Modified); // ロールバック発火=未保存の本文が失われない
+        });
+
+    // ===== A-7 (b): 他タブ重複の検知 =====
+
+    /// <summary>
+    /// **順序の契約も pin する**(設計書 §4.2): 重複タブ判定は保存先プローブ+上書き確認より
+    /// **前**。拒否する相手の到達性を調べる意味はなく、遠隔共有で無駄な 5 秒を待たせない。
+    /// fixture の <c>occupied</c> は実在するので、プローブ+確認を重複判定の上へ持ち上げる変異では
+    /// 先に「上書きの確認」が出る = <c>DoesNotContain(OkCancel)</c> が落ちる
+    /// (ローカルパスなので <c>SaveTargetCallCount</c> は動かず、Ctrl+S 側の双子
+    /// <see cref="Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe"/> のような
+    /// プローブ回数では観測できない)。
+    /// </summary>
+    [Fact]
+    public void SaveAs_PathOpenInAnotherTab_ShowsErrorAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string occupied = tmp.File("occupied.txt");
+            File2.WriteAllText(occupied, "original");
+            Assert.NotNull(host.File.TryOpenOrActivate(occupied)); // タブ A
+
+            var doc = host.Docs.CreateNew(); // タブ B(無題)
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(occupied, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
+            );
+            // 順序の pin(上の doc を参照): 重複タブは確認より前に弾く
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+            Assert.Equal("original", File2.ReadAllText(occupied)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>
+    /// 自分自身のパスへの上書き保存は正当な操作。
+    /// **非既定状態から始めるのが要点**: 無題タブ(State.Path == null)から始めると
+    /// FindByPath は常に null を返し、「null が返った」と「自分が返った」を区別できない
+    /// =自タブ除外(!ReferenceEquals)を落とす変異が生存する。
+    /// パス確定済みの doc + 別パスの他タブ、という配置にする。
+    /// </summary>
+    [Fact]
+    public void SaveAs_OwnPath_IsNotTreatedAsDuplicate() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string other = tmp.File("other.txt");
+            File2.WriteAllText(other, "other");
+            Assert.NotNull(host.File.TryOpenOrActivate(other)); // 別パスの他タブを在席させる
+
+            string mine = tmp.File("mine.txt");
+            File2.WriteAllText(mine, "old");
+            var doc = host.File.TryOpenOrActivate(mine); // パス確定済みの自タブ
+            Assert.NotNull(doc);
+            doc!.Editor.Text = "new";
+            host.Dialogs.SaveAs = new SaveAsResult(mine, 65001, false, LineEnding.Crlf);
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("別のタブで開いています"));
+            // A-7 (a) 追加後はこのテストが新しい上書き確認を通る(mine は実在するため)。
+            // FakePrompt.OkCancelResult 既定 true で素通りするので、通ること自体を明示して
+            // 「気付かないうちに別の経路を測っている」状態にしない。
+            // 自分自身のパスへの SaveAs で確認が出るのは意図どおり: 従来も「参照」経由なら
+            // SaveFileDialog の OverwritePrompt が同じ確認を出していた(自分が開いている
+            // ファイルを除外する仕組みは無い)= 非対称の解消であって新しい負担ではない。
+            Assert.Contains(host.Prompt.Log, e => e.Caption == "上書きの確認");
+            Assert.Contains("new", File2.ReadAllText(mine));
+        });
+
+    /// <summary>
+    /// 照合は <c>PathKey</c>(GetFullPath + ToLowerInvariant)であって文字列等値ではない。
+    /// <c>LoadInto</c> は渡された生パスをそのまま <c>State.Path</c> に入れるので、別経路で開いた
+    /// タブと SaveAs のダイアログ入力が同じファイルの**違う綴り**を持ちうる
+    /// (=文字列等値で照合すると重複を見逃して A-7 (b) が再発する)。
+    /// 綴り差は Windows で実在する大文字小文字違いを使い、
+    /// (a) 2 つの綴りが Ordinal で別物・(b) それでも同じファイルを指す(ボリュームが大小無視)
+    /// の 2 点を fixture 側で実測して固定する。Windows 10 以降のディレクトリ単位
+    /// case sensitivity が有効な環境では (b) が落ちる = 「たまたま緑」ではなく前提の破れとして見える。
+    /// </summary>
+    [Fact]
+    public void SaveAs_PathOpenInAnotherTab_DifferentCaseSpelling_IsStillDetected() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string lower = tmp.File("occupied.txt");
+            string upper = tmp.File("OCCUPIED.TXT");
+            File2.WriteAllText(lower, "original");
+
+            Assert.NotEqual(lower, upper, StringComparer.Ordinal); // (a) 綴りは別物
+            Assert.True(File2.Exists(upper)); // (b) それでも同じファイル
+
+            var tabA = host.File.TryOpenOrActivate(lower); // タブ A は小文字綴り
+            Assert.NotNull(tabA);
+            Assert.Equal(lower, tabA!.State.Path); // 生パスがそのまま入る
+
+            var doc = host.Docs.CreateNew(); // タブ B(無題)
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(upper, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            // 再表示の初期値 = 正規化済み full。大文字綴りのまま = タブ A の State.Path とは
+            // 別文字列であることを実測で固定する(文字列等値では照合できない証拠)。
+            string full = host.Dialogs.SaveAsRequests[1].Path!;
+            Assert.Equal(upper, full);
+            Assert.NotEqual(tabA.State.Path, full, StringComparer.Ordinal);
+
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
+            );
+            Assert.Equal("original", File2.ReadAllText(lower)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>
+    /// ガードの**位置**(保存先プローブより前)を SaveAs 側でも固定する。Ctrl+S 側の双子
+    /// <see cref="Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe"/> は
+    /// <c>SaveTargetCallCount == 0</c> を持っていたが、SaveAs 側は
+    /// <see cref="SaveAs_PathOpenInAnotherTab_ShowsErrorAndReopens"/> がローカルパス fixture で
+    /// <c>DoesNotContain(OkCancel)</c> しか見ていないため、**ガードをプローブの下・確認の上へ
+    /// 移す変異が全緑で生存していた**(最終品質パス m-3)。害は無駄な 5 秒プローブであって
+    /// データ喪失ではないが、src コメントが「遠隔共有で無駄な 5 秒を待たせない」と主張している。
+    /// UNC でないと観測できない理由はローカル版 doc と同じ(<c>IsRemote</c> が偽だとプローブ自体
+    /// 呼ばれない)。プローブ結果は「到達可能・未存在」にしておく: 呼ばれてしまった場合に
+    /// 「到達不能で短絡した」と紛れないようにするため。
+    /// **assert の順序が load-bearing**: ガードを下げる変異では粗い assert
+    /// (戻り値・再表示回数・エラー文言)は全部通るので、位置の契約を最初に落とす。
+    /// </summary>
+    [Fact]
+    public void SaveAs_PathOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            const string unc = @"\\nonexistent-host-42\share\x.txt";
+
+            // UNC は実ファイルを用意できないので在席タブは State.Path 直代入で作る
+            // (Task 6 のガードが SaveAs 経由での重複生成を塞いでいるため。先例 =
+            // Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe)。
+            var occupant = host.Docs.CreateNew();
+            occupant.Editor.Text = "occupant-content";
+            occupant.State.Path = unc;
+
+            var doc = host.Docs.CreateNew(); // 無題タブ(こちらがアクティブ)
+            doc.Editor.Text = "abc";
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: false
+            );
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(unc, 65001, false, LineEnding.Crlf));
+
+            bool saved = host.File.SaveAs(); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(0, host.Probe.SaveTargetCallCount); // 位置の契約(最初に落とす)
+            Assert.False(saved);
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
+            );
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+            Assert.Null(doc.State.Path);
+        });
+
+    // ===== A-7 (b) 残余(Task 6b): 既にある重複状態での Ctrl+S =====
+
+    /// <summary>
+    /// Task 6(SaveAs 側)のガードは重複タブが**生まれる**経路しか塞がない。**既にある**状態
+    /// (復元 extras の dedup がバックアップ Id のみで照合するため現行フリートでも発生する)では
+    /// <c>SaveDocument</c> が <c>FindByPath</c> を参照せず、Ctrl+S が無警告でもう一方のタブの
+    /// 内容をディスクから消していた。
+    /// fixture は SaveAs を通さず <c>State.Path</c> を直接代入して作る
+    /// (Task 6 のガードが SaveAs 経由での重複生成を塞いでいるため)。
+    /// 同手法の先例 = <see cref="Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified"/>。
+    /// </summary>
+    [Fact]
+    public void Save_PathAlsoOpenInAnotherTab_IsBlocked_AndFileKeepsOtherTabContent() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string shared = tmp.File("shared.txt");
+            File2.WriteAllText(shared, "tabA-content");
+            var tabA = host.File.TryOpenOrActivate(shared); // 先に生まれたタブ
+            Assert.NotNull(tabA);
+
+            var tabB = host.Docs.CreateNew(); // 後から生まれた重複タブ(復元 dedup 漏れ相当)
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = shared; // SaveAs を経由せず衝突状態を作る
+            tabB.Editor.ReplaceCharRange(0, 0, "x"); // dirty=保存点が打たれていないことを観測可能にする
+            Assert.True(tabB.Editor.Modified);
+            // 生成順で先勝ち = FindByPath は tabA を返す(tabB が「新しい方」であることを固定する)。
+            Assert.Same(tabA, host.Docs.FindByPath(shared));
+
+            Assert.False(host.File.Save()); // tabB がアクティブ = Ctrl+S 経路
+
+            // 本体: 相手タブの内容がディスク上に生き残る(戻り値だけでなく実ファイルで見る)。
+            Assert.Equal("tabA-content", File2.ReadAllText(shared));
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブが同じファイルを開いています")
+            );
+            // 文言が Task 6(SaveAs)のものと別であることを固定する。Ctrl+S では呼び出し元の
+            // タブ自身もそのパスを持っているので「そのタブで保存してください」は成立しない
+            // (コピペで Task 6 の文言を持ち込むと SR ユーザーが実行不能な指示を聞かされる)。
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.Contains("そのタブで保存してください")
+            );
+            Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へは落ちない
+            Assert.True(tabB.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
+        });
+
+    /// <summary>
+    /// 対照群(過剰検知の防止): 同じ衝突状態でも**先に生まれたタブ**の Ctrl+S は通る。
+    /// これが無いと「常に false を返す」変異と「<c>!ReferenceEquals</c> を落とす」変異が生き残る
+    /// (衝突相手が在席したままなので <c>FindByPath</c> は必ず非 null を返す = 自タブ除外だけが効いている)。
+    /// </summary>
+    [Fact]
+    public void Save_OlderTabOfCollidingPair_StillWrites() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string shared = tmp.File("shared.txt");
+            File2.WriteAllText(shared, "original");
+            var tabA = host.File.TryOpenOrActivate(shared);
+            Assert.NotNull(tabA);
+
+            var tabB = host.Docs.CreateNew(); // 衝突相手を在席させる(検知対象が在ることが前提)
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = shared;
+            Assert.Same(tabA, host.Docs.FindByPath(shared)); // 検知対象は tabA 自身
+
+            host.Docs.Activate(tabA!);
+            tabA!.Editor.ReplaceCharRange(
+                0,
+                tabA.Editor.CurrentBuffer.Current.CharLength,
+                "tabA-saved"
+            );
+            Assert.True(tabA.Editor.Modified);
+
+            Assert.True(host.File.Save());
+
+            Assert.Equal("tabA-saved", File2.ReadAllText(shared));
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.Contains("別のタブが同じファイルを開いています")
+            );
+            Assert.False(tabA.Editor.Modified); // SetSavePoint 済み=書き込み経路を通っている
+        });
+
+    /// <summary>
+    /// ガードの**位置**(WriteToPath 冒頭の到達性プローブより前)を固定する。重複タブは保存させない
+    /// ので到達性を調べる意味がなく、遠隔共有で無駄な 5 秒を待たせてはいけない。
+    /// <c>TryInspectSaveTarget</c> は <c>RemotePathDetector.IsRemote</c> が真のときしかプローブを
+    /// 呼ばないため、**ローカルパスの fixture ではこの契約を観測できない**(ガードを
+    /// プローブ直後へ移しても他の網は全緑のまま=src コメントが存在しない安全網を主張する状態に
+    /// なる。Task 2 の F-1 と同型)。UNC 版が必要な理由はここ。
+    /// fixture の先例 = <see cref="Save_ShowsErrorPrompt_WhenRemoteUncUnreachable"/>。
+    /// </summary>
+    [Fact]
+    public void Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            const string unc = @"\\nonexistent-host-42\share\x.txt";
+
+            // UNC は実ファイルを用意できないので 2 タブとも State.Path 直代入で作る
+            // (Task 6 のガードが SaveAs 経由での重複生成を塞いでいる事情はローカル版と同じ)。
+            var tabA = host.Docs.CreateNew(); // 先に生まれたタブ
+            tabA.Editor.Text = "tabA-content";
+            tabA.State.Path = unc;
+
+            var tabB = host.Docs.CreateNew(); // 後から生まれた重複タブ
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = unc;
+            tabB.Editor.ReplaceCharRange(0, 0, "x"); // dirty=保存点が打たれていないことを観測可能にする
+            Assert.True(tabB.Editor.Modified);
+            Assert.Same(tabA, host.Docs.FindByPath(unc)); // 生成順で先勝ち=tabB が止められる側
+
+            // 到達可能・未存在(既定)のまま残す: プローブが呼ばれてしまった場合に
+            // 「到達不能で短絡した」と紛れないようにする(呼ばれた事実だけを見る)。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: false
+            );
+
+            bool saved = host.File.Save(); // tabB がアクティブ = Ctrl+S 経路
+
+            // **assert の順序が load-bearing**: ガードを外す/プローブ後へ移す変異では
+            // Assert.False(saved) も落ちるので、先に書くとプローブの網が隠れる。
+            // 位置の契約(プローブより前)を最初に落とす。
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
+            Assert.False(saved);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブが同じファイルを開いています")
+            );
+            // 短絡であって到達性エラーでも書込失敗でもない(プローブ非実行の裏取り)。
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+            Assert.True(tabB.Editor.Modified); // 保存点を打っていない
+        });
+
+    // ===== A-7 (a): 上書き確認 =====
+
+    /// <summary>
+    /// SR ユーザーの主経路(ダイアログのテキストボックス直入力)でも上書き確認が出る。
+    /// fixture は**実ファイルをディスクに置く**だけで作る(Fake の申告ではなくローカル枝の
+    /// <c>File.Exists</c> が読む実体を入力にする)。<c>TryOpenOrActivate</c> は呼ばない:
+    /// 重複タブ検知が上書き確認より**前**にあるので、別タブで開いたパスを使うと
+    /// Task 6 のエラーに当たって本テストが別のものを pin する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_ExistingFile_AsksOverwriteConfirmation() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "original");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "new";
+            host.Dialogs.SaveAs = new SaveAsResult(path, 65001, false, LineEnding.Crlf);
+
+            Assert.True(host.File.SaveAs()); // FakePrompt.OkCancelResult 既定 true = 上書き承諾
+
+            var confirm = Assert.Single(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Caption == "上書きの確認"
+            );
+            // 読み上げ順の pin: 最大 200 文字のパスより**問いが先**に来る
+            // (SR は本文を頭から読む。パスを先に置くと何を聞かれているかが最後まで分からない)。
+            Assert.StartsWith(
+                "同じ名前のファイルが既に存在します。上書きしますか?",
+                confirm.Text,
+                StringComparison.Ordinal
+            );
+            Assert.Contains(path, confirm.Text, StringComparison.Ordinal); // どこへ書くかも読める
+            // S-12: 破壊的な確認は既定フォーカスをキャンセル側に置く。SaveAsDialog は
+            // AcceptButton = OK なので「ファイル名を打つ → Enter」が主経路であり、
+            // 既定が OK 側だと Enter 連打でこの確認ごと確定してしまう。
+            Assert.Equal(("上書きの確認", true), Assert.Single(host.Prompt.OkCancelCalls));
+            Assert.Contains("new", File2.ReadAllText(path));
+        });
+
+    /// <summary>
+    /// A-7 (a) の**リモート枝**。上のテストはローカル枝(素の <c>File.Exists</c>)しか通らないため、
+    /// <c>TryInspectSaveTarget</c> のリモート枝 <c>exists = probe.FileExists;</c> を
+    /// <c>exists = false;</c> にする変異が**全緑で生存していた**(最終品質パス I-1)。
+    /// = UNC / マップドネットワークドライブ上の既存ファイルを無確認で上書きする退行が
+    /// 検出されない状態だった。本ブランチの目玉の半分が無網だったということ。
+    /// 原因は fixture 側にある: スイート内で唯一 <c>FileExists: true</c> を置いていた
+    /// <see cref="SaveAs_UnreachableUncPath_ShowsErrorAndReopens"/> は
+    /// <c>Reachable: false</c> と対にした**意図的な毒値**なので、
+    /// 「リモート + 到達可能 + 既存」の組み合わせがどこにも無かった。
+    /// 辞退させるのは実書込へ進ませないため(共有は実在しないので書込は必ず失敗し、
+    /// 何を pin しているのか分からなくなる)。
+    /// </summary>
+    [Fact]
+    public void SaveAs_ExistingFileOnUncPath_AsksOverwriteConfirmation() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: true
+            );
+            host.Prompt.OkCancelResult = false; // 辞退 → 再表示 → キュー枯渇で終了
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(@"\\127.0.0.1\no-such-share\a.txt", 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(("上書きの確認", true), Assert.Single(host.Prompt.OkCancelCalls));
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+        });
+
+    /// <summary>
+    /// 「いいえ」でファイルもドキュメント状態も一切変えずにダイアログへ戻る。
+    /// **非既定のエンコード/BOM/改行を選ぶのが要点**(CLAUDE.md §4 の no-change 規範。
+    /// 本ファイルでは 3 度目の同型指摘): 既定(65001 / BOM なし / CRLF)を選ぶと
+    /// 「State を触っていない」が既定値と区別できず、**確認ブロックを
+    /// <c>doc.State.Encoding = newEncoding</c> の下へ移す変異が全緑で生存する**。
+    /// その位置に落ちると「State だけ新エンコードで Path は旧のまま」が残り、
+    /// 後続の Ctrl+S が元ファイルを別エンコードでサイレント上書きする
+    /// (FileController の同箇所のコメントが警告しているデータ破損そのもの)。
+    /// </summary>
+    [Fact]
+    public void SaveAs_OverwriteDeclined_KeepsFileAndReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "original");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "new"; // ASCII=932 でも劣化警告は出ない
+            host.Prompt.OkCancelResult = false; // 「いいえ」
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(path, 932, HasBom: true, LineEnding.Lf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Equal("original", File2.ReadAllText(path)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+            // 選んだ 932 / BOM / LF はどれも State に触れていない(既定のまま)
+            Assert.Equal(65001, doc.State.Encoding.CodePage);
+            Assert.False(doc.State.HasBom);
+            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding);
+        });
+
+    /// <summary>
+    /// 新規ファイルでは確認しない。FakePrompt.OkCancelResult の既定は true なので
+    /// 「保存が成功した」だけでは確認の有無を区別できない(vacuous になる)。
+    /// Log に OkCancel が**出ないこと**で固定する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_NewFile_DoesNotAskOverwrite() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                tmp.File("fresh.txt"),
+                65001,
+                false,
+                LineEnding.Crlf
+            );
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+        });
+
+    /// <summary>
+    /// 到達不能なリモート保存先はエラーにして再表示する(書込を試みない)。
+    /// <c>FileExists</c> に **true** を置くのは意図的な毒値: 到達不能のとき FileExists は
+    /// 無意味という <see cref="SaveTargetProbeResult"/> の契約(本物のプローブは
+    /// <c>Reachable = fileExists || dirExists</c> なのでこの組は production では作れない)を、
+    /// 「読んだら上書き確認が出てしまう」という観測可能な形に変える。
+    /// false のままだと「戻り値を先に見る」短絡を外す変異が Log 上は無変化になり、
+    /// DoesNotContain(OkCancel) が vacuous になる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_UnreachableUncPath_ShowsErrorAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: true
+            );
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(@"\\127.0.0.1\no-such-share\a.txt", 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs());
+
+            // **assert の順序が load-bearing**(先例 =
+            // Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe): 短絡を外す変異では
+            // 再表示回数も落ちるので、粗い方を先に書くと契約違反そのものの網が隠れる。
+            // 到達不能のとき FileExists は無意味(SaveTargetProbeResult の契約)= 読んではいけない。
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith(
+                        "ネットワークパスに到達できません",
+                        StringComparison.Ordinal
+                    )
+            );
+            // 書込は試みていない = WriteToPath の失敗エラーは出ない
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
             );
         });
 
@@ -276,6 +1207,17 @@ public class FileControllerTests
 
     // ===== 符号化劣化警告(CanEncodeBuffer 経由) =====
 
+    /// <summary>
+    /// 劣化警告に「キャンセル」と答えると、ファイルにも State にも一切触れない。
+    /// Task 8(2026-08-23)以降、この <c>false</c> は「警告して中止した」結果ではない:
+    /// 警告後は <c>continue</c> してダイアログを再表示し、2 回目に 1-shot の
+    /// <see cref="Fakes.FakeFileDialogService.SaveAs"/> が払い出しを終えてキャンセル扱いに
+    /// なった結果である。**再表示そのものの pin は
+    /// <see cref="SaveAs_EncodingWarningDeclined_ReopensDialog"/>** が持つ。
+    /// (先例 = <see cref="SaveAs_WhitespacePath_WarnsWithExactMessage_AndLeavesStateUnchanged"/>。
+    /// テスト名の Cancel は**警告への答**であって SaveAs の中止ではない。名前が
+    /// 「中止」を主張すると、<c>continue</c> を <c>return false</c> へ戻す改悪を名前が追認する)
+    /// </summary>
     [Fact]
     public void SaveAs_LossyEncoding_CancelKeepsStateAndWritesNothing() =>
         Sta.Run(() =>
@@ -296,6 +1238,45 @@ public class FileControllerTests
                 host.Prompt.Log,
                 e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
             );
+            // S-12 と**対称**: 破壊的な確認は両方とも既定フォーカスをキャンセル側に置く。
+            // Task 8 で警告のキャンセルが「入力を保ったまま再表示」になり、誤爆した Enter の
+            // コストが消えたので、劣化警告だけ既定 OK にしておく根拠がなくなった
+            // (コンボの初期値は seed 由来なので、ユーザーが文字コードに触れていなくても
+            // 警告条件は成立しうる = 「直前に自分で選んだ」前提が成り立たない)。
+            // defaultCancel を false へ戻す変異をここで殺す。
+            Assert.Equal(("文字コードの警告", true), Assert.Single(host.Prompt.OkCancelCalls));
+        });
+
+    /// <summary>
+    /// 文字コード劣化警告のキャンセルもダイアログへ戻す(選び直せる場所がそのダイアログだから)。
+    /// 保存先は**新規ファイル**にして、上書き確認と <c>OkCancelResult</c> を取り合わないようにする
+    /// (FakePrompt の応答は 1 つしかないので、既存ファイルにすると上書き確認も同時に「いいえ」になる)。
+    /// 停止保証は <c>SaveAsQueue</c> の**枯渇=キャンセル**だけ: 警告が continue になった今、
+    /// 「同じ入力 → 警告 → キャンセル → 再表示」は自力では終わらない
+    /// (だから SaveAsQueue に「最後の値を繰り返す」モードを足してはいけない)。
+    /// 選ぶ 932 は既定(65001)と別値なので末尾の no-change assert は空振りしない
+    /// (CLAUDE.md §4。<c>doc.State.Encoding = newEncoding</c> を警告ブロックの上へ移す変異は
+    /// この assert で落ちる)。
+    /// </summary>
+    [Fact]
+    public void SaveAs_EncodingWarningDeclined_ReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "絵文字 \U0001F600"; // SJIS(932)で表せない
+            host.Prompt.OkCancelResult = false; // 警告に「キャンセル」
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(tmp.File("a.txt"), 932, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(host.Prompt.Log, e => e.Caption == "文字コードの警告");
+            Assert.False(File2.Exists(tmp.File("a.txt")));
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // State は書き換わっていない
         });
 
     [Fact]
@@ -488,12 +1469,19 @@ public class FileControllerTests
             doc.Editor.ReplaceCharRange(0, 1, ""); // "abc", Modified=true(_savedRoot からズレたまま)
             Assert.True(doc.Editor.Modified); // 前提: Save 前は dirty
             doc.State.Path = @"\\nonexistent-host-42\share\x.txt";
-            host.Probe.Result = false; // プローブがタイムアウト/到達不可を返す
+            // A-4: 書込側は保存先意味論のプローブを使う。読み取り側の Result は既定 true のまま
+            // 残す=「書込側が読み取り側を呼んでいたら素通りして書込に進み、
+            // 到達性エラーではなく "保存できませんでした" になる」ので、どちらを使っているか判別できる。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: false
+            );
 
             Assert.False(host.File.Save());
 
-            Assert.Equal(1, host.Probe.CallCount); // Save 経路も UNC は必ずプローブを通す(HIGH-6 と対称)
-            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.LastTimeout); // 5s → 5min mutation の kill
+            // Save 経路も UNC は必ずプローブを通す(HIGH-6 と対称)
+            Assert.Equal(1, host.Probe.SaveTargetCallCount);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout); // 5s → 5min mutation の kill
             // "ネットワークパスに到達できません" が Save 経路でも 1 件だけ発火する(Load と Save の
             // 二重発火を避ける=WriteToPath 冒頭ガードのみで完結する契約)。
             var reachErrors = host.Prompt.Log.Where(e =>
@@ -533,7 +1521,10 @@ public class FileControllerTests
 
             Assert.True(host.File.Save()); // 通常経路で成功
 
-            Assert.Equal(0, host.Probe.CallCount); // ローカルパスはプローブを回さない(挙動不変)
+            // ローカルパスはプローブを回さない(挙動不変)。A-4 で書込側が保存先意味論へ移ったので
+            // 観測点も SaveTargetCallCount にする(CallCount は書込側から呼ばれなくなり
+            // ローカル/リモートを問わず 0=リモートゲートの変異を殺せない vacuous な網になる)。
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
             Assert.Equal("abc", File2.ReadAllText(path)); // 実際にディスクへ書き出し完了
         });
 
@@ -541,9 +1532,14 @@ public class FileControllerTests
     public void SaveAs_ShowsErrorPrompt_WhenPickedPathIsRemoteAndUnreachable() =>
         Sta.Run(() =>
         {
-            // SaveAs で新たに UNC を選んだが到達不可なシナリオ: SaveAs は WriteToPath を経由する
-            // ため CSV-M-2 ガードで短絡し、SaveAsDocument の Encoding/HasBom/LineEnding ロールバックが
-            // WriteToPath=false の帰り経路で発火する(既存 SaveAs_WriteFailure_RollsBack... と対称)。
+            // SaveAs で新たに UNC を選んだが到達不可なシナリオ。
+            // **短絡位置は A-7 (a) で前へ移った**: 以前は WriteToPath 冒頭の CSV-M-2 ガードで止まり
+            // Encoding/HasBom/LineEnding は「一度書き換えてからロールバック」されていたが、
+            // 現在は SaveAsDocument の事前判定(上書き確認の直前)で止まるため State には
+            // **触れないまま**同じ結果になる。以下の State assert はロールバックではなく
+            // 「一切変更していない」を pin する(ロールバック自体の網は
+            // SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath が持つ)。
+            // 再表示の網は SaveAs_UnreachableUncPath_ShowsErrorAndReopens。
             using var host = new Host();
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = "abc"; // 既定 State=UTF-8/BOM なし/CRLF
@@ -555,17 +1551,23 @@ public class FileControllerTests
                 HasBom: true,
                 LineEnding.Lf
             );
-            host.Probe.Result = false;
+            // A-4: 書込側は保存先意味論のプローブ。読み取り側の Result は既定 true のままにして
+            // 「どちらを呼んでいるか」を判別可能にする(Save 経路の同型テストと対称)。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: false
+            );
 
             Assert.False(host.File.SaveAs());
 
-            Assert.Equal(1, host.Probe.CallCount); // SaveAs でも WriteToPath 経由で 1 回だけプローブが走る
-            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.LastTimeout); // 5s pin
-            // State ロールバック(WriteToPath が false を返した経路が SaveAsDocument のロールバックを発火)
+            // 事前判定で短絡するのでプローブは 1 回だけ(WriteToPath まで進めば 2 回になる)
+            Assert.Equal(1, host.Probe.SaveTargetCallCount);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout); // 5s pin
+            // State は一切変わらない(旧: WriteToPath 失敗からのロールバック)
             Assert.Null(doc.State.Path); // Path は旧のまま(後続 Ctrl+S の別エンコード上書き事故防止)
-            Assert.Equal(65001, doc.State.Encoding.CodePage); // ロールバック(932→65001)
-            Assert.False(doc.State.HasBom); // ロールバック
-            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding); // ロールバック
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 932 を選んだが反映前に止まる
+            Assert.False(doc.State.HasBom);
+            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding);
             Assert.Contains(
                 host.Prompt.Log,
                 e =>
@@ -1497,6 +2499,45 @@ public class FileControllerTests
             Assert.Contains("…", err.Text, StringComparison.Ordinal);
             // 元 path 全体は載らない (500 文字 'a' 連続が丸ごとは入らない)。
             Assert.DoesNotContain(new string('a', 500), err.Text, StringComparison.Ordinal);
+        });
+
+    /// <summary>
+    /// 保存側(A-7 / A-19)が足した文言も同じ無害化を通る。本ブランチが追加した prompt は 4 本
+    /// (重複タブ 2 種・上書き確認・「パスが正しくありません」)で、いずれも
+    /// <c>SanitizeForDisplay.OneLine(path, 200)</c> を通しているが**どれにも網が無く**、
+    /// 生 path へ戻す変異が全緑で通った(最終品質パス m-5)。代表 1 本で idiom を pin する。
+    /// 選んだのは SaveAs の重複タブエラー: 実ファイルもプローブも要らず、
+    /// 在席タブの <c>State.Path</c>(= 復元 BackupRecord 由来 = 攻撃者 JSON 起源になりうる面。
+    /// 申し送り S-6)がそのまま文言に載る導線だから。
+    /// U+202E は <c>UnicodeCategory.Format</c> のため culture-sensitive な Contains では
+    /// 常に「見つかる」側へ倒れる。上の 3 本と同じく <c>StringComparison.Ordinal</c> を明示する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_SanitizesRloOverride_InDuplicateTabErrorPrompt() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // 拡張子スプーフィング: evil-{RLO}txt.exe が "evil-exe.txt" 風に表示される。
+            const string attackPath = "\\\\server\\share\\evil-‮txt.exe";
+
+            var occupant = host.Docs.CreateNew(); // 復元で生まれた在席タブ相当
+            occupant.State.Path = attackPath;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(attackPath, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            var err = Assert.Single(host.Prompt.Log, e => e.Kind == "Error");
+            Assert.StartsWith(
+                "このファイルは別のタブで開いています",
+                err.Text,
+                StringComparison.Ordinal
+            );
+            Assert.DoesNotContain("‮", err.Text, StringComparison.Ordinal);
         });
 
     // ===== Task 4: LoadInto エラーダイアログ抑止 seam(復元経路 Task 5 用) =====

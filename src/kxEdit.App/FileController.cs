@@ -224,8 +224,9 @@ public sealed class FileController
         try
         {
             // HIGH-6 + CSV-M-1: UNC / マップドネットワークドライブは 5 秒プローブで到達不能なら
-            // 即エラー(60 秒 UI 凍結を回避)。ポリシーは Save 側と共有=TryProbeReachability。
-            if (!TryProbeReachability(path))
+            // 即エラー(60 秒 UI 凍結を回避)。読む側は「既存ファイルがあるか」が知りたいので
+            // File.Exists 意味論のプローブでよい(書く側=TryInspectSaveTarget とは意味論が違う: A-4)。
+            if (!TryProbeFileExists(path))
                 return false;
 
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
@@ -328,69 +329,214 @@ public sealed class FileController
         return doc is not null && SaveAsDocument(doc);
     }
 
-    /// <summary>指定ドキュメントを保存。Path 未確定なら SaveAs にフォールバック。</summary>
-    public bool SaveDocument(Document doc) =>
-        doc.State.Path is null ? SaveAsDocument(doc) : WriteToPath(doc, doc.State.Path);
+    /// <summary>
+    /// 指定ドキュメントを保存。Path 未確定なら SaveAs にフォールバック。
+    /// A-7 (b) 残余(Task 6b・2026-08-23): 同一パスを 2 タブが持っている状態での上書き保存を止める。
+    /// </summary>
+    public bool SaveDocument(Document doc)
+    {
+        if (doc.State.Path is null)
+            return SaveAsDocument(doc);
 
-    /// <summary>指定ドキュメントを名前を付けて保存。成功で State.Path/Encoding/LineEnding とラベルを更新する。</summary>
+        // A-7 (b) 残余: SaveAsDocument のガード(Task 6)は重複タブが「生まれる」経路しか塞がない。
+        // 「既にある」状態は復元 extras の dedup がバックアップ Id のみで照合するため現行フリートでも
+        // 発生し(クラッシュ直前に開いたタブ・他インスタンス遺物・旧「あとで」孤児)、そこでは
+        // Ctrl+S が無警告でもう一方のタブの内容をディスクから消す。
+        // 述語は Task 6 と同じ(FindByPath = PathKey 照合 + 自タブ除外)。FindByPath は生成順で
+        // 最初の一致を返すので、先に生まれたタブが保存権を持ち、後から生まれた方が止まる。
+        // 置き場所: WriteToPath ではなく Ctrl+S の入口。WriteToPath は低レベルの書き込み
+        // プリミティブで、UI ポリシーを置くと層が濁る(現在の呼出元は本メソッドと SaveAsDocument
+        // の 2 つだけで、SaveAsDocument 側は自前の同等ガードを既に通している)。
+        // 位置も load-bearing: WriteToPath 冒頭の到達性プローブ(TryInspectSaveTarget)より前に
+        // 置く。重複は保存させないので到達性を調べる意味がなく、遠隔共有で無駄な 5 秒を待たせない。
+        var other = _docs.FindByPath(doc.State.Path);
+        if (other is not null && !ReferenceEquals(other, doc))
+        {
+            // 文言は Task 6(SaveAs)と別: ここは呼び出し元のタブ自身もそのパスを持っているので
+            // 「そのタブで保存してください」は成立しない。読み上げで取り違えないよう、
+            // 冒頭が Task 6 の文言の部分文字列にならない形にしてある(テストは冒頭で弁別する)。
+            // 提示する逃げ道は 2 つとも実際に効く: (a) 別名で保存すれば衝突しない・
+            // (b) もう一方のタブを閉じれば FindByPath の一致が自分だけになりこの保存が通る。
+            // 「このタブを破棄」は内容を捨てる案内になるので出口としては挙げない。
+            // CSV-L-5: path は外部入力(復元 BackupRecord 由来もある)なので SanitizeForDisplay で無害化。
+            _prompt.Error(
+                "別のタブが同じファイルを開いています。このまま上書きすると、もう一方のタブの内容が失われます。"
+                    + "「名前を付けて保存」で別の名前を指定するか、もう一方のタブを閉じてから保存してください: "
+                    + SanitizeForDisplay.OneLine(doc.State.Path, 200),
+                "エラー"
+            );
+            return false;
+        }
+
+        return WriteToPath(doc, doc.State.Path);
+    }
+
+    /// <summary>
+    /// 指定ドキュメントを名前を付けて保存。成功で State.Path/Encoding/LineEnding とラベルを更新する。
+    /// A-7 / A-4 / A-19(2026-08-23): 保存先を確定するまでダイアログを繰り返し表示する。
+    /// 「ダイアログの中で選んだ値への警告なら、そのダイアログへ戻す」= 打ち直しを強いない
+    /// (SR ユーザーの主経路はテキストボックス直入力なので、中止して開き直させる代償が大きい)。
+    /// ループの出口は 3 つ: (1) キャンセル(PickSaveAs が null)・(2) 保存成功・
+    /// (3) <see cref="WriteToPath"/> の失敗。(3) は**再表示せずに false を返す**(保存されない)。
+    /// 例: 存在しないフォルダー配下のパスを打つと PickSaveAs は 1 回しか出ない(実測)。
+    /// 書込失敗はダイアログの中で選んだ値の問題とは限らない(権限・ディスク・共有の消失)ので
+    /// 再表示の対象外にしてある — 範囲の線引きとして受容し、申し送り S-16 に記録した。
+    /// すべての continue は PickSaveAs(ユーザー操作)を挟む。
+    /// </summary>
     private bool SaveAsDocument(Document doc)
     {
-        var picked = _fileDialogs.PickSaveAs(
-            _owner,
-            new SaveAsRequest(
-                doc.State.Path,
-                doc.State.Encoding.CodePage,
-                doc.State.HasBom,
-                doc.State.LineEnding
-            )
+        var seed = new SaveAsRequest(
+            doc.State.Path,
+            doc.State.Encoding.CodePage,
+            doc.State.HasBom,
+            doc.State.LineEnding
         );
-        if (picked is null)
-            return false;
-        if (string.IsNullOrWhiteSpace(picked.Path))
+
+        while (true)
         {
-            _prompt.Warn("ファイル名を指定してください。", "エラー");
-            return false;
-        }
+            var picked = _fileDialogs.PickSaveAs(_owner, seed);
+            if (picked is null)
+                return false;
+            // 入力を次回の初期値として保つ。
+            seed = new SaveAsRequest(
+                picked.Path,
+                picked.CodePage,
+                picked.HasBom,
+                picked.LineEnding
+            );
 
-        var newEncoding = EncodingCatalog.Get(picked.CodePage);
+            if (string.IsNullOrWhiteSpace(picked.Path))
+            {
+                _prompt.Warn("ファイル名を指定してください。", "エラー");
+                continue;
+            }
 
-        // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
-        // Load 経路の HadReplacementChar 警告と対称。UTF-8(65001) は BMP+astral 全表現可でスキップ。
-        if (
-            picked.CodePage != 65001
-            && !CanEncodeBuffer(doc.Editor.CurrentBuffer, newEncoding)
-            && !_prompt.OkCancel(
-                "選択した文字コードで表せない文字が含まれています。'?' として保存されデータが失われます。続行しますか?",
-                "文字コードの警告"
+            // V-1: 正規化できても「親フォルダーが取れない」入力は書き込み先が確定しないので弾く。
+            // 該当するのはドライブルート(C:\ / Q:\)・予約デバイス名(CON → \\.\CON)・
+            // \\?\C:\ のような拡張ルート・共有ルート(\\server\share)。
+            // 通すと AtomicFile.Write の `Path.Combine(Path.GetDirectoryName(...)!, ...)` に null が
+            // 渡って ArgumentNullException になる。WriteToPath の catch フィルタと合わせて
+            // 二重に守る理由: フィルタだけだと ConvertEols で保存点が壊れた後に捕まるため、
+            // ここで先に止めた方が本文にもキャレットにも触れない。
+            // 述語(親フォルダーの有無)は FileReachabilityProbe.ProbeSaveTargetWithTimeout と同じ。
+            if (
+                !TryNormalizeSavePath(picked.Path, out string full)
+                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(full))
             )
-        )
-        {
-            return false;
-        }
+            {
+                _prompt.Warn(
+                    $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    "エラー"
+                );
+                continue;
+            }
+            // 以降の判定・保存・State 反映はすべて正規化済みの full を使う。
+            // 再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)。
+            // 位置も load-bearing: 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、
+            // 必ずその後に上書きする。直後の重複タブ分岐が continue するため、この代入は
+            // 再表示の初期値として実際に読まれる(Task 5 の S1854 局所抑止は本タスクで不要になり削除)。
+            seed = seed with
+            {
+                Path = full,
+            };
 
-        // 新エンコード/改行/BOM を State に反映してから WriteToPath へ(既存 WriteToPath は State を参照する)。
-        // C-2 追補 I-1: WriteToPath 失敗時は元の Encoding/LineEnding/HasBom へロールバック
-        // (State だけ更新済で Path が旧のままだと後続の Ctrl+S が元ファイルを別エンコードで
-        // サイレント上書きする=データ破損)。
-        var oldEncoding = doc.State.Encoding;
-        var oldLineEnding = doc.State.LineEnding;
-        var oldHasBom = doc.State.HasBom;
-        doc.State.Encoding = newEncoding;
-        doc.State.LineEnding = picked.LineEnding;
-        doc.State.HasBom = picked.HasBom;
+            // A-7 (b): 同一ファイルを 2 タブで編集させない。片方の Ctrl+S が
+            // もう片方の内容を無警告で消す導線(hot exit レイアウトにも同一 Path が 2 件並ぶ)。
+            // FindByPath は PathKey(GetFullPath + ToLowerInvariant)照合なので
+            // 大小・区切りの揺れも同一と見なす。自分自身への上書きは正当なので除外する。
+            var other = _docs.FindByPath(full);
+            if (other is not null && !ReferenceEquals(other, doc))
+            {
+                _prompt.Error(
+                    $"このファイルは別のタブで開いています。そのタブで保存してください: {SanitizeForDisplay.OneLine(full, 200)}",
+                    "エラー"
+                );
+                continue;
+            }
 
-        if (!WriteToPath(doc, picked.Path))
-        {
-            doc.State.Encoding = oldEncoding;
-            doc.State.LineEnding = oldLineEnding;
-            doc.State.HasBom = oldHasBom;
-            return false;
+            // A-4 / A-7 (a): 到達性と既存有無を 1 回の境界付き I/O で得る。
+            // 素の File.Exists は切断済み SMB 共有で UI を 60 秒固める(PR #42 H-1 の罠)。
+            // 戻り値を**先に**見て短絡するのが契約: 到達不能のとき targetExists は
+            // 未存在と到達不能を区別できず無意味(SaveTargetProbeResult のコメント)。
+            if (!TryInspectSaveTarget(full, out bool targetExists))
+                continue; // エラー表示は TryInspectSaveTarget の中
+
+            // A-7 (a): 従来は「参照」ボタン内の SaveFileDialog(OverwritePrompt)だけが確認していた。
+            // SR ユーザーの主経路はテキストボックス直入力なので、**主経路だけが無確認で上書き**
+            // という非対称が A-7 の実体。確認点をここ 1 箇所に集約し、SaveAsDialog 側は
+            // OverwritePrompt を切って二重確認を避ける。
+            // 文言はパスより問いを先に置く: SR は本文を頭から読むため、最大 200 文字のパスを
+            // 先頭に置くと何を聞かれているかが最後まで分からない(他の文言と同じ「文 → : パス」)。
+            // defaultCancel: true が load-bearing(S-12): SaveAsDialog は AcceptButton = OK なので
+            // 主経路は「ファイル名を打つ → Enter」。読み上げが遅いときの Enter 連打で
+            // この MessageBox まで確定するため、既定が OK 側だと確認を足した意味が消える。
+            if (
+                targetExists
+                && !_prompt.OkCancel(
+                    $"同じ名前のファイルが既に存在します。上書きしますか? 保存先: {SanitizeForDisplay.OneLine(full, 200)}",
+                    "上書きの確認",
+                    defaultCancel: true
+                )
+            )
+            {
+                continue;
+            }
+
+            var newEncoding = EncodingCatalog.Get(picked.CodePage);
+
+            // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/選び直しを選ばせる。
+            // Load 経路の HadReplacementChar 警告と対称。UTF-8(65001) は BMP+astral 全表現可でスキップ。
+            // 設計書 §4.5: キャンセルは中止ではなく**ダイアログへ戻す**。文字コードのコンボボックスは
+            // その SaveAs ダイアログの中にあるので、中止して開き直させると打ち直しを強いることになる。
+            // 副作用として、上書きを承諾した後でここをキャンセルすると次の周回で上書き確認が
+            // もう一度出る。これは意図した挙動: 承諾は「今回の周回で選ばれた保存先」への答なので、
+            // 保存先を選び直せる状態へ戻る以上、前の周回の承諾を持ち越してはいけない。
+            // defaultCancel: true は S-12(上書き確認)と**対称**。破壊的な確認は両方とも
+            // 安全側の既定に置く。当初は「文字コードは直前にユーザー自身が選んだのだから
+            // 非対称でよい」としていたが、根拠が 2 つとも崩れた:
+            // (a) 非対称のコストの裏付けは「既定がキャンセルだと誤爆した Enter が SaveAs 全体を
+            //     中止し、打ち直しを強いる」ことだった。上の continue 化でそのコストが消えた。
+            // (b) コンボの初期値は seed(= doc.State.Encoding)由来なので、Shift_JIS で読み込んだ
+            //     文書に絵文字を貼れば、ユーザーが文字コードに一度も触れなくても警告条件が成立する。
+            //     しかも Enter 押しっぱなしでは読み上げの前に確定するため警告は知覚されない。
+            //     知覚されない警告は警告ではない(S-12 の論旨そのもの)。
+            if (
+                picked.CodePage != 65001
+                && !CanEncodeBuffer(doc.Editor.CurrentBuffer, newEncoding)
+                && !_prompt.OkCancel(
+                    "選択した文字コードで表せない文字が含まれています。'?' として保存されデータが失われます。続行しますか?",
+                    "文字コードの警告",
+                    defaultCancel: true
+                )
+            )
+            {
+                continue; // 文字コードはこのダイアログで選び直せるので戻す(設計書 §4.5)
+            }
+
+            // 新エンコード/改行/BOM を State に反映してから WriteToPath へ(既存 WriteToPath は State を参照する)。
+            // C-2 追補 I-1: WriteToPath 失敗時は元の Encoding/LineEnding/HasBom へロールバック
+            // (State だけ更新済で Path が旧のままだと後続の Ctrl+S が元ファイルを別エンコードで
+            // サイレント上書きする=データ破損)。
+            var oldEncoding = doc.State.Encoding;
+            var oldLineEnding = doc.State.LineEnding;
+            var oldHasBom = doc.State.HasBom;
+            doc.State.Encoding = newEncoding;
+            doc.State.LineEnding = picked.LineEnding;
+            doc.State.HasBom = picked.HasBom;
+
+            if (!WriteToPath(doc, full))
+            {
+                doc.State.Encoding = oldEncoding;
+                doc.State.LineEnding = oldLineEnding;
+                doc.State.HasBom = oldHasBom;
+                return false;
+            }
+            doc.State.Path = full;
+            DocumentManager.UpdateLabel(doc);
+            _metaChanged();
+            RegisterRecent(full); // 保存先も最近のファイルへ
+            return true;
         }
-        doc.State.Path = picked.Path;
-        DocumentManager.UpdateLabel(doc);
-        _metaChanged();
-        RegisterRecent(picked.Path); // 保存先も最近のファイルへ
-        return true;
     }
 
     /// <summary>指定エンコードでバッファ全文が損失なく符号化できるかを事前判定する(SaveAs のダウングレード警告用)。</summary>
@@ -419,13 +565,62 @@ public sealed class FileController
     }
 
     /// <summary>
+    /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
+    /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
+    /// 例外は握って呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
+    /// 未捕捉例外ダイアログにしない。
+    /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
+    /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
+    /// </summary>
+    /// <remarks>
+    /// .NET 9 での実測(Task 5 実装時): <c>Path.GetFullPath</c> が投げるのは実質
+    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>(本テストの pin)、
+    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>(手前の空白チェックが先に捕まえる)、
+    /// (c) 総長 &gt; 32767 → <see cref="System.IO.PathTooLongException"/> の 3 つ。
+    /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」や予約デバイス名(CON / NUL)は
+    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない
+    /// (デバイス名・ドライブルートは呼出側の「親フォルダーが取れるか」ガードが弾く)。
+    /// <b>V-2(脆弱性レビューで解消済み)</b>: 総長が 32767 の直下に収まる窓
+    /// (実測 CWD 110 文字 + 相対 32660 文字)では <c>GetFullPathNameW</c> が
+    /// ERROR_INVALID_NAME を返し、<see cref="System.IO.PathTooLongException"/> ではなく
+    /// **素の <see cref="System.IO.IOException"/>** が飛ぶ。派生関係は一方向なので
+    /// <c>PathTooLongException</c> だけを列挙するとこの窓が抜けて未捕捉例外ダイアログになった。
+    /// 設計書 §4.3 の列挙は実測と食い違っていたため、<c>IOException</c>(厳密な上位集合)へ
+    /// 広げて訂正する。<see cref="System.IO.Path.GetFullPath(string)"/> は
+    /// <c>GetFullPathNameW</c> による名前解決のみで実 I/O を行わないので、握り潰しては
+    /// いけない実 I/O エラーを飲み込む余地はない。
+    /// </remarks>
+    private static bool TryNormalizeSavePath(string input, out string full)
+    {
+        try
+        {
+            full = System.IO.Path.GetFullPath(input);
+            return true;
+        }
+        catch (Exception ex)
+            when (ex
+                    is ArgumentException
+                        or NotSupportedException
+                        or System.IO.IOException
+                        or System.Security.SecurityException
+            )
+        {
+            full = string.Empty;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 改行を State.LineEnding に正規化してから本文を取得し、原子的に保存する。
     /// 例外は _prompt.Error で通知し false を返す。
     /// </summary>
     /// <remarks>
-    /// CSV-M-2(2026-07-20): 冒頭に <see cref="TryProbeReachability"/> を追加し、UNC / マップドネットワーク
+    /// CSV-M-2(2026-07-20): 冒頭に到達性プローブを追加し、UNC / マップドネットワーク
     /// ドライブは 5 秒プローブで到達不能なら以下のロールバック導線を発火する前に return false する
     /// (Load 側 HIGH-6 と対称=Save でも 60 秒 UI 凍結を回避)。
+    /// A-4(2026-08-23): そのプローブを <see cref="TryInspectSaveTarget"/>(保存先意味論)へ切り替えた。
+    /// 読み取り側の <see cref="TryProbeFileExists"/> は File.Exists 意味論のため、まだ存在しない
+    /// 新規ファイルを常に到達不能と誤判定していた(= ネットワーク共有へ新規保存できない症状)。
     ///
     /// Batch A Task 1(2026-07-15): WriteToPath 失敗時に ConvertEols で書き換わった本文と保存点(Modified)
     /// をロールバックする。ConvertEols(非 fast-path)は <c>ReplaceSource(builder.Build())</c> で新規
@@ -438,11 +633,12 @@ public sealed class FileController
     /// </remarks>
     private bool WriteToPath(Document doc, string path)
     {
-        // CSV-M-2: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで到達不能なら
-        // 即エラー(HIGH-6 の LoadInto 側と対称)。snapshotBefore を握る前・ConvertEols 副作用を
-        // 起こす前に短絡することで、プローブ失敗時に「本文の EOL が書き換わる」「新規バッファに
-        // 差し替わる」を発生させない。ポリシーは Load 側と共有=TryProbeReachability。
-        if (!TryProbeReachability(path))
+        // CSV-M-2 → A-4: リモートは 5 秒プローブ。存在確認ではなく「書き込み先が確定できるか」を見る
+        // (読み取り側の TryProbeFileExists は File.Exists 意味論で、新規ファイルを常に到達不能と誤判定した)。
+        // snapshotBefore を握る前・ConvertEols 副作用を起こす前に短絡することで、プローブ失敗時に
+        // 「本文の EOL が書き換わる」「新規バッファに差し替わる」を発生させない。
+        // exists は書込側では使わない(上書き確認は SaveAsDocument が事前に済ませる)。
+        if (!TryInspectSaveTarget(path, out _))
             return false;
 
         // ConvertEols 前のバッファ参照を保持(失敗時ロールバック用=バグ 1+2 対策)。
@@ -477,12 +673,20 @@ public sealed class FileController
             _metaChanged();
             return true;
         }
+        // V-1: ArgumentException を握る = Load 側(LoadInto の Task 5 review I-1)との非対称を戻す。
+        // SaveAsDocument の前段ガードを通らない経路が 2 本ある: Ctrl+S(SaveDocument は
+        // State.Path をそのまま WriteToPath へ渡す)と、悪意ある backup JSON 由来の復元タブ
+        // (OriginalPathValidator の BlockedRoots は C:\Windows 等なので `C:\` は Ok で通る)。
+        // そこから AtomicFile.Write の Path.Combine(null, ...) に届くと ArgumentNullException が
+        // 素通りし、**ConvertEols 後のロールバックが発火しないまま Modified=false が残る**
+        // = 保存していない本文が確認なしで閉じられる(ConfirmDiscardIfDirty は !Modified で即 true)。
         catch (Exception ex)
             when (ex
                     is System.IO.IOException
                         or UnauthorizedAccessException
                         or System.Security.SecurityException
                         or NotSupportedException
+                        or ArgumentException
             )
         {
             // バグ 1+2 修正: ConvertEols が非 fast-path で新規 TextBuffer に差し替えている場合は
@@ -918,7 +1122,13 @@ public sealed class FileController
 
     /// <summary>
     /// action の実行中は復元経路専用の抑止フラグをまとめて ON にする:
-    /// (a) LoadInto/TryProbeReachability の catch 内 _prompt.Error を抑止(失敗パスを集約通知するため)
+    /// (a) 復元経路の per-file ダイアログを抑止(呼出元が失敗パスを集約通知するため)。対象は
+    ///     LoadInto の catch 内 _prompt.Error・LoadInto の置換文字 Warn・RestoreFromBackup の
+    ///     「元パスが無効」Warn・<see cref="ReportUnreachable"/> を通す**全経路**。
+    ///     ReportUnreachable は catch ではなく if ガードの本体で、抑止をそこへ集約した結果
+    ///     読み取り側(<see cref="TryProbeFileExists"/>)だけでなく保存側
+    ///     (<see cref="TryInspectSaveTarget"/>)も含む。main では 1 本の TryProbeReachability を
+    ///     読み書き両側が共有していたので、**抑止の及ぶ範囲は main と同じ**(記述だけが陳腐化していた)。
     /// (b) LoadInto の RegisterRecent を抑止(復元は「ユーザーが開いた」相当でないため RecentFiles を汚さない)
     /// Task 5 で名前は変えずスコープを (a)+(b) に拡張(既存 seam の呼び出し側=Task 4 テストも
     /// (b) の抑止動作を暗黙に受けるが、テスト対象の path はダミー=RecentFiles 検証していないため無害)。
@@ -956,33 +1166,91 @@ public sealed class FileController
     private static void ApplyEol(Document doc) => doc.Editor.EolMode = doc.State.LineEnding;
 
     /// <summary>
-    /// HIGH-6 + CSV-M-1/M-2: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで
-    /// 到達不能なら即 <c>_prompt.Error</c> を出して false を返す。ローカルは true を返して通常経路へ。
-    /// LoadInto / WriteToPath 双方から共有し「Save と Load で同じ到達性ポリシー」を 1 箇所で表現する。
+    /// HIGH-6 + CSV-M-1: リモートパス(UNC / マップドネットワークドライブ)は 5 秒プローブで
+    /// 既存ファイルを確認できなければ即 <c>_prompt.Error</c> を出して false を返す。
+    /// ローカルは true を返して通常経路へ。
+    /// **読み取り側専用**(現在の呼出は <see cref="LoadInto"/> のみ)。名前に反して実体は
+    /// 存在確認(File.Exists 意味論)であり、まだ存在しない新規ファイルを到達不能と誤判定するため、
+    /// 書き込み側は共有できない(= A-4 の機構)。書き込み側は
+    /// <see cref="TryInspectSaveTarget"/>(到達性と既存有無を分けて返す)を使う。
     /// 判定は <see cref="RemotePathDetector.IsRemote(string)"/>(UNC + DriveInfo.DriveType==Network)。
     /// ローカル固定/リムーバブルは判定を skip(挙動不変)、リモート正常経路は reachable=true で通過(挙動不変)。
     /// </summary>
-    private bool TryProbeReachability(string path)
+    private bool TryProbeFileExists(string path)
     {
         if (
             RemotePathDetector.IsRemote(path)
-            && !_reachabilityProbe.ProbeWithTimeout(path, TimeSpan.FromSeconds(5))
+            && !_reachabilityProbe.ProbeFileExistsWithTimeout(path, TimeSpan.FromSeconds(5))
         )
         {
-            // CSV-L-5: path は grep/最近のファイル/BackupRecord 由来で攻撃者制御が届き得るため、
-            // SanitizeForDisplay.OneLine で RLO/改行/長大 path を無害化してから prompt に載せる。
-            // Task 4: 復元経路(WithLoadErrorPromptSuppressed 実行中)は per-file ダイアログを抑止し、
-            // 呼出元で失敗パスを集約通知させる(戻り値 false は伝播)。
-            if (!_suppressLoadErrorPrompt)
-            {
-                _prompt.Error(
-                    $"ネットワークパスに到達できません: {SanitizeForDisplay.OneLine(path, 200)}",
-                    "エラー"
-                );
-            }
+            ReportUnreachable(path);
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// 保存先の既存有無を得る。到達不能なら false(エラー表示済み)。
+    /// <b>false を返したとき <paramref name="exists"/> は無意味</b>(未存在と到達不能を区別できない
+    /// =<see cref="SaveTargetProbeResult"/> の契約)。必ず戻り値を先に見て短絡すること。
+    /// リモート(UNC / マップドネットワークドライブ)だけを 5 秒プローブに載せる。
+    /// ローカルを素通りさせるのは意図的(設計書 §3.3)。ただし**設計書が挙げる根拠
+    /// 「ゲートを外すとロールバック導線に届かなくなる」は誤り**(Task 2 実装時に実測):
+    /// Encoding/HasBom/LineEnding/Path のロールバックは <see cref="WriteToPath"/> の戻り値 false で
+    /// 駆動され、この短絡は ApplyEol / ConvertEols より手前なので本文側の巻き戻し対象すら発生しない。
+    /// ゲートを外して到達不能に倒れてもロールバックはそのまま発火する。
+    /// **維持する本当の理由は誤ったエラー文言**: <see cref="ReportUnreachable"/> の文言は
+    /// 「ネットワークパスに到達できません」の 1 種類しかないため、ゲートを外すとローカルの
+    /// 存在しないフォルダー配下への保存(SR ユーザーが直入力でタイプミスした典型ケース)にまで
+    /// この文言が出る。現行の DirectoryNotFoundException 由来
+    /// 「保存できませんでした: 指定されたパスが見つかりません」より明確に劣化する。
+    /// 文言を分岐させれば直るが、それは設計書 §6 が YAGNI として除外した範囲。
+    /// 副次的な理由: 挙動変更にあたること(CLAUDE.md §2)と、Ctrl+S のたびに Task.Run + Wait が
+    /// 1 回増えること。
+    /// **このゲートを守っている網は Save_SkipsProbe_ForLocalPath と
+    /// SaveAs_LocalNewFile_DoesNotProbe の 2 本**(ロールバックテストは守っていない=
+    /// 緑のままゲートを外せる。上記の誤った根拠を信じて「ロールバックテストが緑だから
+    /// ゲートは不要」と結論しないこと)。
+    /// </summary>
+    /// <param name="exists">
+    /// 保存が上書きになる(A-7 (a) の上書き確認の入力)。読むのは <see cref="SaveAsDocument"/> だけで、
+    /// <see cref="WriteToPath"/> は捨てる(Ctrl+S の上書きは確認しない=自分が開いているファイルへの保存)。
+    /// </param>
+    private bool TryInspectSaveTarget(string path, out bool exists)
+    {
+        if (RemotePathDetector.IsRemote(path))
+        {
+            var probe = _reachabilityProbe.ProbeSaveTargetWithTimeout(
+                path,
+                TimeSpan.FromSeconds(5)
+            );
+            exists = probe.FileExists;
+            if (!probe.Reachable)
+            {
+                ReportUnreachable(path);
+                return false;
+            }
+            return true;
+        }
+        // ローカルは SMB 60 秒凍結の懸念がない。
+        exists = System.IO.File.Exists(path);
+        return true;
+    }
+
+    /// <summary>
+    /// 到達不能の通知。CSV-L-5: path は外部入力(SR ユーザーの直入力・grep / BackupRecord 由来)なので
+    /// SanitizeForDisplay で無害化する。復元経路(<see cref="WithLoadErrorPromptSuppressed"/> 実行中)は
+    /// per-file ダイアログを抑止し、呼出元で失敗パスを集約通知させる(戻り値 false は伝播)
+    /// = 2026-07-23 復元設計 Task 4。
+    /// </summary>
+    private void ReportUnreachable(string path)
+    {
+        if (_suppressLoadErrorPrompt)
+            return;
+        _prompt.Error(
+            $"ネットワークパスに到達できません: {SanitizeForDisplay.OneLine(path, 200)}",
+            "エラー"
+        );
     }
 
     /// <summary>
