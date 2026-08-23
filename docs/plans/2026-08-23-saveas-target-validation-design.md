@@ -521,6 +521,34 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   誰かが意図的にキャッシュ機構を**追加**するしかなく、それは独自のレビューを伴う大きな編集になる。
   事故で壊れうる挙動ではない。
 
+- **S-15**(最終レビュー脆弱性パスで発見・2026-08-23。**main に対する退行**・Medium):
+  **A-19 の正規化が、境界付きプローブの前に無制限のネットワーク呼び出しを置いた。**
+  `Path.GetFullPath` は正規化後のパスに `~` が**どこかに**含まれると `GetLongPathName` を呼ぶ
+  (実際の FS / ネットワーク呼び出し)。実測: `GetFullPath(\\192.0.2.1\share\plain.txt)` は 0 ms、
+  `\\192.0.2.1\share\notes~.txt` は **21,004 ms**(UI スレッド)。
+
+  **main では起きなかった。** main の `SaveAsDocument` は生パスを `WriteToPath` へ渡し、
+  `TryProbeReachability` → `IsRemote`(純粋な文字列判定 + `DriveInfo`。`GetFullPath` なし)→
+  5 秒の境界付きプローブ、の順だった。`GetFullPath` が走るのは `AtomicFile.Write` の中、
+  **到達性が確認できた後**だけ。しかも main の `SaveDocument` は `FindByPath` を呼ばなかった。
+
+  現在の発火点は 3 つ: `TryNormalizeSavePath`(`FileController.cs:418`)、
+  `SaveDocument` の `FindByPath`(`:352`)、`SaveAsDocument` の `FindByPath`(`:442`)。
+  後 2 者は `PathKey.For` 経由で 2 度目の `GetFullPath` を打つ。
+
+  **再現**: `\\server\share\PROJEC~1\notes.txt` を開いた状態で VPN を切る、あるいはドックを外す。
+  Ctrl+S でも Ctrl+Shift+S(ダイアログにそのパスが seed される)でも 20〜60 秒 UI が凍る。
+  `~` は珍しくない — 8.3 短縮名のディレクトリ成分・`~$` の Office ロックファイル・
+  `file.txt~` のバックアップ。**S-5 とは別物**(あちらはローカル固定ドライブのジャンクションと
+  `File.Exists`。呼び出しも機構も違う)。
+
+  **② 受容して PR に「main に対する既知の退行」として明記する。** 正しい修正は正規化自体を
+  境界付きにすること = `IReachabilityProbe` に新しいメンバーが要り、CLAUDE.md §3 では
+  それ自体がコード品質レビューを要する。最終レビューの fixup として入れる形ではないので、
+  **独立したタスクとして回収する**。`UncPathDetector.IsUnc(picked.Path)` で前置ゲートを張るのは
+  安いが不完全(相対入力のマップドドライブは正規化後にしか判定できない)。
+  なお監査 A-16(マップドドライブの同期 I/O で UI が長時間凍結)は同じクラスの既知事項として
+  優先度 2 に載っており、v0.2 はこのクラスを既に許容している。
 - **S-14**(Task 8 の fixup 中に付随発見・2026-08-23。**本ブランチ固有ではなくリポジトリ横断**):
   **XML doc の `cref` が一切検証されていない。** `GenerateDocumentationFile` が
   `Directory.Build.props` にも csproj にも `.editorconfig` にも設定されていないため、
@@ -673,10 +701,15 @@ tool 由来の差分であって挙動変更ではない。
 1. **S-5 が想定した「相殺されない凍結」は、実際にはほぼ発生しない。** 上書き確認へ到達する
    条件は `exists == true`、すなわち `File.Exists` が **true を返しきった**ことである。
    60 秒級の凍結は切断済み SMB のセッションタイムアウトで、**false で終わる**ので確認は出ず、
-   したがって「いいえ」も選べない。Task 7 が現に増やす露出は
-   「SaveAsDocument 段の 1 回」= `WriteToPath` 冒頭で既に走っていた同じ呼出の 2 倍化であって、
-   新しい凍結クラスではない(ループでの反復も、`continue` が毎回 `PickSaveAs` を挟む以上
-   ユーザー操作 1 回につき 1 回)。
+   したがって「いいえ」も選べない。ループでの反復も、`continue` が毎回 `PickSaveAs` を挟む以上
+   ユーザー操作 1 回につき 1 回にとどまる。
+
+   > **訂正(最終レビュー脆弱性パス・2026-08-23)**: ここで「`WriteToPath` 冒頭で既に走っていた
+   > 同じ呼出の 2 倍化」と書いたのは**算術が誤り**。main の `TryProbeReachability` は
+   > `IsRemote` でゲートされていたので、**ローカルパスに対してコントローラは `File.Exists` を
+   > 1 度も打っていなかった**。main との差分は SaveAs で **0 → 2**、Ctrl+S で **0 → 1** である。
+   > **判断 (a) 自体は変わらない** — 上の「60 秒級の凍結は false で終わるので確認は出ない」という
+   > 中核の論拠は成立しており、下の 2 と 3 はそれぞれ単独で決定的。PR に書く数字だけ直すこと。
 2. **(b) はフェイルセーフの向きを反転させる。** `RunSaveTargetProbe` のタイムアウト時の戻り値は
    `(Reachable: false, FileExists: false)` で、これが安全なのは **`Reachable` を先に見て短絡する**
    から(= `SaveTargetProbeResult` の契約)。(b) は「`Reachable` を無視して `exists` だけ採る」ので、
@@ -803,3 +836,56 @@ CLAUDE.md §3 の前倒しコード品質レビューを要するため。**申�
   → **`SaveAsQueue` に「最後の値を繰り返す」モードを絶対に足さないこと。**
   足した瞬間に、網の書き間違いが「`PickSaveAsCount` が想定と違う」という失敗ではなく
   **CI を固める無限ループ**になる(§7.2 がこの fake を設計した理由そのもの)。
+
+### 10.15 最終レビュー脆弱性パスの実測(2026-08-23)
+
+45 種の敵対的な直入力(予約デバイス名・ドライブルート・`\?\`・`\.\`・UNC・`< | " * ?`・
+NUL 埋め込み・ADS・`::$DATA`・既存ディレクトリ・末尾ドット/空白・300 / 32,760 / 40,000 文字・
+RLO・ZWSP・孤立サロゲート・LF 埋め込み・ドライブ相対・`..` トラバーサル)を
+**`FileController.SaveAs()` に end-to-end で通した**結果:
+
+- **未捕捉例外: 0 件**。すべて Warn + 再表示 / Error + false / 正常書込のいずれかで終わる。
+- **直入力由来のサイレントなデータ喪失: 0 件**。失敗時は `Modified == true` と
+  `State.Path` 不変が保たれる。
+- **無制限の UI ブロック: 1 件**(S-15)。
+
+予約デバイス名(`CON` / `NUL` / `PRN` / `AUX` / `COM1` / `LPT1` / `CONIN$`)はすべて `\.\XXX` に
+正規化されて親が null になり、V-1 のガードで止まる。`CON.txt` / `nul.txt` は普通のファイルとして
+往復する。ディレクトリを保存先にすると `File.Move` で失敗し(S-1 の分かりにくい文言のまま)、
+`.tmp` の残骸は残らない。
+
+#### 実測で覆った 2 つの想定
+
+- **TOCTOU の窓は開いており、`AtomicFile` は防波堤ではない。** 劣化警告のモーダルが出ている間に
+  別プロセスが保存先を作る `IUserPrompt` を注入したところ、**上書き確認は出ず**
+  既存内容 `VICTIM-DATA` が置換された。`AtomicFile.Write` は自分で `File.Exists` を見て
+  `File.Replace` 側へ分岐する(`AtomicFile.cs:83-86`)ため、「`File.Move` が拒否してくれる」
+  という想定は誤り。**窓は CPU 時間ではなくユーザーの操作時間で、しかも劣化警告が
+  その窓を作っている。** 現実的な害は小さい(別プロセスがちょうどそのファイルを作る必要がある)
+  ので受容は維持するが、記録は正確にしておく。
+- **8.3 短縮名は重複タブ判定を fail-open させない**(想定より強かった)。S-15 と同じ `~` 展開が
+  効くので `PathKey.For(...KXTILD~1.TNA\AVERYV~1.TXT)` は長い名前のキーと一致し、ガードは発火する。
+  残る fail-open の形はハードリンク・シンボリックリンク・ADS・別マウントポイント。
+  ADS(`plain2.txt:evil`)は実測すると重複判定を迂回するが、書込が `ERROR_INVALID_PARAMETER` で
+  失敗し**ストリームは残らず**、対象ファイルも無傷だった。
+  **重複タブ判定は名前ベースのベストエフォートであり、実際の防波堤は上書き確認のほう**
+  (保存先が既存ファイルに解決される限り必ず発火する)。
+
+#### 確認できた不変条件
+
+- **フェイルセーフ契約**(`Reachable == false` ⇒ `FileExists` は無意味)は保たれている。
+  反例を作ろうとして作れなかった。`(Reachable: false, FileExists: true)` を返す Fake で実測して
+  **`OkCancel` の呼出ゼロ**・書込なし・エラー + 再表示・プローブ 1 回。
+- **`defaultCancel` の配線は正しい**。`MessageBoxButtons.OKCancel` に対する
+  `MessageBoxDefaultButton.Button2` はキャンセル。`src/` の `OkCancel` 呼出 2 箇所がどちらも
+  `true` を渡している。**他に安全側へ倒すべきなのに倒れていないプロンプトは無い**
+  (`YesNoCancel` の未保存確認は Button1 =「はい」= 保存で、既に安全側)。
+- 本ブランチが**追加した**ユーザー可視文字列はすべて `SanitizeForDisplay.OneLine(..., 200)` を
+  通っている(新たな CSV-L-5 の穴は無い)。
+
+#### 追加の Low
+
+`SanitizeForDisplay` は書式文字を**置換ではなく削除**するので、上書き確認は
+`C:\x\evil<ZWSP>.txt` を `C:\x\evil.txt` と表示する = **表示と実際の保存先が一致しない**。
+S-7(空白チェックの話)とは別。サニタイザの方針に由来し既存の全表示面が同じ性質を持つ。
+ユーザー自身が ZWSP を打った場合にしか起きないので受容。
