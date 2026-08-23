@@ -197,13 +197,95 @@ public class OriginalPathValidatorTests
     {
         // \\?\ 付きのパスは Path.GetFullPath が「正規化済み」とみなして素通しするため、
         // スラッシュがバックスラッシュに変換されない。C:/Windows/... は BlockedRoots
-        // (C:\Windows\)と前方一致しないので、GLOBALROOT と同じ機構の穴になる
-        // (この綴り自体は \\?\ が変換を止めるので実際には open できず実害は無いが、
-        //  事後条件は「BlockedRoots が評価できる形」だけを通す)。
+        // (C:\Windows\)と前方一致しない。
+        // この fixture は事後条件(3 文字目が区切りでない=形が不正)で落ちるが、
+        // 仮にそこを緩めても再正規化が C:\Windows\... へ canonical 化して BlockedRoots が
+        // 捕まえる = 二重の網。形の検査そのものを固定しているのは
+        // Check_Rejects_ExtendedDriveRelativePath の側(そちらは再正規化では救えない)。
         var status = OriginalPathValidator.Check(
             @"\\?\C:/Windows/System32/drivers/etc/hosts",
             out _
         );
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    // ---- Task 4B fixup: 事後条件を通り抜ける「非 canonical なドライブ文字形式」 ----
+    //
+    // 事後条件は**形**しか見ない。\\?\ 付きは最初の GetFullPath が素通しするので、
+    // 形は正しいドライブ文字ルートのまま綴りだけが非 canonical という入力が作れ、
+    // StartsWithAnyBlockedRoot の前方一致だけが空振りする。実証済みの実在バイパス 2 系統。
+
+    [Fact]
+    public void Check_Rejects_ExtendedPathWithDoubledSeparatorToBlockedRoot()
+    {
+        // B-1: ドライブルート直後にセパレータを 1 個足すと index 3 が \ vs 本来の 1 文字目で
+        // 不一致になり前方一致が空振りする。Windows は \\?\C:\\... を実際に解決するので
+        // (実測: ProgramData 配下の victim.txt が上書きできた)実害がある。
+        var pd = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (string.IsNullOrEmpty(pd) || pd.Length < 3 || pd[1] != ':')
+            return; // 環境依存 skip
+        var plain = Path.Combine(pd, "kxEdit", "poison.json");
+        // 前提の自己検証: canonical 形は BlockedRoots で Rejected になる。
+        Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(plain, out _));
+
+        var doubled = @"\\?\" + plain.Insert(2, @"\"); // \\?\C:\\ProgramData\...
+        Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(doubled, out _));
+    }
+
+    [Fact]
+    public void Check_Rejects_ExtendedPathWithShortNameToBlockedRoot()
+    {
+        // B-2: 8.3 短縮名。非 extended なら GetFullPath が GetLongPathName で展開するので
+        // 正しく Rejected になるが、\\?\ 付きは素通しなので短縮名が残る。
+        // 8.3 別名は環境依存(volume の 8.3 生成が無効なら存在しない)なので、
+        // **非 extended 形の判定を oracle にして**「この綴りが BlockedRoot を指す」ことを
+        // 確かめた候補だけを検証する(別名を決め打ちしない)。
+        var win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrEmpty(win) || win.Length < 3 || win[1] != ':')
+            return; // 環境依存 skip
+        var root = win[..3];
+        var candidates = new[] { "PROGRA~1", "PROGRA~2", "PROGRA~3" }
+            .Select(alias => root + alias + @"\kxEdit\poison.json")
+            .Where(p => OriginalPathValidator.Check(p, out _) == PathValidation.Rejected)
+            .ToList();
+        // candidates が空の環境(8.3 生成が無効など)では検証対象が無い=何も主張しない。
+        foreach (var plain in candidates)
+        {
+            var status = OriginalPathValidator.Check(@"\\?\" + plain, out _);
+            Assert.Equal(PathValidation.Rejected, status);
+        }
+    }
+
+    [Fact]
+    public void Check_Rejects_ExtendedDriveRelativePath()
+    {
+        // 再正規化の前提を固定する。\\?\C:xyz は入口の IsPathFullyQualified を**通過**し
+        // (実測: 非 extended の C:xyz は False だが \\?\ 付きは True)、剥がすと
+        // ドライブ相対形が残る。これを GetFullPath に渡すとカレントディレクトリ基準で
+        // 解決されて絶対パスに化けるため、事後条件の「3 文字目が区切り」が門番になる。
+        var status = OriginalPathValidator.Check(@"\\?\C:kxedit_no_such\a.txt", out _);
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_ExtendedPathWithNonLetterDrive()
+    {
+        // ドライブ文字が英字であることの網。非 extended の 1:\... は
+        // Path.IsPathFullyQualified が入口で弾く(実測 False)ので、\\?\ 付きだけが
+        // ここに到達する = 事後条件が唯一の門番。
+        var status = OriginalPathValidator.Check(@"\\?\1:\Temp\a.txt", out _);
+        Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    [Fact]
+    public void Check_Rejects_ReservedDeviceNameNul()
+    {
+        // 意図的な挙動変更(安全側)。Path.GetFullPath はルート付きパスでも NUL だけを
+        // \\.\NUL へ書き換える(実測: CON / COM1 / PRN / AUX / NUL.txt は書き換えない)。
+        // \\.\NUL への保存は内容を黙って捨てるサイレントなデータ喪失なので、
+        // 無題タブへの降格が正しい失敗。
+        var path = Path.Combine(Path.GetTempPath(), "NUL");
+        var status = OriginalPathValidator.Check(path, out _);
         Assert.Equal(PathValidation.Rejected, status);
     }
 
