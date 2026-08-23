@@ -23,7 +23,7 @@ public sealed class FakePrompt : IUserPrompt
     /// </summary>
     public List<(string Caption, bool DefaultCancel)> OkCancelCalls { get; } = new();
 
-    public bool OkCancel(string text, string caption, bool defaultCancel = false)
+    public bool OkCancel(string text, string caption, bool defaultCancel)
     {
         Log.Add(("OkCancel", text, caption));
         OkCancelCalls.Add((caption, defaultCancel));
