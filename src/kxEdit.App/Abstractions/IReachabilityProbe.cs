@@ -17,10 +17,16 @@ public readonly record struct SaveTargetProbeResult(bool Reachable, bool FileExi
 /// 本番は <see cref="FileReachabilityProbe"/> / テストは Fake を差し込む。
 /// UNC ロード時の 60 秒 UI 凍結を 5 秒プローブで回避するために FileController が使う。
 /// どちらのメソッドも、呼出側が**正規化済みの絶対パス**を渡す契約。
-/// ただし破ったときの壊れ方は非対称なので理由は分けて読むこと:
-/// <see cref="ProbeSaveTargetWithTimeout"/> は親フォルダーが空文字になり到達不能へ倒れる(失敗が見える)。
-/// <see cref="ProbeFileExistsWithTimeout"/> は File.Exists が CWD 基準で**普通に動いてしまう**ため
-/// 黙って別のファイルを指す(= A-19 が正規化を要求する理由)。
+/// 理由は**両者共通で 1 つだけ**: 相対パスを渡すと内部の <c>File.Exists</c> /
+/// <c>Directory.Exists</c> がプロセスの CWD 基準で解決するので、例外も「到達不能」も返さずに
+/// **黙って別のファイルを指す**(= A-19 が正規化を要求する理由)。
+/// 実測(2026-08-23。CWD に <c>memo.txt</c> と <c>sub\memo.txt</c> を置いた状態):
+/// <c>ProbeSaveTargetWithTimeout("memo.txt")</c> → (Reachable: true, FileExists: true)、
+/// <c>("nope.txt")</c> → (false, false)、<c>("sub\nope.txt")</c> → (true, false)。
+/// <b>「保存側だけは親フォルダーが空文字になって到達不能へ倒れるので失敗が見える」と書いていたのは誤り。</b>
+/// 空文字になるのはディレクトリー成分を持たない相対入力に限られ(<c>sub\...</c> では
+/// <c>GetDirectoryName</c> が <c>"sub"</c> を返すので機構自体が発火しない)、しかもそのときは
+/// CWD に同名ファイルが無い場合=読み取り側が返す false と区別がつかない。**非対称は無い。**
 /// </summary>
 public interface IReachabilityProbe
 {

@@ -376,7 +376,12 @@ public sealed class FileController
     /// A-7 / A-4 / A-19(2026-08-23): 保存先を確定するまでダイアログを繰り返し表示する。
     /// 「ダイアログの中で選んだ値への警告なら、そのダイアログへ戻す」= 打ち直しを強いない
     /// (SR ユーザーの主経路はテキストボックス直入力なので、中止して開き直させる代償が大きい)。
-    /// ループの途中出口はキャンセルだけで、すべての continue は PickSaveAs(ユーザー操作)を挟む。
+    /// ループの出口は 3 つ: (1) キャンセル(PickSaveAs が null)・(2) 保存成功・
+    /// (3) <see cref="WriteToPath"/> の失敗。(3) は**再表示せずに false を返す**(保存されない)。
+    /// 例: 存在しないフォルダー配下のパスを打つと PickSaveAs は 1 回しか出ない(実測)。
+    /// 書込失敗はダイアログの中で選んだ値の問題とは限らない(権限・ディスク・共有の消失)ので
+    /// 再表示の対象外にしてある — 範囲の線引きとして受容し、申し送り S-16 に記録した。
+    /// すべての continue は PickSaveAs(ユーザー操作)を挟む。
     /// </summary>
     private bool SaveAsDocument(Document doc)
     {
@@ -1117,7 +1122,13 @@ public sealed class FileController
 
     /// <summary>
     /// action の実行中は復元経路専用の抑止フラグをまとめて ON にする:
-    /// (a) LoadInto/TryProbeFileExists の catch 内 _prompt.Error を抑止(失敗パスを集約通知するため)
+    /// (a) 復元経路の per-file ダイアログを抑止(呼出元が失敗パスを集約通知するため)。対象は
+    ///     LoadInto の catch 内 _prompt.Error・LoadInto の置換文字 Warn・RestoreFromBackup の
+    ///     「元パスが無効」Warn・<see cref="ReportUnreachable"/> を通す**全経路**。
+    ///     ReportUnreachable は catch ではなく if ガードの本体で、抑止をそこへ集約した結果
+    ///     読み取り側(<see cref="TryProbeFileExists"/>)だけでなく保存側
+    ///     (<see cref="TryInspectSaveTarget"/>)も含む。main では 1 本の TryProbeReachability を
+    ///     読み書き両側が共有していたので、**抑止の及ぶ範囲は main と同じ**(記述だけが陳腐化していた)。
     /// (b) LoadInto の RegisterRecent を抑止(復元は「ユーザーが開いた」相当でないため RecentFiles を汚さない)
     /// Task 5 で名前は変えずスコープを (a)+(b) に拡張(既存 seam の呼び出し側=Task 4 テストも
     /// (b) の抑止動作を暗黙に受けるが、テスト対象の path はダミー=RecentFiles 検証していないため無害)。
