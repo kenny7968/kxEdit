@@ -94,7 +94,8 @@ public sealed partial class MainForm : Form
     internal bool? LastCloseTookSilentPathForTest => _lastCloseTookSilentPathForTest;
 
     /// <summary>A-8: 直近のクローズで、hot exit の事後条件検査(最終 flush の成否)が
-    /// どう出たか。null=検査に到達しなかった(前提ゲートで既に silent close ではない)。
+    /// どう出たか。null=OnFormClosing 未実行、または検査に到達しなかった
+    /// (前提ゲートで既に silent close ではない)。
     /// oversized による fall-through と「バックアップ書込失敗」による fall-through を
     /// テストが弁別するための seam。</summary>
     private bool? _lastCloseFinalFlushOkForTest;
