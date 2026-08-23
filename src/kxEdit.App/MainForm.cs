@@ -93,6 +93,14 @@ public sealed partial class MainForm : Form
     private bool? _lastCloseTookSilentPathForTest;
     internal bool? LastCloseTookSilentPathForTest => _lastCloseTookSilentPathForTest;
 
+    /// <summary>A-8: 直近のクローズで、hot exit の事後条件検査(最終 flush の成否)が
+    /// どう出たか。null=検査に到達しなかった(前提ゲートで既に silent close ではない)。
+    /// oversized による fall-through と「バックアップ書込失敗」による fall-through を
+    /// テストが弁別するための seam。</summary>
+    private bool? _lastCloseFinalFlushOkForTest;
+
+    internal bool? LastCloseFinalFlushOkForTest => _lastCloseFinalFlushOkForTest;
+
     // Task 13 テスト用: fall-through 経路の ConfirmDiscardIfDirty 呼出を差し替える。
     // null = 通常経路 (実 _file.ConfirmDiscardIfDirty=MessageBox 発火) / 非 null = 呼出をこの delegate に置き換え。
     // テストでは MessageBox がブロックしないよう常に override を渡すこと。返り値=保存/破棄成功=true / キャンセル=false。
@@ -457,6 +465,20 @@ public sealed partial class MainForm : Form
             _settings.RestoreOpenFilesOnStartup
             && _settings.BackupEnabled
             && !HasOversizedDirtyDoc();
+        _lastCloseFinalFlushOkForTest = null;
+        if (silentPath)
+        {
+            // A-8(設計 2026-08-24 §3): 前提ゲートだけでは「退避できる条件が揃っている」しか
+            // 言えない。確認をスキップしてよいのは**実際に退避できたとき**だけなので、
+            // ここで最終 flush を投入し完了を待って事後条件を検査する。
+            // 投入した本文書込が 1 件でも失敗している / 完了を確認できない場合は、
+            // hot exit の交換条件が成立していない=従来の未保存確認へ倒す。
+            _backup.FinalFlushForRestore();
+            bool flushOk = _backup.WaitForFinalFlush();
+            _lastCloseFinalFlushOkForTest = flushOk;
+            if (!flushOk)
+                silentPath = false;
+        }
         _lastCloseTookSilentPathForTest = silentPath;
 
         if (!silentPath)
@@ -497,7 +519,12 @@ public sealed partial class MainForm : Form
 
         // ON: docs が生きているうちに最終 flush(本文+レイアウト)。OFF の stale layout 掃除は
         // OnFormClosed の Shutdown(keepForRestore:false) が担う。
-        if (_settings.RestoreOpenFilesOnStartup)
+        // A-8: silentPath は true → false へしか遷移しないので、ここで true =「上の事後条件検査で
+        // 既に flush 済み」と同値。二重に走らせない理由は速度: ReconcileContent は dirty 文書ごとに
+        // SnapshotText(全文 string 化)を走らせるため、巨大 dirty タブ同居時の終了が目に見えて遅くなる。
+        // フォールバック時(silentPath=false)は確認ループの保存/破棄をレイアウトへ反映するため
+        // ここで改めて走らせる必要がある。
+        if (_settings.RestoreOpenFilesOnStartup && !silentPath)
             _backup.FinalFlushForRestore();
 
         _settings.LastSession = null; // 統合後は旧形式を書かない
