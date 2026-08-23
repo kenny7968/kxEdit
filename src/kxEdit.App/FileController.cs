@@ -48,6 +48,14 @@ public sealed class FileController
     /// <b>警告文言の「n 秒」もこの値から補間する</b>ので、ここを変えれば文言も追随する
     /// (Task 3 レビュー 脆弱-m-1: 以前は文言側が literal の二重管理で、文言だけを 30 秒に
     /// 書き換える変異が全緑で生存した)。
+    /// <para>
+    /// <b>到達性プローブ(<see cref="TryProbeFileExists"/> / <see cref="TryInspectSaveTarget"/>)の
+    /// 5 秒はここへ寄せていない</b>(Task 4 レビュー 脆弱-m-2 の判断)。同じ数値だが<b>別の境界</b>で、
+    /// 寄せると「正規化の待ちを 10 秒にしたい」がプローブの待ちまで黙って変える結合を新設する。
+    /// 文言との二重管理も無い(プローブ側の文言に秒数が出ない)ため、Task 3 で潰した形とは違う。
+    /// プローブ側の literal は <c>FakeReachabilityProbe.LastTimeout</c> /
+    /// <c>SaveTargetLastTimeout</c> の assert が既に pin している。
+    /// </para>
     /// </summary>
     private static readonly TimeSpan NormalizeTimeout = TimeSpan.FromSeconds(5);
 
@@ -168,12 +176,27 @@ public sealed class FileController
         //
         // 第 2 項は SaveAs 側 V-1 / V-3 と同じ門番で、**正規化の後ろに置くのが load-bearing**:
         // seam の Ok は「文字列として正規化できた」以上の意味を持たない(実測 2026-08-23:
-        // CON → \\.\CON・NUL → \\.\NUL・LPT1 → \\.\LPT1 がいずれも Ok で返る)。
-        // 素通しにすると先頭 `\\` で RemotePathDetector がリモート判定 →
-        // 「ネットワークパスに到達できません」という的外れな文言になり(V-3 と同じ症状)、
-        // 到達性プローブを通ってしまった実装では File.OpenRead(@"\\.\CON") が**無期限に
-        // ブロック**する(実測: 3 秒で打ち切るまで戻らず。NUL は 0 バイト読めて空タブが開く)。
-        // 境界を張るのが目的の変更で、無境界の待ちを新設しない。
+        // CON → \\.\CON・NUL → \\.\NUL・LPT1 → \\.\LPT1 がいずれも Ok で返る。
+        // ディレクトリー付きでも NUL は特別扱いで <tmp>\NUL → \\.\NUL になる)。
+        // 素通しにすると次の 3 つが起きる:
+        //   (1) `\\.\` 綴りが State.Path / FindByPath のキー / RecentFiles へ流れうる。
+        //   (2) 先頭 `\\` で RemotePathDetector がリモート判定するので、無意味な到達性プローブ
+        //       (Task.Run + Wait・最悪 5 秒待ち)を 1 本余分に通る。
+        //   (3) その結果「ネットワークパスに到達できません」という的外れな文言になる
+        //       (= V-3 で潰したはずの症状。ルートの場合は「開けませんでした: アクセスが
+        //       拒否されました」)。
+        // **訂正(Task 4 レビュー 脆弱-I-4)**: ここには当初「ガードが無いと
+        // File.OpenRead(@"\\.\CON") が無期限にブロックする」と書いていた。**これは誤り**で、
+        // 測っていたのは OpenRead + 読み出しだった。本番の TextFileService.LoadAsBufferAuto は
+        // 本文を読む前に probe.Length を打つため(TextFileService.cs:151)、デバイスパスは
+        // そこで NotSupportedException になり読みに到達しない。再実測(2026-08-23):
+        //   \\.\CON  OpenRead 1ms OK / +.Length 4ms NotSupported / +Read 2999ms BLOCKED /
+        //            LoadAsBufferAuto 3ms NotSupported
+        //   \\.\NUL  OpenRead 0ms OK / +.Length 0ms NotSupported / +Read 0ms OK /
+        //            LoadAsBufferAuto 1ms NotSupported
+        // つまり無境界の待ちは現行経路では発生せず、(1) は Core 側の .Length が内側の防御に
+        // なっている。本ガードはその**二重防御の外側**であり、直接の実害として測れるのは
+        // (2)(3) のほう。
         // 述語が弾くのはルート(C:\ / \\server\share)とデバイスパスだけで、実ファイルは
         // 拡張長 (\\?\C:\Temp\a.txt) や UNC (\\server\share\a.txt) も親フォルダーを持つ(実測)。
         var norm = _reachabilityProbe.NormalizePathWithTimeout(path, NormalizeTimeout);

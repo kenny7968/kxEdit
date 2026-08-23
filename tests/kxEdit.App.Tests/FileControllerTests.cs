@@ -1608,13 +1608,17 @@ public class FileControllerTests
 
             Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"));
 
+            // 脆弱-I-3 と同じ将来ガード: 現行では単独の変異を殺さない(弾いた後にタブを
+            // 残す形へ壊れたときのための網)。kill を担うのは下の文言 assert。
             Assert.Equal(before, host.Docs.Count);
             // 文言の弁別: 到達不能側にだけ現れる語を見る(保存側と同じ思想)。
             Assert.Contains(
                 host.Prompt.Log,
                 e => e.Kind == "Error" && e.Text.Contains("到達できません")
             );
-            // 秒数は NormalizeTimeout から補間される。literal を書き戻す変異をここで kill する。
+            // 秒数は NormalizeTimeout から補間される。**違う数値の** literal を書き戻す変異
+            // (「30 秒」など)をここで kill する(保存側の双子と同じ例示。同じ数値の literal
+            // へ戻す変異は殺せない=補間であること自体は測れない)。
             Assert.Contains(host.Prompt.Log, e => e.Text.Contains("5 秒"));
             Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("正しくありません"));
         });
@@ -1710,6 +1714,15 @@ public class FileControllerTests
     /// 使っているなら、開けて・本文が読めて・履歴に載って・2 回目は同じタブが再利用される。
     /// あわせて <c>NormalizeCallCount == 1</c> を pin する(「1 操作あたり正規化 1 本」=
     /// 設計書 §3 の不変条件。境界付きにした意味がここに掛かっている)。
+    /// <para>
+    /// <b>打つ側を<c>裸の相対名</c>にしてあるのが load-bearing</b>(Task 4 レビュー 仕様-m-2):
+    /// これが絶対パスだと、ガードのオペランドを <c>GetDirectoryName(norm.Full)</c> から
+    /// <c>GetDirectoryName(path)</c>(生入力)へ取り違える変異が全緑で生存した。相対名は
+    /// 生の親が空・正規化後の親は非空なので、オペランドが入れ替わった瞬間に「パスが
+    /// 正しくありません」で弾かれて赤くなる。実運用でも旧 <c>RecentFiles</c> / 旧 session JSON に
+    /// 相対パスが残りうる(A-19)ので、守っているのは実在の経路。seam は Fake が固定値を
+    /// 返すので、この相対名がカレントディレクトリーに依存することはない。
+    /// </para>
     /// </summary>
     [Fact]
     public void TryOpenOrActivate_UsesNormalizedPathFromProbe_NotDirectGetFullPath() =>
@@ -1717,7 +1730,7 @@ public class FileControllerTests
         {
             using var host = new Host();
             using var tmp = new TempDir();
-            string typed = tmp.File("typed.txt"); // 作らない=正規化を捨てる実装では開けない
+            const string typed = "typed.txt"; // 裸の相対名(上の doc 参照)。実在させない
             string redirected = tmp.File("redirected.txt");
             File2.WriteAllText(redirected, "redirected");
             host.Probe.NormalizeResult = new PathNormalizeResult(
@@ -1763,12 +1776,29 @@ public class FileControllerTests
     /// 保存側 V-1 / V-3 の開く側対称。予約デバイス名は <c>GetFullPath</c> が <c>\\.\NUL</c> へ
     /// 正規化する = seam は <c>Ok</c> を返す(「文字列として正規化できた」以上の意味を持たない)。
     /// ガードが無いと先頭 <c>\\</c> で <see cref="RemotePathDetector"/> がリモート判定し、
-    /// 到達性プローブを通って <c>File.OpenRead</c> まで届く。
+    /// 無意味な到達性プローブを 1 本通ったうえで「ネットワークパスに到達できません」という
+    /// 的外れな文言になる(= V-3 で潰したはずの症状)。
     /// <para>
-    /// fixture に <c>CON</c> ではなく <c>NUL</c> を選ぶのは<b>意図的</b>: 実測(2026-08-23)で
-    /// <c>File.OpenRead(@"\\.\CON")</c> は<b>無期限にブロック</b>する(3 秒で打ち切るまで戻らない)
-    /// ため、ガードを外す変異でテストが赤ではなく<b>ハング</b>する。<c>NUL</c> は 0 バイト読めて
-    /// 空タブが開くので、同じ穴を<b>赤で</b>観測できる。
+    /// <b>入力が <c>&lt;tmp&gt;\NUL</c> なのは load-bearing</b>(Task 4 レビュー 脆弱-I-2):
+    /// 裸の <c>NUL</c> だと<b>生入力の親も</b>空なので、ガードを正規化の<b>前</b>へ移す変異が
+    /// 全緑で生存した。ディレクトリー付きなら生の親は <c>&lt;tmp&gt;</c>(非空)で、正規化後に
+    /// 初めて <c>\\.\NUL</c>(親 null)になるため、順序が壊れた瞬間に赤くなる。実測(2026-08-23):
+    /// <c>&lt;tmp&gt;\NUL</c> → <c>\\.\NUL</c>。<b><c>CON</c> はディレクトリー付きだと変換されない</b>
+    /// (<c>&lt;tmp&gt;\CON</c> はそのまま)ので、この形が作れるのは <c>NUL</c> のほう。
+    /// </para>
+    /// <para>
+    /// <b>訂正(脆弱-I-4)</b>: 当初ここには「<c>CON</c> だと <c>File.OpenRead</c> が無期限に
+    /// ブロックするので fixture に <c>NUL</c> を選んだ」と書いていた。<b>これは誤り</b>。
+    /// <c>LoadAsBufferAuto</c> は本文を読む前に <c>probe.Length</c> を打ち、デバイスパスは
+    /// そこで <c>NotSupportedException</c> になるので読みに到達しない(実測: <c>\\.\CON</c> /
+    /// <c>\\.\NUL</c> とも <c>LoadAsBufferAuto</c> は 1〜3 ms で <c>NotSupportedException</c>)。
+    /// <c>CON</c> でもハングしないので、fixture 選択にその制約は無い。
+    /// </para>
+    /// <para>
+    /// <b>「到達性プローブまで届かせない」が観測できるのは Fake の既定が <c>Result=true</c> だから</b>
+    /// (仕様-n-1)。本番の <see cref="FileReachabilityProbe"/> は <c>File.Exists(@"\\.\NUL")</c> が
+    /// false なので、ガードが無くてもプローブ側が止める。ここで見ているのは
+    /// 「ガードが**プローブより前に**弾くか」であって、実運用で必ず開けてしまうかではない。
     /// </para>
     /// </summary>
     [Fact]
@@ -1776,11 +1806,18 @@ public class FileControllerTests
         Sta.Run(() =>
         {
             using var host = new Host();
+            using var tmp = new TempDir();
+            string deviceViaDir = tmp.File("NUL"); // 生の親は非空・正規化すると \\.\NUL
             int before = host.Docs.Count;
 
-            Assert.Null(host.File.TryOpenOrActivate("NUL"));
+            Assert.Null(host.File.TryOpenOrActivate(deviceViaDir));
 
-            Assert.Equal(before, host.Docs.Count); // 空タブが開かない
+            // 脆弱-I-3: この 1 行は**単独の変異を殺さない**(ガードを外しても
+            // LoadAsBufferAuto が NotSupportedException になり、作りかけタブは
+            // TryOpenOrActivate の失敗経路が閉じるので件数は戻る)。将来
+            // 「弾いた後にタブを残す」形へ壊れたときのための網として残す
+            // = Task 3 の Modified assert と同じ扱い。kill を担うのは下の 2 本。
+            Assert.Equal(before, host.Docs.Count);
             Assert.Equal(0, host.Probe.CallCount); // 到達性プローブまで届かせない
             Assert.Contains(
                 host.Prompt.Log,
@@ -1800,16 +1837,22 @@ public class FileControllerTests
             // ルートは正規化できるが親フォルダーが無い=ファイルとして確定しない。
             // ガードが無いと LoadInto の catch(UnauthorizedAccessException)へ落ちて
             // 「開けませんでした」になる=文言 assert が変異を kill する。
+            // 脆弱-I-2: 入力を裸の root ではなく `<root>\anything\..` にするのが load-bearing。
+            // 裸の root は生入力の親も null なので、ガードを正規化の**前**へ移す変異が生存する。
+            // この形なら生の親は `<root>anything`(非空)で、正規化して初めて root になる
+            // (実測 2026-08-23: C:\anything\.. → C:\)。`anything` は実在しなくてよい
+            // (`..` の畳み込みは純粋な文字列処理)。
             // ローカルパスをハードコードしないため root は TempDir から導出する。
             using var host = new Host();
             using var tmp = new TempDir();
             string root = System.IO.Path.GetPathRoot(tmp.Root)!;
             Assert.False(string.IsNullOrEmpty(root));
+            string rootViaDotDot = System.IO.Path.Combine(root, "anything", "..");
             int before = host.Docs.Count;
 
-            Assert.Null(host.File.TryOpenOrActivate(root));
+            Assert.Null(host.File.TryOpenOrActivate(rootViaDotDot));
 
-            Assert.Equal(before, host.Docs.Count);
+            Assert.Equal(before, host.Docs.Count); // 脆弱-I-3 と同じ将来ガード(単独では kill しない)
             Assert.Contains(
                 host.Prompt.Log,
                 e => e.Kind == "Error" && e.Text.Contains("正しくありません")
@@ -2952,6 +2995,11 @@ public class FileControllerTests
     /// 申し送り S-6)がそのまま文言に載る導線だから。
     /// U+202E は <c>UnicodeCategory.Format</c> のため culture-sensitive な Contains では
     /// 常に「見つかる」側へ倒れる。上の 3 本と同じく <c>StringComparison.Ordinal</c> を明示する。
+    /// <para>
+    /// メソッド名は <c>SaveAs_</c> で始まるが、射程は保存側だけではない: Task 3 で保存側の
+    /// TimedOut 文言、Task 4 で<b>開く側</b>の TimedOut 文言を足してある。名前を変えないのは
+    /// 「OneLine の idiom は代表 1 本で pin する」(#47 最終品質パス m-5 の受容)を続けるため。
+    /// </para>
     /// </summary>
     [Fact]
     public void SaveAs_SanitizesRloOverride_InDuplicateTabErrorPrompt() =>
@@ -3000,6 +3048,24 @@ public class FileControllerTests
             var warn = Assert.Single(host2.Prompt.Log, e => e.Kind == "Warn");
             Assert.Contains("到達できません", warn.Text, StringComparison.Ordinal);
             Assert.DoesNotContain("‮", warn.Text, StringComparison.Ordinal);
+
+            // 脆弱-I-1(Task 4): **開く側**の TimedOut 文言も同じ射程に入れる。生 path へ戻す
+            // 変異が全緑で生存していた。開く側は保存側より危険で、抑止スコープの外に
+            // 攻撃者がファイル名を決められる経路が実在する: grep ジャンプ(MainForm の
+            // OpenAndSelect)と「最近のファイル」(settings.json 由来)。どちらも
+            // WithLoadErrorPromptSuppressed の外なので、不達共有上の evil-{RLO}txt.exe が
+            // そのままダイアログに載る。代表 1 本の原則は維持し、新しい代表は作らない。
+            using var host3 = new Host();
+            host3.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.TimedOut,
+                string.Empty
+            );
+
+            Assert.Null(host3.File.TryOpenOrActivate(attackPath));
+
+            var openErr = Assert.Single(host3.Prompt.Log, e => e.Kind == "Error");
+            Assert.Contains("到達できません", openErr.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("‮", openErr.Text, StringComparison.Ordinal);
         });
 
     // ===== Task 4: LoadInto エラーダイアログ抑止 seam(復元経路 Task 5 用) =====
@@ -3029,6 +3095,43 @@ public class FileControllerTests
             // 抑止解除後: 再びダイアログが出る(finally での復元確認)
             host.File.TryOpenOrActivate(missing);
             Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+        });
+
+    /// <summary>
+    /// 脆弱-m-3(Task 4)。<c>try/finally</c> を外して逐次実行にする変異が全緑で生存していた。
+    /// 既存メソッドだが、本タスクが<b>新しい失敗経路をここに通す</b>ので網を足す。
+    /// <para>
+    /// <c>action()</c> が投げたときにフラグが立ちっぱなしになると、以後<b>プロセスの寿命の間</b>
+    /// 「開けませんでした」「ネットワークパスに到達できません」「置換文字の警告」、そして本タスクが
+    /// 足した「到達できません / パスが正しくありません」まで<b>無言で消える</b>
+    /// (利用者は開けない理由を一切知らされない)。<c>_suppressRegisterRecent</c> 側が
+    /// 立ちっぱなしなら「最近のファイル」も更新されなくなるので、2 つとも戻ることを見る。
+    /// 例外型は catch フィルタに一致しない型を選ぶ(<see cref="InvalidOperationException"/>)=
+    /// 途中で握られず <c>finally</c> だけが仕事をする状況にするため。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void WithLoadErrorPromptSuppressed_RestoresBothFlags_WhenActionThrows() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string missing = tmp.File("no-such-file.txt");
+            string existing = tmp.File("a.txt");
+            File2.WriteAllText(existing, "abc");
+
+            Assert.Throws<InvalidOperationException>(() =>
+                host.File.WithLoadErrorPromptSuppressed(() =>
+                    throw new InvalidOperationException("boom")
+                )
+            );
+
+            // (a) 失敗ダイアログが戻る
+            Assert.Null(host.File.TryOpenOrActivate(missing));
+            Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+            // (b) RecentFiles の登録も戻る
+            Assert.NotNull(host.File.TryOpenOrActivate(existing));
+            Assert.Equal(existing, host.Settings.RecentFiles[0]);
         });
 
     // ===== 統合復元 Task 5: RestoreSession(hot exit 統合・設計 2026-07-23 §3.3/§4) =====
