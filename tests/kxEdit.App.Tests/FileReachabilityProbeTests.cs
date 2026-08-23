@@ -210,4 +210,74 @@ public class FileReachabilityProbeTests
         Assert.True(result.Reachable);
         Assert.True(result.FileExists);
     }
+
+    // ===== 境界付き正規化(Issue #48 / 設計書 §4)=====
+
+    [Fact]
+    public void RunNormalizeProbe_WorkExceedsTimeout_FailsSafeToTimedOut()
+    {
+        // S-15 の本体。フェイルセーフ値が Ok へ変異すると、タイムアウトしたのに
+        // 「正規化できた」と読んで空文字パスを保存先に採用してしまう。
+        // 組み方は既存 2 本と対称: work は Ok を返すので、TimedOut が返ったなら
+        // フェイルセーフ由来と確定する。
+        var gate = new TaskCompletionSource();
+        try
+        {
+            var result = FileReachabilityProbe.RunNormalizeProbe(
+                () =>
+                {
+                    gate.Task.Wait();
+                    return new PathNormalizeResult(PathNormalizeStatus.Ok, @"C:\Temp\a.txt");
+                },
+                TimeSpan.FromMilliseconds(50)
+            );
+
+            Assert.Equal(PathNormalizeStatus.TimedOut, result.Status);
+            Assert.Equal(string.Empty, result.Full); // タイムアウトを「このパスで良い」と読ませない
+        }
+        finally
+        {
+            gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
+        }
+    }
+
+    [Fact]
+    public void RunNormalizeProbe_WorkCompletes_ReturnsWorkResult()
+    {
+        // 対照群。常にフェイルセーフ値を返す実装を kill する。
+        var result = FileReachabilityProbe.RunNormalizeProbe(
+            () => new PathNormalizeResult(PathNormalizeStatus.Ok, @"C:\Temp\a.txt"),
+            Timeout
+        );
+
+        Assert.Equal(PathNormalizeStatus.Ok, result.Status);
+        Assert.Equal(@"C:\Temp\a.txt", result.Full);
+    }
+
+    [Fact]
+    public void PathNormalizeResult_default_is_TimedOut() =>
+        // ゼロ値をフェイルセーフ側に置く設計の pin。
+        // enum の並びを入れ替える変異(Ok = 0 にする)をここで kill する。
+        Assert.Equal(PathNormalizeStatus.TimedOut, default(PathNormalizeResult).Status);
+
+    [Fact]
+    public void NormalizePath_RelativeInput_ReturnsRootedPath()
+    {
+        // 実実装の意味論(A-19 が要求する「絶対パスにする」)。Fake 経由では届かない。
+        var result = new FileReachabilityProbe().NormalizePathWithTimeout("memo.txt", Timeout);
+
+        Assert.Equal(PathNormalizeStatus.Ok, result.Status);
+        Assert.True(System.IO.Path.IsPathFullyQualified(result.Full));
+    }
+
+    [Fact]
+    public void NormalizePath_EmbeddedNul_ReturnsInvalid()
+    {
+        // 実実装の例外フィルタ。NUL 混入は ArgumentException(PR #47 Task 5 の実測)。
+        // Invalid と TimedOut を弁別する(同じ値にする変異をここで kill する)。
+        var result = new FileReachabilityProbe().NormalizePathWithTimeout("a\0b", Timeout);
+
+        Assert.Equal(PathNormalizeStatus.Invalid, result.Status);
+        Assert.Equal(string.Empty, result.Full);
+    }
 }

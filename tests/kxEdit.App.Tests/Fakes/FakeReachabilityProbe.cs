@@ -40,4 +40,30 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
         SaveTargetLastTimeout = timeout;
         return SaveTargetResult;
     }
+
+    /// <summary>
+    /// <c>NormalizePathWithTimeout</c> の応答。null のときは実装 <see cref="FileReachabilityProbe"/>
+    /// へ委譲し、非 null ならその固定値を返す。
+    /// </summary>
+    public PathNormalizeResult? NormalizeResult { get; set; }
+
+    public int NormalizeCallCount { get; private set; }
+
+    /// <summary>直近の <c>NormalizePathWithTimeout</c> 呼出で渡された path。</summary>
+    public string? NormalizeLastPath { get; private set; }
+
+    /// <summary>直近の <c>NormalizePathWithTimeout</c> 呼出で渡された timeout(5s 契約の pin)。</summary>
+    public TimeSpan NormalizeLastTimeout { get; private set; }
+
+    public PathNormalizeResult NormalizePathWithTimeout(string path, TimeSpan timeout)
+    {
+        NormalizeCallCount++;
+        NormalizeLastPath = path;
+        NormalizeLastTimeout = timeout;
+        // 既定は「実 GetFullPath と同じ答え」を返す。Fake が素通し(path をそのまま返す)だと
+        // 相対パス入力のテストが「正規化されたつもり」で通ってしまい、A-19 の網が
+        // vacuous になる(PR #47 の教訓: Fake を注入するテストは本番実装の性質を証人にできない)。
+        return NormalizeResult
+            ?? new FileReachabilityProbe().NormalizePathWithTimeout(path, timeout);
+    }
 }

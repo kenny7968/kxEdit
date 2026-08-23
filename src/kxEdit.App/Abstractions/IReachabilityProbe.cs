@@ -13,10 +13,41 @@ namespace kxEdit.App;
 public readonly record struct SaveTargetProbeResult(bool Reachable, bool FileExists);
 
 /// <summary>
-/// パスへの到達可否を短時間で判定する DI シーム(HIGH-6)。
+/// 境界付き正規化の結果状態(Issue #48 / 設計書 §4)。
+/// <b>ゼロ値をフェイルセーフ側に置いてある</b>: 初期化漏れや <c>default</c> が
+/// 「正規化できた」に転ばないようにするため、<see cref="TimedOut"/> を 0 にする。
+/// </summary>
+public enum PathNormalizeStatus
+{
+    /// <summary>期限内に終わらなかった。パスは確定していない。</summary>
+    TimedOut = 0,
+
+    /// <summary>入力が正規化できない(NUL 混入・総長超過など)。</summary>
+    Invalid = 1,
+
+    /// <summary>正規化できた。</summary>
+    Ok = 2,
+}
+
+/// <summary>
+/// 境界付き正規化の結果(Issue #48 / 設計書 §4)。
+/// <c>Status</c> が <see cref="PathNormalizeStatus.Ok"/> のときだけ <c>Full</c> が意味を持つ。
+/// それ以外は空文字 — <b>ただし <c>default(PathNormalizeResult)</c> だけは <c>Full</c> が
+/// null</b> になる(record struct のゼロ値は string を初期化できない)。
+/// どちらにせよ <b>Ok 以外で <c>Full</c> を読んではいけない</b>: 呼出側は必ず
+/// <c>Status</c> で分岐すること。
+/// </summary>
+/// <param name="Status">結果状態。</param>
+/// <param name="Full">正規化済み絶対パス(Ok のときのみ)。</param>
+public readonly record struct PathNormalizeResult(PathNormalizeStatus Status, string Full);
+
+/// <summary>
+/// パスへの到達可否を短時間で判定し(HIGH-6)、パスの正規化そのものにも境界を張る
+/// (Issue #48 / S-15)DI シーム。
 /// 本番は <see cref="FileReachabilityProbe"/> / テストは Fake を差し込む。
 /// UNC ロード時の 60 秒 UI 凍結を 5 秒プローブで回避するために FileController が使う。
-/// どちらのメソッドも、呼出側が**正規化済みの絶対パス**を渡す契約。
+/// <b>プローブ 2 本</b>(<see cref="ProbeFileExistsWithTimeout"/> /
+/// <see cref="ProbeSaveTargetWithTimeout"/>)は、呼出側が**正規化済みの絶対パス**を渡す契約。
 /// 理由は**両者共通で 1 つだけ**: 相対パスを渡すと内部の <c>File.Exists</c> /
 /// <c>Directory.Exists</c> がプロセスの CWD 基準で解決するので、例外も「到達不能」も返さずに
 /// **黙って別のファイルを指す**(= A-19 が正規化を要求する理由)。
@@ -27,6 +58,8 @@ public readonly record struct SaveTargetProbeResult(bool Reachable, bool FileExi
 /// 空文字になるのはディレクトリー成分を持たない相対入力に限られ(<c>sub\...</c> では
 /// <c>GetDirectoryName</c> が <c>"sub"</c> を返すので機構自体が発火しない)、しかもそのときは
 /// CWD に同名ファイルが無い場合=読み取り側が返す false と区別がつかない。**非対称は無い。**
+/// <see cref="NormalizePathWithTimeout"/> だけはこの契約の**外**にある(その正規化を作るのが
+/// 仕事なので、生パスを受け取る)。
 /// </summary>
 public interface IReachabilityProbe
 {
@@ -44,4 +77,14 @@ public interface IReachabilityProbe
     /// 2 つの述語を 1 タスクにまとめてあるのは、遠隔共有での待ちを 5 秒 1 回に収めるため。
     /// </summary>
     SaveTargetProbeResult ProbeSaveTargetWithTimeout(string path, TimeSpan timeout);
+
+    /// <summary>
+    /// パスを境界付きで正規化する(Issue #48 / S-15)。
+    /// <c>Path.GetFullPath</c> は正規化後のパスに <c>~</c> が含まれると
+    /// <c>GetLongPathName</c> を呼び、不達の共有に対して約 21 秒 UI を止める。
+    /// <b>UI スレッドから正規化するときは必ずこれを通す。</b>
+    /// この 1 本だけは<b>正規化前の生パスを渡してよい</b>(他の 2 本と契約が違う。
+    /// 正規化そのものが仕事なので)。
+    /// </summary>
+    PathNormalizeResult NormalizePathWithTimeout(string path, TimeSpan timeout);
 }

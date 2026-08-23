@@ -6,12 +6,18 @@ namespace kxEdit.App;
 /// <see cref="IReachabilityProbe"/> の本番実装。読み取り側の
 /// <see cref="ProbeFileExistsWithTimeout"/> は <see cref="System.IO.File.Exists"/> を、
 /// 書き込み側の <see cref="ProbeSaveTargetWithTimeout"/> は File.Exists + 親フォルダーの
-/// <see cref="System.IO.Directory.Exists"/> を、それぞれ <see cref="Task.Run{TResult}(Func{TResult})"/> で
+/// <see cref="System.IO.Directory.Exists"/> を、正規化の
+/// <see cref="NormalizePathWithTimeout"/> は <see cref="System.IO.Path.GetFullPath(string)"/> を、
+/// それぞれ <see cref="Task.Run{TResult}(Func{TResult})"/> で
 /// バックグラウンドスレッドに退避し、<see cref="Task.Wait(TimeSpan)"/> の短タイムアウトで
-/// UI スレッドをブロックしない。どちらもタイムアウト時のフェイルセーフは
-/// <see cref="WaitBounded{T}"/> に集約する(= 到達不能側に倒す)。
+/// UI スレッドをブロックしない。3 本ともタイムアウト時のフェイルセーフは
+/// <see cref="WaitBounded{T}"/> に集約する(= 「確定しなかった」側に倒す。前 2 本は到達不能、
+/// 正規化は <see cref="PathNormalizeStatus.TimedOut"/>)。
+/// <see cref="System.IO.Path.GetFullPath(string)"/> は名前解決のみで実 I/O を行わない —
+/// **ただし正規化後のパスに <c>~</c> が含まれる場合だけは例外**で <c>GetLongPathName</c> を
+/// 呼ぶため、不達の共有に対して約 21 秒ブロックする(Issue #48 / S-15。だからここに退避する)。
 /// UNC 未到達時は 60 秒の SMB タイムアウトが走るスレッドが 1 本 leak するが、
-/// まれなケースのため許容(設計書 PR-5 節)。
+/// まれなケースのため許容(設計書 PR-5 節)。正規化側も同じ受容。
 /// </summary>
 public sealed class FileReachabilityProbe : IReachabilityProbe
 {
@@ -48,6 +54,25 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// </summary>
     internal static bool RunFileExistsProbe(Func<bool> work, TimeSpan timeout) =>
         WaitBounded(Task.Run(work), timeout, false);
+
+    /// <summary>
+    /// 境界付き正規化の骨格。<paramref name="work"/> をバックグラウンドへ退避し、
+    /// 期限内に終わらなければ「確定しなかった」= <see cref="PathNormalizeStatus.TimedOut"/> へ倒す。
+    /// フェイルセーフ値をここに置く理由は <see cref="RunFileExistsProbe"/> と同じ:
+    /// <c>WaitBounded(task, timeout, 定数)</c> と直書きすると定数が 1 トークンの引数でしかなく、
+    /// <see cref="PathNormalizeStatus.Ok"/> へ書き換えてもコンパイルが通り・ハングもせず・
+    /// 全緑になってしまう(= タイムアウトを「正規化できた」と読み、空文字のパスを
+    /// 保存先として採用する)。
+    /// </summary>
+    internal static PathNormalizeResult RunNormalizeProbe(
+        Func<PathNormalizeResult> work,
+        TimeSpan timeout
+    ) =>
+        WaitBounded(
+            Task.Run(work),
+            timeout,
+            new PathNormalizeResult(PathNormalizeStatus.TimedOut, string.Empty)
+        );
 
     /// <inheritdoc />
     public bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout) =>
@@ -89,6 +114,34 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                     // IOException 系が出る可能性を吸って「到達不能」に倒す
                     // (ProbeFileExistsWithTimeout と同方針)。
                     return new SaveTargetProbeResult(false, false);
+                }
+            },
+            timeout
+        );
+
+    /// <inheritdoc />
+    public PathNormalizeResult NormalizePathWithTimeout(string path, TimeSpan timeout) =>
+        RunNormalizeProbe(
+            () =>
+            {
+                try
+                {
+                    return new PathNormalizeResult(PathNormalizeStatus.Ok, Path.GetFullPath(path));
+                }
+                // フィルタは FileController.TryNormalizeSavePath から**そのまま移設**した。
+                // PR #47 の V-2 対策を落とさないこと: 総長が 32767 の直下に収まる窓では
+                // GetFullPathNameW が ERROR_INVALID_NAME を返し、PathTooLongException ではなく
+                // 素の IOException が飛ぶ。PathTooLongException だけを列挙するとこの窓が抜けて
+                // 未捕捉例外ダイアログになる。
+                catch (Exception ex)
+                    when (ex
+                            is ArgumentException
+                                or NotSupportedException
+                                or IOException
+                                or System.Security.SecurityException
+                    )
+                {
+                    return new PathNormalizeResult(PathNormalizeStatus.Invalid, string.Empty);
                 }
             },
             timeout
