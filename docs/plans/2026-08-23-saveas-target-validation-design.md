@@ -386,6 +386,7 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   `exists` だけ採る」がある(制御フローも文言も不変のまま 5 秒上限になる)が、採ると Task 7 の
   上書き確認テストが「実ファイルがディスクに在る → 確認が出る」から「Fake が在ると言った →
   確認が出る」に変わり、**本ブランチで最も重要な網が弱まる**。このトレードオフを Task 7 で判断する。
+  → **判断済み(Task 7): (a) 現状維持。理由と、上の見立てのうち訂正した 2 点は §10.6。**
 - **S-6**(Task 5 の脆弱性レビューで追加・2026-08-23): `SanitizeForDisplay` の適用漏れが 3 箇所ある。
   `FileController.ConfirmDiscardIfDirty` の「{DisplayName} の変更を保存しますか?」・
   `DocumentState.DisplayName`(タブラベル)・`MainForm.RebuildRecentMenu`(`&` のエスケープのみ)。
@@ -579,3 +580,41 @@ tool 由来の差分であって挙動変更ではない。
   (`WriteToPath` の直接差し替え = S1144 / ゲートを `if (true)` にする = CS0162 /
   `path.Length >= 0` = RCS1215・S3981)。挙動等価な別形で当てること。
 - 変異で変数が未使用になるとビルドが落ち、上記 1 点目と組み合わさって偽の「生存」を作る。
+
+### 10.6 S-5 の判断: (a) 現状維持(Task 7)
+
+`TryInspectSaveTarget` のローカル枝は素の `System.IO.File.Exists` のまま残す。
+根拠は 3 つで、うち 2 つは S-5 起票時の見立てを**実装を読んだうえで訂正**するもの。
+
+1. **S-5 が想定した「相殺されない凍結」は、実際にはほぼ発生しない。** 上書き確認へ到達する
+   条件は `exists == true`、すなわち `File.Exists` が **true を返しきった**ことである。
+   60 秒級の凍結は切断済み SMB のセッションタイムアウトで、**false で終わる**ので確認は出ず、
+   したがって「いいえ」も選べない。Task 7 が現に増やす露出は
+   「SaveAsDocument 段の 1 回」= `WriteToPath` 冒頭で既に走っていた同じ呼出の 2 倍化であって、
+   新しい凍結クラスではない(ループでの反復も、`continue` が毎回 `PickSaveAs` を挟む以上
+   ユーザー操作 1 回につき 1 回)。
+2. **(b) はフェイルセーフの向きを反転させる。** `RunSaveTargetProbe` のタイムアウト時の戻り値は
+   `(Reachable: false, FileExists: false)` で、これが安全なのは **`Reachable` を先に見て短絡する**
+   から(= `SaveTargetProbeResult` の契約)。(b) は「`Reachable` を無視して `exists` だけ採る」ので、
+   タイムアウトが「ファイルは存在しない」= **上書き確認をスキップする**と読まれる。
+   まれな凍結を、本ブランチが直そうとしている当の欠陥(無確認の上書き)と交換することになる。
+3. **網が弱まる。** (b) にすると A-7 (a) の全テストが「実ファイルがディスクに在る」ではなく
+   「Fake がそう申告した」を入力にする。加えて `SaveAs_LocalNewFile_DoesNotProbe`
+   (`SaveTargetCallCount == 0`)が成立しなくなる = §3.3 のリモートゲートを守る 2 本のうち 1 本を
+   失う。
+
+残存リスク(固定ドライブ上のジャンクション/シンボリックリンクがネットワーク先を指す場合に
+`File.Exists` が上限なくブロックしうる)は **PR description に記載して受容**する。
+根治するなら `RemotePathDetector` 側で reparse point を解決する話であり、読み取り側
+(`TryProbeFileExists` / `FileMetaProvider` / `FileTimestampProvider`)にも同じ穴があるので、
+本ブランチの範囲ではなく横断テーマとして扱う。
+
+### 10.7 SaveAs のリモートプローブは 2 回(Task 7 で実測)
+
+計画 Task 7 の Step 5 は `SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout` へ
+`Assert.Equal(1, host.Probe.SaveTargetCallCount)` を足すよう指示していたが、**実測は 2**。
+§5 が明記しているとおり SaveAs 経路では事前判定(§4.1 (4))と `WriteToPath` 冒頭の
+自己完結ガードで 1 回ずつ走る(`WriteToPath` は Ctrl+S が直接入る入口でもあるため自己完結を
+崩さない、という §5 の判断の帰結)。テストは 2 で pin し、「1 に直さないこと」を doc に書いた。
+1 往復であることの pin は `PickSaveAsCount == 1` と「OkCancel が Log に出ない」で担保する
+(回数だけでは、確認が出て既定 `OkCancelResult = true` で続行した場合と区別できない)。
