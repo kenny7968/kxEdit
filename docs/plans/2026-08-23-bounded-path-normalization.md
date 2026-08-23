@@ -797,6 +797,103 @@ Task 3 と同じ観点に加えて、**復元経路のダイアログ抑止ス�
 
 ---
 
+## Task 4B: `OriginalPathValidator` の GLOBALROOT 回避を塞ぐ(スコープ追加・セキュリティ修正)
+
+**レビュー区分:** **前倒し脆弱性レビュー**(パス操作・セキュリティ修正)
+
+**Files:**
+- Modify: `src/kxEdit.Core/Backup/OriginalPathValidator.cs:50-80` 付近
+- Test: `tests/kxEdit.Core.Tests/Backup/OriginalPathValidatorTests.cs`
+
+### 経緯(このタスクは当初の計画に無い)
+
+Task 4 の脆弱性レビューが、**本ブランチ由来ではない既存の脆弱性**を発見した。ユーザー判断で本ブランチに含める(当初は非公開 Advisory の下書きを推奨したが、ブランチ内で直す方針を選択)。
+
+CLAUDE.md §9 は「セキュリティ修正も §3 と同じプロセスで行う」と定める。本節がその設計に相当する。
+
+### 欠陥
+
+`OriginalPathValidator.Check` は DOS device path プレフィックスを**先頭 4 文字だけ剥がして** `BlockedRoots` と前方一致照合する。`\\?\GLOBALROOT\Device\HarddiskVolumeN\...` は剥がした残りが `GLOBALROOT\Device\...` になり、`C:\Windows\` と決して前方一致しない。
+
+**実測(2026-08-23・ビルド済み `kxEdit.Core.dll` を反射で直接呼出)**:
+
+```
+plain hosts            Check=Rejected   readable=True   ← 正しく拒否
+devicepath hosts       Check=Rejected   readable=True   ← \\?\C:\ は既に塞がれている
+GLOBALROOT hosts       Check=Ok         readable=True   ← 素通り
+GLOBALROOT win.ini     Check=Ok         readable=True
+```
+
+`HarddiskVolume6` がこの環境の C: に解決することも実測で確認した(`\\?\GLOBALROOT\Device\HarddiskVolume6\Windows\win.ini` が 92 バイトで読める)。ボリューム番号は環境依存なので、**テストで番号を決め打ちしないこと**(後述)。
+
+**攻撃導線**: `%AppData%\kxEdit` のバックアップ JSON に `OriginalPath` = 上記綴り + 任意 `Content` を仕込むと、`FileController.RestoreDirtyFromBackup` が起動時に `State.Path` にそれを載せた **dirty タブ**を作る。以後ユーザーの Ctrl+S、または終了時の「保存しますか?」1 回で `hosts` が攻撃者内容に置き換わる。`BlockedRoots` はまさにこれを防ぐ機構なので、**既存のセキュリティ制御を無効化する**。`SECURITY.md` の「想定される攻撃面」の「バックアップファイル: 復元機能を悪用したパストラバーサル、任意ファイル上書き」に該当。
+
+### 修正方針
+
+**前置ガードの列挙で塞がない。** プレフィックスの種類を列挙して弾く方式は原理的に漏れる(PR #43 の教訓「前置ガードの列挙は原理的に漏れる → 事後条件で検査する」)。
+
+**事後条件で検査する**: プレフィックス除去後の `forCheck` が、次の**どちらかの形であることを要求**する。該当しなければ `Rejected`。
+
+1. ドライブ文字ルート形式 — `X:\...`(`Path.IsPathFullyQualified` かつ 2 文字目が `:` かつ 3 文字目が区切り)
+2. UNC 形式 — `\\server\share\...`(サーバー名と共有名の両方がある)
+
+これで `GLOBALROOT\Device\...` / `Volume{GUID}\...` / `Device\...` / `pipe\...` はすべて落ちる。**「何を拒否するか」ではなく「何を許可するか」を書く**ので、新しい device 名前空間が増えても漏れない。
+
+**確認すべき経路(すべて現状どおり通ること)**:
+
+| 入力 | 除去後 | 期待 |
+|------|--------|------|
+| `C:\work\a.txt` | 同左 | Ok |
+| `\\?\C:\work\a.txt` | `C:\work\a.txt` | Ok |
+| `\\.\C:\work\a.txt` | `C:\work\a.txt` | Ok |
+| `\\server\share\a.txt` | 同左 | Ok |
+| `\\?\UNC\server\share\a.txt` | `\\server\share\a.txt` | Ok |
+| `C:\Windows\System32\drivers\etc\hosts` | 同左 | **Rejected**(BlockedRoots) |
+| `\\?\C:\Windows\...\hosts` | `C:\Windows\...\hosts` | **Rejected**(BlockedRoots) |
+| `\\?\GLOBALROOT\Device\HarddiskVolumeN\Windows\...\hosts` | `GLOBALROOT\Device\...` | **Rejected**(本タスクの新規) |
+| `\\?\Volume{GUID}\a.txt` | `Volume{GUID}\a.txt` | **Rejected**(新規・後述の受容) |
+| `\\.\PhysicalDrive0` | `PhysicalDrive0` | **Rejected**(新規) |
+| `\\.\pipe\foo` | `pipe\foo` | **Rejected**(新規) |
+
+### 意図的な挙動変更(受容)
+
+**ボリューム GUID パス(`\\?\Volume{GUID}\...`)が拒否される。** ドライブ文字を割り当てずにマウントしたボリューム上のファイルを開いていた場合、hot exit 復元で**無題タブに降格**する(本文は残る・パスが失われる)。
+
+受容の理由: (a) 「開く」ダイアログと `\\server\share` 経由の通常操作ではこの綴りは生まれない、(b) 降格は本文を失わない安全側の失敗、(c) 許可リストに `Volume{GUID}` を足すと `GLOBALROOT` との弁別が形式的に難しくなり、事後条件方式の利点が薄れる。**PR description に明記する。**
+
+### テスト設計
+
+`tests/kxEdit.Core.Tests/Backup/OriginalPathValidatorTests.cs` に追加する。
+
+**ボリューム番号を決め打ちしないこと。** `HarddiskVolume6` は環境依存。攻撃綴りのテストは「**`BlockedRoots` 配下を指す GLOBALROOT 綴りが `Rejected` になる**」ことを固定すればよく、実ファイルが読めるかは検証対象ではない(読める番号を探す処理はテストを環境依存にする)。番号は固定値でよい — 検査は**文字列の形**だけを見るので、存在しないボリューム番号でも `Rejected` になるのが正しい。
+
+| 網 | 内容 |
+|----|------|
+| GLOBALROOT 拒否 | `\\?\GLOBALROOT\Device\HarddiskVolume1\Windows\System32\drivers\etc\hosts` → `Rejected` |
+| GLOBALROOT 拒否(BlockedRoots 外でも) | `\\?\GLOBALROOT\Device\HarddiskVolume1\Temp\a.txt` → `Rejected`(**形で弾くので配下は問わない**) |
+| device 名前空間の拒否 | `\\.\PhysicalDrive0` / `\\.\pipe\foo` → `Rejected` |
+| Volume GUID の拒否 | `\\?\Volume{00000000-0000-0000-0000-000000000000}\a.txt` → `Rejected` |
+| **回帰(通ること)** | `C:\work\...` / `\\?\C:\...` / `\\.\C:\...` / `\\server\share\...` / `\\?\UNC\server\share\...` が従来どおり `Ok` |
+| **回帰(拒否のまま)** | `C:\Windows\...\hosts` / `\\?\C:\Windows\...\hosts` が `Rejected`(**理由が BlockedRoots のままであること**) |
+
+**ミューテーション検証**:
+
+1. 新しい事後条件を丸ごと削除 → GLOBALROOT のテストが赤になるか。
+2. 事後条件を「UNC 形式のみ許可」に変異(ドライブ文字を落とす)→ 回帰テスト(`C:\work\...` が Ok)が赤になるか。**赤にならないなら回帰の網が無い。**
+3. 事後条件を「ドライブ文字のみ許可」に変異 → `\\server\share\...` の回帰テストが赤になるか。
+4. `\\?\UNC\` の剥がし処理を壊す → `\\?\UNC\server\share\...` の回帰テストが赤になるか。
+
+### 非目標
+
+- **admin share 経由の pivot**(`\\host\C$\Windows\...`)は既存の受容のまま(クラス doc の「現状の許容」に明記済み)。本タスクで変えない。
+- reparse point 検査(BK-M-1)の挙動は変えない。
+
+### 申し送り
+
+- マージ後に **GitHub Security Advisory の要否を検討**する(CLAUDE.md §9)。`SECURITY.md` は「深刻度が高い問題については、修正リリースと同時に GitHub Security Advisory を公開します」と約束している。
+
+---
+
 ## Task 5: `DocumentManager.FindByPath` を `ForNormalized` にする
 
 **レビュー区分:** 通常(仕様レビュー)
