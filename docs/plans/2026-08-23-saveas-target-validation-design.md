@@ -447,16 +447,37 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   `OkCancel("別の名前で保存しますか?") → SaveAsDocument(doc)` なら話が別で、
   **成功すれば Modified が下りてクローズも進む**のでクローズフローが正しく解決する。
   クローズループのキャンセル意味論と絡むため Task 6b では実装せず記録に留める。
-- **S-12**(Task 7 で判明・2026-08-23): **上書き確認の既定ボタンが OK 側**。
-  `IUserPrompt.OkCancel` は `MessageBox.Show(..., MessageBoxButtons.OKCancel, ...)` で、
-  WinForms の既定は Button1 = OK。Enter を反射的に押すと上書きが確定する。
-  Windows 純正の `SaveFileDialog.OverwritePrompt` は「はい / いいえ」で **いいえが既定**であり、
-  A-7 (a) の合流で kxEdit はその安全側の既定を失った(参照経由で従来出ていたのは純正の方)。
-  破壊的確認だけ既定を Cancel 側にするには seam に
-  `MessageBoxDefaultButton` を渡す引数(または `ConfirmDestructive` の追加)が要り、
-  文字コード劣化警告など既存 2 呼出と `FakePrompt` にも波及するため Task 7 では触っていない。
-  **最終ブランチレビュー(脆弱性パス)で判断する。** 併せて文言も
-  「上書きしますか?」に対してボタンが OK / キャンセルである点(はい / いいえではない)を再考する。
+- **S-12**(Task 7 で判明・2026-08-23。**Task 7 のレビューで根拠を差し替え、方針も ① 修正へ変更**):
+  **上書き確認の既定ボタンが OK 側だった。** `IUserPrompt.OkCancel` は
+  `MessageBox.Show(..., MessageBoxButtons.OKCancel, ...)` の 4 引数オーバーロードで、
+  WinForms の既定は Button1 = OK。
+
+  **起票時に「Windows 純正の `SaveFileDialog.OverwritePrompt` は『いいえ』が既定なので、
+  A-7 (a) の合流で安全側の既定を失った」と書いたが、これは未検証の主張だった。**
+  レビューは GUI 実行なしに検証できず、証拠はむしろ逆を指す(.NET の
+  `FileDialog.PromptFileOverwrite` は `MessageBoxButtons.YesNo` で既定 `Button1` = **Yes**)。
+  本ブランチでは「既定値を実物で確認せず意図から推論して外した」失敗が既に 2 回あるため
+  (§10.2 と Task 6b の `RestoreOpenFilesOnStartup`)、事実として残さない。
+  **実機確認は L5 の項目に落とす。**
+
+  **根拠は純正との比較を持ち出さなくても成立する。** `SaveAsDialog.cs` は
+  `AcceptButton = ok` を設定しているので、SR の主経路は
+  「ファイル名を打つ → **Enter**(OK 発火)→ MessageBox が OK フォーカスで開く →
+  **反射的な 2 回目の Enter でファイルが消える**」。読み上げが遅いときに Enter を連打するのは
+  SR ユーザーの実際の振る舞いであり、**A-7 (a) が追加した確認が、主経路の打鍵パターン
+  そのもので無力化される**。Windows の既定が何であれ成立する。
+
+  → **Task 7 の fixup で ① 修正**。`IUserPrompt.OkCancel` に
+  `bool defaultCancel = false` を足し、上書き確認だけ `true` を渡す。呼出元は
+  `FileController` の 2 箇所のみ(レビューが全 grep 済み)なので波及ゼロ。
+  **これは網の面でも利得がある**: `OverwritePrompt = false` の行は `SaveAsDialog` が Form で
+  テスト参照ゼロのため原理的に kill 不能(§10.8)だが、`defaultCancel` は `FakePrompt` に
+  記録できるので**安全側の既定が L3 の assertion になる**。L5 のみの保証を網のある保証へ変える。
+
+  併記した文言の不整合(「上書きしますか?」に対してボタンが OK / キャンセルで
+  はい / いいえではない)は**別の Minor として残す**。`IUserPrompt` に `YesNo` を足す変更は
+  安全側既定の修正に見合わない。なお既定を Cancel にすると、質問を聞いた直後に
+  フォーカスされたボタンとして「キャンセル」が読まれるので、不整合は緩和される方向に働く。
 - **S-8**(Task 5 の fixup で発生・2026-08-23): V-1 の修正 (b) で `WriteToPath` の catch フィルタに
   `ArgumentException` を足したが、これは `ArgumentNullException` と `ArgumentOutOfRangeException` も
   一緒に握る。フィルタのコメントは「**想定内の入出力エラーのみ握る。NullReference 等のロジックバグは
@@ -628,3 +649,25 @@ tool 由来の差分であって挙動変更ではない。
 崩さない、という §5 の判断の帰結)。テストは 2 で pin し、「1 に直さないこと」を doc に書いた。
 1 往復であることの pin は `PickSaveAsCount == 1` と「OkCancel が Log に出ない」で担保する
 (回数だけでは、確認が出て既定 `OkCancelResult = true` で続行した場合と区別できない)。
+
+### 10.8 追加の意図的な挙動変更(Task 7・§4.5 の表に無いもの)
+
+**自分自身のパスへ「名前を付けて保存」すると、上書き確認が出るようになった。**
+§4.5 の表は策定時のまま残すので、ここに記録する(CLAUDE.md §2)。
+
+レビューの判定は**妥当**。`参照` 経由の `SaveFileDialog` は `OverwritePrompt` が既定 true で、
+native prompt は「今そのタブで開いているファイル」を除外しないため、**従来から自分のパスでも
+確認していた**。したがってこれは新しい負担ではなく、A-7 (a) が訴えている非対称の解消そのもの。
+自分のパスへの SaveAs は通常「文字コードや改行を変えるため」に行うので、確認が効く場面でもある。
+Ctrl+S は従来どおり確認しない(`WriteToPath` は `exists` を捨てる)。
+
+### 10.9 原理的に pin できない production 行(Task 7)
+
+`SaveAsDialog.cs` の `OverwritePrompt = false` は**自動テストで kill できない**。
+`SaveAsDialog` は `Form` で、`tests/` からの参照が**ゼロ**(レビューが全 grep で確認)。
+この行を消しても全ソリューション 2173 件が緑のままになる。**唯一の網は L5 ④**
+(参照経由で既存ファイルを選び、確認が 1 回だけ出ることを実機で確認する)。
+
+**L5 を実施するまで、この行は無保護であると認識すること。** CSharpier や整理で消えても
+自動テストは何も言わない。§10.4 の known-unkillable と同じ枠だが、あちらが「防御コードで
+到達不能」なのに対し、こちらは「production の挙動なのにテスト層が届かない」点で質が違う。
