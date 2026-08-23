@@ -32,14 +32,39 @@ public enum PathNormalizeStatus
 /// <summary>
 /// 境界付き正規化の結果(Issue #48 / 設計書 §4)。
 /// <c>Status</c> が <see cref="PathNormalizeStatus.Ok"/> のときだけ <c>Full</c> が意味を持つ。
-/// それ以外は空文字 — <b>ただし <c>default(PathNormalizeResult)</c> だけは <c>Full</c> が
-/// null</b> になる(record struct のゼロ値は string を初期化できない)。
-/// どちらにせよ <b>Ok 以外で <c>Full</c> を読んではいけない</b>: 呼出側は必ず
-/// <c>Status</c> で分岐すること。
+/// それ以外は空文字。呼出側は必ず <c>Status</c> で分岐すること。
+/// <b>兄弟の <see cref="SaveTargetProbeResult"/> と同じく、<c>default</c> でも全メンバーが
+/// フェイルセーフ値になる</b>: <c>Status</c> はゼロ値が <see cref="PathNormalizeStatus.TimedOut"/>、
+/// <c>Full</c> は backing field が null のとき空文字を返す。positional record
+/// (<c>record struct X(Status, string Full)</c>)では <c>default</c> の <c>Full</c> が
+/// <b>null</b> になり、「ゼロ値をフェイルセーフ側に置く」原則から <c>Full</c> だけが外れる
+/// ため、手書きのプロパティにしてある(消費側は <c>SanitizeForDisplay.OneLine(...)</c> と
+/// <c>State.Path = ...</c> なので、null が漏れると NRE か「Path が null の無題タブ」になる)。
+/// <b>ただし等値比較だけはゼロ値を吸わない</b>: record struct の自動生成 <c>Equals</c> は
+/// プロパティではなく backing field を見るため、
+/// <c>default != new PathNormalizeResult(TimedOut, string.Empty)</c> になる(実測)。
+/// **テストで <c>Assert.Equal(default, result)</c> と書かないこと** —
+/// <c>Status</c> と <c>Full</c> を個別に assert する。
 /// </summary>
-/// <param name="Status">結果状態。</param>
-/// <param name="Full">正規化済み絶対パス(Ok のときのみ)。</param>
-public readonly record struct PathNormalizeResult(PathNormalizeStatus Status, string Full);
+public readonly record struct PathNormalizeResult
+{
+    private readonly string? _full;
+
+    /// <summary>結果を組み立てる。</summary>
+    /// <param name="status">結果状態。</param>
+    /// <param name="full">正規化済み絶対パス(Ok のときのみ)。</param>
+    public PathNormalizeResult(PathNormalizeStatus status, string full) =>
+        (Status, _full) = (status, full);
+
+    /// <summary>結果状態。ゼロ値は <see cref="PathNormalizeStatus.TimedOut"/>。</summary>
+    public PathNormalizeStatus Status { get; }
+
+    /// <summary>
+    /// 正規化済み絶対パス(<see cref="PathNormalizeStatus.Ok"/> のときのみ意味を持つ)。
+    /// <c>default</c> でも null にならない。
+    /// </summary>
+    public string Full => _full ?? string.Empty;
+}
 
 /// <summary>
 /// パスへの到達可否を短時間で判定し(HIGH-6)、パスの正規化そのものにも境界を張る
@@ -48,6 +73,11 @@ public readonly record struct PathNormalizeResult(PathNormalizeStatus Status, st
 /// UNC ロード時の 60 秒 UI 凍結を 5 秒プローブで回避するために FileController が使う。
 /// <b>プローブ 2 本</b>(<see cref="ProbeFileExistsWithTimeout"/> /
 /// <see cref="ProbeSaveTargetWithTimeout"/>)は、呼出側が**正規化済みの絶対パス**を渡す契約。
+/// <see cref="NormalizePathWithTimeout"/> だけはこの契約の**外**にある(その正規化を作るのが
+/// 仕事なので、生パスを受け取る)。
+/// <b>合成規則</b>: <see cref="NormalizePathWithTimeout"/> の出力(<c>Full</c>)を
+/// プローブ 2 本の入力に渡す。これが 3 本の関係のすべてであり、
+/// 「1 操作あたり正規化 1 本」(設計書 §3 の不変条件)はこの向きにしか成立しない。
 /// 理由は**両者共通で 1 つだけ**: 相対パスを渡すと内部の <c>File.Exists</c> /
 /// <c>Directory.Exists</c> がプロセスの CWD 基準で解決するので、例外も「到達不能」も返さずに
 /// **黙って別のファイルを指す**(= A-19 が正規化を要求する理由)。
@@ -58,8 +88,6 @@ public readonly record struct PathNormalizeResult(PathNormalizeStatus Status, st
 /// 空文字になるのはディレクトリー成分を持たない相対入力に限られ(<c>sub\...</c> では
 /// <c>GetDirectoryName</c> が <c>"sub"</c> を返すので機構自体が発火しない)、しかもそのときは
 /// CWD に同名ファイルが無い場合=読み取り側が返す false と区別がつかない。**非対称は無い。**
-/// <see cref="NormalizePathWithTimeout"/> だけはこの契約の**外**にある(その正規化を作るのが
-/// 仕事なので、生パスを受け取る)。
 /// </summary>
 public interface IReachabilityProbe
 {

@@ -255,10 +255,18 @@ public class FileReachabilityProbeTests
     }
 
     [Fact]
-    public void PathNormalizeResult_default_is_TimedOut() =>
+    public void PathNormalizeResult_default_is_TimedOut()
+    {
         // ゼロ値をフェイルセーフ側に置く設計の pin。
         // enum の並びを入れ替える変異(Ok = 0 にする)をここで kill する。
         Assert.Equal(PathNormalizeStatus.TimedOut, default(PathNormalizeResult).Status);
+
+        // Full も同じ原則に乗せる(I-2)。positional record
+        // (record struct X(Status, string Full))へ戻す変異=default の Full が null になる変異を
+        // ここで kill する。Task 3/4 の消費形は SanitizeForDisplay.OneLine(...) と
+        // State.Path = ... なので、null が漏れると NRE か「Path が null の無題タブ」になる。
+        Assert.Equal(string.Empty, default(PathNormalizeResult).Full);
+    }
 
     [Fact]
     public void NormalizePath_RelativeInput_ReturnsRootedPath()
@@ -279,5 +287,124 @@ public class FileReachabilityProbeTests
 
         Assert.Equal(PathNormalizeStatus.Invalid, result.Status);
         Assert.Equal(string.Empty, result.Full);
+    }
+
+    [Fact]
+    public void NormalizePath_OverLongPath_ReturnsInvalid()
+    {
+        // V-2 の網を seam 自身に持たせる。40,000 文字の相対入力は PathTooLongException
+        // (IOException 派生。実測 net9.0.8 で確認)。フィルタから IOException を外す変異を
+        // ここで kill する。実害は「Invalid を返さない」では済まない: フィルタ外の例外は
+        // work から task の fault として出て、WaitBounded がそれを投げ直すので
+        // **UI スレッドの未捕捉例外ダイアログ**になる(= PR #47 の V-2 が戻る)。
+        // FileControllerTests 側の V-2 網は Task 3 で 2 段の間接経由になるため、
+        // フィルタが住んでいるこのファイルに直接の網を置く。
+        var result = new FileReachabilityProbe().NormalizePathWithTimeout(
+            new string('a', 40000),
+            Timeout
+        );
+
+        Assert.Equal(PathNormalizeStatus.Invalid, result.Status);
+        Assert.Equal(string.Empty, result.Full);
+    }
+
+    // ===== 「timeout が実際に境界として使われる」ことの網 =====
+    //
+    // Run*Probe を直接叩くテストは work を差し替えられるので決定的だが、**公開メソッドが
+    // その timeout を素通しで渡しているか**は別の網が要る。末尾の timeout を
+    // Timeout.InfiniteTimeSpan へ替える変異は、それが無いと全緑で生存する
+    // (正規化なら S-15 の 21 秒凍結、既存 2 本なら HIGH-6 の 60 秒凍結が丸ごと戻る)。
+    //
+    // 1 回の呼び出しでは決定的にならない: Task.Wait(TimeSpan.Zero) はスピンせず IsCompleted を
+    // 返すだけだが、Task.Run 直後にプール側が先に完走することが**実測 20,000 回中 62 回
+    // (0.31%)**ある。単発 assert は CI でフレークする。そこで「N 回中 1 回でもフェイルセーフ値」
+    // を見る: 変異側(timeout 無視=無限待ち)は N 回とも本来値を返すので確実に kill でき、
+    // 未変異側が N 回連続で完走する確率は 0.0031^N ≒ 0 で安定する。
+    private const int ZeroTimeoutAttempts = 20;
+
+    [Fact]
+    public void NormalizePath_ZeroTimeout_FailsSafeToTimedOut()
+    {
+        var seen = new List<PathNormalizeStatus>();
+        for (int i = 0; i < ZeroTimeoutAttempts; i++)
+            seen.Add(
+                new FileReachabilityProbe()
+                    .NormalizePathWithTimeout(@"C:\Temp\a.txt", TimeSpan.Zero)
+                    .Status
+            );
+
+        Assert.Contains(PathNormalizeStatus.TimedOut, seen);
+    }
+
+    [Fact]
+    public void ProbeFileExists_ZeroTimeout_FailsSafeToNotFound()
+    {
+        // **本ブランチが作った穴ではない**が、既存 2 本にも同じ無網があったので同時に塞ぐ
+        // (同じファイル内で同型に書けるため)。存在するファイルを渡すので、境界が
+        // 効いていなければ 20 回とも true が返る。
+        using var tmp = new TempDir();
+        string path = tmp.File("a.txt");
+        File2.WriteAllText(path, "x");
+
+        var seen = new List<bool>();
+        for (int i = 0; i < ZeroTimeoutAttempts; i++)
+            seen.Add(new FileReachabilityProbe().ProbeFileExistsWithTimeout(path, TimeSpan.Zero));
+
+        Assert.Contains(false, seen);
+    }
+
+    [Fact]
+    public void ProbeSaveTarget_ZeroTimeout_FailsSafeToUnreachable()
+    {
+        // 同上(**本ブランチが作った穴ではない**)。到達可能なパスを渡すので、境界が
+        // 効いていなければ 20 回とも Reachable=true が返る。
+        using var tmp = new TempDir();
+
+        var seen = new List<bool>();
+        for (int i = 0; i < ZeroTimeoutAttempts; i++)
+            seen.Add(
+                new FileReachabilityProbe()
+                    .ProbeSaveTargetWithTimeout(tmp.File("not-yet.txt"), TimeSpan.Zero)
+                    .Reachable
+            );
+
+        Assert.Contains(false, seen);
+    }
+
+    private static bool ThrowsForWaitBoundedTest() => throw new InvalidOperationException("boom");
+
+    [Fact]
+    public void WaitBounded_FaultedTask_RethrowsOriginalExceptionType()
+    {
+        // I-6。NormalizePathWithTimeout の絞り込みフィルタを抜けた例外(=ロジックバグ)を、
+        // 移設前と同じ姿=元の型のまま呼出スレッドへ届けるための網。
+        // 素の task.Wait(TimeSpan) は faulted task の中身を AggregateException で包む
+        // (実測 net9.0.8。**task.Result を GetAwaiter().GetResult() へ替えても直らない** —
+        // 包むのは Result ではなく Wait のほう)。WaitBounded 側の
+        // ExceptionDispatchInfo による投げ直しを外す変異をここで kill する。
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            FileReachabilityProbe.WaitBounded(
+                Task.Run(ThrowsForWaitBoundedTest),
+                Timeout,
+                onTimeout: false
+            )
+        );
+
+        Assert.Equal("boom", ex.Message);
+    }
+
+    [Fact]
+    public void FakeNormalize_DefaultDelegatesToRealImplementation()
+    {
+        // Fake の既定が実装への委譲であることを pin する。素通しに変えると
+        // 「正規化されたつもり」のテストが黙って通り、網が vacuous になる
+        // (PR #47 の教訓)。Task 3 以降の V-2 網はこの委譲に依存する。
+        var fake = new Fakes.FakeReachabilityProbe();
+
+        var result = fake.NormalizePathWithTimeout("memo.txt", Timeout);
+
+        Assert.Equal(PathNormalizeStatus.Ok, result.Status);
+        Assert.True(System.IO.Path.IsPathFullyQualified(result.Full)); // 素通しなら "memo.txt" のまま
+        Assert.Equal(1, fake.NormalizeCallCount);
     }
 }

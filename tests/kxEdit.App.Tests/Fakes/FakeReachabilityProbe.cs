@@ -1,12 +1,24 @@
 namespace kxEdit.App.Tests.Fakes;
 
 /// <summary>
-/// <see cref="IReachabilityProbe"/> のテスト用フェイク。既定は Result=true(ローカル/正常 UNC は通過)。
-/// HIGH-6 の UNC プローブ経路(<c>ProbeFileExistsWithTimeout</c>)呼び出し回数と、
-/// 呼出時に FileController が渡したタイムアウト値(5 秒契約)の pin に使う。
+/// <see cref="IReachabilityProbe"/> のテスト用フェイク。3 メンバーとも、呼び出し回数と
+/// 呼出側が渡したタイムアウト値(5 秒契約)を pin するための観測点を持つ。
+/// <list type="bullet">
+/// <item><c>ProbeFileExistsWithTimeout</c> — 既定 <see cref="Result"/>=true
+/// (ローカル / 正常 UNC は通過)。HIGH-6 の UNC プローブ経路の pin。</item>
+/// <item><c>ProbeSaveTargetWithTimeout</c> — 既定は「到達可能・未存在」= 新規保存が通る形(A-4)。</item>
+/// <item><c>NormalizePathWithTimeout</c> — 既定は<b>実装への委譲</b>(素通しではない)。
+/// 理由は <see cref="NormalizeResult"/> のコメント(Issue #48)。</item>
+/// </list>
 /// </summary>
 public sealed class FakeReachabilityProbe : IReachabilityProbe
 {
+    /// <summary>
+    /// <c>NormalizePathWithTimeout</c> の既定応答を作る実装。状態を持たないので使い回す
+    /// (呼び出しごとに new しない)。
+    /// </summary>
+    private static readonly FileReachabilityProbe RealProbe = new();
+
     public bool Result { get; set; } = true;
     public int CallCount { get; private set; }
 
@@ -63,7 +75,6 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
         // 既定は「実 GetFullPath と同じ答え」を返す。Fake が素通し(path をそのまま返す)だと
         // 相対パス入力のテストが「正規化されたつもり」で通ってしまい、A-19 の網が
         // vacuous になる(PR #47 の教訓: Fake を注入するテストは本番実装の性質を証人にできない)。
-        return NormalizeResult
-            ?? new FileReachabilityProbe().NormalizePathWithTimeout(path, timeout);
+        return NormalizeResult ?? RealProbe.NormalizePathWithTimeout(path, timeout);
     }
 }
