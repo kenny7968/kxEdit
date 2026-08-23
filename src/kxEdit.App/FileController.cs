@@ -462,11 +462,15 @@ public sealed class FileController
             // OverwritePrompt を切って二重確認を避ける。
             // 文言はパスより問いを先に置く: SR は本文を頭から読むため、最大 200 文字のパスを
             // 先頭に置くと何を聞かれているかが最後まで分からない(他の文言と同じ「文 → : パス」)。
+            // defaultCancel: true が load-bearing(S-12): SaveAsDialog は AcceptButton = OK なので
+            // 主経路は「ファイル名を打つ → Enter」。読み上げが遅いときの Enter 連打で
+            // この MessageBox まで確定するため、既定が OK 側だと確認を足した意味が消える。
             if (
                 targetExists
                 && !_prompt.OkCancel(
                     $"同じ名前のファイルが既に存在します。上書きしますか? 保存先: {SanitizeForDisplay.OneLine(full, 200)}",
-                    "上書きの確認"
+                    "上書きの確認",
+                    defaultCancel: true
                 )
             )
             {
