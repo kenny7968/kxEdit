@@ -108,12 +108,13 @@ public sealed class DocumentManager : IDisposable
     /// ここではファイルシステムに触れない — 触ると開いているタブ数に比例して
     /// <c>GetFullPath</c> が走り、不達共有上の <c>~</c> パスが 1 つあるだけで
     /// UI が約 21 秒固まる(S-15)。正規化は呼出側が
-    /// <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> で 1 回だけ行う。
+    /// <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> で、1 操作につき多くとも
+    /// 1 回だけ行う(Ctrl+S のように 0 回で済む操作もある)。
     /// </summary>
     /// <remarks>
     /// <b>意図的な挙動変更(Issue #48 Task 5)</b>: 区切り差(<c>/</c> と <c>\</c>)や
     /// 相対セグメント(<c>..</c>)は<b>吸収しない</b>。以前は照会パスと開いている全タブのパスの
-    /// 両方に <see cref="PathKey.For"/>(= <c>GetFullPath</c>)を打っており、
+    /// 両方に <c>PathKey.For</c>(= <c>GetFullPath</c>。最終レビュー Q-I-2 で削除済み)を打っており、
     /// 呼び出しあたり 1 + タブ数回の実 I/O になりえた。Ctrl+S / 開く / grep ジャンプ / 復元は
     /// すべてここを通るため、不達共有上の <c>~</c> タブが 1 枚あるだけで全部が固まっていた。
     /// 吸収させたくなったらそれは呼出側が正規化を怠っているということなので、ここではなく

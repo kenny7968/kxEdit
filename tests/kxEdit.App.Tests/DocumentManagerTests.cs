@@ -149,9 +149,11 @@ public class DocumentManagerTests
     public void FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize() =>
         Sta.Run(() =>
         {
-            // 上の姉妹で、縛るのは**タブ側**(ループ内)。2 本要る理由: 照会側だけ / タブ側だけを
-            // PathKey.For へ戻す変異は、もう一方のテストでは緑のまま通り抜ける(片側が
-            // 区切りを吸収し、もう片側が吸収しないので結局一致しない)。
+            // 上の姉妹で、縛るのは**タブ側**(ループ内)。2 本要る理由: 照会側だけ / タブ側だけに
+            // GetFullPath を復活させる変異(旧 PathKey.For 相当。最終レビュー Q-I-2 で
+            // メソッド自体は削除したので、いま同じ形を作るには Path.GetFullPath を直に挟む)は、
+            // もう一方のテストでは緑のまま通り抜ける(片側が区切りを吸収し、もう片側が
+            // 吸収しないので結局一致しない)。
             // S-15 の実害はタブ数に比例するループ側なので、ここを空けると主犯が戻る。
             using var host = new Host();
             var doc = host.Docs.CreateNew();
@@ -171,7 +173,8 @@ public class DocumentManagerTests
         });
 
     /// <summary>
-    /// S-15 の主犯(<c>PathKey.For</c> = <c>GetFullPath</c>)が本当に消えたことを IL で直接固定する。
+    /// S-15 の主犯(<c>GetFullPath</c> による実 FS 接触。旧 <c>PathKey.For</c> の中身)が
+    /// 本当に消えたことを IL で直接固定する。
     /// 上の挙動 2 本は「<b>結果に効く</b> GetFullPath」しか捕まえられず、結果を捨てる呼出
     /// (挙動不変・コストだけが残る形)を見逃す。S-15 はコストの問題なので、
     /// 「呼出が 1 つも無い」ことをここで見る。
@@ -189,9 +192,9 @@ public class DocumentManagerTests
     /// </para>
     /// </summary>
     [Fact]
-    public void FindByPath_DoesNotCallFileSystemTouchingPathKeyFor()
+    public void FindByPath_DoesNotTouchFileSystem()
     {
-        var callees = CalleesOf(
+        var callees = IlCallees.Of(
             typeof(DocumentManager).GetMethod(nameof(DocumentManager.FindByPath))!
         );
         // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の 2 本は無意味)。
@@ -201,49 +204,11 @@ public class DocumentManagerTests
                 m.DeclaringType == typeof(kxEdit.Core.Text.PathKey)
                 && m.Name == nameof(kxEdit.Core.Text.PathKey.ForNormalized)
         );
-        Assert.DoesNotContain(
-            callees,
-            m =>
-                m.DeclaringType == typeof(kxEdit.Core.Text.PathKey)
-                && m.Name == nameof(kxEdit.Core.Text.PathKey.For)
-        );
-        // PathKey を経由しない直接呼び(Path.GetFullPath / Path.GetLongPathName 相当)も塞ぐ。
+        // Path のメンバーを直接呼ぶ形(GetFullPath / GetLongPathName 相当)を塞ぐ。
+        // かつてここには `PathKey.For` を名指しで禁じる assert も並べていたが、
+        // 最終レビュー Q-I-2 でメソッドごと削除したので、その再導入は実行時の走査ではなく
+        // コンパイルエラーで止まる。
         Assert.DoesNotContain(callees, m => m.DeclaringType == typeof(System.IO.Path));
-    }
-
-    /// <summary>
-    /// method の IL から <c>call</c> / <c>callvirt</c> の対象として解決できたメソッドを集める。
-    /// オペランドを誤読した偽陽性はメタデータテーブル種別(MethodDef / MemberRef / MethodSpec)と
-    /// 解決可否で捨てる。残る偽陽性は「呼んでいないものが混ざる」方向にしか働かないので、
-    /// 「呼んでいない」の assert が偽陽性で<b>緑になることはない</b>
-    /// (逆に、将来の本体変更で偽陽性が当たれば赤で気付ける)。
-    /// </summary>
-    private static List<MethodBase> CalleesOf(MethodInfo method)
-    {
-        byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;
-        var typeArgs = method.DeclaringType!.GetGenericArguments();
-        var methodArgs = method.GetGenericArguments();
-        var result = new List<MethodBase>();
-        for (int i = 0; i + 4 < il.Length; i++)
-        {
-            if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt(いずれも 4 バイトのトークンを伴う)
-                continue;
-            int token = BitConverter.ToInt32(il, i + 1);
-            byte table = (byte)((uint)token >> 24);
-            if (table != 0x06 && table != 0x0A && table != 0x2B) // MethodDef/MemberRef/MethodSpec
-                continue;
-            try
-            {
-                var m = method.Module.ResolveMethod(token, typeArgs, methodArgs);
-                if (m is not null)
-                    result.Add(m);
-            }
-            catch (Exception e) when (e is ArgumentException or BadImageFormatException)
-            {
-                // 解決できないトークン=オペランドの誤読。呼出ではないので捨てる。
-            }
-        }
-        return result;
     }
 
     // ===== Issue #48 Task 7: State.Path の不変条件(設計書 §3.1) =====

@@ -82,7 +82,9 @@ public readonly record struct PathNormalizeResult
 /// 仕事なので、生パスを受け取る)。
 /// <b>合成規則</b>: <see cref="NormalizePathWithTimeout"/> の出力(<c>Full</c>)を
 /// プローブ 2 本の入力に渡す。これが 3 本の関係のすべてであり、
-/// 「1 操作あたり正規化 1 本」(設計書 §3 の不変条件)はこの向きにしか成立しない。
+/// 「1 操作あたり正規化<b>多くとも</b> 1 本」(設計書 §3 の不変条件)はこの向きにしか成立しない。
+/// 「ちょうど 1 本」ではない: Ctrl+S は <c>State.Path</c> が正規化済みという不変条件により
+/// <b>0 本</b>で済む(<c>SaveDocument_ExistingPath_DoesNotNormalizeAtAll</c> が 0 を pin する)。
 /// 理由は**両者共通で 1 つだけ**: 相対パスを渡すと内部の <c>File.Exists</c> /
 /// <c>Directory.Exists</c> がプロセスの CWD 基準で解決するので、例外も「到達不能」も返さずに
 /// **黙って別のファイルを指す**(= A-19 が正規化を要求する理由)。

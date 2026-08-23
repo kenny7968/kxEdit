@@ -13,6 +13,14 @@ namespace kxEdit.App.Tests;
 /// 境界付き seam の呼び出し回数を見る網も、seam を通さない直呼びには反応しない。
 /// 残る手段が IL 走査。
 /// </para>
+/// <para>
+/// <b>この型は kxEdit.App.Tests 内で唯一の実装</b>(最終レビュー Q-m-1)。
+/// 以前は <c>DocumentManagerTests</c> にも同じ本文の private コピーがあり、
+/// S-15 の構造網が同一アセンブリ内で 2 本に分岐していた(片方だけ直る事故の温床)。
+/// <c>tests/kxEdit.Core.Tests/Text/RecentFilesListTests.cs</c> にも同じ走査があるが、
+/// あちらは<b>別アセンブリ</b>(Core.Tests は App.Tests を参照しない)なので統合できない=
+/// 重複したままが正しい。走査の意味を変えるときは 2 アセンブリ分を同時に直すこと。
+/// </para>
 /// </summary>
 internal static class IlCallees
 {

@@ -2,45 +2,42 @@ namespace kxEdit.Core.Text;
 
 /// <summary>
 /// 同一ファイル判定用の正規化キー。Windows 前提で大文字小文字を無視する。
-/// 入力の契約で 2 つに分かれる:
-/// <see cref="For"/> は生入力用で <c>GetFullPath</c> を通し、
-/// <see cref="ForNormalized"/> は正規化済み絶対パス用で**ファイルシステムに触れない**。
-/// 小文字化の規則そのものは <see cref="ForNormalized"/> が single source。
+/// 契約は 1 つだけ:<b>入力は正規化済みの絶対パス</b>で、
+/// ここは<b>ファイルシステムに一切触れない</b>。
 /// </summary>
 /// <remarks>
-/// Issue #48 (S-15): <c>Path.GetFullPath</c> は正規化後のパスに <c>~</c> が含まれると
+/// <b>生入力版(<c>For</c>)は削除した</b>(Issue #48 / 最終ブランチレビュー Q-I-2・
+/// public API の意図的な削除)。
+/// <para>
+/// 経緯: <c>Path.GetFullPath</c> は正規化後のパスに <c>~</c> が含まれると
 /// <c>GetLongPathName</c> を呼ぶ。これは境界の無い実ファイルシステム / ネットワーク呼び出しで、
-/// 不達の共有に対して約 21 秒 UI スレッドを止める(実測 2026-08-23)。
-/// このため<b>タブ数や履歴件数に比例して <see cref="For"/> を呼ぶ経路を作ってはいけない</b>。
-/// そういう経路(<c>DocumentManager.FindByPath</c> / <c>RecentFilesList.Add</c>)は
-/// <see cref="ForNormalized"/> を使い、正規化は操作あたり 1 回・境界付きで済ませる。
+/// 不達の共有に対して約 21 秒 UI スレッドを止める(S-15・実測 2026-08-23)。
+/// <c>For</c> はその <c>GetFullPath</c> を内包したまま、タブ数や履歴件数に比例して呼ばれる場所
+/// (<c>DocumentManager.FindByPath</c> / <c>RecentFilesList.Add</c>)から使われていた=
+/// S-15 の凶器そのもの。
+/// </para>
+/// <para>
+/// 両方の呼出側を <see cref="ForNormalized"/> へ移した時点で <c>For</c> の実消費者はゼロに
+/// なったが、<b>残しておくこと自体が罠だった</b>: より短く自然な名前が
+/// <see cref="ForNormalized"/> の隣に並び、その doc が「相対パス・区切り文字差を吸収する」と
+/// まさに欲しく見える能力を謳う。次にパス比較を書く人が最初に手を伸ばすのはそちらで、
+/// 1 行で S-15 が戻る。消したことで、その再導入は実行時のリフレクション網ではなく
+/// <b>コンパイルエラー</b>という強く安い保証で止まる。
+/// </para>
+/// <para>
+/// 正規化が要るなら、ここではなく<b>境界付き seam</b>
+/// (<c>IReachabilityProbe.NormalizePathWithTimeout</c>)を通す。1 操作につき多くとも 1 回。
+/// </para>
+/// <para>
+/// <b>一緒に消えた副次契約</b>: <c>For</c> は <c>GetFullPath</c> の例外を空文字へ落として
+/// 「正規化できない入力(埋め込み NUL 等)はまとめて 1 件」に集約していた(CSV-L-8)。
+/// 唯一の消費者だった <c>RecentFilesList.Add</c> が <see cref="ForNormalized"/> へ移り、
+/// 生の綴りのまま重複判定するようになったので、この契約には生きた消費者がいない
+/// (件数は <c>RecentFilesList.MaxItems</c> で頭打ちなので増幅も起きない)。
+/// </para>
 /// </remarks>
 public static class PathKey
 {
-    /// <summary>
-    /// 生入力用。<c>GetFullPath</c> で相対パス・区切り文字差を吸収してからキー化する。
-    /// 正規化できない場合は空文字を返し、「invalid はまとめて 1 件」に集約する（CSV-L-8）。
-    /// <b>実 I/O を伴いうる</b>(remarks 参照)。UI スレッドから 1 操作につき 1 回を超えて
-    /// 呼ばないこと。
-    /// </summary>
-    public static string For(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-            return string.Empty;
-        string full;
-        try
-        {
-            full = Path.GetFullPath(path);
-        }
-        catch
-        {
-            // CSV-L-8 (v0.11): GetFullPath 例外時は攻撃者制御の生 path を返すのを避け、
-            // 空文字（= dedup 用の invariant「invalid はまとめて 1 件」）に落とす。
-            return string.Empty;
-        }
-        return ForNormalized(full);
-    }
-
     /// <summary>
     /// 正規化済み絶対パス用。小文字化するだけで、<b>ファイルシステムには一切触れない</b>。
     /// 呼出側が正規化済みパスを渡す契約(設計書 §3.1 の不変条件)。

@@ -35,14 +35,16 @@ public static class RecentFilesList
     /// <b>path と current の各項目は正規化済み絶対パス</b>(Issue #48 / 設計書 §3.1 の不変条件)。
     /// </summary>
     /// <remarks>
-    /// Issue #48: 以前はここで <see cref="PathKey.For"/>(= <c>GetFullPath</c>)を
-    /// 1 + 履歴件数だけ呼んでいた。<c>RegisterRecent</c> は開くたび・保存が成功するたびに走り、
+    /// Issue #48: 以前はここで <c>PathKey.For</c>(= <c>GetFullPath</c>。最終レビュー Q-I-2 で
+    /// 削除済み)を 1 + 履歴件数だけ呼んでいた。<c>RegisterRecent</c> は開くたび・保存が成功するたびに走り、
     /// 最近のファイルは設定に永続するので、一度でも不達共有上の <c>~</c> パスを開くと
     /// 以後すべての開く・保存が約 21 秒固まった(S-15 と同一機構・#47 以前からの既存バグ)。
     /// 既存 settings.json に残る未正規化エントリーは dedup されなくなるが、
     /// データ損失は無く 1 度開き直せば解消する(設計書 §3.4 の受容)。
-    /// 同じ理由で「正規化できない入力はまとめて 1 件」という <see cref="PathKey.For"/> 側の
+    /// 同じ理由で「正規化できない入力はまとめて 1 件」という <c>PathKey.For</c> 側の
     /// 集約(CSV-L-8)もここでは効かなくなるが、件数は max で頭打ちなので増幅は起きない。
+    /// この契約は本メソッドが唯一の消費者だったため、最終レビュー Q-I-2 で <c>PathKey.For</c> ごと
+    /// 削除した(<see cref="PathKey"/> の remarks 参照)。
     /// </remarks>
     public static List<string> Add(IEnumerable<string> current, string path, int max)
     {

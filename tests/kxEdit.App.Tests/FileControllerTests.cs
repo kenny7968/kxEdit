@@ -752,8 +752,11 @@ public class FileControllerTests
     /// <c>GetFullPath</c> を直接呼ぶ実装なら <c>typed.txt</c> にできて落ちる。
     /// </para>
     /// <para>
-    /// あわせて <c>NormalizeCallCount == 1</c> を pin する。「1 操作あたり正規化 1 本」は
-    /// 設計書 §3 の不変条件で、境界付きにした意味(5 秒 × N にしない)がここに掛かっている。
+    /// あわせて <c>NormalizeCallCount == 1</c> を pin する。「1 操作あたり正規化<b>多くとも</b>
+    /// 1 本」は設計書 §3 の不変条件で、境界付きにした意味(5 秒 × N にしない)がここに掛かっている。
+    /// 上限であって下限ではない: Ctrl+S は 0 本
+    /// (<see cref="SaveDocument_ExistingPath_DoesNotNormalizeAtAll"/>)。ここが 1 本なのは
+    /// SaveAs が生入力を受け取る入口だから。
     /// </para>
     /// </summary>
     [Fact]
@@ -774,7 +777,9 @@ public class FileControllerTests
 
             Assert.True(host.File.SaveAs());
 
-            Assert.Equal(1, host.Probe.NormalizeCallCount); // 5 秒 × N にしない
+            // 生入力を受け取る入口なので 1 本(5 秒 × N にしない)。不変条件は「多くとも 1 本」で、
+            // Ctrl+S のように 0 本の操作もある。
+            Assert.Equal(1, host.Probe.NormalizeCallCount);
             Assert.Equal(typed, host.Probe.NormalizeLastPath); // 生入力がそのまま seam へ届く
             Assert.Equal(redirected, doc.State.Path);
             Assert.True(File2.Exists(redirected));
@@ -791,16 +796,17 @@ public class FileControllerTests
     // 3 本は役割が分かれていて、どれも他の 2 本では代替できない:
     //   (a) DoesNotNormalizeAtAll        — Ctrl+S が seam を 0 回しか打たない(絶対値)
     //   (b) DoesNotScaleNormalizeCalls   — その 0 回がタブ数に依存しない(1+N の N 側)
-    //   (c) DoesNotNormalizeOutsideTheSeam — seam を通さない直呼びが増えていない(構造)
+    //   (c) PathEntryPoints_DoNotNormalizeOutsideTheSeam
+    //                                    — seam を通さない直呼びが増えていない(構造)
     // (a)(b) は seam の呼び出し回数しか見ないので、`Path.GetFullPath` の直呼びが
     // 足された場合は**全緑のまま生存する**(結果の綴りは変わらないので挙動でも観測できない)。
     // そこだけを (c) が IL で塞ぐ。逆に (c) は回数を数えないので、seam を 2 回打つ変異は
     // (a)(b) にしか当たらない。
     //
     // 同じ「網の役割分担」は DocumentManager 側にもある: FindByPath の PathKey.ForNormalized を
-    // PathKey.For へ戻す変異は、`For` が seam を通らないので (a)(b) では赤にならない。
-    // それを殺すのは DocumentManagerTests の
-    // FindByPath_DoesNotCallFileSystemTouchingPathKeyFor(実測で確認済み)。
+    // GetFullPath 経由へ戻す変異(旧 PathKey.For 相当)は、その経路が seam を通らないので
+    // (a)(b) では赤にならない。それを殺すのは DocumentManagerTests の
+    // FindByPath_DoesNotTouchFileSystem(実測で確認済み)。
 
     /// <summary>
     /// Issue #48 の成果そのもの。Ctrl+S は不変条件(<c>State.Path</c> は正規化済み)により
@@ -833,19 +839,20 @@ public class FileControllerTests
 
     /// <summary>
     /// 1+N の N 側が消えたことの網。設計書 §5 のミューテーション項目 2 が指摘した穴
-    /// —「seam の呼び出し回数」だけを見ていると <c>FindByPath</c> を <c>PathKey.For</c> へ
-    /// 戻す変異を kill できない(<c>For</c> は seam を通らない)— への対処として、
-    /// <b>タブ数を変えても回数が変わらない</b>ことを固定する。
+    /// —「seam の呼び出し回数」だけを見ていると <c>FindByPath</c> を <c>GetFullPath</c> 経由へ
+    /// 戻す変異(旧 <c>PathKey.For</c> 相当)を kill できない(その経路は seam を通らない)—
+    /// への対処として、<b>タブ数を変えても回数が変わらない</b>ことを固定する。
     /// <para>
     /// タブ数を実際に振る(1 と 5)のが load-bearing。固定の 5 タブで「差分 0」を見るだけだと
     /// 上の姉妹と同じことしか言っておらず、「スケールしない」という主張の証人にならない。
     /// </para>
     /// <para>
     /// <b>この網では kill できない変異</b>: <c>FindByPath</c> の <c>ForNormalized</c> を
-    /// <c>For</c> へ戻す変異はここでは赤にならない(<c>For</c> は <c>Path.GetFullPath</c> を
-    /// 直接呼ぶので seam のカウンタが動かない)。承知のうえで置いている。実際の kill 役は
+    /// <c>GetFullPath</c> 経由へ戻す変異(旧 <c>PathKey.For</c> 相当)はここでは赤にならない
+    /// (<c>Path.GetFullPath</c> を直接呼ぶので seam のカウンタが動かない)。承知のうえで置いている。
+    /// 実際の kill 役は
     /// <c>DocumentManagerTests</c> の 3 本(実測 2026-08-24 — この変異で赤になるのはこの 3 本だけ):
-    /// <c>FindByPath_DoesNotCallFileSystemTouchingPathKeyFor</c>(構造)・
+    /// <c>FindByPath_DoesNotTouchFileSystem</c>(構造)・
     /// <c>FindByPath_DoesNotNormalizeSeparators_CallerMustNormalize</c> と
     /// <c>FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize</c>(挙動)。
     /// Core の <c>PathKeyTests.ForNormalized_does_not_normalize_separators</c> は
@@ -887,40 +894,66 @@ public class FileControllerTests
     }
 
     /// <summary>
-    /// Ctrl+S の経路が <c>Path.GetFullPath</c> / <c>PathKey.For</c> を<b>直接</b>呼んでいない
-    /// ことを IL で固定する。上の 2 本(回数の網)の死角を塞ぐ専用の網。
+    /// FileController のパス経路が <c>Path.GetFullPath</c> を<b>直接</b>呼んでいないことを
+    /// IL で固定する。上の 2 本(回数の網)の死角を塞ぐ専用の網。
     /// <para>
-    /// <b>なぜ挙動テストで代替できないか</b>: <c>State.Path</c> は既に正規化済みなので、
-    /// そこへ <c>GetFullPath</c> を掛け直しても<b>結果の綴りは 1 文字も変わらない</b>。
+    /// <b>なぜ挙動テストで代替できないか</b>: 走査対象が扱うパスはどれも境界付き seam を
+    /// 通った後の正規化済みパスなので、そこへ <c>GetFullPath</c> を掛け直しても
+    /// <b>結果の綴りは 1 文字も変わらない</b>(<c>Path.GetFullPath</c> は絶対パスに対して冪等)。
     /// 保存先も内容も同じ、seam のカウンタも動かない。観測できる差は「不達共有で 21 秒
     /// 止まる」ことだけで、それはテストでは再現しない(実 FS / ネットワークが要る)。
     /// = S-15 の再導入は<b>構造でしか検出できない</b>。
     /// </para>
     /// <para>
-    /// 走査対象を <c>SaveDocument</c> と <c>WriteToPath</c> の 2 つにするのは、Ctrl+S が
-    /// 前者から後者へ素通しで委譲するため。片方だけ見ると、もう片方に足された 1 行を見逃す。
-    /// <c>PathKey.ForNormalized</c> は許す(ファイルシステム非接触=S-15 の対象外)。
+    /// <b>走査対象が 5 つある理由</b>。それぞれ別の穴を塞いでいて、どれも他で代替できない:
+    /// <list type="number">
+    /// <item><c>SaveDocument</c> — Ctrl+S の入口。</item>
+    /// <item><c>WriteToPath</c> — Ctrl+S が素通しで委譲する先。<c>SaveDocument</c> だけ見ると、
+    /// こちらに足された 1 行を見逃す。</item>
+    /// <item><c>TryOpenOrActivateCore</c> — <b>生パスを実際に受け取る入口その 1</b>
+    /// (最終レビュー Q-I-1)。</item>
+    /// <item><c>SaveAsDocument</c> — 同じく生パスを受け取る入口その 2。</item>
+    /// <item><c>NormalizeSavePath</c> — (4) が 1 段越しに呼ぶ薄いヘルパ。この走査は
+    /// <b>直接の</b>呼出しか見ないので、ここを対象に入れないと (4) の網を 1 ホップで迂回できる。</item>
+    /// </list>
+    /// (3)(4) を足したのは最終ブランチレビュー Q-I-1 の指摘による。それまで網は下流((1)(2)と
+    /// <c>FindByPath</c> / <c>RecentFilesList.Add</c>)しか見ておらず、<c>string full = norm.Full;</c>
+    /// を <c>Path.GetFullPath(norm.Full)</c> へ書き換える変異—<b>S-15 の再導入とバイト単位で同じ形</b>—が
+    /// Core / App 全緑のまま生存していた(実測)。既に絶対なパスでも <c>GetLongPathName</c> は走る
+    /// (<c>GetFullPath(@"C:\PROGRA~1\a.txt")</c> → <c>C:\Program Files\a.txt</c>)ので、
+    /// この 1 行が不達共有上の <c>~</c> パスに対して 21 秒の凍結を戻す。
+    /// </para>
+    /// <para>
+    /// <c>Path</c> のメンバーを丸ごと禁じるのではなく <c>GetFullPath</c> だけを見るのが要点:
+    /// (3)(4) は <c>Path.GetDirectoryName</c> を<b>正当に</b>呼ぶ(V-1 の門番)。
+    /// <c>PathKey.ForNormalized</c> も許す(ファイルシステム非接触=S-15 の対象外)。
+    /// なお <c>PathKey.For</c> を見る assert は不要になった: 最終レビュー Q-I-2 でメソッドごと
+    /// 削除したので、呼び直しは実行時の走査ではなく<b>コンパイルエラー</b>で止まる。
     /// </para>
     /// </summary>
     [Fact]
-    public void SaveDocument_DoesNotNormalizeOutsideTheSeam()
+    public void PathEntryPoints_DoNotNormalizeOutsideTheSeam()
     {
-        var save = typeof(FileController).GetMethod(
+        var save = FileControllerMethod(
             nameof(FileController.SaveDocument),
             BindingFlags.Public | BindingFlags.Instance
         );
-        var write = typeof(FileController).GetMethod(
-            "WriteToPath",
-            BindingFlags.NonPublic | BindingFlags.Instance
-        );
-        // 改名で GetMethod が null を返し、走査ゼロ件が「呼んでいない」と読める形になるのを防ぐ。
-        Assert.NotNull(save);
-        Assert.NotNull(write);
+        var write = FileControllerMethod("WriteToPath");
+        var open = FileControllerMethod("TryOpenOrActivateCore");
+        var saveAs = FileControllerMethod("SaveAsDocument");
+        var normalizeSavePath = FileControllerMethod("NormalizeSavePath");
 
         var saveCallees = IlCallees.Of(save);
         var writeCallees = IlCallees.Of(write);
+        var openCallees = IlCallees.Of(open);
+        var saveAsCallees = IlCallees.Of(saveAs);
+        var normalizeCallees = IlCallees.Of(normalizeSavePath);
 
         // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の assert は無意味)。
+        static bool IsNormalizeSeam(MethodBase m) =>
+            m.DeclaringType == typeof(IReachabilityProbe)
+            && m.Name == nameof(IReachabilityProbe.NormalizePathWithTimeout);
+
         Assert.Contains(
             saveCallees,
             m =>
@@ -932,8 +965,24 @@ public class FileControllerTests
             m =>
                 m.DeclaringType == typeof(TextFileService) && m.Name == nameof(TextFileService.Save)
         );
+        Assert.Contains(openCallees, IsNormalizeSeam);
+        Assert.Contains(normalizeCallees, IsNormalizeSeam);
+        // SaveAs は seam を直接ではなくヘルパ経由で呼ぶ。そのヘルパ自身が (5) で走査される。
+        Assert.Contains(
+            saveAsCallees,
+            m => m.DeclaringType == typeof(FileController) && m.Name == "NormalizeSavePath"
+        );
 
-        foreach (var callees in new[] { saveCallees, writeCallees })
+        foreach (
+            var callees in new[]
+            {
+                saveCallees,
+                writeCallees,
+                openCallees,
+                saveAsCallees,
+                normalizeCallees,
+            }
+        )
         {
             Assert.DoesNotContain(
                 callees,
@@ -941,11 +990,21 @@ public class FileControllerTests
                     m.DeclaringType == typeof(System.IO.Path)
                     && m.Name == nameof(System.IO.Path.GetFullPath)
             );
-            Assert.DoesNotContain(
-                callees,
-                m => m.DeclaringType == typeof(PathKey) && m.Name == nameof(PathKey.For)
-            );
         }
+    }
+
+    /// <summary>
+    /// <see cref="FileController"/> のメソッドを名前で引く。既定は private インスタンスメソッド。
+    /// 改名で <c>GetMethod</c> が null を返し、走査ゼロ件が「呼んでいない」と読める形になるのを防ぐ。
+    /// </summary>
+    private static MethodInfo FileControllerMethod(
+        string name,
+        BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance
+    )
+    {
+        var method = typeof(FileController).GetMethod(name, flags);
+        Assert.NotNull(method);
+        return method;
     }
 
     // ===== A-7 (b): 他タブ重複の検知 =====
@@ -1880,8 +1939,10 @@ public class FileControllerTests
     /// <c>typed.txt</c> だが seam は実在する <c>redirected.txt</c> を返す。下流
     /// (<c>LoadInto</c> / <c>FindByPath</c> / <c>RegisterRecent</c>)が本当に seam の出力を
     /// 使っているなら、開けて・本文が読めて・履歴に載って・2 回目は同じタブが再利用される。
-    /// あわせて <c>NormalizeCallCount == 1</c> を pin する(「1 操作あたり正規化 1 本」=
-    /// 設計書 §3 の不変条件。境界付きにした意味がここに掛かっている)。
+    /// あわせて <c>NormalizeCallCount == 1</c> を pin する(「1 操作あたり正規化<b>多くとも</b>
+    /// 1 本」= 設計書 §3 の不変条件。境界付きにした意味がここに掛かっている。上限であって
+    /// 下限ではなく、Ctrl+S は 0 本 =
+    /// <see cref="SaveDocument_ExistingPath_DoesNotNormalizeAtAll"/>)。
     /// <para>
     /// <b>打つ側を<c>裸の相対名</c>にしてあるのが load-bearing</b>(Task 4 レビュー 仕様-m-2):
     /// これが絶対パスだと、ガードのオペランドを <c>GetDirectoryName(norm.Full)</c> から
@@ -1909,7 +1970,9 @@ public class FileControllerTests
             var doc = host.File.TryOpenOrActivate(typed);
 
             Assert.NotNull(doc);
-            Assert.Equal(1, host.Probe.NormalizeCallCount); // 5 秒 × N にしない
+            // 生入力を受け取る入口なので 1 本(5 秒 × N にしない)。不変条件は「多くとも 1 本」で、
+            // Ctrl+S のように 0 本の操作もある。
+            Assert.Equal(1, host.Probe.NormalizeCallCount);
             Assert.Equal(typed, host.Probe.NormalizeLastPath); // 生入力がそのまま seam へ届く
             Assert.Equal(redirected, doc!.State.Path); // LoadInto が seam の出力を使う
             Assert.Equal("redirected", doc.Editor.Text);

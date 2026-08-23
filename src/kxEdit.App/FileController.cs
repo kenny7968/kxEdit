@@ -715,8 +715,9 @@ public sealed class FileController
     /// 正規化できない入力は例外ではなく <see cref="PathNormalizeStatus.Invalid"/> で戻り、
     /// 呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
     /// 未捕捉例外ダイアログにしない(例外を握る実体は seam の中にある)。
-    /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
-    /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
+    /// (かつて PathKey.For も内部で GetFullPath していたが、あちらは失敗時に空文字へ落として
+    /// dedup キーを 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違った。
+    /// 実消費者が消えたので最終レビュー Q-I-2 でメソッドごと削除した。)
     /// <para>
     /// <b>Issue #48 (S-15)</b>: 以前ここは <see cref="System.IO.Path.GetFullPath(string)"/> を
     /// 直接呼び、remarks に「GetFullPath は <c>GetFullPathNameW</c> による名前解決のみで
