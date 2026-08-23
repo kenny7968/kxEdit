@@ -519,6 +519,15 @@ public class FileControllerTests
 
     // ===== A-7 (b): 他タブ重複の検知 =====
 
+    /// <summary>
+    /// **順序の契約も pin する**(設計書 §4.2): 重複タブ判定は保存先プローブ+上書き確認より
+    /// **前**。拒否する相手の到達性を調べる意味はなく、遠隔共有で無駄な 5 秒を待たせない。
+    /// fixture の <c>occupied</c> は実在するので、プローブ+確認を重複判定の上へ持ち上げる変異では
+    /// 先に「上書きの確認」が出る = <c>DoesNotContain(OkCancel)</c> が落ちる
+    /// (ローカルパスなので <c>SaveTargetCallCount</c> は動かず、Ctrl+S 側の双子
+    /// <see cref="Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe"/> のような
+    /// プローブ回数では観測できない)。
+    /// </summary>
     [Fact]
     public void SaveAs_PathOpenInAnotherTab_ShowsErrorAndReopens() =>
         Sta.Run(() =>
@@ -542,6 +551,8 @@ public class FileControllerTests
                 host.Prompt.Log,
                 e => e.Kind == "Error" && e.Text.Contains("別のタブで開いています")
             );
+            // 順序の pin(上の doc を参照): 重複タブは確認より前に弾く
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
             Assert.Equal("original", File2.ReadAllText(occupied)); // 上書きされていない
             Assert.Null(doc.State.Path);
         });
@@ -573,6 +584,13 @@ public class FileControllerTests
             Assert.True(host.File.SaveAs());
 
             Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("別のタブで開いています"));
+            // A-7 (a) 追加後はこのテストが新しい上書き確認を通る(mine は実在するため)。
+            // FakePrompt.OkCancelResult 既定 true で素通りするので、通ること自体を明示して
+            // 「気付かないうちに別の経路を測っている」状態にしない。
+            // 自分自身のパスへの SaveAs で確認が出るのは意図どおり: 従来も「参照」経由なら
+            // SaveFileDialog の OverwritePrompt が同じ確認を出していた(自分が開いている
+            // ファイルを除外する仕組みは無い)= 非対称の解消であって新しい負担ではない。
+            Assert.Contains(host.Prompt.Log, e => e.Caption == "上書きの確認");
             Assert.Contains("new", File2.ReadAllText(mine));
         });
 
@@ -808,9 +826,23 @@ public class FileControllerTests
                 StringComparison.Ordinal
             );
             Assert.Contains(path, confirm.Text, StringComparison.Ordinal); // どこへ書くかも読める
+            // S-12: 破壊的な確認は既定フォーカスをキャンセル側に置く。SaveAsDialog は
+            // AcceptButton = OK なので「ファイル名を打つ → Enter」が主経路であり、
+            // 既定が OK 側だと Enter 連打でこの確認ごと確定してしまう。
+            Assert.Equal(("上書きの確認", true), Assert.Single(host.Prompt.OkCancelCalls));
             Assert.Contains("new", File2.ReadAllText(path));
         });
 
+    /// <summary>
+    /// 「いいえ」でファイルもドキュメント状態も一切変えずにダイアログへ戻る。
+    /// **非既定のエンコード/BOM/改行を選ぶのが要点**(CLAUDE.md §4 の no-change 規範。
+    /// 本ファイルでは 3 度目の同型指摘): 既定(65001 / BOM なし / CRLF)を選ぶと
+    /// 「State を触っていない」が既定値と区別できず、**確認ブロックを
+    /// <c>doc.State.Encoding = newEncoding</c> の下へ移す変異が全緑で生存する**。
+    /// その位置に落ちると「State だけ新エンコードで Path は旧のまま」が残り、
+    /// 後続の Ctrl+S が元ファイルを別エンコードでサイレント上書きする
+    /// (FileController の同箇所のコメントが警告しているデータ破損そのもの)。
+    /// </summary>
     [Fact]
     public void SaveAs_OverwriteDeclined_KeepsFileAndReopensDialog() =>
         Sta.Run(() =>
@@ -820,15 +852,21 @@ public class FileControllerTests
             string path = tmp.File("a.txt");
             File2.WriteAllText(path, "original");
             var doc = host.Docs.CreateNew();
-            doc.Editor.Text = "new";
+            doc.Editor.Text = "new"; // ASCII=932 でも劣化警告は出ない
             host.Prompt.OkCancelResult = false; // 「いいえ」
-            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(path, 65001, false, LineEnding.Crlf));
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(path, 932, HasBom: true, LineEnding.Lf)
+            );
 
             Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
 
             Assert.Equal(2, host.Dialogs.PickSaveAsCount);
             Assert.Equal("original", File2.ReadAllText(path)); // 上書きされていない
             Assert.Null(doc.State.Path);
+            // 選んだ 932 / BOM / LF はどれも State に触れていない(既定のまま)
+            Assert.Equal(65001, doc.State.Encoding.CodePage);
+            Assert.False(doc.State.HasBom);
+            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding);
         });
 
     /// <summary>
@@ -1022,6 +1060,9 @@ public class FileControllerTests
                 host.Prompt.Log,
                 e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
             );
+            // S-12: 既定フォーカスをキャンセル側へ倒したのは**上書き確認だけ**(こちらは現状維持)。
+            // 非対称が意図的であることを固定する = OkCancel の既定引数を true へ変える変異を殺す。
+            Assert.Equal(("文字コードの警告", false), Assert.Single(host.Prompt.OkCancelCalls));
         });
 
     [Fact]
