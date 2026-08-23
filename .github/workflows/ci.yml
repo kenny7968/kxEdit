@@ -57,6 +57,18 @@ jobs:
       - name: App.Tests(LocalOnly 除外)
         run: dotnet test tests/kxEdit.App.Tests -c Release --no-build --filter "Category!=LocalOnly"
 
+      # Issue #48 最終レビュー Q-I-4: ここまでの 3 ステップはすべて Release で、Debug.Assert は
+      # [Conditional("DEBUG")] のため Release バイナリに残らない。DocumentState.Path の不変条件を
+      # 守る網は Debug.Assert なので、Release だけでは 1 行も走らない(実証: IsPathFullyQualified →
+      # IsPathRooted の変異が Release 全緑で生存・Debug では赤)。
+      # --no-build を付けないのは別構成のバイナリが要るため。ビルドは App.Tests の依存グラフだけ。
+      # Core.Tests の Debug は足さない(既知 S-5 で 4 件赤)。
+      # ステップ名は tools/pre-merge-check.ps1 と**完全一致**させる(CLAUDE.md §6: ローカル / CI の
+      # 失敗ログを同じキーワードで探せるようにする)。App.Tests に LocalOnly は現状 0 件だが、
+      # 上の Release 版と同じ除外を付けて将来追加時の CI 落ちを防ぐ。
+      - name: App.Tests(Debug・Debug.Assert 有効)
+        run: dotnet test tests/kxEdit.App.Tests -c Debug --filter "Category!=LocalOnly"
+
       # MD-L-2: 依存 (直接/推移) の可視化。依存更新 PR で人間が diff を確認できる
       # ようログ出力するだけの参考ステップ。lock file check は行わないため
       # continue-on-error で失敗しても CI 全体は成功扱いにする。

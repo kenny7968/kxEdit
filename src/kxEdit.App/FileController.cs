@@ -41,6 +41,24 @@ public sealed class FileController
     // 復元は「ユーザーが開いた」相当ではないため RecentFiles を汚さない=起動前の順序を保つ。
     private bool _suppressRegisterRecent;
 
+    /// <summary>
+    /// パス正規化に張る境界(S-15)。<b>開く入口(<see cref="TryOpenOrActivate"/>)と保存入口
+    /// (<see cref="NormalizeSavePath"/>)で共有する</b>ので、両者の境界が食い違うことは
+    /// 構造上ありえない(doc の約束ではなく定数の共有で担保する)。
+    /// <b>警告文言の「n 秒」もこの値から補間する</b>ので、ここを変えれば文言も追随する
+    /// (Task 3 レビュー 脆弱-m-1: 以前は文言側が literal の二重管理で、文言だけを 30 秒に
+    /// 書き換える変異が全緑で生存した)。
+    /// <para>
+    /// <b>到達性プローブ(<see cref="TryProbeFileExists"/> / <see cref="TryInspectSaveTarget"/>)の
+    /// 5 秒はここへ寄せていない</b>(Task 4 レビュー 脆弱-m-2 の判断)。同じ数値だが<b>別の境界</b>で、
+    /// 寄せると「正規化の待ちを 10 秒にしたい」がプローブの待ちまで黙って変える結合を新設する。
+    /// 文言との二重管理も無い(プローブ側の文言に秒数が出ない)ため、Task 3 で潰した形とは違う。
+    /// プローブ側の literal は <c>FakeReachabilityProbe.LastTimeout</c> /
+    /// <c>SaveTargetLastTimeout</c> の assert が既に pin している。
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan NormalizeTimeout = TimeSpan.FromSeconds(5);
+
     public FileController(
         DocumentManager docs,
         IWin32Window owner,
@@ -143,18 +161,120 @@ public sealed class FileController
     /// 既に開いていればそのタブをアクティブ化（Q4：二重編集の上書き事故防止）し、
     /// 最近のファイルは先頭へ繰上げ。新規に開けなければ作りかけタブを破棄して
     /// 直前のアクティブへ戻し null を返す。
+    /// <para>
+    /// <b>Issue #48 / 設計書 §3.6</b>: 入口で 1 回だけ境界付き正規化する。以降
+    /// (<c>FindByPath</c> / <see cref="LoadInto"/> / <see cref="RegisterRecent"/>)は
+    /// 正規化済みパスを受け取る契約になる。
+    /// </para>
     /// </summary>
-    public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false)
+    public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false) =>
+        TryOpenOrActivateCore(path, suppressAutoCsv).Doc;
+
+    /// <summary>
+    /// <see cref="TryOpenOrActivate"/> の本体。開いた(または活性化した)文書と
+    /// 「既存タブを再利用した(fast-path activate)」かどうかを<b>組で</b>返す。
+    /// <para>
+    /// <b>Issue #48 Task 5</b>: 復元経路には「fast-path activate した既存タブには adopt しない」
+    /// という門番が 2 箇所あり(<see cref="RestoreLayoutRecord"/> / <see cref="RestoreExtraBackup"/>)、
+    /// どちらも従来は<b>呼出前に</b> <c>_docs.FindByPath(引数)</c> を打って判定していた。これは
+    /// 「引数と State.Path が同じ綴りである」ことに依存する形で、<see cref="DocumentManager.FindByPath"/>
+    /// が区切り差を吸収しなくなった今は成り立たない(レイアウト JSON の <c>rec.Path</c> は
+    /// <c>LegacySessionConverter</c> 経由で未正規化でありうる)。判定が落ちると既存タブへ adopt が走り、
+    /// 既に adopt 済みのバックアップ Id を上書きして別のゾンビを作る。
+    /// </para>
+    /// <para>
+    /// 呼出点で先に正規化して <c>FindByPath</c> と本メソッドの両方へ渡す案も採れるが、それだと
+    /// 境界付き正規化が 1 レコードあたり 2 回になり、不達先ではタイムアウト待ちが倍になる。
+    /// 「再利用したか」は本メソッドしか知り得ない事実なので、ここから返す。
+    /// </para>
+    /// <para>
+    /// <b>組で返す理由(Task 5 レビュー m-3)</b>: <c>out bool</c> + メソッド先頭での
+    /// <c>reusedExisting = false;</c> だと、将来「既存タブを返す」経路をもう 1 本足したときに
+    /// 代入を忘れてもコンパイルが通り、門番(<c>if (!reusedExisting) adopt</c>)が黙って
+    /// adopt を走らせる=既存タブが adopt 済みのバックアップ Id を上書きする。戻り値の組に
+    /// すると各 return 地点で値を<b>書かざるを得ない</b>ので、「既定値のまま素通り」という
+    /// 失敗の形自体が消える。公開 API(<see cref="TryOpenOrActivate"/>)の挙動は変えない。
+    /// </para>
+    /// </summary>
+    private (Document? Doc, bool ReusedExisting) TryOpenOrActivateCore(
+        string path,
+        bool suppressAutoCsv
+    )
     {
-        var existing = _docs.FindByPath(path);
+        // Issue #48 / 設計書 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった
+        // (保存側は SaveAsDocument が既に塞いである)。境界付きにする理由は S-15:
+        // 正規化後のパスに `~` が残ると GetFullPath が GetLongPathName を呼び、不達の共有に
+        // 対して約 21 秒 UI を止める。タイムアウトは保存側と同じ NormalizeTimeout を共有する。
+        //
+        // 第 2 項は SaveAs 側 V-1 / V-3 と同じ門番で、**正規化の後ろに置くのが load-bearing**:
+        // seam の Ok は「文字列として正規化できた」以上の意味を持たない(実測 2026-08-23:
+        // CON → \\.\CON・NUL → \\.\NUL・LPT1 → \\.\LPT1 がいずれも Ok で返る。
+        // ディレクトリー付きでも NUL は特別扱いで <tmp>\NUL → \\.\NUL になる)。
+        // 素通しにすると次の 3 つが起きる:
+        //   (1) `\\.\` 綴りが State.Path / FindByPath のキー / RecentFiles へ流れうる。
+        //   (2) 先頭 `\\` で RemotePathDetector がリモート判定するので、無意味な到達性プローブ
+        //       (Task.Run + Wait・最悪 5 秒待ち)を 1 本余分に通る。
+        //   (3) その結果「ネットワークパスに到達できません」という的外れな文言になる
+        //       (= V-3 で潰したはずの症状。ルートの場合は「開けませんでした: アクセスが
+        //       拒否されました」)。
+        // **訂正(Task 4 レビュー 脆弱-I-4)**: ここには当初「ガードが無いと
+        // File.OpenRead(@"\\.\CON") が無期限にブロックする」と書いていた。**これは誤り**で、
+        // 測っていたのは OpenRead + 読み出しだった。本番の TextFileService.LoadAsBufferAuto は
+        // 本文を読む前に probe.Length を打つため(TextFileService.cs:151)、デバイスパスは
+        // そこで NotSupportedException になり読みに到達しない。再実測(2026-08-23):
+        //   \\.\CON  OpenRead 1ms OK / +.Length 4ms NotSupported / +Read 2999ms BLOCKED /
+        //            LoadAsBufferAuto 3ms NotSupported
+        //   \\.\NUL  OpenRead 0ms OK / +.Length 0ms NotSupported / +Read 0ms OK /
+        //            LoadAsBufferAuto 1ms NotSupported
+        // つまり無境界の待ちは現行経路では発生せず、(1) は Core 側の .Length が内側の防御に
+        // なっている。本ガードはその**二重防御の外側**であり、直接の実害として測れるのは
+        // (2)(3) のほう。
+        // 述語が弾くのはルート(C:\ / \\server\share)とデバイスパスだけで、実ファイルは
+        // 拡張長 (\\?\C:\Temp\a.txt) や UNC (\\server\share\a.txt) も親フォルダーを持つ(実測)。
+        var norm = _reachabilityProbe.NormalizePathWithTimeout(path, NormalizeTimeout);
+        if (
+            norm.Status != PathNormalizeStatus.Ok
+            || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(norm.Full))
+        )
+        {
+            // 復元経路(RestoreSession)は WithLoadErrorPromptSuppressed の中でここへ来る。
+            // 無条件に出すと起動時に per-file ダイアログが増えるので、既存の失敗経路
+            // (LoadInto の catch / ReportUnreachable)と同じく抑止スコープを尊重する。
+            // 戻り値 null は抑止に関係なく伝播し、呼出元が failedPaths へ集約する。
+            if (!_suppressLoadErrorPrompt)
+            {
+                // 到達不能(TimedOut)と打ち間違い(Invalid・親フォルダー無し)で文言を分ける
+                // のは SaveAs 側と同じ理由(同じ文言だと、原因がネットワークなのに利用者が
+                // 入力を疑い続ける)。こちらは開く経路なので保存先ではなくファイルを指す。
+                // switch 式なのは可読性のため。網羅性検査が効かない事情は SaveAsDocument
+                // 側の同じ分岐のコメントに書いてある。
+                // 文言の「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
+                // CSV-L-5: path は外部入力(復元 JSON 由来もある)なので必ず無害化する。
+                _prompt.Error(
+                    norm.Status switch
+                    {
+                        PathNormalizeStatus.TimedOut =>
+                            $"ファイルに到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(path, 200)}",
+                        _ => $"パスが正しくありません: {SanitizeForDisplay.OneLine(path, 200)}",
+                    },
+                    "エラー"
+                );
+            }
+            return (null, false);
+        }
+        // 以降の照合・ロード・最近のファイル登録はすべて正規化済みの full を使う
+        // (生の path を混ぜると設計書 §3.1 の不変条件が入口で破れる)。
+        string full = norm.Full;
+
+        var existing = _docs.FindByPath(full);
         if (existing is not null)
         {
             _docs.Activate(existing);
             // Task 10 review I-2: 復元経路(_suppressRegisterRecent=true)では fast-path でも
             // RegisterRecent を抑止する(重複パスの LastSession 復元で RecentFiles が汚染されるのを防ぐ)。
             if (!_suppressRegisterRecent)
-                RegisterRecent(path);
-            return existing;
+                RegisterRecent(full);
+            return (existing, true); // ここだけが「既存タブを再利用した」経路
         }
 
         var prev = _docs.Active; // 読込失敗時に戻る先（直前のアクティブタブ）
@@ -167,7 +287,7 @@ public sealed class FileController
         bool loaded;
         try
         {
-            loaded = LoadInto(doc, path, forcedCodePage: null);
+            loaded = LoadInto(doc, full, forcedCodePage: null);
         }
         catch
         {
@@ -182,12 +302,12 @@ public sealed class FileController
             // 機能させるため suppressAutoCsv=true で抑止する（設計 2026-07-04）。
             if (!suppressAutoCsv)
                 _openedFresh(doc);
-            return doc;
+            return (doc, false); // 新しく作ったタブ=再利用ではない
         }
         _docs.TryClose(doc, _ => true); // 読込失敗→作りかけタブを破棄
         if (prev is not null)
             _docs.Activate(prev); // 直前のアクティブへ戻す
-        return null;
+        return (null, false);
     }
 
     /// <summary>アクティブタブを指定の文字コードで開き直す。Path 未確定なら案内表示して中止。</summary>
@@ -419,17 +539,40 @@ public sealed class FileController
             // 二重に守る理由: フィルタだけだと ConvertEols で保存点が壊れた後に捕まるため、
             // ここで先に止めた方が本文にもキャレットにも触れない。
             // 述語(親フォルダーの有無)は FileReachabilityProbe.ProbeSaveTargetWithTimeout と同じ。
+            // ガードを**正規化の後ろに残すのは load-bearing**(Issue #48): seam の Ok は
+            // 「文字列として正規化できた」以上の意味を持たない(実測: CON → \\.\CON も
+            // \\?\ もそのまま Ok で返る)ので、境界付きにしても V-1 の門番は要る。
+            var norm = NormalizeSavePath(picked.Path);
             if (
-                !TryNormalizeSavePath(picked.Path, out string full)
-                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(full))
+                norm.Status != PathNormalizeStatus.Ok
+                || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(norm.Full))
             )
             {
+                // S-15: 到達不能(タイムアウト)と打ち間違い(Invalid)で文言を分ける。
+                // 同じ文言だと、原因がネットワークなのに利用者が入力を疑い続ける。
+                // 親フォルダーが取れない場合(V-1)は Ok なので既定枝=「正しくありません」に入る。
+                // switch 式なのは**可読性のため**: Status とそれが出す文言の対応が一望でき、
+                // 4 値目に固有の文言を足すときもアーム 1 行で済む。
+                // **網羅性検査は期待できない**(Task 3 レビュー 仕様-I-1・実測で訂正):
+                // `_ =>` アームがある以上、4 値目を足しても switch 式は三項と同じく黙って
+                // 既定枝へ倒れる。discard を外して 3 値を全列挙しても、enum は宣言外の値を
+                // 取りうるため CS8524 が出て -warnaserror で落ちる = この場所で網羅性検査を
+                // 効かせる形はそもそも取れない。三項との保護効果は等価。
+                // (`_ => throw` にすると 4 値目で保存経路がクラッシュするので改悪。)
+                // 文言の「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
                 _prompt.Warn(
-                    $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    norm.Status switch
+                    {
+                        PathNormalizeStatus.TimedOut =>
+                            $"保存先に到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                        _ =>
+                            $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                    },
                     "エラー"
                 );
                 continue;
             }
+            string full = norm.Full;
             // 以降の判定・保存・State 反映はすべて正規化済みの full を使う。
             // 再表示時も絶対パスを見せる(どこへ保存されるかが読み上げで分かる)。
             // 位置も load-bearing: 上の `seed = new SaveAsRequest(picked...)` は生入力を載せるので、
@@ -442,8 +585,10 @@ public sealed class FileController
 
             // A-7 (b): 同一ファイルを 2 タブで編集させない。片方の Ctrl+S が
             // もう片方の内容を無警告で消す導線(hot exit レイアウトにも同一 Path が 2 件並ぶ)。
-            // FindByPath は PathKey(GetFullPath + ToLowerInvariant)照合なので
-            // 大小・区切りの揺れも同一と見なす。自分自身への上書きは正当なので除外する。
+            // FindByPath は PathKey.ForNormalized(ToLowerInvariant のみ)照合なので大小の揺れは
+            // 同一と見なす。区切りの揺れは吸収しないが、ここへ渡す full も比較先の State.Path も
+            // 正規化済み(設計書 §3.1 の不変条件・Issue #48 Task 5)なので揺れは残らない。
+            // 自分自身への上書きは正当なので除外する。
             var other = _docs.FindByPath(full);
             if (other is not null && !ReferenceEquals(other, doc))
             {
@@ -567,48 +712,30 @@ public sealed class FileController
     /// <summary>
     /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
     /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
-    /// 例外は握って呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
-    /// 未捕捉例外ダイアログにしない。
-    /// PathKey.For も内部で GetFullPath するが、あちらは失敗時に空文字へ落として dedup キーを
-    /// 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違うので流用しない。
+    /// 正規化できない入力は例外ではなく <see cref="PathNormalizeStatus.Invalid"/> で戻り、
+    /// 呼出側で「入力し直し」に落とす: SR ユーザーの直入力がそのまま届く面なので
+    /// 未捕捉例外ダイアログにしない(例外を握る実体は seam の中にある)。
+    /// (かつて PathKey.For も内部で GetFullPath していたが、あちらは失敗時に空文字へ落として
+    /// dedup キーを 1 件へ集約する契約(CSV-L-8)= ユーザーに直させる本メソッドとは契約が違った。
+    /// 実消費者が消えたので最終レビュー Q-I-2 でメソッドごと削除した。)
+    /// <para>
+    /// <b>Issue #48 (S-15)</b>: 以前ここは <see cref="System.IO.Path.GetFullPath(string)"/> を
+    /// 直接呼び、remarks に「GetFullPath は <c>GetFullPathNameW</c> による名前解決のみで
+    /// 実 I/O を行わないので、握り潰してはいけない実 I/O エラーを飲み込む余地はない」と
+    /// 書いていた。<b>これは誤り</b>で、正規化後のパスに <c>~</c> が含まれると
+    /// <c>GetLongPathName</c>(境界の無い実 FS / ネットワーク呼び出し)が走り、不達の共有に対して
+    /// 約 21 秒 UI スレッドを止める(実測 21,002 ms・2026-08-23)。この誤認が S-15 を通した。
+    /// 実 I/O を伴う以上、結果は例外の有無ではなく 3 状態(Ok / Invalid / TimedOut)になる。
+    /// 境界は <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> 側で張る。
+    /// </para>
+    /// <para>
+    /// <c>GetFullPath</c> がどの入力でどの例外型を投げるかの実測記録・V-2 の経緯は、フィルタの
+    /// 実体と離れないよう移設先 <see cref="FileReachabilityProbe.NormalizePathWithTimeout"/> の
+    /// remarks へ移してある。
+    /// </para>
     /// </summary>
-    /// <remarks>
-    /// .NET 9 での実測(Task 5 実装時): <c>Path.GetFullPath</c> が投げるのは実質
-    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>(本テストの pin)、
-    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>(手前の空白チェックが先に捕まえる)、
-    /// (c) 総長 &gt; 32767 → <see cref="System.IO.PathTooLongException"/> の 3 つ。
-    /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」や予約デバイス名(CON / NUL)は
-    /// **投げずに素通りする**ので、このフィルタは無効文字の門番ではない
-    /// (デバイス名・ドライブルートは呼出側の「親フォルダーが取れるか」ガードが弾く)。
-    /// <b>V-2(脆弱性レビューで解消済み)</b>: 総長が 32767 の直下に収まる窓
-    /// (実測 CWD 110 文字 + 相対 32660 文字)では <c>GetFullPathNameW</c> が
-    /// ERROR_INVALID_NAME を返し、<see cref="System.IO.PathTooLongException"/> ではなく
-    /// **素の <see cref="System.IO.IOException"/>** が飛ぶ。派生関係は一方向なので
-    /// <c>PathTooLongException</c> だけを列挙するとこの窓が抜けて未捕捉例外ダイアログになった。
-    /// 設計書 §4.3 の列挙は実測と食い違っていたため、<c>IOException</c>(厳密な上位集合)へ
-    /// 広げて訂正する。<see cref="System.IO.Path.GetFullPath(string)"/> は
-    /// <c>GetFullPathNameW</c> による名前解決のみで実 I/O を行わないので、握り潰しては
-    /// いけない実 I/O エラーを飲み込む余地はない。
-    /// </remarks>
-    private static bool TryNormalizeSavePath(string input, out string full)
-    {
-        try
-        {
-            full = System.IO.Path.GetFullPath(input);
-            return true;
-        }
-        catch (Exception ex)
-            when (ex
-                    is ArgumentException
-                        or NotSupportedException
-                        or System.IO.IOException
-                        or System.Security.SecurityException
-            )
-        {
-            full = string.Empty;
-            return false;
-        }
-    }
+    private PathNormalizeResult NormalizeSavePath(string input) =>
+        _reachabilityProbe.NormalizePathWithTimeout(input, NormalizeTimeout);
 
     /// <summary>
     /// 改行を State.LineEnding に正規化してから本文を取得し、原子的に保存する。
@@ -953,8 +1080,12 @@ public sealed class FileController
                     "kxEdit: dirty-backup-missing, demoting to disk reopen: {0}",
                     kxEdit.Core.Text.SanitizeForDisplay.OneLine(rec.Path, 200)
                 );
-            bool existedBefore = _docs.FindByPath(rec.Path) is not null;
-            var opened = TryOpenOrActivate(rec.Path);
+            // Issue #48 Task 5: 「既存タブを再利用したか」は TryOpenOrActivate 自身に答えさせる。
+            // ここで _docs.FindByPath(rec.Path) を打つ旧形は、rec.Path が未正規化でありうる
+            // (LegacySessionConverter が旧 LastSessionSnapshot の Path を素通しで載せる)一方で
+            // FindByPath が区切り差を吸収しなくなったため、同じファイルなのに「既存タブ無し」へ
+            // 倒れる。判定の使い道は下の adopt 門番なので、崩れると既存タブの adopt を上書きする。
+            var (opened, reusedExisting) = TryOpenOrActivateCore(rec.Path, suppressAutoCsv: false);
             if (opened is null)
             {
                 failedPaths.Add(rec.Path);
@@ -968,7 +1099,7 @@ public sealed class FileController
             // 次 Reconcile(ReconcileContent の Decide / layout-only では ReconcileMapMaintenance)が
             // 既存機構で Delete する。fast-path activate(既存タブ)には adopt しない=既存タブが
             // 別バックアップで adopt 済みの場合に Id 上書きで別のゾンビを作らないため(残置受容)。
-            if (pathOnlyBk is not null && !existedBefore)
+            if (pathOnlyBk is not null && !reusedExisting)
                 adoptRestored?.Invoke(opened, pathOnlyBk);
             return opened;
         }
@@ -1100,8 +1231,14 @@ public sealed class FileController
                 );
                 return null;
             }
-            bool existedBefore = _docs.FindByPath(normalized) is not null;
-            var opened = TryOpenOrActivate(normalized);
+            // Issue #48 Task 5: レイアウト側(RestoreLayoutRecord)と同じ機構で判定する。
+            // ここの normalized は OriginalPathValidator.Check の出力=同じ GetFullPath 由来なので
+            // 旧形(呼出前の FindByPath)でも今のところ一致するが、「2 つの正規化器の出力が
+            // 綴りまで同じ」という暗黙の前提に門番を預けたままにしない。
+            var (opened, reusedExisting) = TryOpenOrActivateCore(
+                normalized,
+                suppressAutoCsv: false
+            );
             if (opened is null)
             {
                 failedPaths.Add(bk.OriginalPath);
@@ -1111,7 +1248,7 @@ public sealed class FileController
             // 最終品質パス I-1: path-only 消費レコードは adopt→clean 検出→次 tick 削除で
             // 残置させない(レイアウト外 Id は次回以降も毎起動 extras としてゾンビ復活するため)。
             // fast-path activate(既存タブ)には adopt しない=Id 上書きで既存 adopt を壊さない。
-            if (!existedBefore)
+            if (!reusedExisting)
                 adoptRestored?.Invoke(opened, bk);
             return opened;
         }

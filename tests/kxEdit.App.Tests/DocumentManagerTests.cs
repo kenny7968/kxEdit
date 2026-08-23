@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace kxEdit.App.Tests;
 
 /// <summary>
@@ -112,16 +114,51 @@ public class DocumentManagerTests
             Assert.Equal(0, caretChanged);
         });
 
-    // ===== FindByPath(PathKey 同一視) =====
+    // ===== FindByPath(PathKey.ForNormalized 照合)=====
+    // Issue #48: 以前は照会パスと**開いている全タブのパス**に PathKey.For を打っていた
+    // (= 呼び出しあたり GetFullPath が 1 + タブ数回)。不達共有上の `~` タブが 1 つあるだけで
+    // Ctrl+S / 開く / grep ジャンプ / 復元のすべてが約 21 秒固まった。
+    // 呼出側が正規化済みパスを渡す契約に変え、ここはファイルシステムに触れない。
 
     [Fact]
-    public void FindByPath_MatchesCaseAndSeparatorInsensitively() =>
+    public void FindByPath_MatchesCaseInsensitively() =>
         Sta.Run(() =>
         {
             using var host = new Host();
             var doc = host.Docs.CreateNew();
             doc.State.Path = @"C:\Temp\A.TXT";
-            Assert.Same(doc, host.Docs.FindByPath("c:/temp/a.txt")); // 大小文字・区切り差を同一視
+            Assert.Same(doc, host.Docs.FindByPath(@"c:\temp\a.txt")); // 大小文字は同一視
+        });
+
+    [Fact]
+    public void FindByPath_DoesNotNormalizeSeparators_CallerMustNormalize() =>
+        Sta.Run(() =>
+        {
+            // 新契約の pin(意図的な挙動変更)。ここで区切りを吸収させると
+            // GetFullPath が戻り、S-15 が丸ごと再発する。
+            // App レベルの呼出側は全員 TryOpenOrActivate / NormalizeSavePath を通るので
+            // 実害は無い(設計書 §3.3)。
+            // このテストが縛るのは**照会パス側**だけ(下の姉妹がタブ側を縛る)。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.State.Path = @"C:\Temp\a.txt";
+            Assert.Null(host.Docs.FindByPath("C:/Temp/a.txt"));
+        });
+
+    [Fact]
+    public void FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize() =>
+        Sta.Run(() =>
+        {
+            // 上の姉妹で、縛るのは**タブ側**(ループ内)。2 本要る理由: 照会側だけ / タブ側だけに
+            // GetFullPath を復活させる変異(旧 PathKey.For 相当。最終レビュー Q-I-2 で
+            // メソッド自体は削除したので、いま同じ形を作るには Path.GetFullPath を直に挟む)は、
+            // もう一方のテストでは緑のまま通り抜ける(片側が区切りを吸収し、もう片側が
+            // 吸収しないので結局一致しない)。
+            // S-15 の実害はタブ数に比例するループ側なので、ここを空けると主犯が戻る。
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.State.Path = "C:/Temp/a.txt"; // 非正規化の綴り(旧レイアウト JSON 由来を模す)
+            Assert.Null(host.Docs.FindByPath(@"C:\Temp\a.txt"));
         });
 
     [Fact]
@@ -134,6 +171,104 @@ public class DocumentManagerTests
             doc.State.Path = @"C:\Temp\a.txt";
             Assert.Null(host.Docs.FindByPath(@"C:\Temp\other.txt"));
         });
+
+    /// <summary>
+    /// S-15 の主犯(<c>GetFullPath</c> による実 FS 接触。旧 <c>PathKey.For</c> の中身)が
+    /// 本当に消えたことを IL で直接固定する。
+    /// 上の挙動 2 本は「<b>結果に効く</b> GetFullPath」しか捕まえられず、結果を捨てる呼出
+    /// (挙動不変・コストだけが残る形)を見逃す。S-15 はコストの問題なので、
+    /// 「呼出が 1 つも無い」ことをここで見る。
+    /// 陽性対照(<c>ForNormalized</c> を拾えること)を同時に置くのは、走査が空を返しただけで
+    /// 緑になる vacuous 化を防ぐため。
+    /// <para>
+    /// <b>この網の射程(Task 5 レビュー m-2・実測で生存を確認)</b>: 走査するのは
+    /// <see cref="DocumentManager.FindByPath"/> の<b>直接の</b>呼出だけで、推移的な呼出は見ない。
+    /// 結果を捨てる <c>GetFullPath</c> を private ヘルパ 1 段越しに置く変異は、この網を含めて
+    /// 全緑のまま生存する。つまり本テストは「<c>FindByPath</c> の本体に FS 接触の呼出が
+    /// 直接は無い」ことしか言っておらず、「この関数から FS に到達しない」ことは保証しない。
+    /// ただし抜けるのは<b>片側だけをヘルパへ切り出した形</b>に限る: <c>ForNormalized</c> の
+    /// 呼出 2 本を<b>両方</b>ヘルパへ移すと陽性対照の <c>Assert.Contains</c> が落ちて赤になるので、
+    /// 本体をまるごとヘルパへ移す形は検出できる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void FindByPath_DoesNotTouchFileSystem()
+    {
+        var callees = IlCallees.Of(
+            typeof(DocumentManager).GetMethod(nameof(DocumentManager.FindByPath))!
+        );
+        // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の 2 本は無意味)。
+        Assert.Contains(
+            callees,
+            m =>
+                m.DeclaringType == typeof(kxEdit.Core.Text.PathKey)
+                && m.Name == nameof(kxEdit.Core.Text.PathKey.ForNormalized)
+        );
+        // Path のメンバーを直接呼ぶ形(GetFullPath / GetLongPathName 相当)を塞ぐ。
+        // かつてここには `PathKey.For` を名指しで禁じる assert も並べていたが、
+        // 最終レビュー Q-I-2 でメソッドごと削除したので、その再導入は実行時の走査ではなく
+        // コンパイルエラーで止まる。
+        Assert.DoesNotContain(callees, m => m.DeclaringType == typeof(System.IO.Path));
+    }
+
+    // ===== Issue #48 Task 7: State.Path の不変条件(設計書 §3.1) =====
+
+    /// <summary>
+    /// 「<c>State.Path</c> は null か正規化済み絶対パス」を I/O 無しの構造チェックで守る網。
+    /// 上の <c>FindByPath</c> 群と <c>RecentFilesList.Add</c> はこの不変条件に依拠して
+    /// ファイルシステム非依存の比較をするので、破れると同一ファイルの重複タブ検知
+    /// (A-7 (b))がすり抜ける。
+    /// <para>
+    /// 述語に <see cref="System.IO.Path.IsPathFullyQualified(string)"/> を選ぶのが
+    /// load-bearing: <c>IsPathRooted</c> だとドライブ相対(<c>C:memo.txt</c>)と
+    /// カレントドライブのルート相対(<c>\memo.txt</c>)が通ってしまい、どちらも
+    /// 「後で <c>GetFullPath</c> したときに CWD / カレントドライブ依存で解決される」=
+    /// A-19 そのものの形。だから相対の InlineData にはその 2 つを含める。
+    /// </para>
+    /// <para>
+    /// <b>Debug 専用</b>: <c>Debug.Assert</c> は Release で消える。xUnit / VSTest の testhost は
+    /// <c>TestHostTraceListener</c> を入れており、assert の失敗はダイアログではなく
+    /// <c>DebugAssertException</c>(testhost の内部型)になる — だから
+    /// <c>Assert.ThrowsAny</c> で受けられる(実測で確認)。Release 側も空にせず
+    /// 「通ること」を assert するのは、(a) 構成ごとに vacuous な緑を作らないため、
+    /// (b) この網を例外へ格上げする変異(= 本番でユーザーの操作が落ちる)を
+    /// Release 側で赤にするため。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("memo.txt")] // 純粋な相対
+    [InlineData(@"sub\memo.txt")] // 相対+サブフォルダー
+    [InlineData(@"C:memo.txt")] // ドライブ相対(IsPathRooted は true を返す)
+    [InlineData(@"\memo.txt")] // カレントドライブのルート相対(同上)
+    public void DocumentState_Path_RejectsNonFullyQualified(string relative)
+    {
+#if DEBUG
+        var state = new DocumentState();
+        Assert.ThrowsAny<Exception>(() => state.Path = relative);
+#else
+        var state = new DocumentState { Path = relative }; // Release では素通り
+        Assert.Equal(relative, state.Path);
+#endif
+    }
+
+    [Theory]
+    [InlineData(@"C:\Temp\a.txt")]
+    [InlineData(@"\\server\share\a.txt")] // UNC も絶対(「2 文字目が : か」だけを見る変異を kill)
+    public void DocumentState_Path_AcceptsFullyQualified(string absolute)
+    {
+        var state = new DocumentState { Path = absolute };
+        Assert.Equal(absolute, state.Path);
+    }
+
+    [Fact]
+    public void DocumentState_Path_AcceptsNull()
+    {
+        // 無題タブ。非既定位置(絶対パスが入った状態)から始める — 生成直後の null に
+        // いきなり null を入れても「setter を通った結果」と既定値を区別できない。
+        var state = new DocumentState { Path = @"C:\Temp\a.txt" };
+        state.Path = null;
+        Assert.Null(state.Path);
+    }
 
     // ===== TryClose =====
 

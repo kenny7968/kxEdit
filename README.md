@@ -109,7 +109,10 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 powershell -File tools\pre-merge-check.ps1
 ```
 
-Format check → Release ビルド (0 警告) → 3 テストプロジェクト全緑、で PASS。
+Format check → Release ビルド (0 警告) → 3 テストプロジェクト全緑 → App.Tests を Debug で再実行、で PASS。
+
+最後の Debug 実行は `Debug.Assert` (`[Conditional("DEBUG")]` で Release バイナリに残らない) を
+使った網をゲートに載せるためのステップ。Core.Tests の Debug は既知の失敗があるため含めない。
 
 CI (`ci.yml`) とほぼ同一のゲートだが、次の 2 点だけ異なる:
 

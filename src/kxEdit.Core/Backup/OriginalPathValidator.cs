@@ -20,10 +20,59 @@ public enum PathValidation
 /// で解決先を再度 BlockedRoots に照合。ローカルドライブのみ対象で
 /// UNC の Ok 契約は維持。
 ///
+/// Task 4B: BlockedRoots 照合の前段を 2 つ足す。どちらか片方だけでは塞がらない。
+/// (1) 事後条件 = プレフィックス除去後の**形**が「ドライブ文字ルート」か「UNC」の
+///     どちらかであることを要求する。\\?\GLOBALROOT\Device\HarddiskVolumeN\... /
+///     \\.\PhysicalDrive0 / \\.\pipe\... はここで落ちる。
+/// (2) 再正規化 = プレフィックスを剥がしてドライブ文字形式が残ったときだけ、もう一度
+///     Path.GetFullPath に通す。\\?\ 付きは最初の GetFullPath が素通しするため、
+///     C:\\Windows\... (区切り重複) や C:\PROGRA~3\... (8.3 短縮名) がそのまま残り、
+///     どちらも**形は正しいドライブ文字ルート**なので (1) を通過して前方一致だけが空振りする
+///     (実測: \\?\C:\\ProgramData\... への書き込みが実際に成立した)。
+///
+/// つまり事後条件は「形」しか保証せず、綴りの canonical 性は GetFullPath に依存する。
+/// 安全性は「形の検査 + canonical 化 + 前方一致」の 3 点セットで初めて成立する。
+///
+/// V-m-1(最終ブランチレビュー・脆弱性パスの実測): その事後条件には**穴がある**。
+/// <see cref="IsUncRooted"/> の device 除外は \\?\ と \\.\ の**厳密 2 綴り**しか見ないので、
+/// \\??\ / \\.?\ / \\?.\ / \\?\UNC\C:\ / \\?\UNC\GLOBALROOT\ は「\\ 始まり + サーバー名と
+/// 共有名が非空」を満たして UNC と見なされ、Ok が返る。つまり
+/// 「ここまで来た形はドライブ文字ルートか UNC のどちらか」という上の記述は、
+/// **厳密には成立していない**。
+/// 実害が無いのは下流の事情による: 実測でこれらの綴りは MUP(Multiple UNC Provider)へ
+/// 回されて解決できず、実書き込みには至らない。したがって現状は「事後条件が破れているが
+/// 到達できない」状態であり、事後条件そのものを証人にした議論はできない
+/// (将来 UNC 側の扱いを変えるときは、ここが前提になっていないか必ず確認すること)。
+///
+/// (3) device プレフィックスの再出現も閉じる。「許可する形だけを書く」方式でも、
+///     **許可した形に化ける綴り**は別途塞ぐ必要がある。実在した 2 経路:
+///     - 再正規化が予約デバイス名を書き換えて \\.\NUL を作る(\\?\ 配下の NUL は
+///       デバイスではなく普通のファイル名なので、通すと BlockedRoot 配下に実ファイルができる)
+///     - プレフィックスを二重にした入力 (\\?\\\?\C:\Windows\...) は剥がしが 1 回なので
+///       \\?\C:\Windows\... が残る
+///     どちらも「\\ 始まり + 区切り + 非空」で UNC 判定を満たしてしまうため、
+///     IsUncRooted の入口で \\?\ / \\.\ を明示的に除外している。
+///
+/// 副作用として \\?\Volume{GUID}\... (ドライブ文字未割当ボリューム)も Rejected になる
+/// = hot exit 復元では無題タブに降格する(本文は失われない・受容)。ただし
+/// FileController の path-only extras 経路(未変更タブの復元)だけは Rejected でレコードごと
+/// skip されるため、その綴りの clean タブは黙って復元されなくなる(本文は元ファイルに在る)。
+///
 /// 現状の許容(次リリース以降で再検討):
+/// - subst / ネットワークドライブ割当は「ドライブ文字の許可リスト」では原理的に閉じない。
+///   subst Y: C:\Windows した状態の Y:\System32\drivers\etc\hosts は Ok になる
+///   (Task 4B 以前も同じ = 差分外)。%AppData% に書ける攻撃者は
+///   HKCU\...\Explorer\DOS Devices にも書けるので脅威モデル内。根治は
+///   「ハンドルを開いて最終パスを解決してから照合」だが本ブランチでは扱わない。
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
 ///   (実運用の UNC を潰さない優先)。閉じる場合は BlockedRoots とは別の
 ///   UNC 用フィルタ(\\host\&lt;drive&gt;$\... を拒絶)で判定する。
+///   V-m-3(最終レビュー・実測): この受容範囲は上の例が示すより広い。**host はループバックで
+///   よい** — \\?\UNC\localhost\C$\ProgramData\... が Ok を返し、実際に BlockedRoot 配下へ
+///   書き込めることを実測した(\\127.0.0.1\C$\... も同様)。つまりネットワークも攻撃者の
+///   インフラも要らず、%AppData% の backup JSON を書ければ 1 台の中で完結する
+///   (admin share を開くので管理者権限は必要)。「リモート共有を使う攻撃だから遠い」と
+///   読まないこと。
 /// - OneDrive Files On-Demand 等 cloud placeholder は IO_REPARSE_TAG_CLOUD 系
 ///   reparse tag を持つため BK-M-1 実装で無条件 Rejected になる可能性がある
 ///   (false-positive 受容)。tag 別判定(GetFileInformationByHandleEx /
@@ -62,7 +111,18 @@ public static class OriginalPathValidator
             // Ok が返る)。判定用にコピーを 1 本作り、そこから 4 文字プレフィックスを剥がして評価する。
             // \\?\UNC\server\share\... は「本物の UNC を長パス表現した安全な形式」なので、
             // \\server\share\... に戻したうえで既存の UNC 経路と同じ扱い(BlockedRoots に非該当=Ok)にする。
+            //
+            // V-m-2(最終レビュー・実測): この説明が当てはまるのは **UNC が厳密に大文字**の
+            // 綴りだけ。剥がしの比較は Ordinal なので \\?\unc\... / \\?\Unc\... は
+            // ここを通らず、下の \\?\ 枝で 4 文字だけ剥がされて "unc\server\share\..." になり、
+            // 事後条件(ドライブ文字ルートでも UNC でもない)で Rejected になる。
+            // Windows 側は小文字綴りも解決できる(実測)ので、これは**過剰拒否**。
+            // フェイルセーフ方向なので安全上の問題は無く、症状は「その綴りの clean タブが
+            // 黙って復元されない(本文は元ファイルに在る)」まで。OrdinalIgnoreCase へ緩める
+            // 修正は、剥がし後の綴りが再び事後条件と BlockedRoots を通ることの確認込みで
+            // 別途行う(本ブランチでは形を変えない)。
             string forCheck = normalized;
+            bool prefixStripped = true;
             if (forCheck.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
                 forCheck = @"\\" + forCheck[8..];
             else if (
@@ -70,6 +130,50 @@ public static class OriginalPathValidator
                 || forCheck.StartsWith(@"\\.\", StringComparison.Ordinal)
             )
                 forCheck = forCheck[4..];
+            else
+                prefixStripped = false;
+
+            // Task 4B 再正規化: プレフィックスを剥がしてドライブ文字形式が残ったときだけ、
+            // もう一度 GetFullPath に通す。上の :63 の GetFullPath は \\?\ 付きを
+            // 「正規化済み」とみなして素通しするため、そのままでは非 canonical な綴りが残り、
+            // StartsWithAnyBlockedRoot の前方一致が空振りする。実測で確認した実在バイパス:
+            //   \\?\C:\\Windows\...        (区切りの重複。index 3 が \ vs W で不一致=素通り)
+            //   \\?\C:\PROGRA~3\...        (8.3 短縮名。非 extended なら GetLongPathName で展開される)
+            //   \\?\C:/Windows/...  \\?\C:\..\Windows\...  \\?\C:\Windows.\...
+            // マーカーが消えた後なら GetFullPath が上のすべてを canonical 化する(実測 0 ms)。
+            //
+            // 順序が要: 先に IsDriveRooted で「ルート付き」を確かめてから通す。相対形
+            // (GLOBALROOT\Device\... / pipe\foo / C:xyz)を GetFullPath に渡すと
+            // **カレントディレクトリ基準で解決されて絶対パスに化ける**ため、事後条件を
+            // 通過してしまう。
+            //
+            // コスト: 追加の GetFullPath はプレフィックス付き入力にしか走らない。UNC 枝は
+            // IsDriveRooted が false になるので自動的に除外される = 不達共有 + `~` で
+            // GetLongPathName が 21 秒かかる S-15 をこの経路から再導入しない。残るコスト増は
+            // 「\\?\ / \\.\ 付き + ドライブ文字 + `~` を含む」入力で、そのドライブがネットワーク
+            // 割当のときだけ(:63 の無境界 GetFullPath と同じ A-16 の受容範囲・設計書 §6)。
+            if (prefixStripped && IsDriveRooted(forCheck))
+                forCheck = Path.GetFullPath(forCheck);
+
+            // Task 4B: 事後条件 — ここまで来た forCheck が「ドライブ文字ルート (X:\...)」か
+            // 「UNC (\\server\share\...)」のどちらかでなければならない。
+            // 4 文字剥がしだけでは \\?\GLOBALROOT\Device\HarddiskVolumeN\Windows\... が
+            // GLOBALROOT\Device\... になり、BlockedRoots (C:\Windows\... 等)と決して前方一致しない=
+            // Ok が返っていた(実証: 攻撃者 JSON に上記綴りを植えると hosts を Ok として復元先に採れる)。
+            // ここを「拒否したい綴り (GLOBALROOT / Volume{GUID} / pipe / PhysicalDrive ...) の列挙」で
+            // 書くと原理的に漏れるので、**許可する形だけ**を書く。
+            //
+            // ただし事後条件が保証するのは「形」だけで、綴りが canonical であることは
+            // 上の再正規化(と :63 の GetFullPath)に依存する。両方が揃って初めて
+            // StartsWithAnyBlockedRoot の前方一致が意味を持つ。片方だけでは塞がらない。
+            //
+            // 順序が load-bearing: 再正規化を**後ろ**へ動かすと、事後条件が検査した形と
+            // BlockedRoots が照合する形が食い違う。GetFullPath は予約デバイス名を書き換える
+            // (C:\ProgramData\...\NUL → \\.\NUL)ので、「ドライブ文字形式として合格した値」が
+            // 照合時には device パスに化けている、という状態が作れてしまう(B-3)。
+            // ここで**正規化後の値を検査する**ことでその窓を閉じている。
+            if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
+                return PathValidation.Rejected;
 
             // BK-M-1: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
             // UNC (\\server\share\...) はサーバ側 NTFS でありクライアントから検査不能=
@@ -86,6 +190,79 @@ public static class OriginalPathValidator
         {
             return PathValidation.Rejected;
         }
+    }
+
+    /// <summary>
+    /// Task 4B: <c>X:\...</c> 形式か = <b>ルート付きであること</b>の門番。
+    /// canonical 性は一切保証しない(<c>C:\\Windows\...</c> も <c>C:\PROGRA~3\...</c> も
+    /// <c>C:\..\Windows\...</c> も true を返す)。canonical 化は <see cref="Check"/> 側の
+    /// 再正規化の仕事で、本メソッドはその<b>前提</b>(相対パスを
+    /// <see cref="Path.GetFullPath(string)"/> に渡さない)を作るためにある。
+    ///
+    /// 3 文字目が区切りであることは load-bearing: ここを緩めるとドライブ相対形
+    /// (<c>C:xyz</c>)が通り、再正規化がカレントディレクトリ基準で解決してしまう
+    /// (実測: <c>GetFullPath(@"C:kxedit\a.txt")</c> → プロセスの CWD 配下)。
+    /// ただし「<c>/</c> を弾く」側は<b>セキュリティ的には再正規化と二重</b>になっている:
+    /// BlockedRoot を指す綴り (<c>C:/Windows/...</c>) は、仮にここを緩めても再正規化が
+    /// <c>C:\Windows\...</c> へ canonical 化して BlockedRoots が捕まえる(実測で確認)。
+    /// 区切りに <c>/</c> を足す変異は<b>等価変異ではなく「挙動は変わるがセキュリティ的に
+    /// 中立な変異」</b>で、変わるのは BlockedRoot **外**の綴りの可否だけ。その差分を
+    /// <c>Check_Rejects_ExtendedDrivePathWithAltSeparators_OutsideBlockedRoots</c> で固定し、
+    /// ドライブ相対を弾く側は <c>Check_Rejects_ExtendedDriveRelativePath</c> で固定している。
+    /// 1 文字目が英字であることも同様: 非 extended 入力なら
+    /// <see cref="Path.IsPathFullyQualified(string)"/> が <c>1:\...</c> を入口で弾くが、
+    /// <c>\\?\1:\...</c> は入口を通過するのでここが唯一の門番になる。
+    /// </summary>
+    private static bool IsDriveRooted(string path) =>
+        path.Length >= 3
+        && char.IsAsciiLetter(path[0])
+        && path[1] == ':'
+        && path[2] == Path.DirectorySeparatorChar;
+
+    /// <summary>
+    /// Task 4B: <c>\\server\share...</c> 形式か。サーバー名と共有名の**両方**が非空であることを
+    /// 要求する。ここを「<c>\\</c> で始まる」だけに緩めると、除去後に <c>\\</c> が残る綴りが
+    /// 素通りする。
+    ///
+    /// B-3 / I-4: DOS device プレフィックス (<c>\\?\</c> / <c>\\.\</c>) を**明示的に除外**する。
+    /// これが無いと <c>\\.\NUL</c> が「サーバー名 <c>.</c>・共有名 <c>NUL</c>」の UNC に化け、
+    /// 事後条件・BlockedRoots・BK-M-1 の reparse 検査の 3 つすべてを迂回する。到達経路は 2 本:
+    /// (1) <see cref="Check"/> の再正規化が予約デバイス名を書き換える
+    ///     (<c>\\?\C:\ProgramData\...\NUL</c> → 剥がし → <c>C:\ProgramData\...\NUL</c> →
+    ///      <c>GetFullPath</c> → <c>\\.\NUL</c>)。<c>\\?\</c> 配下では <c>NUL</c> はデバイスでなく
+    ///      普通のファイル名なので、通すと BlockedRoot 配下に実ファイルが作られる(実証済み)。
+    /// (2) プレフィックスを**二重**にした入力 (<c>\\?\\\?\C:\Windows\...</c>)。剥がしは 1 回
+    ///     だけなので <c>\\?\C:\Windows\...</c> が残る。
+    /// <para>
+    /// <b>限界(V-m-1・最終ブランチレビューの実測)</b>: 除外するのは上の<b>厳密 2 綴り</b>だけ。
+    /// <c>\\??\</c> / <c>\\.?\</c> / <c>\\?.\</c> / <c>\\?\UNC\C:\</c> /
+    /// <c>\\?\UNC\GLOBALROOT\</c> はここを素通りし、「サーバー名と共有名が非空」を満たして
+    /// <c>true</c> を返す = <see cref="Check"/> が <see cref="PathValidation.Ok"/> を返す。
+    /// クラス doc が謳う事後条件(「形はドライブ文字ルートか UNC のどちらか」)はこの範囲で破れている。
+    /// 実書込には至らない(実測: MUP へ回されて解決不能)ので実害は無いが、
+    /// <b>事後条件を証人にして安全を主張しないこと</b>。
+    /// </para>
+    /// </summary>
+    private static bool IsUncRooted(string path)
+    {
+        if (
+            path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\.\", StringComparison.Ordinal)
+        )
+            return false;
+        if (!path.StartsWith(@"\\", StringComparison.Ordinal))
+            return false;
+        int serverEnd = path.IndexOf(Path.DirectorySeparatorChar, 2);
+        // -1 = 共有名の区切りが無い(\\server だけ) / 2 = サーバー名が空(\\\share\...)。
+        // 後者は \\?\UNC\ の剥がしが \\ + 残り を作るだけなので degenerate な入力で生まれうる。
+        //
+        // このうち **load-bearing なのは == 2 の側だけ**。-1 の側は下流の共有名検査が同じ入力を
+        // 落とす(\\server は shareStart == 0 になり path[0] が区切りなので false)。変異
+        // 「<= 2 → == 2」が生存することで実証済み。意図を 1 箇所で読めるよう統合したまま残す。
+        if (serverEnd <= 2)
+            return false;
+        int shareStart = serverEnd + 1;
+        return shareStart < path.Length && path[shareStart] != Path.DirectorySeparatorChar;
     }
 
     /// <summary>

@@ -102,12 +102,29 @@ public sealed class DocumentManager : IDisposable
         return doc;
     }
 
-    /// <summary>保存済みの同一パスを開いているタブを探す（未保存タブは対象外）。</summary>
+    /// <summary>
+    /// 保存済みの同一パスを開いているタブを探す（未保存タブは対象外）。
+    /// <b>引数は正規化済み絶対パス</b>(Issue #48 / 設計書 §3.1 の不変条件)。
+    /// ここではファイルシステムに触れない — 触ると開いているタブ数に比例して
+    /// <c>GetFullPath</c> が走り、不達共有上の <c>~</c> パスが 1 つあるだけで
+    /// UI が約 21 秒固まる(S-15)。正規化は呼出側が
+    /// <see cref="IReachabilityProbe.NormalizePathWithTimeout"/> で、1 操作につき多くとも
+    /// 1 回だけ行う(Ctrl+S のように 0 回で済む操作もある)。
+    /// </summary>
+    /// <remarks>
+    /// <b>意図的な挙動変更(Issue #48 Task 5)</b>: 区切り差(<c>/</c> と <c>\</c>)や
+    /// 相対セグメント(<c>..</c>)は<b>吸収しない</b>。以前は照会パスと開いている全タブのパスの
+    /// 両方に <c>PathKey.For</c>(= <c>GetFullPath</c>。最終レビュー Q-I-2 で削除済み)を打っており、
+    /// 呼び出しあたり 1 + タブ数回の実 I/O になりえた。Ctrl+S / 開く / grep ジャンプ / 復元は
+    /// すべてここを通るため、不達共有上の <c>~</c> タブが 1 枚あるだけで全部が固まっていた。
+    /// 吸収させたくなったらそれは呼出側が正規化を怠っているということなので、ここではなく
+    /// 呼出側を直す(<see cref="PathKey.ForNormalized"/> の注記と同じ規約)。
+    /// </remarks>
     public Document? FindByPath(string path)
     {
-        string key = PathKey.For(path);
+        string key = PathKey.ForNormalized(path);
         foreach (var d in _docs)
-            if (d.State.Path is not null && PathKey.For(d.State.Path) == key)
+            if (d.State.Path is not null && PathKey.ForNormalized(d.State.Path) == key)
                 return d;
         return null;
     }

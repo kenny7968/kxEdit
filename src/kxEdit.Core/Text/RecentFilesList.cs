@@ -2,7 +2,9 @@ namespace kxEdit.Core.Text;
 
 /// <summary>
 /// 「最近のファイル」リストの純ロジック（UI 非依存・テスト可能）。先頭が最新。
-/// PathKey で正規化して重複を除き（同一ファイルの大小/区切り違いを 1 件に）、上限でクランプする。
+/// <see cref="PathKey.ForNormalized"/> で重複を除き（同一ファイルの大小違いを 1 件に）、
+/// 上限でクランプする。<b>ファイルシステムには一切触れない</b>(Issue #48 / S-15。
+/// 区切り違いを吸収しなくなった経緯は <see cref="Add"/> の remarks 参照)。
 /// </summary>
 public static class RecentFilesList
 {
@@ -28,9 +30,22 @@ public static class RecentFilesList
         source is null ? new List<string>() : source.Take(MaxItems).ToList();
 
     /// <summary>
-    /// current の先頭に path を加えた新リストを返す。path と同一（PathKey 一致）の既存項目は除き、
-    /// 全体を max 件にクランプする。max が 0 以下なら空リスト。
+    /// current の先頭に path を加えた新リストを返す。path と同一（<see cref="PathKey.ForNormalized"/>
+    /// 一致）の既存項目は除き、全体を max 件にクランプする。max が 0 以下なら空リスト。
+    /// <b>path と current の各項目は正規化済み絶対パス</b>(Issue #48 / 設計書 §3.1 の不変条件)。
     /// </summary>
+    /// <remarks>
+    /// Issue #48: 以前はここで <c>PathKey.For</c>(= <c>GetFullPath</c>。最終レビュー Q-I-2 で
+    /// 削除済み)を 1 + 履歴件数だけ呼んでいた。<c>RegisterRecent</c> は開くたび・保存が成功するたびに走り、
+    /// 最近のファイルは設定に永続するので、一度でも不達共有上の <c>~</c> パスを開くと
+    /// 以後すべての開く・保存が約 21 秒固まった(S-15 と同一機構・#47 以前からの既存バグ)。
+    /// 既存 settings.json に残る未正規化エントリーは dedup されなくなるが、
+    /// データ損失は無く 1 度開き直せば解消する(設計書 §3.4 の受容)。
+    /// 同じ理由で「正規化できない入力はまとめて 1 件」という <c>PathKey.For</c> 側の
+    /// 集約(CSV-L-8)もここでは効かなくなるが、件数は max で頭打ちなので増幅は起きない。
+    /// この契約は本メソッドが唯一の消費者だったため、最終レビュー Q-I-2 で <c>PathKey.For</c> ごと
+    /// 削除した(<see cref="PathKey"/> の remarks 参照)。
+    /// </remarks>
     public static List<string> Add(IEnumerable<string> current, string path, int max)
     {
         var result = new List<string>();
@@ -38,12 +53,12 @@ public static class RecentFilesList
             return result;
 
         result.Add(path);
-        string key = PathKey.For(path);
+        string key = PathKey.ForNormalized(path);
         foreach (string p in current)
         {
             if (result.Count >= max)
                 break; // 追加前に上限判定（max==1 の超過を防ぐ）
-            if (PathKey.For(p) == key)
+            if (PathKey.ForNormalized(p) == key)
                 continue; // 同一ファイルは先頭の 1 件に集約
             result.Add(p);
         }
