@@ -528,8 +528,19 @@ public class MainFormSmokeTests
             {
                 var doc = Assert.Single(form.FileForTest.DocsForTest);
                 Assert.Equal("edited-dirty", doc.Editor.SnapshotText); // 移行復元済み
+                // A-8: silent path を外れると確認ループが実 MessageBox を出し、テストホストが
+                // 不可視のモーダルで永久停止する(ミューテーション検証中に実際に踏んだ)。
+                // override を置いて「ハング」を「clean な失敗」へ変え、ついでに
+                // 呼ばれないこと自体を silent path の証拠として固定する。
+                int confirmCalls = 0;
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true;
+                });
                 form.Close(); // hot exit(ON×BackupON・dirty ≤32M → silent)
                 Assert.Equal(true, form.LastCloseTookSilentPathForTest);
+                Assert.Equal(0, confirmCalls); // 確認は一度も出ない
             }
 
             // FinalFlush → Shutdown(keep) 後: レイアウトが dirty タブを実バックアップ Id で参照し、
