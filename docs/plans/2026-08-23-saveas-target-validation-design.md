@@ -514,6 +514,17 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
 本節は**実施記録の追記**(CLAUDE.md §8 が認める)。§1〜§8 は策定時のまま。
 §9 の申し送りリストだけは実装中に S-5〜S-13 を追記している(策定時は S-1〜S-4 のみ)。
 
+### 10.0 §7.3 の P4 は書いていない(忘れたのではない)
+
+§7.3 のテスト表にある **P4 `ProbeSaveTarget_ZeroTimeout_ReturnsUnreachable` は実装していない。**
+`task.Wait(TimeSpan.Zero)` は「タスクが先に完了する」レースを持ち、確実に false にできないため
+(フレーキーなテストを増やすより書かない、という判断)。
+
+タイムアウト経路そのものは**別の形で被覆済み**で、無被覆のまま残ってはいない。
+`RunSaveTargetProbe` / `RunFileExistsProbe` に `work` を注入し、完了しない
+`TaskCompletionSource` で止めた `work` を渡すことで、両側のフェイルセーフ値を決定的に pin した。
+経緯は §10.3。
+
 ### 10.1 seam の名前が変わった(Task 1 のコード品質レビュー)
 
 §3.2 のコードスケッチは策定時のまま残してあるので、読むときは次の対応で読み替えること。
