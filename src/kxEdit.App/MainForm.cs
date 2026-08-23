@@ -88,6 +88,11 @@ public sealed partial class MainForm : Form
     /// Coordinator 全体を露出せず観測点 1 個に絞る(レビュー M-3)。</summary>
     internal bool StartupRestoreGateOpenForTest => _backup.StartupRestoreDoneForTest;
 
+    // A-8 / H-1(設計 2026-08-24 §10.8): OnFormClosing 実行中フラグ(再入ガード)。
+    // 最終 flush の完了待ちが UI スレッドをブロックしている最中に SENT メッセージ経由で
+    // クローズが再入しうるため。機構と対処の根拠は OnFormClosing 冒頭のコメント参照。
+    private bool _closeInProgress;
+
     // Task 13 テスト用: OnFormClosing が silent path(§8.2 fast-path)を通ったかを観測する。
     // null = OnFormClosing 未実行 / true = silent (ConfirmDiscardIfDirty loop skip) / false = fall-through。
     // A-8: <see cref="LastCloseFinalFlushOkForTest"/> と組で読む(下の 3 状態表を参照)。
@@ -462,103 +467,139 @@ public sealed partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // 終了開始: 実行中の grep を中止し、終了確認中に結果窓が湧くのを抑止する。
-        _grep.BeginClose();
-
-        // hot exit(設計 §3.2/§10): ON かつ内容の定期退避が生きている(BackupEnabled)かつ
-        // 全 dirty がバックアップ可能(≤32M chars)なら、未保存確認なしで閉じる。
-        // BackupEnabled=false は「内容を永続化しない」ユーザー意思の尊重、32M 超は path-only
-        // バックアップ(内容なし)による無断喪失の防止=いずれも従来の確認経路へ fall-through。
-        bool silentPath =
-            _settings.RestoreOpenFilesOnStartup
-            && _settings.BackupEnabled
-            && !HasOversizedDirtyDoc();
-        _lastCloseFinalFlushOkForTest = null;
-        // A-8: 末尾 flush(:末尾の RestoreOpenFilesOnStartup ブロック)を飛ばしてよいかは、
-        // silentPath の単調性(true → false へしか遷移しない、という prose の約束)ではなく
-        // 「flush を実際に走らせ、かつその後に文書の状態を変えていない」という事実に置く。
-        // silentPath に依存させると、将来 silentPath=true を代入する経路が入ったり下の flush が
-        // 別条件でくくられたときに「flush していないのに飛ばす」= silent close なのに本文も
-        // レイアウトも一切書かれない(A-8 と同じ喪失クラス)へ倒れる。
-        bool flushUpToDate = false;
-        if (silentPath)
+        // ===== 再入ガード(A-8 / H-1・設計 2026-08-24 §10.8) =====
+        // STA スレッド上の**管理された**ブロッキング待機(下の WaitForFinalFlush →
+        // WaitHandle.WaitOne)は CoWaitForMultipleHandles を経由するため、待っている間も
+        // **SENT メッセージを配送する**。posted な WM_TIMER しか来ないという前提は誤りで、
+        // WM_CLOSE(タスクマネージャーの「タスクの終了」)や WM_QUERYENDSESSION
+        // (ログオフ/シャットダウンで CSRSS が送る)は SendMessage=配送されて
+        // OnFormClosing を再入する。
+        // 入れ子の close をそのまま走らせると、外側が待機で止まっている足元で
+        // OnFormClosed → BackupCoordinator.Shutdown → Form.Dispose まで完走してしまい、
+        // 外側が待機から戻ったときには
+        //   - 外側の e.Cancel=true が無視される(Form は既に破棄済み)
+        //   - 外側の確認ループの答えが全て捨てられる(No の MarkDiscarded は破棄済み writer へ
+        //     落ち、末尾の FinalFlushForRestore は _shutDown で no-op)
+        // となり、A-8 が直したはずの喪失が「ユーザーの回答ごと」再発する。
+        // したがって入れ子側は**即座に取り消して**外側の close に決着させる。
+        // 代償: WM_QUERYENDSESSION を veto すると Windows がシャットダウン阻止 UI を出しうるが、
+        // 外側の待機は最長 BackupCoordinator.FinalFlushWait(5 秒)で終わり、その後は通常どおり
+        // 閉じる=阻止は一時的。入れ子を勝たせて上記の喪失を招くより軽い。
+        // grep の中断・前提ゲート・最終 flush・確認ループ・設定保存の**どれにも触れない**こと
+        // (外側が実行中で、二重実行はそのまま二重の副作用になる)。
+        if (_closeInProgress)
         {
-            // A-8(設計 2026-08-24 §3): 前提ゲートだけでは「退避できる条件が揃っている」しか
-            // 言えない。確認をスキップしてよいのは**実際に退避できたとき**だけなので、
-            // ここで最終 flush を投入し完了を待って事後条件を検査する。
-            // 投入した本文書込が 1 件でも失敗している / 完了を確認できない場合は、
-            // hot exit の交換条件が成立していない=従来の未保存確認へ倒す。
-            _backup.FinalFlushForRestore();
-            flushUpToDate = true;
-            bool flushOk = _backup.WaitForFinalFlush();
-            _lastCloseFinalFlushOkForTest = flushOk;
-            if (!flushOk)
-                silentPath = false;
+            e.Cancel = true;
+            base.OnFormClosing(e);
+            return;
         }
-        _lastCloseTookSilentPathForTest = silentPath;
-
-        if (!silentPath)
+        _closeInProgress = true;
+        try
         {
-            // 確認ループは保存(Modified=false 化)と破棄(MarkDiscarded)で文書の状態を変えるため、
-            // 上で走らせた flush があってもレイアウト/本文は陳腐化する=末尾で必ず flush し直す。
-            // A-8 のフォールバック(flushUpToDate=true で進入)でここを落とすと、実体の無い
-            // BackupId を指したままの session-state.json が残る。
-            flushUpToDate = false;
+            // 終了開始: 実行中の grep を中止し、終了確認中に結果窓が湧くのを抑止する。
+            _grep.BeginClose();
 
-            // 従来経路: 全 dirty タブに Yes/No/Cancel 確認(all-or-nothing fall-through)。
-            // どれかでキャンセルなら終了中止。
-            var discarded = new List<Document>();
-            foreach (var doc in _docs.Documents.ToArray())
+            // hot exit(設計 §3.2/§10): ON かつ内容の定期退避が生きている(BackupEnabled)かつ
+            // 全 dirty がバックアップ可能(≤32M chars)なら、未保存確認なしで閉じる。
+            // BackupEnabled=false は「内容を永続化しない」ユーザー意思の尊重、32M 超は path-only
+            // バックアップ(内容なし)による無断喪失の防止=いずれも従来の確認経路へ fall-through。
+            bool silentPath =
+                _settings.RestoreOpenFilesOnStartup
+                && _settings.BackupEnabled
+                && !HasOversizedDirtyDoc();
+            _lastCloseFinalFlushOkForTest = null;
+            // A-8: 末尾 flush(:末尾の RestoreOpenFilesOnStartup ブロック)を飛ばしてよいかは、
+            // silentPath の単調性(true → false へしか遷移しない、という prose の約束)ではなく
+            // 「flush を実際に走らせ、かつその後に文書の状態を変えていない」という事実に置く。
+            // silentPath に依存させると、将来 silentPath=true を代入する経路が入ったり下の flush が
+            // 別条件でくくられたときに「flush していないのに飛ばす」= silent close なのに本文も
+            // レイアウトも一切書かれない(A-8 と同じ喪失クラス)へ倒れる。
+            bool flushUpToDate = false;
+            if (silentPath)
             {
-                if (!doc.Editor.Modified)
-                    continue;
-                _docs.Activate(doc); // どのファイルの確認かを SR/視覚で示す
-                bool keepClosing = _confirmDiscardOverrideForTest is not null
-                    ? _confirmDiscardOverrideForTest(doc)
-                    : _file.ConfirmDiscardIfDirty(doc);
-                if (!keepClosing)
-                {
-                    e.Cancel = true;
-                    _grep.CancelClose(); // 終了を取りやめたので grep を通常運用へ戻す
-                    base.OnFormClosing(e);
-                    return;
-                }
-                // keepClosing=true+Modified 維持=No(破棄)の明示選択(Yes は SaveDocument で
-                // Modified=false 化される)。破棄意図を hot exit の復元対象へ silent 復活させない
-                // (PR #22 M-1 後継)。確定は確認ループ完走後: 途中キャンセルでマークが残留すると、
-                // 以後その文書がバックアップ/レイアウト対象から永久に外れて silent 消失するため。
-                if (doc.Editor.Modified)
-                    discarded.Add(doc);
+                // A-8(設計 2026-08-24 §3): 前提ゲートだけでは「退避できる条件が揃っている」しか
+                // 言えない。確認をスキップしてよいのは**実際に退避できたとき**だけなので、
+                // ここで最終 flush を投入し完了を待って事後条件を検査する。
+                // 投入した本文書込が 1 件でも失敗している / 完了を確認できない場合は、
+                // hot exit の交換条件が成立していない=従来の未保存確認へ倒す。
+                _backup.FinalFlushForRestore();
+                flushUpToDate = true;
+                bool flushOk = _backup.WaitForFinalFlush();
+                _lastCloseFinalFlushOkForTest = flushOk;
+                if (!flushOk)
+                    silentPath = false;
             }
-            foreach (var doc in discarded)
-                _backup.MarkDiscarded(doc); // OFF 経路でも冪等に無害(Shutdown が全削除する)
+            _lastCloseTookSilentPathForTest = silentPath;
+
+            if (!silentPath)
+            {
+                // 確認ループは保存(Modified=false 化)と破棄(MarkDiscarded)で文書の状態を変えるため、
+                // 上で走らせた flush があってもレイアウト/本文は陳腐化する=末尾で必ず flush し直す。
+                // A-8 のフォールバック(flushUpToDate=true で進入)でここを落とすと、実体の無い
+                // BackupId を指したままの session-state.json が残る。
+                flushUpToDate = false;
+
+                // 従来経路: 全 dirty タブに Yes/No/Cancel 確認(all-or-nothing fall-through)。
+                // どれかでキャンセルなら終了中止。
+                var discarded = new List<Document>();
+                foreach (var doc in _docs.Documents.ToArray())
+                {
+                    if (!doc.Editor.Modified)
+                        continue;
+                    _docs.Activate(doc); // どのファイルの確認かを SR/視覚で示す
+                    bool keepClosing = _confirmDiscardOverrideForTest is not null
+                        ? _confirmDiscardOverrideForTest(doc)
+                        : _file.ConfirmDiscardIfDirty(doc);
+                    if (!keepClosing)
+                    {
+                        e.Cancel = true;
+                        _grep.CancelClose(); // 終了を取りやめたので grep を通常運用へ戻す
+                        base.OnFormClosing(e);
+                        return;
+                    }
+                    // keepClosing=true+Modified 維持=No(破棄)の明示選択(Yes は SaveDocument で
+                    // Modified=false 化される)。破棄意図を hot exit の復元対象へ silent 復活させない
+                    // (PR #22 M-1 後継)。確定は確認ループ完走後: 途中キャンセルでマークが残留すると、
+                    // 以後その文書がバックアップ/レイアウト対象から永久に外れて silent 消失するため。
+                    if (doc.Editor.Modified)
+                        discarded.Add(doc);
+                }
+                foreach (var doc in discarded)
+                    _backup.MarkDiscarded(doc); // OFF 経路でも冪等に無害(Shutdown が全削除する)
+            }
+
+            // ウィンドウサイズを設定に保存（最大化中は RestoreBounds を使う・M1 同様）。
+            var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            _settings.WindowWidth = b.Width;
+            _settings.WindowHeight = b.Height;
+
+            // ON: docs が生きているうちに最終 flush(本文+レイアウト)。OFF の stale layout 掃除は
+            // OnFormClosed の Shutdown(keepForRestore:false) が担う。
+            // A-8: 飛ばしてよいのは flushUpToDate=true のとき、すなわち「上の事後条件検査で flush 済み」
+            // かつ「その後に文書の状態を変えていない」ときだけ(確認ループを通ったら false に戻る)。
+            // 二重に走らせない理由は速度: ReconcileContent は dirty 文書ごとに SnapshotText
+            // (全文 string 化)を走らせるため、巨大 dirty タブ同居時の終了が目に見えて遅くなる。
+            if (_settings.RestoreOpenFilesOnStartup && !flushUpToDate)
+                _backup.FinalFlushForRestore();
+
+            _settings.LastSession = null; // 統合後は旧形式を書かない
+            if (!_settings.RestoreOpenFilesOnStartup)
+            {
+                // レガシー残骸の掃除(設計 2026-07-23 統合 §8): OFF 恒久ユーザーは移行パス
+                // (RestoreUnifiedSession)を一度も通らないため、ここで消さないと本文入りの
+                // last-session-buffers.json が orphan として永久に残る。ON 側の掃除は
+                // 起動時の移行パスが担う(復元消費とセットで削除)。
+                kxEdit.Core.Session.LastSessionBuffersStore.Delete(LastSessionBuffersPath);
+            }
+            SaveSettingsSafe();
+            base.OnFormClosing(e);
         }
-
-        // ウィンドウサイズを設定に保存（最大化中は RestoreBounds を使う・M1 同様）。
-        var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
-        _settings.WindowWidth = b.Width;
-        _settings.WindowHeight = b.Height;
-
-        // ON: docs が生きているうちに最終 flush(本文+レイアウト)。OFF の stale layout 掃除は
-        // OnFormClosed の Shutdown(keepForRestore:false) が担う。
-        // A-8: 飛ばしてよいのは flushUpToDate=true のとき、すなわち「上の事後条件検査で flush 済み」
-        // かつ「その後に文書の状態を変えていない」ときだけ(確認ループを通ったら false に戻る)。
-        // 二重に走らせない理由は速度: ReconcileContent は dirty 文書ごとに SnapshotText
-        // (全文 string 化)を走らせるため、巨大 dirty タブ同居時の終了が目に見えて遅くなる。
-        if (_settings.RestoreOpenFilesOnStartup && !flushUpToDate)
-            _backup.FinalFlushForRestore();
-
-        _settings.LastSession = null; // 統合後は旧形式を書かない
-        if (!_settings.RestoreOpenFilesOnStartup)
+        finally
         {
-            // レガシー残骸の掃除(設計 2026-07-23 統合 §8): OFF 恒久ユーザーは移行パス
-            // (RestoreUnifiedSession)を一度も通らないため、ここで消さないと本文入りの
-            // last-session-buffers.json が orphan として永久に残る。ON 側の掃除は
-            // 起動時の移行パスが担う(復元消費とセットで削除)。
-            kxEdit.Core.Session.LastSessionBuffersStore.Delete(LastSessionBuffersPath);
+            // キャンセル経路(確認ループの早期 return / e.Cancel=true)でも必ず戻す。
+            // 戻し漏れると、一度キャンセルした窓は以後永久に閉じられなくなる。
+            _closeInProgress = false;
         }
-        SaveSettingsSafe();
-        base.OnFormClosing(e);
     }
 
     /// <summary>設計 §10: BK-M-3 の 32M cap を超える dirty 文書があるか(path-only バックアップは

@@ -720,8 +720,11 @@ public sealed class BackupCoordinator : IDisposable
     /// </remarks>
     public bool WaitForFinalFlush() => WaitForFinalFlush(FinalFlushWait);
 
-    /// <summary>timeout をテストから明示するためのオーバーロード。</summary>
-    internal bool WaitForFinalFlush(TimeSpan timeout)
+    /// <summary>実装本体。既定値(<see cref="FinalFlushWait"/>)の適用点を上のラッパ 1 箇所に
+    /// 閉じ込めるため timeout を明示引数で受ける。テストからは呼ばれない(timeout 経路の検証は
+    /// <see cref="IBackupWriter.WaitForPendingJobs"/> を false で返す fake writer と、
+    /// その fake が受け取った timeout の突き合わせで行う)ため private。</summary>
+    private bool WaitForFinalFlush(TimeSpan timeout)
     {
         // _shutDown の判定を先に置くのは必須: Shutdown/Dispose は _shutDown=true の直後に
         // _writer を破棄するので「_writer is not null」では破棄済みを弾けない。破棄済みの

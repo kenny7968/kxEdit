@@ -907,6 +907,10 @@ public class MainFormSmokeTests
                 });
                 form.Close();
 
+                // Note: この 1 行だけは実時間に依存する(実 writer のバリアが
+                // BackupCoordinator.FinalFlushWait=5 秒以内に完了する必要がある。実測は 1 秒未満だが、
+                // 極端に遅い CI では timeout→false で赤化しうる)。対の失敗テストは
+                // timeout でも書込失敗でも false のため、この依存を持たない。
                 Assert.Equal(true, form.LastCloseFinalFlushOkForTest);
                 Assert.Equal(true, form.LastCloseTookSilentPathForTest);
             }
@@ -960,6 +964,57 @@ public class MainFormSmokeTests
                 BackupStore.LoadAll(tmp.BackupDir),
                 r => r.Id == dirtyTab.BackupId && r.Content == "normal-body"
             );
+        });
+
+    /// <summary>H-1(設計 2026-08-24 §10.8): OnFormClosing の再入ガード。
+    /// 実運用の再入は「STA スレッドの管理ブロッキング待機(A-8 で入れた
+    /// <see cref="BackupCoordinator.WaitForFinalFlush()"/>)が **SENT メッセージを配送する**」ために
+    /// WM_CLOSE(タスクマネージャーの「タスクの終了」)/ WM_QUERYENDSESSION(ログオフ)から起きる。
+    /// それをそのまま再現するには別スレッドからの <c>SendMessage</c> と実際に止まる writer が要るが、
+    /// 機構(= OnFormClosing の入れ子実行)は同じなので、ここでは確認ループの中から
+    /// <see cref="Form.Close"/> を呼んで決定的に作る(<see cref="Form.Close"/> は
+    /// <c>SendMessage(WM_CLOSE)</c>=同期再入)。
+    /// ガードなしでは入れ子 close が最後まで完走して Form を破棄し(=外側の
+    /// <c>e.Cancel</c> は無視される)、外側は破棄済み Form の上で確認ループを続行する
+    /// =同じ文書に 2 回確認し、その回答は全て捨てられる。</summary>
+    [Fact]
+    public void OnFormClosing_ReentrantClose_IsCanceled_OuterCloseSurvives() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false); // BackupEnabled=false
+            settings.RestoreOpenFilesOnStartup = true; // 前提ゲートが落ちて確認ループへ入る
+
+            int confirmCalls = 0;
+            bool disposedUnderOuterCall = false;
+            int closedEvents = 0;
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                // Single: dirty タブが 1 個だけ=「同じ文書への確認は 1 回」の前提を固定する。
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "dirty-body");
+                Assert.True(doc.Editor.Modified);
+                form.FormClosed += (_, _) => closedEvents++;
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    if (confirmCalls == 1)
+                    {
+                        // 入れ子クローズ。1 回目だけに限るのは必須: ガードが無い実装では入れ子側も
+                        // 同じ確認ループへ入るため、無条件に呼ぶと無限再帰でテストホストごと落ちる
+                        // (赤ではなくクラッシュになり、何が起きたか読めなくなる)。
+                        form.Close();
+                        disposedUnderOuterCall = form.IsDisposed;
+                    }
+                    return true; // No=破棄して続行
+                });
+                form.Close();
+            }
+
+            Assert.Equal(1, confirmCalls); // 同じ文書への確認は 1 回だけ(回答が捨てられていない)
+            Assert.Equal(1, closedEvents); // close の完走はちょうど 1 回
+            Assert.False(disposedUnderOuterCall); // 入れ子が外側の足元で Form を破棄していない
         });
 
     // 設計 §10: 32M cap 判定の中核(IsOversizedDirty)。32M chars の実バッファを alloc せず
