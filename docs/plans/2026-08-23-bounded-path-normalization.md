@@ -837,6 +837,23 @@ GLOBALROOT win.ini     Check=Ok         readable=True
 1. ドライブ文字ルート形式 — `X:\...`(`Path.IsPathFullyQualified` かつ 2 文字目が `:` かつ 3 文字目が区切り)
 2. UNC 形式 — `\\server\share\...`(サーバー名と共有名の両方がある)
 
+> **【訂正・Task 4B 仕様レビュー】上の 1 の逐語実装では不十分。** `Path.IsPathFullyQualified` は `/` も区切りと見なすため、実測で
+>
+> ```
+> Path.IsPathFullyQualified("C:/work/a.txt")                = True
+> Path.IsPathFullyQualified("C:/Windows/System32/…/hosts")  = True
+> ```
+>
+> となる。一方 `Path.GetFullPath` は **`\\?\` 付きのパスだけ正規化を素通しする**ので区切りが `/` のまま残り、`BlockedRoots`(`C:\Windows\…`)との前方一致が空振りする:
+>
+> ```
+> GetFullPath(\\?\C:/Windows/…/hosts) = \\?\C:/Windows/…/hosts   ← 変換されない
+> GetFullPath(\\.\C:/Windows/…/hosts) = \\.\C:\Windows\…\hosts   ← \\.\ は変換される
+> GetFullPath(C:/Windows/…/hosts)     = C:\Windows\…\hosts       ← 素は変換される
+> ```
+>
+> **3 文字目の判定は `Path.DirectorySeparatorChar`(`\`)に限定すること。** これは計画のレシピに元からあった穴で、実装時に発見・訂正した(スコープ追加ではなく必要な補正)。`\\?\C:/…` は実際には読み書きとも `FileNotFoundException` になるので直接の実害は無いが、事後条件の網が空振りする点が問題。
+
 これで `GLOBALROOT\Device\...` / `Volume{GUID}\...` / `Device\...` / `pipe\...` はすべて落ちる。**「何を拒否するか」ではなく「何を許可するか」を書く**ので、新しい device 名前空間が増えても漏れない。
 
 **確認すべき経路(すべて現状どおり通ること)**:
