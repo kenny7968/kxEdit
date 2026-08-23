@@ -704,6 +704,65 @@ public class FileControllerTests
             Assert.False(tabA.Editor.Modified); // SetSavePoint 済み=書き込み経路を通っている
         });
 
+    /// <summary>
+    /// ガードの**位置**(WriteToPath 冒頭の到達性プローブより前)を固定する。重複タブは保存させない
+    /// ので到達性を調べる意味がなく、遠隔共有で無駄な 5 秒を待たせてはいけない。
+    /// <c>TryInspectSaveTarget</c> は <c>RemotePathDetector.IsRemote</c> が真のときしかプローブを
+    /// 呼ばないため、**ローカルパスの fixture ではこの契約を観測できない**(ガードを
+    /// プローブ直後へ移しても他の網は全緑のまま=src コメントが存在しない安全網を主張する状態に
+    /// なる。Task 2 の F-1 と同型)。UNC 版が必要な理由はここ。
+    /// fixture の先例 = <see cref="Save_ShowsErrorPrompt_WhenRemoteUncUnreachable"/>。
+    /// </summary>
+    [Fact]
+    public void Save_PathAlsoOpenInAnotherTab_RemoteUnc_IsBlockedBeforeProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            const string unc = @"\\nonexistent-host-42\share\x.txt";
+
+            // UNC は実ファイルを用意できないので 2 タブとも State.Path 直代入で作る
+            // (Task 6 のガードが SaveAs 経由での重複生成を塞いでいる事情はローカル版と同じ)。
+            var tabA = host.Docs.CreateNew(); // 先に生まれたタブ
+            tabA.Editor.Text = "tabA-content";
+            tabA.State.Path = unc;
+
+            var tabB = host.Docs.CreateNew(); // 後から生まれた重複タブ
+            tabB.Editor.Text = "tabB-content";
+            tabB.State.Path = unc;
+            tabB.Editor.ReplaceCharRange(0, 0, "x"); // dirty=保存点が打たれていないことを観測可能にする
+            Assert.True(tabB.Editor.Modified);
+            Assert.Same(tabA, host.Docs.FindByPath(unc)); // 生成順で先勝ち=tabB が止められる側
+
+            // 到達可能・未存在(既定)のまま残す: プローブが呼ばれてしまった場合に
+            // 「到達不能で短絡した」と紛れないようにする(呼ばれた事実だけを見る)。
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: true,
+                FileExists: false
+            );
+
+            bool saved = host.File.Save(); // tabB がアクティブ = Ctrl+S 経路
+
+            // **assert の順序が load-bearing**: ガードを外す/プローブ後へ移す変異では
+            // Assert.False(saved) も落ちるので、先に書くとプローブの網が隠れる。
+            // 位置の契約(プローブより前)を最初に落とす。
+            Assert.Equal(0, host.Probe.SaveTargetCallCount);
+            Assert.False(saved);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("別のタブが同じファイルを開いています")
+            );
+            // 短絡であって到達性エラーでも書込失敗でもない(プローブ非実行の裏取り)。
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+            Assert.True(tabB.Editor.Modified); // 保存点を打っていない
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
