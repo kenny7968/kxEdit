@@ -27,9 +27,17 @@ public interface IBackupWriter : IDisposable
     /// <summary>セッションレイアウトを削除するジョブを投入する(OFF 終了時の stale 掃除)。</summary>
     void DeleteLayout(string path);
 
-    /// <summary>A-8: 投入済みジョブが全て実行し終わるまで待つ(<see cref="IDisposable.Dispose"/>
-    /// はしない=終了がキャンセルされてもライターは生き続ける)。<paramref name="timeout"/> 内に
-    /// 完了を確認できたら true。締切済み(Dispose 後)は待たずに true。
+    /// <summary>A-8: 投入済みジョブが全て実行し終わるまで待つ。<see cref="IDisposable.Dispose"/>
+    /// は**しない**=終了がキャンセルされてもライターは生き続ける(これが本 API の中核契約)。
+    /// <paramref name="timeout"/> 内に完了を確認できたら true。
+    ///
+    /// 投入を受け付けられない場合(締切済み/破棄済み)も true を返すが、これは
+    /// 「保留ジョブが無い」保証ではなく「**これ以上の投入は無く**、残ジョブのドレインは
+    /// <see cref="IDisposable.Dispose"/> の Join に委ねられている」の意=待てないものは待たない。
+    /// 実際、Dispose 進行中と Join 満了後の 2 状態では保留ジョブが残ったまま true になる。
+    /// timeout の false(=確認できない=安全側で失敗扱い)とは極性が逆である点に注意し、
+    /// **破棄済みライターに対して本 API を事後条件検査として使ってはならない**。
+    ///
     /// 呼び出しは UI スレッド前提。hot exit の確認スキップ前に「本当に書けたか」を
     /// 事後条件として検査するための seam。</summary>
     bool WaitForPendingJobs(TimeSpan timeout);

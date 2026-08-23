@@ -316,9 +316,13 @@ public class SerialBackupWriterTests
 
     // ===== A-8: WaitForPendingJobs(投入済みジョブの待ち合わせ) =====
 
-    /// <summary>A-8: 投入済みジョブが全部実行し終わってから true を返す。
-    /// 「待たずに true」だと事後条件検査が空手形になるため、実ファイルの存在で
-    /// 「本当に待った」ことを assert する。</summary>
+    /// <summary>A-8: 投入済みジョブが全部実行し終わってから true を返す(正常系)。実ファイルの
+    /// 存在も併せて見る。ただし <c>Assert.True</c> の側は「即 true」実装に対して空虚であり、
+    /// この 1 本が実際に殺せるのは <c>Assert.Single</c> の側だけ・しかもレース依存
+    /// (margin は広い方向=LoadAll は空 dir 列挙で済むのに対し、ワーカーは
+    /// CreateDirectory + temp 書込 + File.Move を要する)。
+    /// 「待たずに true」変異クラスの構造的な kill は timeout 側の
+    /// <see cref="WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked"/> が担う。</summary>
     [Fact]
     public void WaitForPendingJobs_ReturnsTrue_AfterQueuedJobsRan()
     {
@@ -363,7 +367,11 @@ public class SerialBackupWriterTests
     }
 
     /// <summary>A-8: Dispose 済み(締切済み)なら待たずに true。
-    /// 締切後は Enqueue が捨てられるので、素朴に待つと必ず timeout 全長ブロックしてしまう。</summary>
+    /// 締切後は Enqueue が捨てられるので、素朴に待つと必ず timeout 全長ブロックしてしまう。
+    ///
+    /// 名前の "Immediately" は時間を測ってはいない=実際の検査は「50 ms 以内に true」。
+    /// この短い 50 ms 自体が早期 return の kill 機構(早期 return を消すと Wait(50ms) が
+    /// バリア未実行のまま満了して false になり、本テストが赤化する)。</summary>
     [Fact]
     public void WaitForPendingJobs_ReturnsTrue_Immediately_AfterDispose()
     {
@@ -372,5 +380,29 @@ public class SerialBackupWriterTests
         writer.Dispose();
 
         Assert.True(writer.WaitForPendingJobs(TimeSpan.FromMilliseconds(50)));
+    }
+
+    /// <summary>A-8 設計 §4 の中核契約: WaitForPendingJobs は <see cref="IDisposable.Dispose"/>
+    /// しない。待ち合わせの後もライターが生きていて、後続の Write がディスクに届くことを固定する。
+    ///
+    /// この網が無いと「成功時だけ畳む」変異(Wait が true なら Dispose して return)が
+    /// 他 3 本を全緑のまま通過する(レビュー実測)。本番に入れば「事後条件検査が成功 →
+    /// ユーザーが終了をキャンセル → 以後そのセッションで 1 件も書かれない」= A-8 と同種の
+    /// サイレント喪失を新設するため、生存させてはならない変異である。
+    ///
+    /// 待ちは入れない: 2 件目の到達は using 脱出時の Dispose ドレイン
+    /// (CompleteAdding + Join)で同期確定する=本ファイルの決定化の原則どおり。</summary>
+    [Fact]
+    public void WaitForPendingJobs_DoesNotDisposeWriter_SubsequentWritesStillLand()
+    {
+        using var tmp = new SbwTempDir();
+        using (var w = new SerialBackupWriter(tmp.Root))
+        {
+            w.Write(Rec("live-1", "one"));
+            Assert.True(w.WaitForPendingJobs(TimeSpan.FromSeconds(15)));
+            w.Write(Rec("live-2", "two")); // 待ち合わせ後もライターが生きている
+        } // Dispose でドレイン
+
+        Assert.Equal(2, BackupStore.LoadAll(tmp.Root).Count);
     }
 }

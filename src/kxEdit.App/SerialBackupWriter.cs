@@ -105,7 +105,10 @@ public sealed class SerialBackupWriter : IBackupWriter
         });
 
     /// <summary>ジョブを投入する(締め切り後・破棄後は無視)。投入できたら true。実装詳細。
-    /// 呼び出しは UI スレッド前提。</summary>
+    /// 呼び出しは UI スレッド前提。
+    /// Write/Delete/DeleteAll/WriteLayout/DeleteLayout の 5 箇所が戻り値を捨てるのは意図的
+    /// (=投入失敗は無音、という既存挙動の保存)。戻り値を見るのは
+    /// <see cref="WaitForPendingJobs"/> だけ。</summary>
     // _disposed は volatile 不要: 書き込み(Dispose)も読み取り(Enqueue)も UI スレッドのみ。
     private bool Enqueue(Action job)
     {
@@ -155,12 +158,26 @@ public sealed class SerialBackupWriter : IBackupWriter
     {
         // キュー末尾にバリアジョブを積み、それが走り終わるのを待つ。直列ワーカーなので
         // バリアが走った時点で先行ジョブは全て実行済み=失敗通知(OnWriteFailed)も発火済み。
+        //
+        // 不変条件: 投入者(producer)は UI スレッドただ 1 つ。「末尾バリア」が「全保留ジョブの完了」を
+        // 意味するのは、待っている間に誰も新しいジョブを積めないからである(現状 Reconcile を回す
+        // BackupCoordinator._timer は System.Windows.Forms.Timer=Tick も UI スレッド)。将来 producer が
+        // 増えると、true を返した直後に新しい write が保留になり、呼び出し側(hot exit の事後条件検査)が
+        // 静かに嘘になる。producer を増やすならバリアの意味論から設計し直すこと。
+        //
         // 同期プリミティブに TaskCompletionSource を使う理由: ManualResetEventSlim + using だと
         // timeout 後にバリアが破棄済みインスタンスへ Set を打ち、ワーカー側 catch に例外を
         // 吸わせる設計になる。TrySetResult は timeout 後に呼ばれても無害。
+        // RunContinuationsAsynchronously は現状 no-op(Task.Wait の待ちは継続ではなく
+        // InvokeMayRunArbitraryCode=false の内部完了アクションで、フラグに関係なくインライン実行される)。
+        // 将来 await する消費者が現れたとき継続がワーカースレッドで走るのを防ぐ防御として残す。
         var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // 締切済み/破棄済み=**今後の**投入は無い(既に保留のジョブがあれば Dispose の Join が
+        // ドレインを担う)。待てないので待たない=この true は「保留ゼロ」の保証ではない
+        // (極性の注意は IBackupWriter 側の xmldoc を参照)。
         if (!Enqueue(() => barrier.TrySetResult()))
-            return true; // 締切済み=これ以上の書込は無い(待つと timeout 全長ブロックするだけ)
+            return true;
+        // 中核契約: ここで Dispose はしない(終了がキャンセルされてもライターは生き続ける)。
         return barrier.Task.Wait(timeout);
     }
 
