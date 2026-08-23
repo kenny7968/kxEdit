@@ -805,6 +805,97 @@ public class MainFormSmokeTests
             Assert.Empty(BackupStore.LoadAll(tmp.BackupDir));
         });
 
+    /// <summary>A-8(設計 2026-08-24): hot exit の確認なしクローズは、本文バックアップが
+    /// 実際に書けなかったときは従来の未保存確認へ倒れる。
+    /// 失敗注入は Fake ではなく**実 SerialBackupWriter**に対して行う: backupDirectory の位置に
+    /// ファイルを置くと BackupStore.Write の Directory.CreateDirectory が IOException を投げ、
+    /// OnWriteFailed 経由で BackupCoordinator の失敗キューに積まれる。起動側(LoadAll は
+    /// Directory.Exists=false で空・sweep 2 種は try/catch)がこの状況に耐えることは
+    /// 2026-08-24 のスパイクで実測済み。
+    /// 修正前はこのテストで確認が 0 回・silent=true になり、session-state.json に
+    /// 実体の無い BackupId が残る(=次回起動で E4′ タブごと消失)。</summary>
+    [Fact]
+    public void OnFormClosing_UnifiedOn_BackupWriteFails_FallsThroughToConfirm() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            // backups ディレクトリの位置を「ファイル」で塞ぐ=実 writer の書込が必ず失敗する。
+            File2.WriteAllText(tmp.BackupDir, "occupied");
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            int confirmCalls = 0;
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                // Single: dirty タブが 1 個だけであることを固定する(後段の confirmCalls==1 の前提)。
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+                Assert.True(doc.Editor.Modified);
+                Assert.False(form.HasOversizedDirtyDocForTest()); // oversized 経路ではないことを固定
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true; // No=破棄して続行
+                });
+                form.Close();
+
+                // 事後条件が偽。false の一般的な意味は「退避できたと言い切れない」(timeout も false)
+                // だが、この fixture では実 writer の OnWriteFailed が積んだ失敗 Id が根拠になる。
+                Assert.Equal(false, form.LastCloseFinalFlushOkForTest);
+                Assert.Equal(false, form.LastCloseTookSilentPathForTest); // → 確認経路へ倒れた
+            }
+
+            Assert.Equal(1, confirmCalls); // dirty 1 タブに確認 1 回(silent close なら 0 回)
+
+            // A-8 の実害(実体の無い BackupId をレイアウトへ残すこと)が起きていない: No と答えた
+            // タブは MarkDiscarded でレイアウトから外れる=次回起動で空枠にも亡霊にもならない。
+            // なお「バックアップが 1 バイトも書けていない」ことは assert しない: base dir 位置が
+            // ファイルである以上 Directory.Exists / LoadAll は常に空で、何も主張しないため。
+            var layout = SessionLayoutStore.Load(tmp.LayoutPath);
+            Assert.NotNull(layout);
+            Assert.Empty(layout!.Tabs);
+        });
+
+    /// <summary>A-8 の対照群: 書込が成功する通常構成では事後条件が真になり、
+    /// 従来どおり確認なしで閉じる(挙動不変の側を固定する)。
+    /// これが無いと「常に false を返す」実装でも上のテストが緑になる。
+    /// 対照群が空虚にならないよう、事後条件が真である根拠(実 writer が本文を実ファイルへ
+    /// 書き切ったこと)まで見る。</summary>
+    [Fact]
+    public void OnFormClosing_UnifiedOn_BackupWriteSucceeds_StaysSilent() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            int confirmCalls = 0;
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+                Assert.True(doc.Editor.Modified); // 失敗テストと同じ dirty 前提から始める
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true;
+                });
+                form.Close();
+
+                Assert.Equal(true, form.LastCloseFinalFlushOkForTest);
+                Assert.Equal(true, form.LastCloseTookSilentPathForTest);
+            }
+
+            Assert.Equal(0, confirmCalls); // 確認なしで閉じる(hot exit 本来の挙動)
+            // Close() は Shutdown(keep) の writer ドレインまで同期完了している=決定的。
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "unsaved-body");
+        });
+
     // MarkDiscarded の確定は確認ループ完走後(MainForm 側の遅延適用): 途中キャンセルで close が
     // 中止された場合、既に No と答えたタブの破棄マークが残留しない=以後も通常どおり保護される。
     [Fact]
