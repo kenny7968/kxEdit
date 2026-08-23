@@ -852,6 +852,10 @@ public class MainFormSmokeTests
 
             // A-8 の実害(実体の無い BackupId をレイアウトへ残すこと)が起きていない: No と答えた
             // タブは MarkDiscarded でレイアウトから外れる=次回起動で空枠にも亡霊にもならない。
+            // 同型の assertion は BackupOff / oversized の fall-through テストにもあり、
+            // BuildLayout の _discarded ガードを落とす変異はそれらも同時に殺す。本行の新規性は
+            // 「fall-through の原因が書込失敗のときも同様である」点=末尾 flush を落とす退行を
+            // 実測で捕まえる(A-8 の実害そのものを直接見る唯一の assertion)。
             // なお「バックアップが 1 バイトも書けていない」ことは assert しない: base dir 位置が
             // ファイルである以上 Directory.Exists / LoadAll は常に空で、何も主張しないため。
             var layout = SessionLayoutStore.Load(tmp.LayoutPath);
@@ -860,8 +864,13 @@ public class MainFormSmokeTests
         });
 
     /// <summary>A-8 の対照群: 書込が成功する通常構成では事後条件が真になり、
-    /// 従来どおり確認なしで閉じる(挙動不変の側を固定する)。
-    /// これが無いと「常に false を返す」実装でも上のテストが緑になる。
+    /// 従来どおり確認なしで閉じる(設計 §6.3「ON×BackupON×書込成功=変化なし」)。
+    /// ミューテーション被覆の増分は小さい: WaitForFinalFlush が常に false を返す変異は、
+    /// 既存の OnFormClosing_UnifiedOn_BackupOn_Dirty_SilentClose_FlushesLayoutAndBackup と
+    /// OnFormClosing_CanceledClose_DoesNotPersistDiscardMarks が(より強い assertion で)
+    /// 既に殺す。本テストの実効は (a) (silent, flushOk)=(true, true) の隅を固定する唯一の行
+    /// (下の LastCloseFinalFlushOkForTest)と、(b) 上の失敗テストが赤くなったときに
+    /// 「機構が壊れたのか失敗注入が壊れたのか」を切り分ける診断価値の 2 点。
     /// 対照群が空虚にならないよう、事後条件が真である根拠(実 writer が本文を実ファイルへ
     /// 書き切ったこと)まで見る。</summary>
     [Fact]

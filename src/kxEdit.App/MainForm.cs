@@ -90,6 +90,7 @@ public sealed partial class MainForm : Form
 
     // Task 13 テスト用: OnFormClosing が silent path(§8.2 fast-path)を通ったかを観測する。
     // null = OnFormClosing 未実行 / true = silent (ConfirmDiscardIfDirty loop skip) / false = fall-through。
+    // A-8: <see cref="LastCloseFinalFlushOkForTest"/> と組で読む(下の 3 状態表を参照)。
     private bool? _lastCloseTookSilentPathForTest;
     internal bool? LastCloseTookSilentPathForTest => _lastCloseTookSilentPathForTest;
 
@@ -97,7 +98,13 @@ public sealed partial class MainForm : Form
     /// どう出たか。null=OnFormClosing 未実行、または検査に到達しなかった
     /// (前提ゲートで既に silent close ではない)。
     /// oversized による fall-through と「バックアップ書込失敗」による fall-through を
-    /// テストが弁別するための seam。</summary>
+    /// テストが弁別するための seam。
+    /// <see cref="LastCloseTookSilentPathForTest"/> と組で
+    /// <c>(silent, flushOk)</c> の 3 状態を弁別する:
+    /// <c>(true, true)</c>=hot exit の確認なしクローズ /
+    /// <c>(false, false)</c>=A-8 の書込失敗フォールバック /
+    /// <c>(false, null)</c>=前提ゲート(OFF・BackupOFF・oversized)での fall-through。
+    /// <c>(true, null)</c> と <c>(false, true)</c> は構造上あり得ない。</summary>
     private bool? _lastCloseFinalFlushOkForTest;
 
     internal bool? LastCloseFinalFlushOkForTest => _lastCloseFinalFlushOkForTest;
@@ -467,6 +474,13 @@ public sealed partial class MainForm : Form
             && _settings.BackupEnabled
             && !HasOversizedDirtyDoc();
         _lastCloseFinalFlushOkForTest = null;
+        // A-8: 末尾 flush(:末尾の RestoreOpenFilesOnStartup ブロック)を飛ばしてよいかは、
+        // silentPath の単調性(true → false へしか遷移しない、という prose の約束)ではなく
+        // 「flush を実際に走らせ、かつその後に文書の状態を変えていない」という事実に置く。
+        // silentPath に依存させると、将来 silentPath=true を代入する経路が入ったり下の flush が
+        // 別条件でくくられたときに「flush していないのに飛ばす」= silent close なのに本文も
+        // レイアウトも一切書かれない(A-8 と同じ喪失クラス)へ倒れる。
+        bool flushUpToDate = false;
         if (silentPath)
         {
             // A-8(設計 2026-08-24 §3): 前提ゲートだけでは「退避できる条件が揃っている」しか
@@ -475,6 +489,7 @@ public sealed partial class MainForm : Form
             // 投入した本文書込が 1 件でも失敗している / 完了を確認できない場合は、
             // hot exit の交換条件が成立していない=従来の未保存確認へ倒す。
             _backup.FinalFlushForRestore();
+            flushUpToDate = true;
             bool flushOk = _backup.WaitForFinalFlush();
             _lastCloseFinalFlushOkForTest = flushOk;
             if (!flushOk)
@@ -484,6 +499,12 @@ public sealed partial class MainForm : Form
 
         if (!silentPath)
         {
+            // 確認ループは保存(Modified=false 化)と破棄(MarkDiscarded)で文書の状態を変えるため、
+            // 上で走らせた flush があってもレイアウト/本文は陳腐化する=末尾で必ず flush し直す。
+            // A-8 のフォールバック(flushUpToDate=true で進入)でここを落とすと、実体の無い
+            // BackupId を指したままの session-state.json が残る。
+            flushUpToDate = false;
+
             // 従来経路: 全 dirty タブに Yes/No/Cancel 確認(all-or-nothing fall-through)。
             // どれかでキャンセルなら終了中止。
             var discarded = new List<Document>();
@@ -520,12 +541,11 @@ public sealed partial class MainForm : Form
 
         // ON: docs が生きているうちに最終 flush(本文+レイアウト)。OFF の stale layout 掃除は
         // OnFormClosed の Shutdown(keepForRestore:false) が担う。
-        // A-8: silentPath は true → false へしか遷移しないので、ここで true =「上の事後条件検査で
-        // 既に flush 済み」と同値。二重に走らせない理由は速度: ReconcileContent は dirty 文書ごとに
-        // SnapshotText(全文 string 化)を走らせるため、巨大 dirty タブ同居時の終了が目に見えて遅くなる。
-        // フォールバック時(silentPath=false)は確認ループの保存/破棄をレイアウトへ反映するため
-        // ここで改めて走らせる必要がある。
-        if (_settings.RestoreOpenFilesOnStartup && !silentPath)
+        // A-8: 飛ばしてよいのは flushUpToDate=true のとき、すなわち「上の事後条件検査で flush 済み」
+        // かつ「その後に文書の状態を変えていない」ときだけ(確認ループを通ったら false に戻る)。
+        // 二重に走らせない理由は速度: ReconcileContent は dirty 文書ごとに SnapshotText
+        // (全文 string 化)を走らせるため、巨大 dirty タブ同居時の終了が目に見えて遅くなる。
+        if (_settings.RestoreOpenFilesOnStartup && !flushUpToDate)
             _backup.FinalFlushForRestore();
 
         _settings.LastSession = null; // 統合後は旧形式を書かない
