@@ -33,6 +33,15 @@ public enum PathValidation
 /// つまり事後条件は「形」しか保証せず、綴りの canonical 性は GetFullPath に依存する。
 /// 安全性は「形の検査 + canonical 化 + 前方一致」の 3 点セットで初めて成立する。
 ///
+/// (3) device プレフィックスの再出現も閉じる。「許可する形だけを書く」方式でも、
+///     **許可した形に化ける綴り**は別途塞ぐ必要がある。実在した 2 経路:
+///     - 再正規化が予約デバイス名を書き換えて \\.\NUL を作る(\\?\ 配下の NUL は
+///       デバイスではなく普通のファイル名なので、通すと BlockedRoot 配下に実ファイルができる)
+///     - プレフィックスを二重にした入力 (\\?\\\?\C:\Windows\...) は剥がしが 1 回なので
+///       \\?\C:\Windows\... が残る
+///     どちらも「\\ 始まり + 区切り + 非空」で UNC 判定を満たしてしまうため、
+///     IsUncRooted の入口で \\?\ / \\.\ を明示的に除外している。
+///
 /// 副作用として \\?\Volume{GUID}\... (ドライブ文字未割当ボリューム)も Rejected になる
 /// = hot exit 復元では無題タブに降格する(本文は失われない・受容)。ただし
 /// FileController の path-only extras 経路(未変更タブの復元)だけは Rejected でレコードごと
@@ -130,6 +139,12 @@ public static class OriginalPathValidator
             // ただし事後条件が保証するのは「形」だけで、綴りが canonical であることは
             // 上の再正規化(と :63 の GetFullPath)に依存する。両方が揃って初めて
             // StartsWithAnyBlockedRoot の前方一致が意味を持つ。片方だけでは塞がらない。
+            //
+            // 順序が load-bearing: 再正規化を**後ろ**へ動かすと、事後条件が検査した形と
+            // BlockedRoots が照合する形が食い違う。GetFullPath は予約デバイス名を書き換える
+            // (C:\ProgramData\...\NUL → \\.\NUL)ので、「ドライブ文字形式として合格した値」が
+            // 照合時には device パスに化けている、という状態が作れてしまう(B-3)。
+            // ここで**正規化後の値を検査する**ことでその窓を閉じている。
             if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
                 return PathValidation.Rejected;
 
@@ -160,11 +175,13 @@ public static class OriginalPathValidator
     /// 3 文字目が区切りであることは load-bearing: ここを緩めるとドライブ相対形
     /// (<c>C:xyz</c>)が通り、再正規化がカレントディレクトリ基準で解決してしまう
     /// (実測: <c>GetFullPath(@"C:kxedit\a.txt")</c> → プロセスの CWD 配下)。
-    /// ただし <b>load-bearing なのは「ドライブ相対を弾く」側だけ</b>で、
-    /// 「<c>/</c> を弾く」側は再正規化と二重になっている:
-    /// 区切りに <c>/</c> を足す変異は生存する(<c>C:/Windows/...</c> は再正規化が
-    /// <c>C:\Windows\...</c> へ canonical 化して BlockedRoots が捕まえるため)。
-    /// 形の検査そのものの証人は <c>Check_Rejects_ExtendedDriveRelativePath</c> の側。
+    /// ただし「<c>/</c> を弾く」側は<b>セキュリティ的には再正規化と二重</b>になっている:
+    /// BlockedRoot を指す綴り (<c>C:/Windows/...</c>) は、仮にここを緩めても再正規化が
+    /// <c>C:\Windows\...</c> へ canonical 化して BlockedRoots が捕まえる(実測で確認)。
+    /// 区切りに <c>/</c> を足す変異は<b>等価変異ではなく「挙動は変わるがセキュリティ的に
+    /// 中立な変異」</b>で、変わるのは BlockedRoot **外**の綴りの可否だけ。その差分を
+    /// <c>Check_Rejects_ExtendedDrivePathWithAltSeparators_OutsideBlockedRoots</c> で固定し、
+    /// ドライブ相対を弾く側は <c>Check_Rejects_ExtendedDriveRelativePath</c> で固定している。
     /// 1 文字目が英字であることも同様: 非 extended 入力なら
     /// <see cref="Path.IsPathFullyQualified(string)"/> が <c>1:\...</c> を入口で弾くが、
     /// <c>\\?\1:\...</c> は入口を通過するのでここが唯一の門番になる。
@@ -179,9 +196,24 @@ public static class OriginalPathValidator
     /// Task 4B: <c>\\server\share...</c> 形式か。サーバー名と共有名の**両方**が非空であることを
     /// 要求する。ここを「<c>\\</c> で始まる」だけに緩めると、除去後に <c>\\</c> が残る綴りが
     /// 素通りする。
+    ///
+    /// B-3 / I-4: DOS device プレフィックス (<c>\\?\</c> / <c>\\.\</c>) を**明示的に除外**する。
+    /// これが無いと <c>\\.\NUL</c> が「サーバー名 <c>.</c>・共有名 <c>NUL</c>」の UNC に化け、
+    /// 事後条件・BlockedRoots・BK-M-1 の reparse 検査の 3 つすべてを迂回する。到達経路は 2 本:
+    /// (1) <see cref="Check"/> の再正規化が予約デバイス名を書き換える
+    ///     (<c>\\?\C:\ProgramData\...\NUL</c> → 剥がし → <c>C:\ProgramData\...\NUL</c> →
+    ///      <c>GetFullPath</c> → <c>\\.\NUL</c>)。<c>\\?\</c> 配下では <c>NUL</c> はデバイスでなく
+    ///      普通のファイル名なので、通すと BlockedRoot 配下に実ファイルが作られる(実証済み)。
+    /// (2) プレフィックスを**二重**にした入力 (<c>\\?\\\?\C:\Windows\...</c>)。剥がしは 1 回
+    ///     だけなので <c>\\?\C:\Windows\...</c> が残る。
     /// </summary>
     private static bool IsUncRooted(string path)
     {
+        if (
+            path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\.\", StringComparison.Ordinal)
+        )
+            return false;
         if (!path.StartsWith(@"\\", StringComparison.Ordinal))
             return false;
         int serverEnd = path.IndexOf(Path.DirectorySeparatorChar, 2);

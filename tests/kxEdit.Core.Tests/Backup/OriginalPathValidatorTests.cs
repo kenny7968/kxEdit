@@ -200,8 +200,10 @@ public class OriginalPathValidatorTests
         // (C:\Windows\)と前方一致しない。
         // この fixture は事後条件(3 文字目が区切りでない=形が不正)で落ちるが、
         // 仮にそこを緩めても再正規化が C:\Windows\... へ canonical 化して BlockedRoots が
-        // 捕まえる = 二重の網。形の検査そのものを固定しているのは
-        // Check_Rejects_ExtendedDriveRelativePath の側(そちらは再正規化では救えない)。
+        // 捕まえる = 二重の網。したがって**この網だけでは形の検査を固定できない**。
+        // 形の検査を固定しているのは Check_Rejects_ExtendedDrivePathWithAltSeparators_
+        // OutsideBlockedRoots(BlockedRoot 外なので再正規化では救えない)と
+        // Check_Rejects_ExtendedDriveRelativePath の 2 本。
         var status = OriginalPathValidator.Check(
             @"\\?\C:/Windows/System32/drivers/etc/hosts",
             out _
@@ -237,21 +239,42 @@ public class OriginalPathValidatorTests
     {
         // B-2: 8.3 短縮名。非 extended なら GetFullPath が GetLongPathName で展開するので
         // 正しく Rejected になるが、\\?\ 付きは素通しなので短縮名が残る。
-        // 8.3 別名は環境依存(volume の 8.3 生成が無効なら存在しない)なので、
-        // **非 extended 形の判定を oracle にして**「この綴りが BlockedRoot を指す」ことを
-        // 確かめた候補だけを検証する(別名を決め打ちしない)。
+        //
+        // 8.3 別名は環境依存(volume の 8.3 生成が無効なら存在しない)なので候補を絞る必要が
+        // あるが、oracle に SUT (Check) を使うと **StartsWithAnyBlockedRoot を壊す変異で候補が
+        // 空になり vacuous に緑**になる。oracle はフレームワーク側だけで組む:
+        // 実在する別名を Directory.Exists で確かめ、GetFullPath で展開した先が
+        // BlockedRoots と同じ特殊フォルダーであることを直接照合する。
         var win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         if (string.IsNullOrEmpty(win) || win.Length < 3 || win[1] != ':')
             return; // 環境依存 skip
         var root = win[..3];
+        var blocked = new[]
+        {
+            Environment.SpecialFolder.Windows,
+            Environment.SpecialFolder.System,
+            Environment.SpecialFolder.SystemX86,
+            Environment.SpecialFolder.ProgramFiles,
+            Environment.SpecialFolder.ProgramFilesX86,
+            Environment.SpecialFolder.CommonApplicationData,
+        }
+            .Select(Environment.GetFolderPath)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s.TrimEnd(Path.DirectorySeparatorChar))
+            .ToArray();
         var candidates = new[] { "PROGRA~1", "PROGRA~2", "PROGRA~3" }
-            .Select(alias => root + alias + @"\kxEdit\poison.json")
-            .Where(p => OriginalPathValidator.Check(p, out _) == PathValidation.Rejected)
+            .Select(alias => root + alias)
+            .Where(Directory.Exists)
+            .Where(dir =>
+                blocked.Any(b =>
+                    Path.GetFullPath(dir).Equals(b, StringComparison.OrdinalIgnoreCase)
+                )
+            )
             .ToList();
         // candidates が空の環境(8.3 生成が無効など)では検証対象が無い=何も主張しない。
-        foreach (var plain in candidates)
+        foreach (var dir in candidates)
         {
-            var status = OriginalPathValidator.Check(@"\\?\" + plain, out _);
+            var status = OriginalPathValidator.Check(@"\\?\" + dir + @"\kxEdit\poison.json", out _);
             Assert.Equal(PathValidation.Rejected, status);
         }
     }
@@ -275,6 +298,90 @@ public class OriginalPathValidatorTests
         // ここに到達する = 事後条件が唯一の門番。
         var status = OriginalPathValidator.Check(@"\\?\1:\Temp\a.txt", out _);
         Assert.Equal(PathValidation.Rejected, status);
+    }
+
+    // ---- Task 4B fixup 2: 「許可した形に化ける」綴り(B-3 / I-4)----
+
+    [Fact]
+    public void Check_Rejects_ExtendedReservedDeviceNameUnderBlockedRoot()
+    {
+        // B-3(前 fixup が持ち込んだ退行の回帰ガード)。連鎖:
+        //   \\?\C:\ProgramData\kxEdit\NUL → 剥がし → C:\ProgramData\kxEdit\NUL
+        //   → 再正規化 (GetFullPath) が予約名を書き換えて \\.\NUL
+        //   → IsUncRooted が「サーバー名 . / 共有名 NUL」の UNC と誤認
+        //   → 事後条件を通過し、isUnc=true なので BK-M-1 の reparse 検査までスキップされ、
+        //     StartsWithAnyBlockedRoot も当然空振り → Ok
+        // normalized(out)は \\?\ 付きのままで、**\\?\ 配下の NUL はデバイスではなく普通の
+        // ファイル名**なので、BlockedRoot 配下に実ファイルが作られる(レビューで実証済み)。
+        //
+        // このテストは**再正規化と事後条件の順序**も同時に固定する: 再正規化を事後条件の
+        // 後ろへ動かすと、事後条件が検査した形 (C:\...\NUL) と BlockedRoots が照合する形
+        // (\\.\NUL) が食い違い、同じ穴が開く。
+        var pd = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrEmpty(pd) || string.IsNullOrEmpty(win))
+            return; // 環境依存 skip
+
+        var leaked = new List<string>();
+        foreach (var blockedRoot in new[] { pd, win })
+        {
+            // 大小・末尾ドット・末尾空白のどれも Win32 は同じ NUL デバイスへ解決する。
+            foreach (var leaf in new[] { "NUL", "nul", "NuL", "NUL.", "NUL " })
+            {
+                var p = @"\\?\" + Path.Combine(blockedRoot, "kxEdit", leaf);
+                if (OriginalPathValidator.Check(p, out _) != PathValidation.Rejected)
+                    leaked.Add(p);
+            }
+        }
+        Assert.Empty(leaked);
+    }
+
+    [Fact]
+    public void Check_Rejects_DoubledDevicePrefix()
+    {
+        // I-4: プレフィックスの剥がしは 1 回だけなので、入力を二重にすると剥がし後に
+        // \\?\... / \\.\... が残る。これも「\\ 始まり + 区切り + 非空」なので UNC と
+        // 誤認され、事後条件・BlockedRoots・reparse 検査の 3 つすべてを迂回する。
+        var win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrEmpty(win))
+            return; // 環境依存 skip
+        var hosts = Path.Combine(win, "System32", "drivers", "etc", "hosts");
+
+        var leaked = new List<string>();
+        foreach (var inner in new[] { @"\\?\", @"\\.\" })
+        {
+            foreach (var outer in new[] { @"\\?\", @"\\.\" })
+            {
+                var p = outer + inner + hosts;
+                if (OriginalPathValidator.Check(p, out _) != PathValidation.Rejected)
+                    leaked.Add(p);
+            }
+        }
+        Assert.Empty(leaked);
+    }
+
+    [Fact]
+    public void Check_Rejects_ExtendedDrivePathWithAltSeparators_OutsideBlockedRoots()
+    {
+        // m-4 の網。IsDriveRooted の「3 文字目は \ のみ」を固定する。
+        // BlockedRoot を指す綴りは再正規化が canonical 化して捕まえるので、この条項が
+        // 単独で効くのは **BlockedRoot 外**の綴りだけ = ここでしか固定できない。
+        //
+        // 張る判断の理由: (1) 事後条件の契約は「形は X:\... のみ」であり、その契約を
+        // 網に載せないと次に触る人が「緩めても等価」と誤読する。(2) \\?\ 付きスラッシュ綴りは
+        // \\?\ がスラッシュ変換を止めるため Windows 自身が open できない(実測 readable=False)
+        // = 開けないパスを復元先に採らないのが正しく、Rejected を固定して失うものが無い。
+        var tmp = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+        if (tmp.Length < 3 || tmp[1] != ':')
+            return; // 環境依存 skip
+        // 前提の自己検証: バックスラッシュ綴りは Ok(= BlockedRoot 外である)。
+        Assert.Equal(
+            PathValidation.Ok,
+            OriginalPathValidator.Check(@"\\?\" + tmp + @"\kxedit_alt\a.txt", out _)
+        );
+
+        var slashed = @"\\?\" + tmp.Replace('\\', '/') + "/kxedit_alt/a.txt";
+        Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(slashed, out _));
     }
 
     [Fact]
