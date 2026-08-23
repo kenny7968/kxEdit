@@ -521,6 +521,19 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   誰かが意図的にキャッシュ機構を**追加**するしかなく、それは独自のレビューを伴う大きな編集になる。
   事故で壊れうる挙動ではない。
 
+- **S-14**(Task 8 の fixup 中に付随発見・2026-08-23。**本ブランチ固有ではなくリポジトリ横断**):
+  **XML doc の `cref` が一切検証されていない。** `GenerateDocumentationFile` が
+  `Directory.Build.props` にも csproj にも `.editorconfig` にも設定されていないため、
+  **CS1574(解決できない cref)が永久に出ない**。
+  `-p:GenerateDocumentationFile=true -p:TreatWarningsAsErrors=false` で建てると
+  **既存の壊れた cref が 12 件**出る(Accessibility / App / Core / Editor と
+  `MainFormSmokeTests.cs`。うち 1 件は `FileController.cs` の `SetOrReplaceSource`)。
+  このコードベースは `<see cref="..."/>` による相互参照を多用する書き方なので、
+  **参照先を消しても改名しても誰も気づかない = コメントが静かに腐り続ける**。
+  対処は「プロパティ 1 つ + CS1591(未文書化メンバー)の抑止」で済むが、
+  ソリューション全体のビルドプロパティ変更なので本ブランチでは扱わない。
+  なお本ブランチが**追加した** cref は 12 件のリストに入っていない(確認済み)。
+
 ## 10. 実施記録
 
 本節は**実施記録の追記**(CLAUDE.md §8 が認める)。§1〜§8 は策定時のまま。
