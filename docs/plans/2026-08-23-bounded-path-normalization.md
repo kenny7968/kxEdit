@@ -1346,7 +1346,13 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 期待: 全緑。**このタスクのテストは実装変更なしで最初から緑になる**(前タスクまでで達成済みのため)。これは正常。網は「今の状態を固定する」ためのもの。
 
-> **注意**: TDD の「まず赤」を確認したい場合は、`DocumentManager.FindByPath` の `ForNormalized` を一時的に `For` へ戻し、`SaveDocument_WithManyOpenTabs_DoesNotScaleNormalizeCalls` が**赤にならない**ことを実際に見ること。これが設計書 §5 が予告した穴で、`PathKey.For` 自体の呼び出し回数を見ないと kill できない。**この網では kill できないと分かったうえで置いている**ことを、テストのコメントに書いた形で残す。Task 9 のミューテーション検証で、Task 1 の `ForNormalized_does_not_normalize_separators` が実際の kill 役であることを確認する。
+> **注意**: TDD の「まず赤」を確認したい場合は、`DocumentManager.FindByPath` の `ForNormalized` を一時的に `For` へ戻し、`SaveDocument_WithManyOpenTabs_DoesNotScaleNormalizeCalls` が**赤にならない**ことを実際に見ること。これが設計書 §5 が予告した穴で、`PathKey.For` 自体の呼び出し回数を見ないと kill できない。**この網では kill できないと分かったうえで置いている**ことを、テストのコメントに書いた形で残す。**【訂正・Task 8 実測】kill 役の見立ては誤りだった。** ここに「Task 1 の `ForNormalized_does_not_normalize_separators` が実際の kill 役」と書いていたが、あれは Core の `PathKeyTests` = **`PathKey` 自身の網**であって、`FindByPath` の呼び分けを変えても反応しない(この変異で Core は全緑のままだった)。実際の kill 役は `DocumentManagerTests` の 3 本:
+
+- `FindByPath_DoesNotCallFileSystemTouchingPathKeyFor`(Task 5 の IL 走査)
+- `FindByPath_DoesNotNormalizeSeparators_CallerMustNormalize`
+- `FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize`
+
+下の Task 9 ミューテーション表の #4 は正しい。
 
 **Step 3: commit**
 
