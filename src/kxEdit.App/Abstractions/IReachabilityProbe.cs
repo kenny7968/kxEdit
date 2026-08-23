@@ -40,11 +40,8 @@ public enum PathNormalizeStatus
 /// <b>null</b> になり、「ゼロ値をフェイルセーフ側に置く」原則から <c>Full</c> だけが外れる
 /// ため、手書きのプロパティにしてある(消費側は <c>SanitizeForDisplay.OneLine(...)</c> と
 /// <c>State.Path = ...</c> なので、null が漏れると NRE か「Path が null の無題タブ」になる)。
-/// <b>ただし等値比較だけはゼロ値を吸わない</b>: record struct の自動生成 <c>Equals</c> は
-/// プロパティではなく backing field を見るため、
-/// <c>default != new PathNormalizeResult(TimedOut, string.Empty)</c> になる(実測)。
-/// **テストで <c>Assert.Equal(default, result)</c> と書かないこと** —
-/// <c>Status</c> と <c>Full</c> を個別に assert する。
+/// 等値比較も<b>公開プロパティ基準</b>にしてあるので、
+/// <c>default == new PathNormalizeResult(TimedOut, string.Empty)</c> は true になる。
 /// </summary>
 public readonly record struct PathNormalizeResult
 {
@@ -64,6 +61,14 @@ public readonly record struct PathNormalizeResult
     /// <c>default</c> でも null にならない。
     /// </summary>
     public string Full => _full ?? string.Empty;
+
+    // record struct の自動生成 Equals は公開プロパティではなく backing field(_full)を見るため、
+    // 「同じフェイルセーフ値」である default と new(TimedOut, string.Empty) が等値にならない
+    // (null vs "")。これは positional 版でも同じ挙動で、手書き化の代償ではない(実測)。
+    // ワナを doc の但し書きで回避するのではなく、公開プロパティ基準の等値を手で書いて型ごと消す。
+    public bool Equals(PathNormalizeResult other) => Status == other.Status && Full == other.Full;
+
+    public override int GetHashCode() => HashCode.Combine(Status, Full);
 }
 
 /// <summary>

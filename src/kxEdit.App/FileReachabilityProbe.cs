@@ -35,17 +35,28 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// 境界付き待ちの判断。タイムアウトしたら <paramref name="onTimeout"/> を返す。
     /// 3 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
     /// (Task 1 コード品質レビュー I-1: タイムアウト値の変異が生存していた)。
-    /// <b>fault は元の例外型のまま投げ直す</b>(Issue #48 コード品質レビュー I-6):
-    /// <see cref="Task.Wait(TimeSpan)"/> は faulted task に対して中身を
-    /// <see cref="AggregateException"/> で包んで投げる。<c>task.Result</c> を
-    /// <c>task.GetAwaiter().GetResult()</c> へ替えても**直らない** —
-    /// 包むのは <c>Result</c> ではなく <c>Wait</c> のほうだから
-    /// (実測 net9.0.8: <c>Wait(TimeSpan)</c> 単体でも AggregateException)。
-    /// <see cref="ExceptionDispatchInfo"/> で中身を投げ直せば型もスタックも保たれ、
-    /// <see cref="NormalizePathWithTimeout"/> のフィルタ外例外(=ロジックバグ)が
+    /// <b>fault は元の例外型のまま投げ直す</b>(Issue #48 コード品質レビュー I-6)。
+    /// faulted task に対する実測(net9.0.8)は次のとおり:
+    /// <c>Wait()</c> / <c>Wait(TimeSpan)</c> / <c>Result</c> は**いずれも**中身を
+    /// <see cref="AggregateException"/> で包んで投げ、包まずに投げるのは
+    /// <c>GetAwaiter().GetResult()</c> だけ。それでも
+    /// <c>Wait(timeout) ? task.Result : onTimeout</c> の <c>Result</c> 側だけを
+    /// <c>GetAwaiter().GetResult()</c> へ替えても**直らない** — 三項の条件である
+    /// <c>Wait</c> が先に評価され、そこで包んで投げるので <c>Result</c> 側に制御が届かないから。
+    /// (**「包むのは <c>Result</c> ではなく <c>Wait</c> のほう」と書いていたのは誤り**だった。
+    /// 両方が包む。差し替えが効かない理由は<b>評価順</b>であって、どちらが包むかではない。)
+    /// <see cref="ExceptionDispatchInfo"/> で中身を投げ直せば型も<b>スタックも</b>保たれる
+    /// (素の <c>throw ex.InnerExceptions[0];</c> ではスタックが投げ直し地点にリセットされ、
+    /// work 内のバグ地点が消える。実測で確認)。これにより
+    /// <see cref="NormalizePathWithTimeout"/> のフィルタ外例外(=ロジックバグ)が、
     /// 移設前(<c>FileController</c> が直接 <c>GetFullPath</c> を呼んでいた頃)と
-    /// 同じ姿で診断できる。既存 2 本の work は素の <c>catch</c> で何も逃がさない=
-    /// task が fault しないので**挙動不変**。
+    /// 同じ姿で診断できる。
+    /// <b>投げ直しは本メソッドの契約であって、呼出側の性質ではない</b>(再レビュー m-1):
+    /// <see cref="ProbeFileExistsWithTimeout"/> / <see cref="ProbeSaveTargetWithTimeout"/> の
+    /// work は素の <c>catch</c> で何も逃がさない=task が fault しないので、
+    /// <b>この 2 つの呼出側については挙動不変</b>。ただし
+    /// <see cref="RunSaveTargetProbe"/> / <see cref="RunFileExistsProbe"/> は internal で
+    /// 任意の work を受けるため、throw しうる work を渡せばここが効く。
     /// </summary>
     internal static T WaitBounded<T>(Task<T> task, TimeSpan timeout, T onTimeout)
     {

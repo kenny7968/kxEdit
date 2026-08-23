@@ -289,18 +289,37 @@ public class FileReachabilityProbeTests
         Assert.Equal(string.Empty, result.Full);
     }
 
-    [Fact]
-    public void NormalizePath_OverLongPath_ReturnsInvalid()
+    // V-2 の網を seam 自身に持たせる。実害は「Invalid を返さない」では済まない: フィルタ外の
+    // 例外は work から task の fault として出て、WaitBounded がそれを投げ直すので
+    // **UI スレッドの未捕捉例外ダイアログ**になる(= PR #47 の V-2 が戻る)。
+    // FileControllerTests 側の V-2 網は Task 3 で 2 段の間接経由になるため、フィルタが住んでいる
+    // このファイルに直接の網を置く。
+    //
+    // **2 つの窓を両方回すのが load-bearing**(再レビュー I-1)。40,000 文字 1 本だけだと
+    // `or IOException` → `or PathTooLongException` と**狭める**変異が全緑で生存し、
+    // PR #47 の V-2 が直したまさにその窓(素の IOException)は無網のまま残る。
+    // Path.GetFullPath の実測マップ(net9.0.8。CWD 長 106 と 157 の両方で同一):
+    //   入力長 32765 → 素の System.IO.IOException
+    //   入力長 32766 → 素の System.IO.IOException   ← V-2 の窓。GetFullPathNameW が
+    //                                                 ERROR_INVALID_NAME を返す
+    //   入力長 32767 → PathTooLongException         ← ここからマネージド事前検査(Win32 に届かない)
+    //   入力長 40000 → PathTooLongException
+    // 変異 `or IOException` → `or PathTooLongException` を当てると、32766 のケースだけが
+    // 「System.IO.IOException : ファイル名、ディレクトリ名、またはボリューム ラベルの構文が
+    // 間違っています」を呼出側へ漏らして赤になる(40000 のケースは緑のまま)= 上表の実地確認。
+    //
+    // **上端は入力長だけで決まり CWD 長に依存しない**: 総長 = CWD + 1 + 入力長 なので、入力長が
+    // 32766 ならどんな CWD でも総長は 32767 を超える。ゆえに
+    // FileControllerTests.SaveAs_OverLongPath_WarnsAndReopens の doc にある
+    // **「素の IOException の窓は CWD 長に依存する fixture になるため自動テストにしない」という
+    // PR #47 の判断は誤りだった** — 固定長 32766 で決定的に再現できる(Task 3 で当該 doc ごと回収する)。
+    [Theory]
+    [InlineData(32766)] // 素の IOException(V-2 の窓)
+    [InlineData(40000)] // PathTooLongException(マネージド事前検査の窓)
+    public void NormalizePath_OverLongPath_ReturnsInvalid(int length)
     {
-        // V-2 の網を seam 自身に持たせる。40,000 文字の相対入力は PathTooLongException
-        // (IOException 派生。実測 net9.0.8 で確認)。フィルタから IOException を外す変異を
-        // ここで kill する。実害は「Invalid を返さない」では済まない: フィルタ外の例外は
-        // work から task の fault として出て、WaitBounded がそれを投げ直すので
-        // **UI スレッドの未捕捉例外ダイアログ**になる(= PR #47 の V-2 が戻る)。
-        // FileControllerTests 側の V-2 網は Task 3 で 2 段の間接経由になるため、
-        // フィルタが住んでいるこのファイルに直接の網を置く。
         var result = new FileReachabilityProbe().NormalizePathWithTimeout(
-            new string('a', 40000),
+            new string('a', length),
             Timeout
         );
 
@@ -377,11 +396,13 @@ public class FileReachabilityProbeTests
     public void WaitBounded_FaultedTask_RethrowsOriginalExceptionType()
     {
         // I-6。NormalizePathWithTimeout の絞り込みフィルタを抜けた例外(=ロジックバグ)を、
-        // 移設前と同じ姿=元の型のまま呼出スレッドへ届けるための網。
-        // 素の task.Wait(TimeSpan) は faulted task の中身を AggregateException で包む
-        // (実測 net9.0.8。**task.Result を GetAwaiter().GetResult() へ替えても直らない** —
-        // 包むのは Result ではなく Wait のほう)。WaitBounded 側の
-        // ExceptionDispatchInfo による投げ直しを外す変異をここで kill する。
+        // 移設前と同じ姿=元の型のまま・元のスタックのまま呼出スレッドへ届けるための網。
+        //
+        // 実測 net9.0.8: faulted task では Wait() / Wait(TimeSpan) / Result の**いずれも**
+        // 中身を AggregateException で包み、包まないのは GetAwaiter().GetResult() だけ。
+        // それでも三項の Result 側だけを差し替えても直らない(条件の Wait が先に評価されて
+        // そこで投げるため)。**「包むのは Result ではなく Wait のほう」と書いていたのは誤り**
+        // だった(再レビュー I-2)。両方が包む。効かない理由は評価順。
         var ex = Assert.Throws<InvalidOperationException>(() =>
             FileReachabilityProbe.WaitBounded(
                 Task.Run(ThrowsForWaitBoundedTest),
@@ -391,6 +412,26 @@ public class FileReachabilityProbeTests
         );
 
         Assert.Equal("boom", ex.Message);
+
+        // 型だけでなく**スタック**も保つこと(再レビュー I-3)。これが無いと
+        // ExceptionDispatchInfo を素の `throw ex.InnerExceptions[0];` に替える変異が全緑で
+        // 生存する — 型は保たれるがスタックが投げ直し地点にリセットされ、work 内のバグ地点が
+        // 消える(= EDI をわざわざ選んだ理由そのものが失われる)。
+        // null 合体は「StackTrace が null なら当然この assert は落ちる」の意で、緩和ではない。
+        Assert.Contains(nameof(ThrowsForWaitBoundedTest), ex.StackTrace ?? string.Empty);
+    }
+
+    [Fact]
+    public void PathNormalizeResult_default_equals_explicit_failsafe()
+    {
+        // m-3。「ゼロ値=フェイルセーフ値」を等値でも成立させる、手書き Equals/GetHashCode の pin。
+        // この 2 行を消して自動生成へ戻すと、backing field(null)と string.Empty が別物として
+        // 比較され赤になる。**positional 版でも同じく等値にならないので、これは手書き化の代償では
+        // ない**(実測)。
+        var failSafe = new PathNormalizeResult(PathNormalizeStatus.TimedOut, string.Empty);
+
+        Assert.Equal(failSafe, default(PathNormalizeResult));
+        Assert.Equal(failSafe.GetHashCode(), default(PathNormalizeResult).GetHashCode());
     }
 
     [Fact]
