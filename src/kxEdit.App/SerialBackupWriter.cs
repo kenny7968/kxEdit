@@ -104,24 +104,27 @@ public sealed class SerialBackupWriter : IBackupWriter
             }
         });
 
-    /// <summary>ジョブを投入する(締め切り後・破棄後は無視)。実装詳細。呼び出しは UI スレッド前提。</summary>
+    /// <summary>ジョブを投入する(締め切り後・破棄後は無視)。投入できたら true。実装詳細。
+    /// 呼び出しは UI スレッド前提。</summary>
     // _disposed は volatile 不要: 書き込み(Dispose)も読み取り(Enqueue)も UI スレッドのみ。
-    private void Enqueue(Action job)
+    private bool Enqueue(Action job)
     {
         // Dispose 開始後は無視(_disposed=true → CompleteAdding → Join → _queue.Dispose の順で進むため
         // この一読で破棄済み・締切済みの両方をカバー)。従来は _queue.IsAddingCompleted を try 外で読んで
         // いたが、_queue.Dispose 後は getter 自体が ObjectDisposedException を投げるため
         // 呼び出し元に伝播していた(xmldoc「破棄後は無視」の意図との乖離)。_disposed で先に遮断する。
         if (_disposed)
-            return;
+            return false;
         // 競合で AddingCompleted 済み／破棄済み(ObjectDisposedException は InvalidOperationException 派生
         // のため 1 つの catch で両方拾える)。UI スレッド前提のため race window はごく狭いが防御的に残す。
         try
         {
             _queue.Add(job);
+            return true;
         }
         catch (InvalidOperationException)
         { /* AddingCompleted 済み or 破棄済み。UI スレッド前提の狭 race・無視 */
+            return false;
         }
     }
 
@@ -145,6 +148,20 @@ public sealed class SerialBackupWriter : IBackupWriter
         catch
         { /* Dispose 競合等。ワーカーを静かに終える */
         }
+    }
+
+    /// <inheritdoc/>
+    public bool WaitForPendingJobs(TimeSpan timeout)
+    {
+        // キュー末尾にバリアジョブを積み、それが走り終わるのを待つ。直列ワーカーなので
+        // バリアが走った時点で先行ジョブは全て実行済み=失敗通知(OnWriteFailed)も発火済み。
+        // 同期プリミティブに TaskCompletionSource を使う理由: ManualResetEventSlim + using だと
+        // timeout 後にバリアが破棄済みインスタンスへ Set を打ち、ワーカー側 catch に例外を
+        // 吸わせる設計になる。TrySetResult は timeout 後に呼ばれても無害。
+        var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!Enqueue(() => barrier.TrySetResult()))
+            return true; // 締切済み=これ以上の書込は無い(待つと timeout 全長ブロックするだけ)
+        return barrier.Task.Wait(timeout);
     }
 
     public void Dispose()

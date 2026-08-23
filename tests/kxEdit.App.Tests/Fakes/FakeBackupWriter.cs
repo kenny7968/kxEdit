@@ -73,5 +73,18 @@ public sealed class FakeBackupWriter : IBackupWriter
 
     public void DeleteLayout(string path) => LayoutDeletes++;
 
+    /// <summary>A-8: Fake は同期実行なので保留ジョブは常に無い。
+    /// <see cref="WaitReturnsFalse"/> を立てると「完了を確認できない」= timeout 相当を再現する。</summary>
+    public bool WaitReturnsFalse;
+
+    /// <summary>WaitForPendingJobs の呼び出し回数(配線の kill に使う)。</summary>
+    public int WaitCalls;
+
+    public bool WaitForPendingJobs(TimeSpan timeout)
+    {
+        WaitCalls++;
+        return !WaitReturnsFalse;
+    }
+
     public void Dispose() => DisposeCount++;
 }

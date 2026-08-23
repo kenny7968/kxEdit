@@ -26,4 +26,11 @@ public interface IBackupWriter : IDisposable
 
     /// <summary>セッションレイアウトを削除するジョブを投入する(OFF 終了時の stale 掃除)。</summary>
     void DeleteLayout(string path);
+
+    /// <summary>A-8: 投入済みジョブが全て実行し終わるまで待つ(<see cref="IDisposable.Dispose"/>
+    /// はしない=終了がキャンセルされてもライターは生き続ける)。<paramref name="timeout"/> 内に
+    /// 完了を確認できたら true。締切済み(Dispose 後)は待たずに true。
+    /// 呼び出しは UI スレッド前提。hot exit の確認スキップ前に「本当に書けたか」を
+    /// 事後条件として検査するための seam。</summary>
+    bool WaitForPendingJobs(TimeSpan timeout);
 }

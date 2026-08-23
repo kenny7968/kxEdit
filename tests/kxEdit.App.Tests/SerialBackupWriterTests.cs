@@ -313,4 +313,64 @@ public class SerialBackupWriterTests
         Assert.Null(second);
         Assert.Null(third);
     }
+
+    // ===== A-8: WaitForPendingJobs(投入済みジョブの待ち合わせ) =====
+
+    /// <summary>A-8: 投入済みジョブが全部実行し終わってから true を返す。
+    /// 「待たずに true」だと事後条件検査が空手形になるため、実ファイルの存在で
+    /// 「本当に待った」ことを assert する。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsTrue_AfterQueuedJobsRan()
+    {
+        using var tmp = new SbwTempDir();
+        using var writer = new SerialBackupWriter(tmp.Root);
+
+        writer.Write(Rec("wait-ok", "body"));
+
+        Assert.True(writer.WaitForPendingJobs(TimeSpan.FromSeconds(15)));
+        Assert.Single(BackupStore.LoadAll(tmp.Root)); // 待った証拠=実ファイルが在る
+    }
+
+    /// <summary>A-8 §5.3: ワーカーが返らないうちは timeout で false。
+    /// 呼び出し側(WaitForFinalFlush)はこれを「確認できない=安全側で失敗扱い」に使う。
+    ///
+    /// 本ファイルの「待ちは一切入れない」原則の唯一の例外: timeout そのものが被検査対象。
+    /// 決定性は保たれている — 直列ワーカーは FIFO なので、塞がれた Write ジョブより先に
+    /// バリアが走ることは原理的にない(200 ms がどう転んでも false)。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked()
+    {
+        using var tmp = new SbwTempDir();
+        // 書込を決定的に失敗させ、その失敗コールバックの中でワーカーを塞ぐ。
+        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("wait-block") + ".json"));
+        using var gate = new ManualResetEventSlim(initialState: false);
+        var writer = new SerialBackupWriter(tmp.Root)
+        {
+            // OnWriteFailed は背景スレッドから同期発火する=ここで止めればワーカーが止まる。
+            OnWriteFailed = _ => gate.Wait(TimeSpan.FromSeconds(15)),
+        };
+        try
+        {
+            writer.Write(Rec("wait-block", "boom"));
+
+            Assert.False(writer.WaitForPendingJobs(TimeSpan.FromMilliseconds(200)));
+        }
+        finally
+        {
+            gate.Set(); // 先に開けないと Dispose の Join が 15 秒待つ
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>A-8: Dispose 済み(締切済み)なら待たずに true。
+    /// 締切後は Enqueue が捨てられるので、素朴に待つと必ず timeout 全長ブロックしてしまう。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsTrue_Immediately_AfterDispose()
+    {
+        using var tmp = new SbwTempDir();
+        var writer = new SerialBackupWriter(tmp.Root);
+        writer.Dispose();
+
+        Assert.True(writer.WaitForPendingJobs(TimeSpan.FromMilliseconds(50)));
+    }
 }
