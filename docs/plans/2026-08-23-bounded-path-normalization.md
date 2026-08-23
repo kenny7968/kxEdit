@@ -77,7 +77,7 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
 `tests/kxEdit.Core.Tests/Text/PathKeyTests.cs` の末尾(クラス内)に追記する:
 
 ```csharp
-    // ===== ForNormalized(Issue #48 §3.2)=====
+    // ===== ForNormalized(Issue #48 / 設計書 §3.2)=====
     // 正規化済み絶対パス専用の契約。ToLowerInvariant のみで、ファイルシステムに触れない。
     // For との弁別が本体: For は GetFullPath を通すので不達ネットワーク共有で
     // UI を約 21 秒止めうる(S-15)。ForNormalized はそれを構造的に持たない。
@@ -97,7 +97,7 @@ dotnet test tests/kxEdit.App.Tests    -c Release --no-build
     public void ForNormalized_does_not_normalize_separators()
     {
         // For との**弁別**。ForNormalized は正規化しないので区切り差は別キーになる。
-        // 呼出側が正規化済みパスを渡す契約(Issue #48 §3.1)を、ここで明文化して固定する。
+        // 呼出側が正規化済みパスを渡す契約(Issue #48 / 設計書 §3.1)を、ここで明文化して固定する。
         // このテストが無いと「ForNormalized の中で GetFullPath も呼ぶ」書き損じが
         // 全緑で通り、S-15 が丸ごと戻る。
         Assert.NotEqual(PathKey.ForNormalized(@"C:\Temp\a.txt"), PathKey.ForNormalized("C:/Temp/a.txt"));
@@ -203,7 +203,7 @@ dotnet test tests/kxEdit.Core.Tests -c Release --no-build
 
 ```bash
 git add src/kxEdit.Core/Text/PathKey.cs tests/kxEdit.Core.Tests/Text/PathKeyTests.cs
-git commit -m "feat(core): PathKey に ForNormalized を新設する(Issue #48 §3.2)
+git commit -m "feat(core): PathKey に ForNormalized を新設する(Issue #48 / 設計書 §3.2)
 
 正規化済み絶対パス専用の契約を切り出す。小文字化のみでファイルシステムに
 触れないため、タブ数や履歴件数に比例して呼んでも S-15 のブロックを起こさない。
@@ -461,7 +461,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 ```bash
 git add src/kxEdit.App/Abstractions/IReachabilityProbe.cs src/kxEdit.App/FileReachabilityProbe.cs tests/kxEdit.App.Tests/Fakes/FakeReachabilityProbe.cs tests/kxEdit.App.Tests/FileReachabilityProbeTests.cs
-git commit -m "feat(app): 境界付きパス正規化の seam を追加する(Issue #48 §4)
+git commit -m "feat(app): 境界付きパス正規化の seam を追加する(Issue #48 / 設計書 §4)
 
 IReachabilityProbe に NormalizePathWithTimeout を足し、既存 2 本と同じ
 WaitBounded / Run*Probe の書式に揃える。フェイルセーフ値は RunNormalizeProbe
@@ -650,7 +650,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 ```bash
 git add src/kxEdit.App/FileController.cs tests/kxEdit.App.Tests/
-git commit -m "fix(app): SaveAs の正規化を境界付きにする(Issue #48 §4.1)
+git commit -m "fix(app): SaveAs の正規化を境界付きにする(Issue #48 / 設計書 §4.1)
 
 TryNormalizeSavePath を seam 経由の NormalizeSavePath に置き換える。
 到達不能(タイムアウト)と打ち間違い(Invalid)で文言を分けた: 同じ文言だと
@@ -735,7 +735,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 ```csharp
     public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false)
     {
-        // Issue #48 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった。
+        // Issue #48 / 設計書 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった。
         // 以降(FindByPath / LoadInto / RegisterRecent)はすべて正規化済みパスを受け取る契約に
         // なるので、ここで 1 回だけ、境界付きで正規化する。
         // 境界付きにする理由は S-15: `~` を含むパスでは GetFullPath が実ネットワーク呼び出しに
@@ -772,7 +772,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 ```bash
 git add src/kxEdit.App/FileController.cs tests/kxEdit.App.Tests/FileControllerTests.cs
-git commit -m "fix(app): TryOpenOrActivate の入口でパスを境界付き正規化する(Issue #48 §3.6)
+git commit -m "fix(app): TryOpenOrActivate の入口でパスを境界付き正規化する(Issue #48 / 設計書 §3.6)
 
 State.Path へ未正規化パスが入る唯一の入口を塞ぐ。これで
 「State.Path は null か正規化済み絶対パス」の不変条件が成立し、
@@ -862,7 +862,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 ```csharp
     /// <summary>
     /// 保存済みの同一パスを開いているタブを探す（未保存タブは対象外）。
-    /// <b>引数は正規化済み絶対パス</b>(Issue #48 §3.1 の不変条件)。
+    /// <b>引数は正規化済み絶対パス</b>(Issue #48 / 設計書 §3.1 の不変条件)。
     /// ここではファイルシステムに触れない — 触ると開いているタブ数に比例して
     /// <c>GetFullPath</c> が走り、不達共有上の <c>~</c> パスが 1 つあるだけで
     /// UI が約 21 秒固まる(S-15)。正規化は呼出側が
@@ -891,7 +891,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 ```bash
 git add src/kxEdit.App/DocumentManager.cs tests/kxEdit.App.Tests/DocumentManagerTests.cs
-git commit -m "fix(app): FindByPath をファイルシステム非依存にする(Issue #48 §3.3)
+git commit -m "fix(app): FindByPath をファイルシステム非依存にする(Issue #48 / 設計書 §3.3)
 
 照会パス + 開いている全タブのパスに PathKey.For を打っていたため、
 呼び出しあたり GetFullPath が 1+N 回走っていた。不達共有上の ~ タブが
@@ -937,7 +937,7 @@ ToLowerInvariant のみにした。
     [Fact]
     public void Dedup_does_not_normalize_separators_accepted_degradation()
     {
-        // Issue #48 §3.4 の**受容**を明示的に固定する。
+        // Issue #48 / 設計書 §3.4 の**受容**を明示的に固定する。
         // 以前は PathKey.For(= GetFullPath)で区切り差を吸収していたが、それは
         // 履歴件数に比例した実 I/O を意味し、不達共有上の `~` パスで
         // 開く・保存のたびに約 21 秒 UI が固まっていた(S-15 と同一機構)。
@@ -967,7 +967,7 @@ dotnet test tests/kxEdit.Core.Tests -c Release --no-build
     /// <summary>
     /// current の先頭に path を加えた新リストを返す。path と同一（<see cref="PathKey.ForNormalized"/>
     /// 一致）の既存項目は除き、全体を max 件にクランプする。max が 0 以下なら空リスト。
-    /// <b>path と current の各項目は正規化済み絶対パス</b>(Issue #48 §3.1 の不変条件)。
+    /// <b>path と current の各項目は正規化済み絶対パス</b>(Issue #48 / 設計書 §3.1 の不変条件)。
     /// </summary>
     /// <remarks>
     /// Issue #48: 以前はここで <see cref="PathKey.For"/>(= <c>GetFullPath</c>)を
@@ -1011,7 +1011,7 @@ dotnet test tests/kxEdit.App.Tests  -c Release --no-build
 
 ```bash
 git add src/kxEdit.Core/Text/RecentFilesList.cs tests/kxEdit.Core.Tests/Text/RecentFilesListTests.cs
-git commit -m "fix(core): RecentFilesList.Add をファイルシステム非依存にする(Issue #48 §3.4)
+git commit -m "fix(core): RecentFilesList.Add をファイルシステム非依存にする(Issue #48 / 設計書 §3.4)
 
 #47 由来ではない既存バグ。RegisterRecent は開くたび・保存が成功するたびに
 走り、最近のファイルは設定に永続するので、一度でも不達共有上の ~ パスを
@@ -1052,7 +1052,7 @@ dotnet test tests/kxEdit.App.Tests  -c Debug --no-build
     public void DocumentState_Path_RejectsRelativePath_InDebugBuild() =>
         Sta.Run(() =>
         {
-            // Issue #48 §3.5: 「State.Path は null か正規化済み絶対パス」の不変条件を
+            // Issue #48 / 設計書 §3.5: 「State.Path は null か正規化済み絶対パス」の不変条件を
             // I/O 無しで守る網。A-19(相対パスが State.Path に残り保存先が CWD 依存になる)の
             // 再発を Debug ビルドで捕まえる。
             // Release では Debug.Assert が消えるので、このテストも Debug 構成でのみ意味を持つ。
@@ -1086,7 +1086,7 @@ dotnet test tests/kxEdit.App.Tests  -c Debug --no-build
 
     /// <summary>
     /// 未保存なら null。非 null のときは<b>正規化済みの絶対パス</b>
-    /// (Issue #48 §3.1 の不変条件)。
+    /// (Issue #48 / 設計書 §3.1 の不変条件)。
     /// <c>DocumentManager.FindByPath</c> と <c>RecentFilesList.Add</c> は、この不変条件に
     /// 依拠して <c>PathKey.ForNormalized</c>(ファイルシステム非依存)で比較する。
     /// ここに未正規化パスが入ると、同一ファイルの重複タブ検知(A-7 (b))がすり抜ける。
@@ -1100,7 +1100,7 @@ dotnet test tests/kxEdit.App.Tests  -c Debug --no-build
             // 相対パス(= A-19 の再発)を Debug ビルドで捕まえる。
             System.Diagnostics.Debug.Assert(
                 value is null || System.IO.Path.IsPathFullyQualified(value),
-                "State.Path は null か正規化済み絶対パスであること(Issue #48 §3.1)"
+                "State.Path は null か正規化済み絶対パスであること(Issue #48 / 設計書 §3.1)"
             );
             _path = value;
         }
@@ -1123,7 +1123,7 @@ dotnet test tests/kxEdit.App.Tests  -c Debug --no-build
 
 ```bash
 git add src/kxEdit.App/DocumentState.cs tests/kxEdit.App.Tests/DocumentManagerTests.cs
-git commit -m "test(app): State.Path の不変条件を Debug.Assert で担保する(Issue #48 §3.5)
+git commit -m "test(app): State.Path の不変条件を Debug.Assert で担保する(Issue #48 / 設計書 §3.5)
 
 「null か正規化済み絶対パス」を I/O 無しの構造チェックで守る。
 FindByPath / RecentFilesList がこの不変条件に依拠して
@@ -1208,7 +1208,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build
 
 ```bash
 git add tests/kxEdit.App.Tests/FileControllerTests.cs
-git commit -m "test(app): Ctrl+S が正規化を 1 回も打たないことを固定する(Issue #48 §5)
+git commit -m "test(app): Ctrl+S が正規化を 1 回も打たないことを固定する(Issue #48 / 設計書 §5)
 
 境界があることではなく「回数が減ったこと」の網。タブ数を変えても
 正規化回数が変わらないことまで固定し、1+N の N 側が消えたことを示す。"
