@@ -88,7 +88,7 @@ public sealed partial class MainForm : Form
     /// Coordinator 全体を露出せず観測点 1 個に絞る(レビュー M-3)。</summary>
     internal bool StartupRestoreGateOpenForTest => _backup.StartupRestoreDoneForTest;
 
-    // A-8 / H-1(設計 2026-08-24 §10.8): OnFormClosing 実行中フラグ(再入ガード)。
+    // A-8 / H-1(設計 2026-08-24 §10.7): OnFormClosing 実行中フラグ(再入ガード)。
     // 最終 flush の完了待ちが UI スレッドをブロックしている最中に SENT メッセージ経由で
     // クローズが再入しうるため。機構と対処の根拠は OnFormClosing 冒頭のコメント参照。
     private bool _closeInProgress;
@@ -467,7 +467,7 @@ public sealed partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // ===== 再入ガード(A-8 / H-1・設計 2026-08-24 §10.8) =====
+        // ===== 再入ガード(A-8 / H-1・設計 2026-08-24 §10.7) =====
         // STA スレッド上の**管理された**ブロッキング待機(下の WaitForFinalFlush →
         // WaitHandle.WaitOne)は CoWaitForMultipleHandles を経由するため、待っている間も
         // **SENT メッセージを配送する**。posted な WM_TIMER しか来ないという前提は誤りで、

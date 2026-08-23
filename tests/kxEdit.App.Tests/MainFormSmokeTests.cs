@@ -966,7 +966,7 @@ public class MainFormSmokeTests
             );
         });
 
-    /// <summary>H-1(設計 2026-08-24 §10.8): OnFormClosing の再入ガード。
+    /// <summary>H-1(設計 2026-08-24 §10.7): OnFormClosing の再入ガード。
     /// 実運用の再入は「STA スレッドの管理ブロッキング待機(A-8 で入れた
     /// <see cref="BackupCoordinator.WaitForFinalFlush()"/>)が **SENT メッセージを配送する**」ために
     /// WM_CLOSE(タスクマネージャーの「タスクの終了」)/ WM_QUERYENDSESSION(ログオフ)から起きる。

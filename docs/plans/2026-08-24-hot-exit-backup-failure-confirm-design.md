@@ -97,6 +97,8 @@ internal bool WaitForFinalFlush(TimeSpan timeout)
 
 ### 5.1 `_failed` を dequeue しない理由
 
+→ **代償の機構は §10.3 で訂正**(「clean 化した文書の Id 残留」は起きない)。
+
 ここで吸い出すと、終了をキャンセルされたときに既存の
 `ReconcileContent` → `ForceWrite` 再試行機構(`BackupCoordinator.cs:465-468`)が
 失敗を見失う。**A-8 と同じ「握り潰し」を新設することになる。** 読むだけにして
@@ -118,6 +120,8 @@ skip するので、そのタブに対して確認は出ない。実害は他の
 - Windows のシャットダウン猶予に収める(WM_QUERYENDSESSION 経路で長時間待つと
   強制終了の対象になる)。
 - 既存 `Shutdown` の `Join(15s)` より短い=**新しい最悪ブロック時間を作らない**。
+  → **この根拠は誤り。§10.1 / §10.7 で訂正**(待ちは置き換えではなく直列に足され、
+  しかも上限でもない)。
   正常時はバリアが即返るので終了の体感は不変。
 - 定数は `BackupCoordinator.FinalFlushWait` に置き、テスト用に `TimeSpan` 明示の
   internal オーバーロードを併設する。
@@ -149,6 +153,9 @@ if (_settings.RestoreOpenFilesOnStartup && !silentPath)   // ← silent 成功�
 寸法保存より前へ動かしてもレイアウトの記録内容は変わらない。
 
 ### 6.2 二重 flush を避ける条件
+
+→ **実装は `&& !flushUpToDate`。§10.6 で訂正**(`silentPath` の単調性に依存する形は
+A-8 の実害を再導入した)。
 
 末尾の flush 条件に `&& !silentPath` を足す。`silentPath` は true → false へしか
 遷移しないので、「末尾で `silentPath == true`」は「前段で flush 済み」と同値。
@@ -183,6 +190,8 @@ PR #47 の教訓(「Fake を注入するテストは本番実装の性質を証�
 検証: dirty タブ → `Close()` → `SetConfirmDiscardOverrideForTest` が呼ばれること
 + `LastCloseTookSilentPathForTest == false`。
 
+→ **§10.2 で確定済み(代替手段は不要)**。
+
 **実装前に実測する前提条件**: 起動時の `LoadAllForRestore` / `SweepOldSessions` が
 同じ不正パスで例外を出さないこと。壊れる場合の代替は (a) 存在しないドライブ文字を
 `backupDirectory` に渡す、(b) それも駄目なら `MainForm` に writerFactory 注入 seam を
@@ -211,6 +220,9 @@ PR #47 の教訓(「Fake を注入するテストは本番実装の性質を証�
 SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 系)そのものは
 不変だが、**SR ユーザーが遭遇する終了確認が新しい条件で出る**。CLAUDE.md §5
 「判定に迷ったら必要に倒す」に従い **必要** と判定する。
+
+→ **再現手順は L5 チェックリストで差し替え済み**(読み取り専用では ACL の効き方次第で
+再現しない。同じ位置にファイルを置く方式が実測済み)。
 
 項目: `%APPDATA%\kxEdit\backups` を読み取り専用にして書込失敗を作り、
 未保存タブがある状態でウィンドウ X → 終了確認ダイアログが NVDA で読み上げられること。
@@ -280,6 +292,13 @@ confirmCalls=0  LastCloseTookSilentPath=true  sessionDirExists=False
 layoutWritten=True tabs=1 backupId=2159d3e31cc547bdb55edd76223b949b
 ```
 
+**注(Task 5 で訂正)**: `sessionDirExists=False` を「実 writer は 1 バイトも書けていない」の
+証拠として読んではならない。base dir の位置がファイルである以上、配下の `session-{GUID}` は
+何が起きても `Directory.Exists` が false になる=**この行は空虚**。A-8 の実害を実際に示している
+のは `layoutWritten=True tabs=1 backupId=…`(実体の無い `BackupId` を指すレイアウトが残った)
+の方である。最終テストは同型の assertion を意図的に置いていない
+(`MainFormSmokeTests` に理由をコメントで残してある)。
+
 無題タブなので次回起動は E4′ = タブごと消失。Form の起動・終了は完走する
 (`BackupStore.LoadAll` は `Directory.Exists` false で空・sweep 2 種は try/catch)。
 §7.1 が挙げていた代替((a) 存在しないドライブ / (b) writerFactory 注入 seam)は**不要**。
@@ -345,19 +364,22 @@ Task 3 が足すのは機会 1 回だけで、新しい露出ではない。
 | M1 | `MainForm`: `if (!flushOk) silentPath = false;` の本体を削除 | **KILL** | `..._BackupWriteFails_FallsThroughToConfirm`(`LastCloseTookSilentPathForTest`) |
 | M2 | `BackupCoordinator`: `return _failed.IsEmpty;` → `return true;` | **KILL** | `WaitForFinalFlush_WriteFailed_ReturnsFalse` ほか 1 |
 | M3 | `BackupCoordinator`: `if (!_writer.WaitForPendingJobs(timeout)) return false;` を削除 | **KILL** | `WaitForFinalFlush_WaitTimesOut_ReturnsFalse` |
-| M4 | `BackupCoordinator`: `_failed.IsEmpty` の前に `while (_failed.TryDequeue(out _)) { }` を挿入(=§5.1 が禁じた dequeue) | **KILL** | `WaitForFinalFlush_DoesNotConsumeFailure_...` のみ(`_WriteFailed_` は緑=網が「消費しない」性質に乗っている証拠) |
+| M4 | `BackupCoordinator`: `_failed` を **dequeue した上で結果は失敗として返す**(`while (_failed.TryDequeue(out _)) ok = false;`) | **KILL** | `WaitForFinalFlush_DoesNotConsumeFailure_...` **のみ**(`_WriteFailed_` は緑)。§10.8 の訂正を参照 |
 | M5 | `SerialBackupWriter`: `return barrier.Task.Wait(timeout);` → `return true;` | **KILL** | `WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked` |
 | M6 | `MainForm`: 末尾 flush の `&& !flushUpToDate` を削除 | **生存(想定どおり)** | — 挙動等価。二重 flush は追加の layout 書込 1 件を生むだけで観測点(ファイル内容)に差が出ない。**性能のための条件であり挙動の網は無い**と記録する |
 | M7 | `MainForm`: `FinalFlushForRestore()` / `WaitForFinalFlush()` の順序入れ替え | **KILL** | `..._BackupWriteFails_...`(`LastCloseFinalFlushOkForTest`)。S-A8-7 の契約が網に乗っている |
-| M8 | `BackupCoordinator`: `WaitForFinalFlush()` → 常に `true` | **KILL** | 4 本(うち**既存 2 本**)。計画が対照テストの根拠に書いた「これが無いと生存する」は**誤り** |
+| M8 | `BackupCoordinator`: `WaitForFinalFlush()` → 常に `true` | **KILL** | **3 本**(`_WriteFailed_` / `_DoesNotConsumeFailure_` / `..._BackupWriteFails_...`)。**既存テストは 0 本**。§10.8 の訂正を参照 |
 | M9 | `SerialBackupWriter`: `WaitForPendingJobs` を「成功時だけ `Dispose()`」に変異 | **KILL** | `WaitForPendingJobs_DoesNotDisposeWriter_...`。**この網が無かった間は 3 本全緑で生存**していた(Task 1 レビューが発見) |
 | M10 | `BackupCoordinator`: `_shutDown \|\|` を短絡から削除 | **KILL** | `WaitForFinalFlush_AfterShutdown_ReturnsTrue_WithoutAskingWriter`。**計画の 5 本だけなら生存**していた |
 | M11 | `BackupCoordinator`: `FinalFlushWait` の**定数値**を変える | **KILL(Task 3 配線後)** | Task 2 時点は **6 本全緑で生存**。Task 3 で実配線が入り、`0` 秒では 5 本が赤・`60` 秒では `Assert.InRange` が赤 |
 | M12 | `MainForm`: `flushUpToDate = false;`(確認ループ進入時の無効化)を削除 | **KILL** | `..._BackupWriteFails_...`。§10.6 参照 |
 
-**最強の証拠形式**: Task 3 を修正前へ戻して全件実行すると、**新規 2 本だけが赤・既存 601 本は
-全緑**。新テストが本物の A-8 回帰テストであり、かつ既存スイートでは A-8 を捕まえられなかった
-ことを同時に示す。
+**最強の証拠形式**: Task 3(`MainForm` の配線)を修正前へ戻して全件実行すると、
+**Task 4 の e2e 2 本だけが赤・残り 601 本は全緑**。この 601 本には Task 1/2 が足した
+10 本も含まれるが、それらは `MainForm` の配線と独立なので結論は変わらない
+=**main 時点のスイートでは A-8 を捕まえられなかった**。
+(当初「既存 601 本」と書いたが、601 = 603 − 2 であって「ブランチ以前から在るテスト」ではない。
+main 時点は 594 本。§10.8)
 
 **副産物(テストスイートの地雷を 1 件除去)**: M11 を最初に当てたとき、テストが失敗せず
 **無限ハング**した。`OnShown_UnifiedOn_LegacyMigration_ThenHotExitClose_WritesRealBackup` が
@@ -393,10 +415,113 @@ A-8 の喪失クラスに倒れないよう固める修正が、まさにその�
 **教訓**: レビュー提案も実装と同じく実測で検証する。とくに「不変条件を機構化する」種類の
 提案は、機構が**すべての経路で**同じ意味を持つかを経路ごとに当てて確かめる。
 
-### 10.7 申し送りの追加・訂正
+### 10.7 最終脆弱性パス High-1 — 待機中の入れ子クローズ(修正)
+
+**指摘と再現**: STA スレッド上の管理されたブロッキング待機は `CoWaitForMultipleHandles` を
+経由するため、待っている間も **SENT メッセージを配送する**。本設計が §5.2 / §6 で前提に
+していた「待機中に再入は起きない」は、**posted メッセージ(`WM_TIMER`)しか見ていない誤り**
+だった。`WM_CLOSE`(タスクマネージャーの「タスクの終了」)と `WM_QUERYENDSESSION`
+(ログオフ / シャットダウンで CSRSS が送る)は sent なので配送され、`OnFormClosing` を再入する。
+
+隔離ハーネスでの実測(ガード無し):
+
+```
+t=    6ms  OnFormClosing ENTER #1
+t=  407ms  worker: SendMessage(WM_CLOSE) →
+t=  407ms  OnFormClosing ENTER #2          ← 待機中に再入
+t=  407ms  OnFormClosed                     ← 入れ子が完走し Form が破棄された
+t= 3008ms  OnFormClosing #1: Wait returned False  IsDisposed=True
+t= 3009ms  Application.Run 復帰  IsDisposed=True  ← 外側の e.Cancel=true は無視された
+```
+
+**帰結**: 入れ子が `OnFormClosed` → `BackupCoordinator.Shutdown()` まで完走すると、外側は
+破棄済み Form 上で確認ループを**もう一度**回し、その回答が全部捨てられる
+(Cancel は無視・No の `MarkDiscarded` → `Delete` は破棄済み writer に飲まれる・
+末尾 `FinalFlushForRestore` は `_shutDown` で no-op)。一方 flush #1 が書いた
+`session-state.json` は実体の無い `BackupId` を指したまま残る=**A-8 の実害が、
+ユーザーに確認したうえで再発する**。
+
+**新規性**: 変更前の silent path には `OnFormClosing` 内にポンプするブロッキング待ちが
+1 つも無かった。**本ブランチが初めて導入した**。
+
+**判断: ① 修正。** `OnFormClosing` 冒頭に再入ガードを置き、入れ子は即座に `e.Cancel = true`
+で取り消して外側に決着させる(`try`/`finally` でフラグを必ず戻す=キャンセル経路で窓が
+永久に閉じなくなるのを防ぐ)。ガード有りの実測:
+
+```
+t=  407ms  OnFormClosing #2: 入れ子ガードで e.Cancel=true
+t= 3007ms  OnFormClosing #1: Wait returned False  IsDisposed=False  ← Form は生存
+t= 3007ms  OnFormClosed  (外側の待機が終わった後)
+```
+
+**代償**: `WM_QUERYENDSESSION` を veto すると Windows がシャットダウン阻止 UI を出しうる。
+ただし外側の待機は最長 `FinalFlushWait`(5 秒)で終わり、その後は通常どおり閉じるので
+阻止は一時的。入れ子を勝たせて上記の喪失を招くより軽い。
+
+**副次**: このガードは指摘に無かった経路も塞ぐ。確認ダイアログ(`MessageBox`)がポンプ
+している最中に `WM_CLOSE` が届くケースで、入れ子が取り消されユーザーの回答が勝つ。
+
+### 10.8 ミューテーション台帳(§10.5)の訂正
+
+台帳は本ブランチの主たる品質証拠であり、その冒頭自身が「粗いと後日どの穴が塞がったか
+再現できない」と述べている。**その台帳の 2 行が再現しなかった**(最終コード品質パスが
+記載どおりに当て直して検出)。原因はいずれも**コーディネータの転記**である。
+
+| 行 | 誤り | 実測 |
+|---|---|---|
+| M4 | 実装者が報告した変異は「dequeue **した上で失敗を返す**」だったが、台帳では「dequeue して `IsEmpty` を返す」と**別の変異に書き換えて**しまった。後者では drain 後の `IsEmpty` が常に true になるので `_WriteFailed_` も赤になる | 記載どおりだと **3 本** KILL。報告どおりの変異なら `_DoesNotConsumeFailure_` **のみ** |
+| M8 | 「4 本(うち既存 2 本)」と書いたが、実装者の報告にあった 3 本の `BackupCoordinatorTests` は Task 2 が追加した**新規**テストで「既存」ではない | 常に `true` → **3 本・既存 0 本**。常に `false` → 5 本・既存 3 本 |
+
+**教訓**: 台帳は実装者の報告を**要約せずそのまま**写す。式を書き換えた瞬間に別の変異になり、
+そこから引く結論(「網は『消費しない』性質に乗っている」)が宙に浮く。実質的な網
+(`_DoesNotConsumeFailure_`)は実在するので穴は隠れていなかったが、**論拠が壊れていた**。
+論拠に使う行こそ「殺したテスト」を全件挙げること。
+
+### 10.9 事後条件が保証しない範囲(最終レビュー I-4 / M-2)
+
+`WaitForFinalFlush() == true` が意味するのは「**投入した書込ジョブが 1 件も例外を投げなかった**」
+であって「本文が永続化された」ではない。差が出る経路が 2 つある。
+
+- **path-only フォールバック**: `EnqueueWrite` は `content.Length > _maxBackupChars` のとき
+  `Content=null` のレコードへ落として**書込は成功する**。`_failed` は空のままなので `true` が返る。
+  本番で塞いでいるのは前提ゲートの `HasOversizedDirtyDoc` **ただ 1 つ**で、それは A-8 が
+  「不十分だ」と宣言した当のもの。しかも閾値の出どころが定数(ゲート側)とフィールド
+  (`EnqueueWrite` 側)に分かれており、`maxBackupCharsOverride` を本番設定へ昇格させた瞬間に
+  静かに破れる結合になっている。
+- **Delete / WriteLayout の失敗は対象外**: `_failed` に載るのは Write の失敗だけ。とくに
+  フォールバックで「いいえ(破棄)」を選んだときの `MarkDiscarded` → `Delete` が失敗しても
+  無音で、孤児バックアップが extras 経由で次回起動に**無音で復活**しうる
+  (書けない状況は消せない状況と強く相関するため、フォールバック経路では現実的)。
+
+いずれも ② 受容。前者は本番到達不能、後者は既存の穴(本ブランチはそこへ配線しただけ)。
+
+### 10.10 フォールバックの UX 上の限界(最終レビュー I-5)
+
+本設計は「新しい確認 UI は作らない」(§3)としたが、その帰結として
+**ユーザーには「なぜ聞かれているか」が一切伝わらない**。文面は既存の
+`{ファイル名} の変更を保存しますか?` のままである。
+
+とくに問題になる組み合わせ:
+
+- **S-A8-2**(遅いディスク / UNC 上の `%APPDATA%` で 5 秒 timeout)では、**何も失敗していなくても**
+  説明のないダイアログが出る。ここで「いいえ(破棄)」を選ぶと、**実際には正常に退避されていた
+  本文が失われる**。これは本ブランチが新設した経路である。
+- **S-A8-4**(M-20 未回収)によりセッション中の書込失敗は一切通知されないため、終了時の
+  ダイアログが**そのセッションで最初で最後の異常の兆候**でありながら、異常であることを
+  示していない。
+
+**② 受容。** 沈黙して消えるより、説明が無くても聞かれる方が明確に良い。またユーザーが選ぶのは
+「未保存の変更を破棄するか」という一貫した問いであり、喪失は無言ではなくユーザーの指示による。
+ただし CLAUDE.md §2「晴眼・弱視ユーザーも第一級」に照らすと product gap ではあるので、
+**M-20(セッション中の書込失敗をユーザーに知らせる)を本件の直接の後続**として位置づける。
+
+### 10.11 申し送りの追加・訂正
 
 | ID | 内容 |
 |---|---|
+| S-A8-12 | 事後条件は Write 失敗のみを見る。**path-only フォールバック(32M 超)は成功として数え**、Delete / WriteLayout の失敗は対象外(§10.9) |
+| S-A8-13 | フォールバックの確認ダイアログは**なぜ出たかを伝えない**。S-A8-2 の timeout では正常なのに出て、「いいえ」で正常退避済みの本文が失われる(§10.10)。M-20 が直接の後続 |
+| S-A8-14 | 「最悪 20 秒」(S-A8-6)は**上限ではない**。STA の管理待機は SENT メッセージを配送するため、待ち時間は timeout + sent ハンドラの実行時間になる(NVDA の `WM_GETOBJECT` 等) |
 | S-A8-1(訂正) | 偽陽性は「clean 化した文書の Id 残留」ではなく「**前 tick のジョブの失敗通知が drain 後・バリア完了前に届く**」場合のみ(§10.3)。安全側・実害は余分な確認 1 回 |
 | S-A8-6 | 終了時の UI スレッド最悪ブロックが 15 秒 → 20 秒(§10.1)。ワーカーが固まった失敗ケースのみ |
 | S-A8-7 | `WaitForFinalFlush` は `FinalFlushForRestore` と**対で・その直後に**呼ぶ契約。単独呼び出し・逆順は無効(§10.3) |
