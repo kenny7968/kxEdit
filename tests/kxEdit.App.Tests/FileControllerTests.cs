@@ -844,8 +844,12 @@ public class FileControllerTests
     /// <b>この網では kill できない変異</b>: <c>FindByPath</c> の <c>ForNormalized</c> を
     /// <c>For</c> へ戻す変異はここでは赤にならない(<c>For</c> は <c>Path.GetFullPath</c> を
     /// 直接呼ぶので seam のカウンタが動かない)。承知のうえで置いている。実際の kill 役は
-    /// <c>DocumentManagerTests.FindByPath_DoesNotCallFileSystemTouchingPathKeyFor</c> と
-    /// <c>PathKeyTests.ForNormalized_does_not_normalize_separators</c>。
+    /// <c>DocumentManagerTests</c> の 3 本(実測 2026-08-24 — この変異で赤になるのはこの 3 本だけ):
+    /// <c>FindByPath_DoesNotCallFileSystemTouchingPathKeyFor</c>(構造)・
+    /// <c>FindByPath_DoesNotNormalizeSeparators_CallerMustNormalize</c> と
+    /// <c>FindByPath_DoesNotNormalizeOpenTabPaths_CallerMustNormalize</c>(挙動)。
+    /// Core の <c>PathKeyTests.ForNormalized_does_not_normalize_separators</c> は
+    /// <c>PathKey</c> 自身の網なので、<c>FindByPath</c> の呼び分けを変えても<b>緑のまま</b>。
     /// </para>
     /// </summary>
     [Fact]
