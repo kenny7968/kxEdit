@@ -87,7 +87,12 @@ public class RecentFilesListTests
         // settings.json 由来のレガシー / 攻撃エントリー(未正規化・相対・null・無効文字)が
         // 来ても例外にしない。以前は GetFullPath の例外を PathKey.For の catch が空文字へ
         // 落として吸収していたが、ForNormalized は I/O も解析もしないので投げる元が無い。
-        // 件数は max で頭打ちなので、invalid が集約されなくなっても増幅は起きない。
+        // ここが縛るのは「投げないこと」と「新規と一致しないものは全件残ること」だけ。
+        // Task 6 レビュー m-1: 以前ここには「件数は max で頭打ちなので増幅は起きない」と
+        // 書いていたが、この fixture は max=MaxItems に対し 6 件しか作らず cap に一度も
+        // 当たらない。cap の網は Caps_at_max / Cap_one_returns_only_new が持つ
+        // (Add の `result.Count >= max` は key の比較より前に効くので、invalid 項目でも
+        // cap は迂回できない)。
         var legacy = new[] { "..\\rel.txt", "c:/dir/a.txt", null!, "a\0b", @"C:\Dir\a.txt" };
         var r = RecentFilesList.Add(legacy, @"C:\new.txt", RecentFilesList.MaxItems);
         Assert.Equal(@"C:\new.txt", r[0]);
@@ -101,6 +106,18 @@ public class RecentFilesListTests
     /// 「呼出が 1 つも無い」ことをここで見る。
     /// 陽性対照(<c>ForNormalized</c> を拾えること)を同時に置くのは、走査が空を返しただけで
     /// 緑になる vacuous 化を防ぐため。
+    /// <para>
+    /// <b>この網の射程(Task 6 レビュー I-1・実測で生存を確認)</b>: 走査するのは
+    /// <see cref="RecentFilesList.Add"/> の<b>直接の</b>呼出だけで、推移的な呼出は見ない。
+    /// 結果を捨てる <c>GetFullPath</c> を private ヘルパ 1 段越しに置く変異は、この網を含めて
+    /// 全緑のまま生存する。つまり本テストは「<c>Add</c> の本体に FS 接触の呼出が直接は無い」
+    /// ことしか言っておらず、「この関数から FS に到達しない」ことは保証しない
+    /// (クラス doc の「ファイルシステムには一切触れない」は実装の性質の宣言であって、
+    /// 本テストがそこまで機械固定しているわけではない)。
+    /// ただし抜けるのは<b>片側だけをヘルパへ切り出した形</b>に限る: <c>ForNormalized</c> の
+    /// 呼出 2 本を<b>両方</b>ヘルパへ移すと陽性対照の <c>Assert.Contains</c> が落ちて赤になるので、
+    /// 本体をまるごとヘルパへ移す形は検出できる。
+    /// </para>
     /// </summary>
     [Fact]
     public void Add_DoesNotCallFileSystemTouchingPathKeyFor()

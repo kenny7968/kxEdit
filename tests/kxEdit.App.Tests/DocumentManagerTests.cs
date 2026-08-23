@@ -177,6 +177,16 @@ public class DocumentManagerTests
     /// 「呼出が 1 つも無い」ことをここで見る。
     /// 陽性対照(<c>ForNormalized</c> を拾えること)を同時に置くのは、走査が空を返しただけで
     /// 緑になる vacuous 化を防ぐため。
+    /// <para>
+    /// <b>この網の射程(Task 5 レビュー m-2・実測で生存を確認)</b>: 走査するのは
+    /// <see cref="DocumentManager.FindByPath"/> の<b>直接の</b>呼出だけで、推移的な呼出は見ない。
+    /// 結果を捨てる <c>GetFullPath</c> を private ヘルパ 1 段越しに置く変異は、この網を含めて
+    /// 全緑のまま生存する。つまり本テストは「<c>FindByPath</c> の本体に FS 接触の呼出が
+    /// 直接は無い」ことしか言っておらず、「この関数から FS に到達しない」ことは保証しない。
+    /// ただし抜けるのは<b>片側だけをヘルパへ切り出した形</b>に限る: <c>ForNormalized</c> の
+    /// 呼出 2 本を<b>両方</b>ヘルパへ移すと陽性対照の <c>Assert.Contains</c> が落ちて赤になるので、
+    /// 本体をまるごとヘルパへ移す形は検出できる。
+    /// </para>
     /// </summary>
     [Fact]
     public void FindByPath_DoesNotCallFileSystemTouchingPathKeyFor()

@@ -3587,6 +3587,50 @@ public class FileControllerTests
             Assert.Empty(adopted); // ★既存タブの adopt を上書きしない
         });
 
+    /// <summary>
+    /// Task 5 レビュー m-1 の網。extras 側の門番を「呼出前の <c>FindByPath</c>」から
+    /// 「<c>TryOpenOrActivate</c> 自身に答えさせる」機構へ揃えた<b>選択</b>を固定する。
+    /// 上の姉妹は<b>挙動</b>を固定するが<b>機構</b>は固定しない: extras が渡す値は
+    /// <c>OriginalPathValidator.Check</c> の出力で、現在の実装では seam の正規化結果と
+    /// 綴りまで一致してしまうため、旧形へ戻す変異が全緑のまま生存する(実測で確認)。
+    /// <para>
+    /// ここでは seam(<c>IReachabilityProbe</c>)の応答を固定して「2 つの正規化器の出力が
+    /// 綴りまで同じとは限らない」状況を作る。Fake は本番実装の性質の証人にはならないが、
+    /// <b>門番がその一致に依存していないこと</b>は Fake でしか作れない(本番の 2 本は
+    /// どちらも <c>GetFullPath</c> 由来なので綴りが割れる入力を作れない)。綴り差に区切り
+    /// (<c>/</c>)を使うのは、<c>FindByPath</c> が <c>ToLowerInvariant</c> のみになった今
+    /// 大小差では吸収されてしまい変異が生存するため。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void RestoreSession_ExtrasPathOnly_ReusesTab_EvenWhenNormalizerSpellingsDiffer() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string p = tmp.File("shared.txt");
+            File2.WriteAllText(p, "on disk");
+            string canonical = System.IO.Path.GetFullPath(p); // OriginalPathValidator.Check の綴り
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Ok,
+                canonical.Replace('\\', '/') // seam だけが別綴りを返す(Windows は / も受ける)
+            );
+            var initialEmpty = host.Docs.CreateNew();
+            var extra = Backup(NewBackupId(), originalPath: p, content: null);
+            var adopted = new List<(Document Doc, BackupRecord Rec)>();
+
+            host.File.RestoreSession(
+                Layout(LayoutRec(path: p, isActive: true)),
+                new[] { extra },
+                initialEmpty,
+                (d, r) => adopted.Add((d, r))
+            );
+
+            Assert.Equal(1, host.Docs.Count); // extras は既存タブを再利用する
+            // ★旧形(呼出前の FindByPath(canonical))だと「既存タブ無し」へ倒れて adopt が走る
+            Assert.Empty(adopted);
+        });
+
     [Fact]
     public void RestoreSession_ExtrasPathOnly_Untitled_IsSkipped() =>
         Sta.Run(() =>

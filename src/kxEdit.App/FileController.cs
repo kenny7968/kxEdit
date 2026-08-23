@@ -168,11 +168,11 @@ public sealed class FileController
     /// </para>
     /// </summary>
     public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false) =>
-        TryOpenOrActivateCore(path, suppressAutoCsv, out _);
+        TryOpenOrActivateCore(path, suppressAutoCsv).Doc;
 
     /// <summary>
-    /// <see cref="TryOpenOrActivate"/> の本体。<paramref name="reusedExisting"/> に
-    /// 「既存タブを再利用した(fast-path activate)」かどうかを返す。
+    /// <see cref="TryOpenOrActivate"/> の本体。開いた(または活性化した)文書と
+    /// 「既存タブを再利用した(fast-path activate)」かどうかを<b>組で</b>返す。
     /// <para>
     /// <b>Issue #48 Task 5</b>: 復元経路には「fast-path activate した既存タブには adopt しない」
     /// という門番が 2 箇所あり(<see cref="RestoreLayoutRecord"/> / <see cref="RestoreExtraBackup"/>)、
@@ -187,14 +187,20 @@ public sealed class FileController
     /// 境界付き正規化が 1 レコードあたり 2 回になり、不達先ではタイムアウト待ちが倍になる。
     /// 「再利用したか」は本メソッドしか知り得ない事実なので、ここから返す。
     /// </para>
+    /// <para>
+    /// <b>組で返す理由(Task 5 レビュー m-3)</b>: <c>out bool</c> + メソッド先頭での
+    /// <c>reusedExisting = false;</c> だと、将来「既存タブを返す」経路をもう 1 本足したときに
+    /// 代入を忘れてもコンパイルが通り、門番(<c>if (!reusedExisting) adopt</c>)が黙って
+    /// adopt を走らせる=既存タブが adopt 済みのバックアップ Id を上書きする。戻り値の組に
+    /// すると各 return 地点で値を<b>書かざるを得ない</b>ので、「既定値のまま素通り」という
+    /// 失敗の形自体が消える。公開 API(<see cref="TryOpenOrActivate"/>)の挙動は変えない。
+    /// </para>
     /// </summary>
-    private Document? TryOpenOrActivateCore(
+    private (Document? Doc, bool ReusedExisting) TryOpenOrActivateCore(
         string path,
-        bool suppressAutoCsv,
-        out bool reusedExisting
+        bool suppressAutoCsv
     )
     {
-        reusedExisting = false;
         // Issue #48 / 設計書 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった
         // (保存側は SaveAsDocument が既に塞いである)。境界付きにする理由は S-15:
         // 正規化後のパスに `~` が残ると GetFullPath が GetLongPathName を呼び、不達の共有に
@@ -254,7 +260,7 @@ public sealed class FileController
                     "エラー"
                 );
             }
-            return null;
+            return (null, false);
         }
         // 以降の照合・ロード・最近のファイル登録はすべて正規化済みの full を使う
         // (生の path を混ぜると設計書 §3.1 の不変条件が入口で破れる)。
@@ -263,13 +269,12 @@ public sealed class FileController
         var existing = _docs.FindByPath(full);
         if (existing is not null)
         {
-            reusedExisting = true;
             _docs.Activate(existing);
             // Task 10 review I-2: 復元経路(_suppressRegisterRecent=true)では fast-path でも
             // RegisterRecent を抑止する(重複パスの LastSession 復元で RecentFiles が汚染されるのを防ぐ)。
             if (!_suppressRegisterRecent)
                 RegisterRecent(full);
-            return existing;
+            return (existing, true); // ここだけが「既存タブを再利用した」経路
         }
 
         var prev = _docs.Active; // 読込失敗時に戻る先（直前のアクティブタブ）
@@ -297,12 +302,12 @@ public sealed class FileController
             // 機能させるため suppressAutoCsv=true で抑止する（設計 2026-07-04）。
             if (!suppressAutoCsv)
                 _openedFresh(doc);
-            return doc;
+            return (doc, false); // 新しく作ったタブ=再利用ではない
         }
         _docs.TryClose(doc, _ => true); // 読込失敗→作りかけタブを破棄
         if (prev is not null)
             _docs.Activate(prev); // 直前のアクティブへ戻す
-        return null;
+        return (null, false);
     }
 
     /// <summary>アクティブタブを指定の文字コードで開き直す。Path 未確定なら案内表示して中止。</summary>
@@ -1079,11 +1084,7 @@ public sealed class FileController
             // (LegacySessionConverter が旧 LastSessionSnapshot の Path を素通しで載せる)一方で
             // FindByPath が区切り差を吸収しなくなったため、同じファイルなのに「既存タブ無し」へ
             // 倒れる。判定の使い道は下の adopt 門番なので、崩れると既存タブの adopt を上書きする。
-            var opened = TryOpenOrActivateCore(
-                rec.Path,
-                suppressAutoCsv: false,
-                out bool reusedExisting
-            );
+            var (opened, reusedExisting) = TryOpenOrActivateCore(rec.Path, suppressAutoCsv: false);
             if (opened is null)
             {
                 failedPaths.Add(rec.Path);
@@ -1233,10 +1234,9 @@ public sealed class FileController
             // ここの normalized は OriginalPathValidator.Check の出力=同じ GetFullPath 由来なので
             // 旧形(呼出前の FindByPath)でも今のところ一致するが、「2 つの正規化器の出力が
             // 綴りまで同じ」という暗黙の前提に門番を預けたままにしない。
-            var opened = TryOpenOrActivateCore(
+            var (opened, reusedExisting) = TryOpenOrActivateCore(
                 normalized,
-                suppressAutoCsv: false,
-                out bool reusedExisting
+                suppressAutoCsv: false
             );
             if (opened is null)
             {
