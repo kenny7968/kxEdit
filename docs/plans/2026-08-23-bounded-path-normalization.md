@@ -809,7 +809,25 @@ Task 3 と同じ観点に加えて、**復元経路のダイアログ抑止ス�
 
 ### 意図的な挙動変更
 
-`FindByPath` は今後、**区切り差や相対セグメントを吸収しない**。呼出側が正規化済みパスを渡す契約になるため。App レベルでは呼出側 4 箇所すべてが正規化済みパスを渡すので挙動不変だが、**ユニットレベルの契約は変わる**。既存テスト `FindByPath_MatchesCaseAndSeparatorInsensitively` は新契約を固定する形に書き換える。CLAUDE.md §2 に従い、この変更は PR description に明記する。
+`FindByPath` は今後、**区切り差や相対セグメントを吸収しない**。呼出側が正規化済みパスを渡す契約になるため。**ユニットレベルの契約は変わる**ので、既存テスト `FindByPath_MatchesCaseAndSeparatorInsensitively` は新契約を固定する形に書き換える。CLAUDE.md §2 に従い、この変更は PR description に明記する。
+
+### 【訂正・Task 4 の申し送り】呼出側は 4 箇所ではなく 5 箇所で、1 箇所が正規化されていない
+
+当初この節には「App レベルでは呼出側 4 箇所すべてが正規化済みパスを渡すので挙動不変」と書いていた。**これは誤り。** 実際の `_docs.FindByPath` 呼出は 5 箇所ある:
+
+| 場所 | 渡す値 | 正規化済みか |
+|------|--------|-------------|
+| `FileController.cs:214` | `full` | 済(Task 4) |
+| `FileController.cs:417` | `doc.State.Path` | 済(§3.1 の不変条件) |
+| `FileController.cs:535` | `full` | 済(Task 3・SaveAs) |
+| **`FileController.cs:1025`** | **`rec.Path`** | **未**(レイアウト JSON 由来) |
+| `FileController.cs:1172` | `normalized` | 済(`OriginalPathValidator.Check` 出力) |
+
+`:1025` の `rec.Path` はレイアウト JSON 由来で、旧バージョンが書いたものや攻撃者 JSON では正規化されている保証がない。Task 4 までは同じ行の `TryOpenOrActivate(rec.Path)` と**両者が同じ生パスを見ていたので整合していた**が、Task 4 で `TryOpenOrActivate` が入口で正規化するようになったため、**`FindByPath` を `ForNormalized` にすると `:1025` だけが区切り差を吸収しなくなり `existedBefore` が false に倒れる**。
+
+その先の `if (pathOnlyBk is not null && !existedBefore) adoptRestored(...)` は「fast-path activate(既存タブ)には adopt しない = Id 上書きで別のゾンビを作らない」ための門番なので、**崩れると既存タブの adopt を上書きする**。
+
+**Task 5 の必須対応**: この呼出点で正規化済みパスを 1 本作って `FindByPath` と `TryOpenOrActivate` の両方に渡すか、`TryOpenOrActivate` に「既存タブを再利用したか」を返させる。**どちらを採るにせよ、`existedBefore` が正しく true になることを固定するテストを足すこと**(未正規化の `rec.Path` で既存タブがある fixture)。
 
 **Step 1: 既存テストを新契約へ書き換え、回数の網を足す**
 
