@@ -988,6 +988,7 @@ public class MainFormSmokeTests
             int confirmCalls = 0;
             bool disposedUnderOuterCall = false;
             int closedEvents = 0;
+            var closingCancelFlags = new List<bool>();
             using (var form = ShowMainForm_Unified(settings, tmp))
             {
                 // Single: dirty タブが 1 個だけ=「同じ文書への確認は 1 回」の前提を固定する。
@@ -995,6 +996,7 @@ public class MainFormSmokeTests
                 doc.Editor.ReplaceCharRange(0, 0, "dirty-body");
                 Assert.True(doc.Editor.Modified);
                 form.FormClosed += (_, _) => closedEvents++;
+                form.FormClosing += (_, args) => closingCancelFlags.Add(args.Cancel);
 
                 form.SetConfirmDiscardOverrideForTest(_ =>
                 {
@@ -1015,6 +1017,10 @@ public class MainFormSmokeTests
             Assert.Equal(1, confirmCalls); // 同じ文書への確認は 1 回だけ(回答が捨てられていない)
             Assert.Equal(1, closedEvents); // close の完走はちょうど 1 回
             Assert.False(disposedUnderOuterCall); // 入れ子が外側の足元で Form を破棄していない
+            // ガードは購読者へも WinForms の契約どおり通知する: 入れ子=取消(Cancel=true)、
+            // 外側=続行(Cancel=false)の順。ガード内の base.OnFormClosing(e) を落とすと
+            // 1 要素だけになりここで赤化する。
+            Assert.Equal(new[] { true, false }, closingCancelFlags);
         });
 
     // 設計 §10: 32M cap 判定の中核(IsOversizedDirty)。32M chars の実バッファを alloc せず
