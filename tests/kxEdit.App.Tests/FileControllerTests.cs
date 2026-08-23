@@ -471,7 +471,8 @@ public class FileControllerTests
     /// (1)「素の <see cref="System.IO.IOException"/> の窓は CWD 長に依存する fixture になるため
     /// 自動テストにしない」→ <b>誤り</b>。窓の上端は<b>入力長だけで決まり CWD 非依存</b>
     /// (総長 = CWD + 1 + 入力長 なので、入力長 32766 ならどんな CWD でも 32767 を超える)。
-    /// 上記 <c>[Theory]</c> に 32766 を入れて自動化済み。
+    /// <c>NormalizePath_OverLongPath_ReturnsInvalid</c> の <c>[Theory]</c> に 32766 を入れて
+    /// 自動化済み(本ファイルには <c>[Theory]</c> は無い。網は別ファイルにある)。
     /// (2)「<see cref="System.IO.PathTooLongException"/> は <c>IOException</c> の派生なので、
     /// この 1 本でフィルタの <c>or IOException</c> という<b>記述そのもの</b>を pin できる」→
     /// <b>誤り</b>。<c>or IOException</c> → <c>or PathTooLongException</c> の変異は
@@ -624,20 +625,34 @@ public class FileControllerTests
             // (同じ文言だと、原因がネットワークなのに利用者が入力を疑い続ける)。
             using var host = new Host();
             var doc = host.Docs.CreateNew();
-            doc.Editor.Text = "abc";
+            // 脆弱-m-3: V-1 の実体は「保存していないのに Modified が false」だった。
+            // ガード枝の SaveAs_DriveRoot_WarnsAndReopens_AndKeepsModified と同じ fixture を作る:
+            // 本文に CRLF・要求 EOL を LF にして ConvertEols を非 fast-path にしておかないと、
+            // 保存点が実際に壊れる条件が成立せず Modified の assert が空振りする。
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // dirty = 非既定状態から検証を始める
+            Assert.True(doc.Editor.Modified);
             // NormalizeResult は PathNormalizeResult? なので `default` と書くと null =
             // 実装への委譲になり、この網が vacuous になる。必ず明示的に構築する。
             host.Probe.NormalizeResult = new PathNormalizeResult(
                 PathNormalizeStatus.TimedOut,
                 string.Empty
             );
-            host.Dialogs.SaveAs = new SaveAsResult(@"C:\Temp\a.txt", 65001, false, LineEnding.Crlf);
+            host.Dialogs.SaveAs = new SaveAsResult(@"C:\Temp\a.txt", 65001, false, LineEnding.Lf);
 
             Assert.False(host.File.SaveAs());
 
             Assert.Null(doc.State.Path); // 保存されていない
             // 文言の弁別: 到達不能側にだけ現れる語を見る
             Assert.Contains(host.Prompt.Log, e => e.Text.Contains("到達できません"));
+            // 脆弱-m-1(b): 文言の秒数は NormalizeTimeout から補間される。literal を書き戻す
+            // 変異(「30 秒」など)をここで kill する。
+            Assert.Contains(host.Prompt.Log, e => e.Text.Contains("5 秒"));
+            // 脆弱-m-3: 現状 continue は ConvertEols より手前なので保存点に触れない。
+            // これは**将来の並べ替えに対する網**で、今この 1 行だけを kill する単一変異は
+            // 作れない(WriteToPath 側の catch にもロールバックがあるため)。それでも置くのは、
+            // 「未保存なのに Modified が落ちる」が V-1 の実害そのものだから。
+            Assert.True(doc.Editor.Modified);
         });
 
     [Fact]
@@ -659,6 +674,48 @@ public class FileControllerTests
             Assert.Null(doc.State.Path);
             Assert.Contains(host.Prompt.Log, e => e.Text.Contains("正しくありません"));
             Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("到達できません"));
+        });
+
+    /// <summary>
+    /// 脆弱-I-1 の網。<c>norm.Status != PathNormalizeStatus.Ok</c> が<b>単独で</b>保存を止めることを
+    /// pin する(この第 1 項は本テストを足すまで<b>完全に無網</b>だった)。
+    /// <para>
+    /// <b>機構</b>: 上の 2 本は fixture の <c>Full</c> が空なので <c>GetDirectoryName("")</c> が
+    /// null を返し、<c>||</c> の第 2 項(V-1 のディレクトリーガード)側でも同じ枝に入る。
+    /// 文言 <c>switch</c> は独立に <c>norm.Status</c> を見るのでメッセージの assert も通る。
+    /// 結果、第 1 項を <c>== PathNormalizeStatus.Invalid</c> へ変異させても(= TimedOut が素通り)
+    /// 全緑で生存した。ここでは <c>Full</c> に<b>親フォルダーが実在する非空パス</b>を載せ、
+    /// 第 2 項が真にならない状況を作る。第 1 項が壊れると SaveAs が実際に成功し
+    /// <c>Assert.False</c> が落ちる。
+    /// </para>
+    /// <para>
+    /// <b>なぜ現状の実装で実害が出ないのに網を張るか</b>: <c>RunNormalizeProbe</c> は失敗時に必ず
+    /// <c>Full = string.Empty</c> を返すので、今は二重防御の内側が効いている
+    /// (内側の契約は <c>RunNormalizeProbe_WorkExceedsTimeout_FailsSafeToTimedOut</c> が pin 済み)。
+    /// しかし <see cref="IReachabilityProbe"/> は interface で任意の実装を差せるうえ、
+    /// 「文言に打った値を出したいので失敗時も生パスを載せる」というごく自然な変更で内側は消える。
+    /// そのとき第 1 項が唯一の門番になり、壊れていれば<b>正規化が一度も成功していないパスへ
+    /// 実際に書き込む</b>。二重防御は外側にも網を張る。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(PathNormalizeStatus.TimedOut)]
+    [InlineData(PathNormalizeStatus.Invalid)]
+    public void SaveAs_NormalizeNotOk_WithNonEmptyFull_DoesNotSave(PathNormalizeStatus status) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string decoy = tmp.File("decoy.txt"); // 親フォルダーが実在 = V-1 ガードは発火しない
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.NormalizeResult = new PathNormalizeResult(status, decoy);
+            host.Dialogs.SaveAs = new SaveAsResult(@"C:\Temp\a.txt", 65001, false, LineEnding.Crlf);
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Null(doc.State.Path);
+            Assert.False(File2.Exists(decoy)); // 正規化が成功していないパスへ書き込まない
         });
 
     [Fact]
@@ -2661,6 +2718,27 @@ public class FileControllerTests
                 StringComparison.Ordinal
             );
             Assert.DoesNotContain("‮", err.Text, StringComparison.Ordinal);
+
+            // 脆弱-m-2(Task 3): 代表テストの射程に、境界付き正規化が足した TimedOut 文言を
+            // 1 つ加える。新しい代表を作らないのは #47 最終品質パス m-5 の受容
+            // (OneLine の idiom は代表 1 本で pin する)を継続するため。TimedOut を選ぶのは、
+            // 「不達の共有」= 復元 JSON 由来の UNC が seed に載る導線そのものだから。
+            using var host2 = new Host();
+            var doc2 = host2.Docs.CreateNew();
+            doc2.Editor.Text = "abc";
+            host2.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.TimedOut,
+                string.Empty
+            );
+            host2.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(attackPath, 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host2.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            var warn = Assert.Single(host2.Prompt.Log, e => e.Kind == "Warn");
+            Assert.Contains("到達できません", warn.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("‮", warn.Text, StringComparison.Ordinal);
         });
 
     // ===== Task 4: LoadInto エラーダイアログ抑止 seam(復元経路 Task 5 用) =====

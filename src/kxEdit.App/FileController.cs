@@ -431,15 +431,20 @@ public sealed class FileController
                 // S-15: 到達不能(タイムアウト)と打ち間違い(Invalid)で文言を分ける。
                 // 同じ文言だと、原因がネットワークなのに利用者が入力を疑い続ける。
                 // 親フォルダーが取れない場合(V-1)は Ok なので既定枝=「正しくありません」に入る。
-                // switch 式にしてあるのは、PathNormalizeStatus に 4 値目を足したとき
-                // 三項だと黙って既定枝へ倒れるため。
-                // 文言の「5 秒」は NormalizeSavePath の TimeSpan と二重管理だが、その値は
-                // SaveAs_PassesFiveSecondTimeoutToNormalizeProbe が pin しているので嘘にならない。
+                // switch 式なのは**可読性のため**: Status とそれが出す文言の対応が一望でき、
+                // 4 値目に固有の文言を足すときもアーム 1 行で済む。
+                // **網羅性検査は期待できない**(Task 3 レビュー 仕様-I-1・実測で訂正):
+                // `_ =>` アームがある以上、4 値目を足しても switch 式は三項と同じく黙って
+                // 既定枝へ倒れる。discard を外して 3 値を全列挙しても、enum は宣言外の値を
+                // 取りうるため CS8524 が出て -warnaserror で落ちる = この場所で網羅性検査を
+                // 効かせる形はそもそも取れない。三項との保護効果は等価。
+                // (`_ => throw` にすると 4 値目で保存経路がクラッシュするので改悪。)
+                // 文言の「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
                 _prompt.Warn(
                     norm.Status switch
                     {
                         PathNormalizeStatus.TimedOut =>
-                            $"保存先に到達できませんでした(5 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
+                            $"保存先に到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
                         _ =>
                             $"パスが正しくありません: {SanitizeForDisplay.OneLine(picked.Path, 200)}",
                     },
@@ -583,6 +588,13 @@ public sealed class FileController
     }
 
     /// <summary>
+    /// SaveAs の正規化に張る境界(S-15)。<b>警告文言の「n 秒」もこの値から補間する</b>ので、
+    /// ここを変えれば文言も追随する(Task 3 レビュー 脆弱-m-1: 以前は文言側が literal の
+    /// 二重管理で、文言だけを 30 秒に書き換える変異が全緑で生存した)。
+    /// </summary>
+    private static readonly TimeSpan NormalizeTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に
     /// 残すと保存先が起動時のカレントディレクトリに依存し、hot exit 復元で無言の無題化を招く。
     /// 正規化できない入力は例外ではなく <see cref="PathNormalizeStatus.Invalid"/> で戻り、
@@ -607,7 +619,7 @@ public sealed class FileController
     /// </para>
     /// </summary>
     private PathNormalizeResult NormalizeSavePath(string input) =>
-        _reachabilityProbe.NormalizePathWithTimeout(input, TimeSpan.FromSeconds(5));
+        _reachabilityProbe.NormalizePathWithTimeout(input, NormalizeTimeout);
 
     /// <summary>
     /// 改行を State.LineEnding に正規化してから本文を取得し、原子的に保存する。

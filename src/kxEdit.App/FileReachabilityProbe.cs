@@ -167,8 +167,11 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// <remarks>
     /// <b>フィルタの実測(net9.0.8)</b> — 移設元 <c>FileController.TryNormalizeSavePath</c> の
     /// 記録を引き継ぐ。<see cref="Path.GetFullPath(string)"/> が投げるのは実質
-    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>、
-    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>、
+    /// (a) NUL 文字混入 → <see cref="ArgumentException"/>
+    ///     (網 = <c>FileReachabilityProbeTests.NormalizePath_EmbeddedNul_ReturnsInvalid</c>)、
+    /// (b) 空 / 空白のみ → <see cref="ArgumentException"/>
+    ///     (これが seam まで届くかは<b>呼出側次第</b>。SaveAs 経路は手前の空白チェックが先に
+    ///     捕まえるが、seam は他の呼出側からも使われるのでそれを前提にしない)、
     /// (c) 総長超過 → 下の V-2 の表、の 3 つだけ。
     /// <c>&lt;</c> <c>|</c> <c>"</c> などの「無効文字」・予約デバイス名(CON / NUL)・
     /// 拡張ルート(<c>\\?\</c>)は<b>投げずに素通りする</b>ので、このフィルタは無効文字の門番ではない
@@ -184,13 +187,26 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// <item>32765 / 32766 → 素の <see cref="IOException"/>(<c>is PathTooLongException</c> は false)</item>
     /// <item>32767 / 40000 → <see cref="PathTooLongException"/></item>
     /// </list>
-    /// 前者は総長が 32767 の直下に収まる窓で、<c>GetFullPathNameW</c> が ERROR_INVALID_NAME を
-    /// 返すために起きる。派生関係は一方向なので <c>PathTooLongException</c> だけを列挙すると
-    /// この窓が抜けて未捕捉例外ダイアログになる。設計書 §4.3 の列挙は実測と食い違っていたため
+    /// 派生関係は一方向なので <c>PathTooLongException</c> だけを列挙すると素の <c>IOException</c>
+    /// の窓が抜けて未捕捉例外ダイアログになる。設計書 §4.3 の列挙は実測と食い違っていたため
     /// <see cref="IOException"/>(厳密な上位集合)へ広げてある。
-    /// <b>この窓の上端は入力長だけで決まり CWD 長に依存しない</b>(総長 = CWD + 1 + 入力長 なので、
-    /// 入力長 32766 ならどんな CWD でも 32767 を超える)。「CWD 長に依存する fixture になるので
-    /// 自動テストにできない」と書いていたのは誤りで、網は
+    /// </para>
+    /// <para>
+    /// <b>窓の機構</b>(Task 3 レビュー 仕様-I-2 で訂正)。移設時に持ってきた旧文は
+    /// 「総長が 32767 の<b>直下に収まる</b>窓」と書いていたが<b>これは誤り</b>で、同じ段落の
+    /// 「入力長 32766 ならどんな CWD でも 32767 を<b>超える</b>」と矛盾していた。実測でも素の
+    /// <c>IOException</c> が出るケースは総長がいずれも 32767 を超えている(32769 / 32770 /
+    /// 32845 / 32951)。正しくは<b>「総長は 32767 を超えるが、入力長は 32767 未満」</b>の窓:
+    /// <list type="bullet">
+    /// <item><b>下端は CWD 依存</b> — 総長 = CWD + 1 + 入力長 が 32767 を超えて初めて
+    /// <c>GetFullPathNameW</c> が ERROR_INVALID_NAME を返す。実測で CWD 110 文字 + 相対 32660
+    /// 文字は素の <c>IOException</c> だが、CWD 3 文字 + 相対 32000 文字は総長が届かず
+    /// <see cref="PathNormalizeStatus.Ok"/> になる。</item>
+    /// <item><b>上端は入力長だけで決まり CWD 非依存</b> — 入力長 32767 からはマネージドの
+    /// 事前検査が先に <see cref="PathTooLongException"/> を投げ、Win32 に届かない。</item>
+    /// </list>
+    /// ゆえに固定長 32766 は<b>どんな CWD でも</b>窓に入り、決定的に再現できる。「CWD 長に依存する
+    /// fixture になるので自動テストにできない」という #47 の判断はこの点で誤りで、網は
     /// <c>FileReachabilityProbeTests.NormalizePath_OverLongPath_ReturnsInvalid</c> の
     /// <c>[Theory]</c> にある。
     /// </para>
