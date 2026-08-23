@@ -447,6 +447,16 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
   `OkCancel("別の名前で保存しますか?") → SaveAsDocument(doc)` なら話が別で、
   **成功すれば Modified が下りてクローズも進む**のでクローズフローが正しく解決する。
   クローズループのキャンセル意味論と絡むため Task 6b では実装せず記録に留める。
+- **S-12**(Task 7 で判明・2026-08-23): **上書き確認の既定ボタンが OK 側**。
+  `IUserPrompt.OkCancel` は `MessageBox.Show(..., MessageBoxButtons.OKCancel, ...)` で、
+  WinForms の既定は Button1 = OK。Enter を反射的に押すと上書きが確定する。
+  Windows 純正の `SaveFileDialog.OverwritePrompt` は「はい / いいえ」で **いいえが既定**であり、
+  A-7 (a) の合流で kxEdit はその安全側の既定を失った(参照経由で従来出ていたのは純正の方)。
+  破壊的確認だけ既定を Cancel 側にするには seam に
+  `MessageBoxDefaultButton` を渡す引数(または `ConfirmDestructive` の追加)が要り、
+  文字コード劣化警告など既存 2 呼出と `FakePrompt` にも波及するため Task 7 では触っていない。
+  **最終ブランチレビュー(脆弱性パス)で判断する。** 併せて文言も
+  「上書きしますか?」に対してボタンが OK / キャンセルである点(はい / いいえではない)を再考する。
 - **S-8**(Task 5 の fixup で発生・2026-08-23): V-1 の修正 (b) で `WriteToPath` の catch フィルタに
   `ArgumentException` を足したが、これは `ArgumentNullException` と `ArgumentOutOfRangeException` も
   一緒に握る。フィルタのコメントは「**想定内の入出力エラーのみ握る。NullReference 等のロジックバグは
