@@ -479,8 +479,13 @@ public sealed class FileController
 
             var newEncoding = EncodingCatalog.Get(picked.CodePage);
 
-            // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
+            // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/選び直しを選ばせる。
             // Load 経路の HadReplacementChar 警告と対称。UTF-8(65001) は BMP+astral 全表現可でスキップ。
+            // 設計書 §4.5: キャンセルは中止ではなく**ダイアログへ戻す**。文字コードのコンボボックスは
+            // その SaveAs ダイアログの中にあるので、中止して開き直させると打ち直しを強いることになる。
+            // 副作用として、上書きを承諾した後でここをキャンセルすると次の周回で上書き確認が
+            // もう一度出る。確認は「今回の周回で選ばれた保存先」に対する問いなので、
+            // 選び直せる状態で承諾を持ち越さないほうが正しい(設計書 §10 の実施記録へ)。
             if (
                 picked.CodePage != 65001
                 && !CanEncodeBuffer(doc.Editor.CurrentBuffer, newEncoding)
@@ -490,7 +495,7 @@ public sealed class FileController
                 )
             )
             {
-                return false; // Task 8 で continue へ変える
+                continue; // 文字コードはこのダイアログで選び直せるので戻す(設計書 §4.5)
             }
 
             // 新エンコード/改行/BOM を State に反映してから WriteToPath へ(既存 WriteToPath は State を参照する)。

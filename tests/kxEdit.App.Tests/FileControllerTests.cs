@@ -1065,6 +1065,38 @@ public class FileControllerTests
             Assert.Equal(("文字コードの警告", false), Assert.Single(host.Prompt.OkCancelCalls));
         });
 
+    /// <summary>
+    /// 文字コード劣化警告のキャンセルもダイアログへ戻す(選び直せる場所がそのダイアログだから)。
+    /// 保存先は**新規ファイル**にして、上書き確認と <c>OkCancelResult</c> を取り合わないようにする
+    /// (FakePrompt の応答は 1 つしかないので、既存ファイルにすると上書き確認も同時に「いいえ」になる)。
+    /// 停止保証は <c>SaveAsQueue</c> の**枯渇=キャンセル**だけ: 警告が continue になった今、
+    /// 「同じ入力 → 警告 → キャンセル → 再表示」は自力では終わらない
+    /// (だから SaveAsQueue に「最後の値を繰り返す」モードを足してはいけない)。
+    /// 選ぶ 932 は既定(65001)と別値なので末尾の no-change assert は空振りしない
+    /// (CLAUDE.md §4。<c>doc.State.Encoding = newEncoding</c> を警告ブロックの上へ移す変異は
+    /// この assert で落ちる)。
+    /// </summary>
+    [Fact]
+    public void SaveAs_EncodingWarningDeclined_ReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "絵文字 \U0001F600"; // SJIS(932)で表せない
+            host.Prompt.OkCancelResult = false; // 警告に「キャンセル」
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(tmp.File("a.txt"), 932, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(host.Prompt.Log, e => e.Caption == "文字コードの警告");
+            Assert.False(File2.Exists(tmp.File("a.txt")));
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // State は書き換わっていない
+        });
+
     [Fact]
     public void SaveAs_LossyEncoding_OkProceedsAndWrites() =>
         Sta.Run(() =>
