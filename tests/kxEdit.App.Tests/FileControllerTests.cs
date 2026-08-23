@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
@@ -779,6 +780,169 @@ public class FileControllerTests
             Assert.True(File2.Exists(redirected));
             Assert.False(File2.Exists(typed));
         });
+
+    // ===== Issue #48 Task 8: 「境界がある」ではなく「回数が減った」の網 =====
+    //
+    // ここまでのタスクの網は「無境界の正規化が境界付き seam を通ること」を固定してきた。
+    // 以下の 3 本は**打つ回数そのもの**を固定する。S-15 の実害は 1 回 21 秒なので、
+    // 回数は待ち時間に直接掛かる(復元経路の姉妹は
+    // RestoreSession_NormalizesOncePerReopenedRecord)。
+    //
+    // 3 本は役割が分かれていて、どれも他の 2 本では代替できない:
+    //   (a) DoesNotNormalizeAtAll        — Ctrl+S が seam を 0 回しか打たない(絶対値)
+    //   (b) DoesNotScaleNormalizeCalls   — その 0 回がタブ数に依存しない(1+N の N 側)
+    //   (c) DoesNotNormalizeOutsideTheSeam — seam を通さない直呼びが増えていない(構造)
+    // (a)(b) は seam の呼び出し回数しか見ないので、`Path.GetFullPath` の直呼びが
+    // 足された場合は**全緑のまま生存する**(結果の綴りは変わらないので挙動でも観測できない)。
+    // そこだけを (c) が IL で塞ぐ。逆に (c) は回数を数えないので、seam を 2 回打つ変異は
+    // (a)(b) にしか当たらない。
+    //
+    // 同じ「網の役割分担」は DocumentManager 側にもある: FindByPath の PathKey.ForNormalized を
+    // PathKey.For へ戻す変異は、`For` が seam を通らないので (a)(b) では赤にならない。
+    // それを殺すのは DocumentManagerTests の
+    // FindByPath_DoesNotCallFileSystemTouchingPathKeyFor(実測で確認済み)。
+
+    /// <summary>
+    /// Issue #48 の成果そのもの。Ctrl+S は不変条件(<c>State.Path</c> は正規化済み)により
+    /// 境界付き正規化を<b>1 回も打たない</b>。この網が無いと、将来「念のため正規化しておく」
+    /// という一見無害な追加で S-15 が戻る。
+    /// <para>
+    /// 差分(<c>before</c> == 後)だけでなく絶対値も pin する: 「開く 1 回 + Ctrl+S 0 回」で
+    /// 合計 1 回。差分だけだと、開く側が 2 回打つ退行を起こしても差分は 0 のまま緑になる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SaveDocument_ExistingPath_DoesNotNormalizeAtAll() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "old");
+            var doc = host.File.TryOpenOrActivate(path)!;
+            doc.Editor.Text = "new";
+
+            int before = host.Probe.NormalizeCallCount; // 開く時の 1 回を除く
+            Assert.Equal(1, before); // 開くは 1 回きり(差分 0 が空振りにならないための足場)
+
+            Assert.True(host.File.SaveDocument(doc));
+
+            Assert.Equal(before, host.Probe.NormalizeCallCount);
+            Assert.Equal("new", File2.ReadAllText(path)); // 保存自体は起きている
+        });
+
+    /// <summary>
+    /// 1+N の N 側が消えたことの網。設計書 §5 のミューテーション項目 2 が指摘した穴
+    /// —「seam の呼び出し回数」だけを見ていると <c>FindByPath</c> を <c>PathKey.For</c> へ
+    /// 戻す変異を kill できない(<c>For</c> は seam を通らない)— への対処として、
+    /// <b>タブ数を変えても回数が変わらない</b>ことを固定する。
+    /// <para>
+    /// タブ数を実際に振る(1 と 5)のが load-bearing。固定の 5 タブで「差分 0」を見るだけだと
+    /// 上の姉妹と同じことしか言っておらず、「スケールしない」という主張の証人にならない。
+    /// </para>
+    /// <para>
+    /// <b>この網では kill できない変異</b>: <c>FindByPath</c> の <c>ForNormalized</c> を
+    /// <c>For</c> へ戻す変異はここでは赤にならない(<c>For</c> は <c>Path.GetFullPath</c> を
+    /// 直接呼ぶので seam のカウンタが動かない)。承知のうえで置いている。実際の kill 役は
+    /// <c>DocumentManagerTests.FindByPath_DoesNotCallFileSystemTouchingPathKeyFor</c> と
+    /// <c>PathKeyTests.ForNormalized_does_not_normalize_separators</c>。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SaveDocument_WithManyOpenTabs_DoesNotScaleNormalizeCalls() =>
+        Sta.Run(() =>
+        {
+            Assert.Equal(0, SaveNormalizeDeltaWithOpenTabs(1));
+            Assert.Equal(0, SaveNormalizeDeltaWithOpenTabs(5));
+        });
+
+    /// <summary>
+    /// <paramref name="tabCount"/> 枚のタブを開いた状態で先頭タブを Ctrl+S し、
+    /// 境界付き正規化の呼び出し回数が<b>いくつ増えたか</b>を返す。
+    /// </summary>
+    private static int SaveNormalizeDeltaWithOpenTabs(int tabCount)
+    {
+        using var host = new Host();
+        using var tmp = new TempDir();
+        for (int i = 0; i < tabCount; i++)
+        {
+            string p = tmp.File($"t{i}.txt");
+            File2.WriteAllText(p, "x");
+            Assert.NotNull(host.File.TryOpenOrActivate(p));
+        }
+        // 開いた枚数だけ打っている=タブ数に比例する呼出が「開く」側には確かに在る。
+        // このあと Ctrl+S が同じ比例を持ち込まないことを見る。
+        Assert.Equal(tabCount, host.Probe.NormalizeCallCount);
+
+        var doc = host.Docs.FindByPath(tmp.File("t0.txt"))!;
+        doc.Editor.Text = "new";
+
+        int before = host.Probe.NormalizeCallCount;
+        Assert.True(host.File.SaveDocument(doc));
+        return host.Probe.NormalizeCallCount - before;
+    }
+
+    /// <summary>
+    /// Ctrl+S の経路が <c>Path.GetFullPath</c> / <c>PathKey.For</c> を<b>直接</b>呼んでいない
+    /// ことを IL で固定する。上の 2 本(回数の網)の死角を塞ぐ専用の網。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: <c>State.Path</c> は既に正規化済みなので、
+    /// そこへ <c>GetFullPath</c> を掛け直しても<b>結果の綴りは 1 文字も変わらない</b>。
+    /// 保存先も内容も同じ、seam のカウンタも動かない。観測できる差は「不達共有で 21 秒
+    /// 止まる」ことだけで、それはテストでは再現しない(実 FS / ネットワークが要る)。
+    /// = S-15 の再導入は<b>構造でしか検出できない</b>。
+    /// </para>
+    /// <para>
+    /// 走査対象を <c>SaveDocument</c> と <c>WriteToPath</c> の 2 つにするのは、Ctrl+S が
+    /// 前者から後者へ素通しで委譲するため。片方だけ見ると、もう片方に足された 1 行を見逃す。
+    /// <c>PathKey.ForNormalized</c> は許す(ファイルシステム非接触=S-15 の対象外)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SaveDocument_DoesNotNormalizeOutsideTheSeam()
+    {
+        var save = typeof(FileController).GetMethod(
+            nameof(FileController.SaveDocument),
+            BindingFlags.Public | BindingFlags.Instance
+        );
+        var write = typeof(FileController).GetMethod(
+            "WriteToPath",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        // 改名で GetMethod が null を返し、走査ゼロ件が「呼んでいない」と読める形になるのを防ぐ。
+        Assert.NotNull(save);
+        Assert.NotNull(write);
+
+        var saveCallees = IlCallees.Of(save);
+        var writeCallees = IlCallees.Of(write);
+
+        // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の assert は無意味)。
+        Assert.Contains(
+            saveCallees,
+            m =>
+                m.DeclaringType == typeof(DocumentManager)
+                && m.Name == nameof(DocumentManager.FindByPath)
+        );
+        Assert.Contains(
+            writeCallees,
+            m =>
+                m.DeclaringType == typeof(TextFileService) && m.Name == nameof(TextFileService.Save)
+        );
+
+        foreach (var callees in new[] { saveCallees, writeCallees })
+        {
+            Assert.DoesNotContain(
+                callees,
+                m =>
+                    m.DeclaringType == typeof(System.IO.Path)
+                    && m.Name == nameof(System.IO.Path.GetFullPath)
+            );
+            Assert.DoesNotContain(
+                callees,
+                m => m.DeclaringType == typeof(PathKey) && m.Name == nameof(PathKey.For)
+            );
+        }
+    }
 
     // ===== A-7 (b): 他タブ重複の検知 =====
 
@@ -3629,6 +3793,55 @@ public class FileControllerTests
             Assert.Equal(1, host.Docs.Count); // extras は既存タブを再利用する
             // ★旧形(呼出前の FindByPath(canonical))だと「既存タブ無し」へ倒れて adopt が走る
             Assert.Empty(adopted);
+        });
+
+    /// <summary>
+    /// Issue #48 Task 8: 復元経路の<b>回数</b>の網(Ctrl+S 側の姉妹は
+    /// <see cref="SaveDocument_ExistingPath_DoesNotNormalizeAtAll"/>)。
+    /// レイアウト由来・extras 由来のどちらも、再オープン 1 レコードあたり境界付き正規化は
+    /// <b>1 回</b>で、2 回にはならない。
+    /// <para>
+    /// <b>なぜ価値があるか</b>: 上の 2 本(<c>ReusesTab</c> 姉妹)は「門番が正しく判定するか」
+    /// という<b>正しさ</b>の網で、コストは見ていない。門番を「呼出前に自前で正規化してから
+    /// <c>FindByPath</c> と <c>TryOpenOrActivate</c> の両方へ渡す」形(設計書の案 1)に
+    /// 書き換えても、判定結果は同じなので <c>ReusesTab</c> は全緑のまま通る。しかし
+    /// 1 レコードあたりの正規化が 2 回になり、S-15 の実害
+    /// (不達共有で 1 回あたり最大 <c>NormalizeTimeout</c> 待ち)が起動時に<b>倍</b>掛かる。
+    /// 復元は起動時に無人で走り、レコード数は攻撃者制御の JSON で増やせるため、
+    /// 1 レコードあたりの係数がそのまま「起動できない時間」になる。
+    /// </para>
+    /// <para>
+    /// <b>この網が言っていないこと</b>: extras の path-only 枝は
+    /// <c>OriginalPathValidator.Check</c> の中で無境界の <c>Path.GetFullPath</c> を
+    /// なお 1 回打つ(監査 A-16・設計書 §6 で明示的に対象外・申し送り S-1)。
+    /// ここで固定するのは<b>seam の呼び出し回数</b>であって「無境界がゼロ」ではない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void RestoreSession_NormalizesOncePerReopenedRecord() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string fromLayoutA = tmp.File("layout-a.txt");
+            string fromLayoutB = tmp.File("layout-b.txt");
+            string fromExtras = tmp.File("extra.txt");
+            foreach (string p in new[] { fromLayoutA, fromLayoutB, fromExtras })
+                File2.WriteAllText(p, "on disk");
+            var initialEmpty = host.Docs.CreateNew();
+
+            host.File.RestoreSession(
+                Layout(LayoutRec(path: fromLayoutA, isActive: true), LayoutRec(path: fromLayoutB)),
+                // extras = レイアウトが参照しないバックアップ。Content=null(path-only)は
+                // ディスク再オープンへ demote される=レイアウト側と同じ再オープン経路を通る。
+                new[] { Backup(NewBackupId(), originalPath: fromExtras, content: null) },
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            // 3 レコードとも実際に開けている(開けていなければ回数の assert が空振りする)。
+            Assert.Equal(3, host.Docs.Count);
+            Assert.Equal(3, host.Probe.NormalizeCallCount); // ★1 レコード 1 回。案 1 なら 6
         });
 
     [Fact]
