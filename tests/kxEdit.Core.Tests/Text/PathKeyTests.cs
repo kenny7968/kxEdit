@@ -26,7 +26,7 @@ public class PathKeyTests
     [Fact]
     public void Invalid_path_returns_empty() => Assert.Equal(string.Empty, PathKey.For("a\0b"));
 
-    // ===== ForNormalized(Issue #48 §3.2)=====
+    // ===== ForNormalized(Issue #48 / 設計書 §3.2)=====
     // 正規化済み絶対パス専用の契約。ToLowerInvariant のみで、ファイルシステムに触れない。
     // For との弁別が本体: For は GetFullPath を通すので不達ネットワーク共有で
     // UI を約 21 秒止めうる(S-15)。ForNormalized はそれを構造的に持たない。
@@ -46,7 +46,7 @@ public class PathKeyTests
     public void ForNormalized_does_not_normalize_separators()
     {
         // For との**弁別**。ForNormalized は正規化しないので区切り差は別キーになる。
-        // 呼出側が正規化済みパスを渡す契約(Issue #48 §3.1)を、ここで明文化して固定する。
+        // 呼出側が正規化済みパスを渡す契約(設計書 §3.1 の不変条件)を、ここで明文化して固定する。
         // このテストが無いと「ForNormalized の中で GetFullPath も呼ぶ」書き損じが
         // 全緑で通り、S-15 が丸ごと戻る。
         Assert.NotEqual(
