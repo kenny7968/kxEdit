@@ -246,6 +246,65 @@ public class DocumentManagerTests
         return result;
     }
 
+    // ===== Issue #48 Task 7: State.Path の不変条件(設計書 §3.1) =====
+
+    /// <summary>
+    /// 「<c>State.Path</c> は null か正規化済み絶対パス」を I/O 無しの構造チェックで守る網。
+    /// 上の <c>FindByPath</c> 群と <c>RecentFilesList.Add</c> はこの不変条件に依拠して
+    /// ファイルシステム非依存の比較をするので、破れると同一ファイルの重複タブ検知
+    /// (A-7 (b))がすり抜ける。
+    /// <para>
+    /// 述語に <see cref="System.IO.Path.IsPathFullyQualified(string)"/> を選ぶのが
+    /// load-bearing: <c>IsPathRooted</c> だとドライブ相対(<c>C:memo.txt</c>)と
+    /// カレントドライブのルート相対(<c>\memo.txt</c>)が通ってしまい、どちらも
+    /// 「後で <c>GetFullPath</c> したときに CWD / カレントドライブ依存で解決される」=
+    /// A-19 そのものの形。だから相対の InlineData にはその 2 つを含める。
+    /// </para>
+    /// <para>
+    /// <b>Debug 専用</b>: <c>Debug.Assert</c> は Release で消える。xUnit / VSTest の testhost は
+    /// <c>TestHostTraceListener</c> を入れており、assert の失敗はダイアログではなく
+    /// <c>DebugAssertException</c>(testhost の内部型)になる — だから
+    /// <c>Assert.ThrowsAny</c> で受けられる(実測で確認)。Release 側も空にせず
+    /// 「通ること」を assert するのは、(a) 構成ごとに vacuous な緑を作らないため、
+    /// (b) この網を例外へ格上げする変異(= 本番でユーザーの操作が落ちる)を
+    /// Release 側で赤にするため。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("memo.txt")] // 純粋な相対
+    [InlineData(@"sub\memo.txt")] // 相対+サブフォルダー
+    [InlineData(@"C:memo.txt")] // ドライブ相対(IsPathRooted は true を返す)
+    [InlineData(@"\memo.txt")] // カレントドライブのルート相対(同上)
+    public void DocumentState_Path_RejectsNonFullyQualified(string relative)
+    {
+#if DEBUG
+        var state = new DocumentState();
+        Assert.ThrowsAny<Exception>(() => state.Path = relative);
+#else
+        var state = new DocumentState { Path = relative }; // Release では素通り
+        Assert.Equal(relative, state.Path);
+#endif
+    }
+
+    [Theory]
+    [InlineData(@"C:\Temp\a.txt")]
+    [InlineData(@"\\server\share\a.txt")] // UNC も絶対(「2 文字目が : か」だけを見る変異を kill)
+    public void DocumentState_Path_AcceptsFullyQualified(string absolute)
+    {
+        var state = new DocumentState { Path = absolute };
+        Assert.Equal(absolute, state.Path);
+    }
+
+    [Fact]
+    public void DocumentState_Path_AcceptsNull()
+    {
+        // 無題タブ。非既定位置(絶対パスが入った状態)から始める — 生成直後の null に
+        // いきなり null を入れても「setter を通った結果」と既定値を区別できない。
+        var state = new DocumentState { Path = @"C:\Temp\a.txt" };
+        state.Path = null;
+        Assert.Null(state.Path);
+    }
+
     // ===== TryClose =====
 
     [Fact]
