@@ -232,3 +232,51 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 
 | S-A8-3 | レイアウト書込失敗は引き金にしない。extras 経路が本文を拾う前提に依存しているので、extras 経路を変更するときは本判断を再検証する |
 | S-A8-4 | M-20(セッション中の書込失敗を一度も通知しない)は別テーマとして未回収 |
 | S-A8-5 | クラッシュ・電源断は対象外 |
+
+## 10. 実施記録
+
+策定時スナップショットの本体(§1-§9)は書き換えず、実装中に判明した訂正と実測をここへ積む
+(CLAUDE.md §8)。
+
+### 10.1 §5.3 の根拠は誤りだった — 最悪ブロック時間は 15 秒 → 20 秒に伸びる
+
+§5.3 は timeout=5 秒の根拠として「既存 `Shutdown` の `Join(15s)` より短い=**新しい最悪ブロック
+時間を作らない**」と書いた。**これは誤り。**
+
+`WaitForPendingJobs` は `Dispose` しないため、5 秒待った**後で** `OnFormClosed` →
+`Shutdown` → `_writer.Dispose()` → `Join(15s)` が**別途**走る。つまり待ちは既存の 15 秒を
+**置き換えるのではなく直列に足す**。ワーカーが固まっているケースの UI スレッド最悪ブロックは
+**15 秒 → 最大 20 秒**になる(Task 1 コード品質レビューが指摘)。
+
+**判断: ② 受容(PR description に記載)。** 理由:
+
+- `Shutdown` の `Join(15s)` は「終了時にバックアップ書込を取りこぼさない」保証そのもの。
+  これを縮めるのは「稀な長い凍結」を「稀なバックアップ喪失」と交換することであり、
+  データ喪失を直す本ブランチでは向きが逆。
+- 5 秒が実際に経過するのは**失敗ケースだけ**。正常時はバリアが ms オーダーで返る。
+- 変更前から既に `Join(15s)` が WM_QUERYENDSESSION の猶予を超えていたので、
+  これは新しい種類の問題ではなく既存の露出が 1.33 倍になるだけ。
+
+timeout は 5 秒のまま据え置く(3 秒に縮めても最悪 18 秒で、遅いディスクでの偽陽性が増える割に
+得るものが小さい)。
+
+### 10.2 §7.1 の代替手段は不要と確定(スパイク実測・2026-08-24)
+
+`backupDirectory` の位置にファイルを置くと `BackupStore.Write` の
+`Directory.CreateDirectory(<BackupDir>/session-xxx)` が IOException を投げ、
+**実 `SerialBackupWriter` が本当に失敗する**。使い捨てテストでの実測:
+
+```
+confirmCalls=0  LastCloseTookSilentPath=true  sessionDirExists=False
+layoutWritten=True tabs=1 backupId=2159d3e31cc547bdb55edd76223b949b
+```
+
+無題タブなので次回起動は E4′ = タブごと消失。Form の起動・終了は完走する
+(`BackupStore.LoadAll` は `Directory.Exists` false で空・sweep 2 種は try/catch)。
+§7.1 が挙げていた代替((a) 存在しないドライブ / (b) writerFactory 注入 seam)は**不要**。
+
+### 10.3 申し送りの追加
+
+| ID | 内容 |
+|---|---|
+| S-A8-6 | 終了時の UI スレッド最悪ブロックが 15 秒 → 20 秒(§10.1)。ワーカーが固まった失敗ケースのみ |
