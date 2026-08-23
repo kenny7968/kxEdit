@@ -36,6 +36,13 @@ public sealed class BackupCoordinator : IDisposable
     /// seam (<see cref="_maxBackupChars"/>) を追加している(既定=この定数)。</summary>
     internal const int MaxBackupChars = 32 * 1024 * 1024;
 
+    /// <summary>A-8: hot exit の確認スキップ前に最終 flush の完了を待つ上限。
+    /// Windows のシャットダウン猶予に収まる長さとして 5 秒(設計 2026-08-24 §5.3)。
+    /// この待ちは <see cref="Shutdown"/> の Join(15 秒)を**置き換えず直列に足す**ため、
+    /// ワーカーが固まった場合の UI スレッド最悪ブロックは 15 秒 → 最大 20 秒に伸びる
+    /// (設計 §10.1 で受容・申し送り S-A8-6)。正常時はバリアが即返るため終了の体感は不変。</summary>
+    internal static readonly TimeSpan FinalFlushWait = TimeSpan.FromSeconds(5);
+
     private readonly DocumentManager _docs;
     private readonly string _dir;
 
@@ -686,6 +693,35 @@ public sealed class BackupCoordinator : IDisposable
             ReconcileMapMaintenance(); // 最終書込でも stale BackupId を残さない(I-1)
         if (_sessionRestoreEnabled)
             ReconcileLayout(force: true);
+    }
+
+    /// <summary>
+    /// A-8(設計 2026-08-24 §5): <see cref="FinalFlushForRestore"/> で投入した本文書込が
+    /// 全て成功したかを待ち合わせて答える。hot exit の確認スキップを決める**前**に呼ぶ事後条件検査。
+    /// </summary>
+    /// <remarks>
+    /// false の意味は「未保存本文が永続化されたと言い切れない」であって「失敗が確定した」ではない
+    /// (timeout も false)。呼び出し側は従来の未保存確認へ倒すこと。
+    /// </remarks>
+    public bool WaitForFinalFlush() => WaitForFinalFlush(FinalFlushWait);
+
+    /// <summary>timeout をテストから明示するためのオーバーロード。</summary>
+    internal bool WaitForFinalFlush(TimeSpan timeout)
+    {
+        // _shutDown の判定を先に置くのは必須: Shutdown/Dispose は _shutDown=true の直後に
+        // _writer を破棄するので「_writer is not null」では破棄済みを弾けない。破棄済みの
+        // WaitForPendingJobs は「これ以上投入されない」の意味で true を返す(=保留ゼロの保証では
+        // ない)ため、事後条件検査に使うと嘘になる(IBackupWriter の契約コメント参照)。
+        if (_shutDown || _writer is null)
+            return true; // 書くものが無い=失敗も無い
+        if (!_writer.WaitForPendingJobs(timeout))
+            return false; // 完了を確認できない=安全側で失敗扱い
+        // 意図的に dequeue しない: ここで吸い出すと、終了がキャンセルされたときに
+        // ReconcileContent 冒頭の ForceWrite 再試行が失敗を見失う(A-8 と同じ握り潰しの新設)。
+        // 代償は「書込は失敗したがその後 clean になった文書」の Id が残っている場合の
+        // 安全側の偽陽性(申し送り S-A8-1)。確認ループは clean タブを skip するため
+        // 実害は他の dirty タブへの余分な確認 1 回に留まる。
+        return _failed.IsEmpty;
     }
 
     /// <summary>

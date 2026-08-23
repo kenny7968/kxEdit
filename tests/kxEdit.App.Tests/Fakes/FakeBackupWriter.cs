@@ -37,6 +37,18 @@ public sealed class FakeBackupWriter : IBackupWriter
     /// OnLayoutWriteFailed を同期発火し、false へ戻す(1 回限りの失敗注入)。</summary>
     public bool FailNextLayoutWrite;
 
+    /// <summary>A-8: Fake は同期実行なので保留ジョブは常に無い。
+    /// これを立てると「完了を確認できない」= timeout 相当を再現する。</summary>
+    public bool WaitReturnsFalse;
+
+    /// <summary>WaitForPendingJobs の呼び出し回数(配線の kill に使う)。</summary>
+    public int WaitCalls;
+
+    /// <summary>WaitForPendingJobs に最後に渡された timeout。呼び出し側が意図した定数
+    /// (BackupCoordinator.FinalFlushWait)を渡していることを固定する(捨てると
+    /// TimeSpan.Zero へ縮める変異が生き残る)。未呼び出しなら null。</summary>
+    public TimeSpan? LastWaitTimeout;
+
     public Action<string>? OnWriteFailed { get; set; }
 
     public Action? OnLayoutWriteFailed { get; set; }
@@ -73,16 +85,12 @@ public sealed class FakeBackupWriter : IBackupWriter
 
     public void DeleteLayout(string path) => LayoutDeletes++;
 
-    /// <summary>A-8: Fake は同期実行なので保留ジョブは常に無い。
-    /// <see cref="WaitReturnsFalse"/> を立てると「完了を確認できない」= timeout 相当を再現する。</summary>
-    public bool WaitReturnsFalse;
-
-    /// <summary>WaitForPendingJobs の呼び出し回数(配線の kill に使う)。</summary>
-    public int WaitCalls;
-
+    /// <summary>A-8: 保留ジョブの待ち合わせ。Fake は同期実行なので既定では常に完了扱い
+    /// (<see cref="WaitReturnsFalse"/> で timeout 相当を注入できる)。</summary>
     public bool WaitForPendingJobs(TimeSpan timeout)
     {
         WaitCalls++;
+        LastWaitTimeout = timeout;
         return !WaitReturnsFalse;
     }
 
