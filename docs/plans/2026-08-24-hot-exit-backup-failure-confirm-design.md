@@ -310,10 +310,36 @@ layoutWritten=True tabs=1 backupId=2159d3e31cc547bdb55edd76223b949b
 (現配線では Task 3 の前提ゲートが `BackupEnabled` を要求するので到達しない)。
 この前提条件は `WaitForFinalFlush` の xmldoc に明記した。
 
-### 10.4 申し送りの追加・訂正
+### 10.4 フォールバックでキャンセルしたときの残留状態(指摘の前提を訂正して受容)
+
+Tasks 3+4 コード品質レビューの指摘: A-8 フォールバックで確認ダイアログに「キャンセル」を
+選ぶと、確認**前**に走った `FinalFlushForRestore()` の `ReconcileLayout(force: true)` により、
+**本文は書けていないのにレイアウトだけが `BackupId` を指した** `session-state.json` が
+ディスクに残る。`e.Cancel = true` の早期 return は末尾 flush より手前なので上書きもされない。
+
+機構は事実(`EnqueueWrite` の直後に `info.HasBackup = true` を楽観的に立て、`BuildLayout` は
+それを見て `BackupId` を書く)。
+
+**ただし指摘の前提「Task 3 がこの状態を新しく作る」は誤りである。** `Reconcile()`
+(タイマー tick / `ActiveDocumentChanged`)は既に `ReconcileLayout(force: false)` を呼び、
+署名が変われば書き込む。`info.HasBackup` の楽観的 true も従来どおり。つまり
+**書込が失敗し続けるセッションでは、この状態は Task 3 以前から日常的に作られている。**
+Task 3 が足すのは機会 1 回だけで、新しい露出ではない。
+
+**判断: ② 受容(PR description に記載)。** 理由:
+
+- 退行ではない。従来はこの状態のまま**警告なく終了**していた(=より悪い)。本ブランチが
+  直しているのはまさにそこ。
+- 残るのは「キャンセルして使い続け、再試行も失敗し続け、そのままクラッシュ / 電源断」の
+  組み合わせのみ。§8 で非目標と明記したクラッシュ経路に属する。
+- 次 tick の `ForceWrite` 再試行が成功すれば自然に解消する。
+
+### 10.5 申し送りの追加・訂正
 
 | ID | 内容 |
 |---|---|
 | S-A8-1(訂正) | 偽陽性は「clean 化した文書の Id 残留」ではなく「**前 tick のジョブの失敗通知が drain 後・バリア完了前に届く**」場合のみ(§10.3)。安全側・実害は余分な確認 1 回 |
 | S-A8-6 | 終了時の UI スレッド最悪ブロックが 15 秒 → 20 秒(§10.1)。ワーカーが固まった失敗ケースのみ |
 | S-A8-7 | `WaitForFinalFlush` は `FinalFlushForRestore` と**対で・その直後に**呼ぶ契約。単独呼び出し・逆順は無効(§10.3) |
+| S-A8-8 | フォールバックでキャンセルすると、実体の無い `BackupId` を指す `session-state.json` がセッション中残りうる(§10.4)。Task 3 以前から在る状態で新しい露出ではない |
+| S-A8-9 | 順序契約(S-A8-7)の変異を殺しているのは e2e 1 本で、その kill はテスト中にバックアップ tick が起きないことに依存する。`Sta.Run` が non-pumping STA で `WM_TIMER` を配送しないため二重に守られてはいる |
