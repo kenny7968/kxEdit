@@ -449,6 +449,30 @@ public sealed class FileController
                 continue;
             }
 
+            // A-4 / A-7 (a): 到達性と既存有無を 1 回の境界付き I/O で得る。
+            // 素の File.Exists は切断済み SMB 共有で UI を 60 秒固める(PR #42 H-1 の罠)。
+            // 戻り値を**先に**見て短絡するのが契約: 到達不能のとき targetExists は
+            // 未存在と到達不能を区別できず無意味(SaveTargetProbeResult のコメント)。
+            if (!TryInspectSaveTarget(full, out bool targetExists))
+                continue; // エラー表示は TryInspectSaveTarget の中
+
+            // A-7 (a): 従来は「参照」ボタン内の SaveFileDialog(OverwritePrompt)だけが確認していた。
+            // SR ユーザーの主経路はテキストボックス直入力なので、**主経路だけが無確認で上書き**
+            // という非対称が A-7 の実体。確認点をここ 1 箇所に集約し、SaveAsDialog 側は
+            // OverwritePrompt を切って二重確認を避ける。
+            // 文言はパスより問いを先に置く: SR は本文を頭から読むため、最大 200 文字のパスを
+            // 先頭に置くと何を聞かれているかが最後まで分からない(他の文言と同じ「文 → : パス」)。
+            if (
+                targetExists
+                && !_prompt.OkCancel(
+                    $"同じ名前のファイルが既に存在します。上書きしますか? 保存先: {SanitizeForDisplay.OneLine(full, 200)}",
+                    "上書きの確認"
+                )
+            )
+            {
+                continue;
+            }
+
             var newEncoding = EncodingCatalog.Get(picked.CodePage);
 
             // C-2 追補 I-2: 選択エンコードで表せない文字があれば警告して続行/中止を選ばせる。
@@ -1159,7 +1183,8 @@ public sealed class FileController
     /// ゲートは不要」と結論しないこと)。
     /// </summary>
     /// <param name="exists">
-    /// 保存が上書きになる(A-7 の上書き確認の入力)。現状 <see cref="WriteToPath"/> は捨てている。
+    /// 保存が上書きになる(A-7 (a) の上書き確認の入力)。読むのは <see cref="SaveAsDocument"/> だけで、
+    /// <see cref="WriteToPath"/> は捨てる(Ctrl+S の上書きは確認しない=自分が開いているファイルへの保存)。
     /// </param>
     private bool TryInspectSaveTarget(string path, out bool exists)
     {

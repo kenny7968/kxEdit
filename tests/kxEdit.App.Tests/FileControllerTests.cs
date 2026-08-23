@@ -289,6 +289,12 @@ public class FileControllerTests
     /// <summary>
     /// 5 秒契約の pin(読み取り側 LastTimeout の観測点と対称)。
     /// ホストが 127.0.0.1 な理由は上のテストの doc を参照(名前解決依存の排除)。
+    /// **回数も pin する**(A-7 (a) 追加時): 旧 <c>&gt;= 1</c> では、Fake の <c>FileExists</c> 既定が
+    /// 変わるなどして上書き確認が発火し、「いいえ → 再表示 → キュー枯渇」という**別の経路を
+    /// 通りながら緑のまま**になる。1 往復(ダイアログ 1 回・確認なし)であることを固定する。
+    /// プローブが **2 回**なのは設計どおり(設計書 §5): SaveAsDocument 段の事前判定と、
+    /// Ctrl+S も直接入る <see cref="FileController"/> 内 <c>WriteToPath</c> 冒頭の自己完結ガードで
+    /// 1 回ずつ。1 に減らす修正は WriteToPath の自己完結を壊すので、ここを 1 に書き換えないこと。
     /// </summary>
     [Fact]
     public void SaveAs_UncPath_ProbesSaveTargetWithFiveSecondTimeout() =>
@@ -306,7 +312,11 @@ public class FileControllerTests
 
             host.File.SaveAs();
 
-            Assert.True(host.Probe.SaveTargetCallCount >= 1);
+            Assert.Equal(2, host.Probe.SaveTargetCallCount); // 事前判定 + WriteToPath 冒頭
+            Assert.Equal(1, host.Dialogs.PickSaveAsCount); // 再表示していない = 1 往復
+            // 回数だけでは「確認が出て OK された」場合と区別できない(既定 OkCancelResult=true では
+            // 続行するので回数が変わらない)。確認が出ていないことも直接見る。
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
             Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout);
         });
 
@@ -763,6 +773,135 @@ public class FileControllerTests
             Assert.True(tabB.Editor.Modified); // 保存点を打っていない
         });
 
+    // ===== A-7 (a): 上書き確認 =====
+
+    /// <summary>
+    /// SR ユーザーの主経路(ダイアログのテキストボックス直入力)でも上書き確認が出る。
+    /// fixture は**実ファイルをディスクに置く**だけで作る(Fake の申告ではなくローカル枝の
+    /// <c>File.Exists</c> が読む実体を入力にする)。<c>TryOpenOrActivate</c> は呼ばない:
+    /// 重複タブ検知が上書き確認より**前**にあるので、別タブで開いたパスを使うと
+    /// Task 6 のエラーに当たって本テストが別のものを pin する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_ExistingFile_AsksOverwriteConfirmation() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "original");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "new";
+            host.Dialogs.SaveAs = new SaveAsResult(path, 65001, false, LineEnding.Crlf);
+
+            Assert.True(host.File.SaveAs()); // FakePrompt.OkCancelResult 既定 true = 上書き承諾
+
+            var confirm = Assert.Single(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Caption == "上書きの確認"
+            );
+            // 読み上げ順の pin: 最大 200 文字のパスより**問いが先**に来る
+            // (SR は本文を頭から読む。パスを先に置くと何を聞かれているかが最後まで分からない)。
+            Assert.StartsWith(
+                "同じ名前のファイルが既に存在します。上書きしますか?",
+                confirm.Text,
+                StringComparison.Ordinal
+            );
+            Assert.Contains(path, confirm.Text, StringComparison.Ordinal); // どこへ書くかも読める
+            Assert.Contains("new", File2.ReadAllText(path));
+        });
+
+    [Fact]
+    public void SaveAs_OverwriteDeclined_KeepsFileAndReopensDialog() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "original");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "new";
+            host.Prompt.OkCancelResult = false; // 「いいえ」
+            host.Dialogs.SaveAsQueue.Enqueue(new SaveAsResult(path, 65001, false, LineEnding.Crlf));
+
+            Assert.False(host.File.SaveAs()); // 2 回目はキュー枯渇=キャンセル
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Equal("original", File2.ReadAllText(path)); // 上書きされていない
+            Assert.Null(doc.State.Path);
+        });
+
+    /// <summary>
+    /// 新規ファイルでは確認しない。FakePrompt.OkCancelResult の既定は true なので
+    /// 「保存が成功した」だけでは確認の有無を区別できない(vacuous になる)。
+    /// Log に OkCancel が**出ないこと**で固定する。
+    /// </summary>
+    [Fact]
+    public void SaveAs_NewFile_DoesNotAskOverwrite() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Dialogs.SaveAs = new SaveAsResult(
+                tmp.File("fresh.txt"),
+                65001,
+                false,
+                LineEnding.Crlf
+            );
+
+            Assert.True(host.File.SaveAs());
+
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+        });
+
+    /// <summary>
+    /// 到達不能なリモート保存先はエラーにして再表示する(書込を試みない)。
+    /// <c>FileExists</c> に **true** を置くのは意図的な毒値: 到達不能のとき FileExists は
+    /// 無意味という <see cref="SaveTargetProbeResult"/> の契約(本物のプローブは
+    /// <c>Reachable = fileExists || dirExists</c> なのでこの組は production では作れない)を、
+    /// 「読んだら上書き確認が出てしまう」という観測可能な形に変える。
+    /// false のままだと「戻り値を先に見る」短絡を外す変異が Log 上は無変化になり、
+    /// DoesNotContain(OkCancel) が vacuous になる。
+    /// </summary>
+    [Fact]
+    public void SaveAs_UnreachableUncPath_ShowsErrorAndReopens() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "abc";
+            host.Probe.SaveTargetResult = new SaveTargetProbeResult(
+                Reachable: false,
+                FileExists: true
+            );
+            host.Dialogs.SaveAsQueue.Enqueue(
+                new SaveAsResult(@"\\127.0.0.1\no-such-share\a.txt", 65001, false, LineEnding.Crlf)
+            );
+
+            Assert.False(host.File.SaveAs());
+
+            Assert.Equal(2, host.Dialogs.PickSaveAsCount);
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith(
+                        "ネットワークパスに到達できません",
+                        StringComparison.Ordinal
+                    )
+            );
+            // 到達不能のとき FileExists は無意味(SaveTargetProbeResult の契約)。
+            // 戻り値を先に見ずに exists を読む変異は、ここで上書き確認が出ることで落ちる。
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+            // 書込は試みていない = WriteToPath の失敗エラーは出ない
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+        });
+
     // ===== Save 公開入口(active 経由 Ctrl+S) / ReadOnly 復元(WriteToPath finally) =====
 
     [Fact]
@@ -1136,9 +1275,14 @@ public class FileControllerTests
     public void SaveAs_ShowsErrorPrompt_WhenPickedPathIsRemoteAndUnreachable() =>
         Sta.Run(() =>
         {
-            // SaveAs で新たに UNC を選んだが到達不可なシナリオ: SaveAs は WriteToPath を経由する
-            // ため CSV-M-2 ガードで短絡し、SaveAsDocument の Encoding/HasBom/LineEnding ロールバックが
-            // WriteToPath=false の帰り経路で発火する(既存 SaveAs_WriteFailure_RollsBack... と対称)。
+            // SaveAs で新たに UNC を選んだが到達不可なシナリオ。
+            // **短絡位置は A-7 (a) で前へ移った**: 以前は WriteToPath 冒頭の CSV-M-2 ガードで止まり
+            // Encoding/HasBom/LineEnding は「一度書き換えてからロールバック」されていたが、
+            // 現在は SaveAsDocument の事前判定(上書き確認の直前)で止まるため State には
+            // **触れないまま**同じ結果になる。以下の State assert はロールバックではなく
+            // 「一切変更していない」を pin する(ロールバック自体の網は
+            // SaveAs_WriteFailure_RollsBackEncodingBomEol_AndKeepsPath が持つ)。
+            // 再表示の網は SaveAs_UnreachableUncPath_ShowsErrorAndReopens。
             using var host = new Host();
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = "abc"; // 既定 State=UTF-8/BOM なし/CRLF
@@ -1159,14 +1303,14 @@ public class FileControllerTests
 
             Assert.False(host.File.SaveAs());
 
-            // SaveAs でも WriteToPath 経由で 1 回だけプローブが走る
+            // 事前判定で短絡するのでプローブは 1 回だけ(WriteToPath まで進めば 2 回になる)
             Assert.Equal(1, host.Probe.SaveTargetCallCount);
             Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.SaveTargetLastTimeout); // 5s pin
-            // State ロールバック(WriteToPath が false を返した経路が SaveAsDocument のロールバックを発火)
+            // State は一切変わらない(旧: WriteToPath 失敗からのロールバック)
             Assert.Null(doc.State.Path); // Path は旧のまま(後続 Ctrl+S の別エンコード上書き事故防止)
-            Assert.Equal(65001, doc.State.Encoding.CodePage); // ロールバック(932→65001)
-            Assert.False(doc.State.HasBom); // ロールバック
-            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding); // ロールバック
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 932 を選んだが反映前に止まる
+            Assert.False(doc.State.HasBom);
+            Assert.Equal(LineEnding.Crlf, doc.State.LineEnding);
             Assert.Contains(
                 host.Prompt.Log,
                 e =>

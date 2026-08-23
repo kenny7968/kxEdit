@@ -165,6 +165,12 @@ public sealed class SaveAsDialog : Form
     {
         using var dlg = new SaveFileDialog
         {
+            // 上書き確認は FileController が全経路で 1 回だけ行う(A-7 (a))。
+            // ここで OverwritePrompt(既定 true)を有効なままにすると参照経由だけ 2 回確認が出る
+            // (A-7 の訴えは「経路によって確認が出たり出なかったりする非対称」そのもの)。
+            // 参照で選んだ後にテキストボックスを編集できる以上、ここでの確認は保存先の確定でもない。
+            // 本ファイルは Form=自動テスト対象外。この行の網は L5 の手動確認のみ。
+            OverwritePrompt = false,
             Filter =
                 "テキスト ファイル (*.txt)|*.txt|マークダウン ファイル (*.md)|*.md|CSV ファイル (*.csv)|*.csv|すべてのファイル (*.*)|*.*",
         };
