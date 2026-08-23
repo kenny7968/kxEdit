@@ -41,6 +41,16 @@ public sealed class FileController
     // 復元は「ユーザーが開いた」相当ではないため RecentFiles を汚さない=起動前の順序を保つ。
     private bool _suppressRegisterRecent;
 
+    /// <summary>
+    /// パス正規化に張る境界(S-15)。<b>開く入口(<see cref="TryOpenOrActivate"/>)と保存入口
+    /// (<see cref="NormalizeSavePath"/>)で共有する</b>ので、両者の境界が食い違うことは
+    /// 構造上ありえない(doc の約束ではなく定数の共有で担保する)。
+    /// <b>警告文言の「n 秒」もこの値から補間する</b>ので、ここを変えれば文言も追随する
+    /// (Task 3 レビュー 脆弱-m-1: 以前は文言側が literal の二重管理で、文言だけを 30 秒に
+    /// 書き換える変異が全緑で生存した)。
+    /// </summary>
+    private static readonly TimeSpan NormalizeTimeout = TimeSpan.FromSeconds(5);
+
     public FileController(
         DocumentManager docs,
         IWin32Window owner,
@@ -143,17 +153,72 @@ public sealed class FileController
     /// 既に開いていればそのタブをアクティブ化（Q4：二重編集の上書き事故防止）し、
     /// 最近のファイルは先頭へ繰上げ。新規に開けなければ作りかけタブを破棄して
     /// 直前のアクティブへ戻し null を返す。
+    /// <para>
+    /// <b>Issue #48 / 設計書 §3.6</b>: 入口で 1 回だけ境界付き正規化する。以降
+    /// (<c>FindByPath</c> / <see cref="LoadInto"/> / <see cref="RegisterRecent"/>)は
+    /// 正規化済みパスを受け取る契約になる。
+    /// </para>
     /// </summary>
     public Document? TryOpenOrActivate(string path, bool suppressAutoCsv = false)
     {
-        var existing = _docs.FindByPath(path);
+        // Issue #48 / 設計書 §3.6: ここが State.Path へ未正規化パスが入る唯一の入口だった
+        // (保存側は SaveAsDocument が既に塞いである)。境界付きにする理由は S-15:
+        // 正規化後のパスに `~` が残ると GetFullPath が GetLongPathName を呼び、不達の共有に
+        // 対して約 21 秒 UI を止める。タイムアウトは保存側と同じ NormalizeTimeout を共有する。
+        //
+        // 第 2 項は SaveAs 側 V-1 / V-3 と同じ門番で、**正規化の後ろに置くのが load-bearing**:
+        // seam の Ok は「文字列として正規化できた」以上の意味を持たない(実測 2026-08-23:
+        // CON → \\.\CON・NUL → \\.\NUL・LPT1 → \\.\LPT1 がいずれも Ok で返る)。
+        // 素通しにすると先頭 `\\` で RemotePathDetector がリモート判定 →
+        // 「ネットワークパスに到達できません」という的外れな文言になり(V-3 と同じ症状)、
+        // 到達性プローブを通ってしまった実装では File.OpenRead(@"\\.\CON") が**無期限に
+        // ブロック**する(実測: 3 秒で打ち切るまで戻らず。NUL は 0 バイト読めて空タブが開く)。
+        // 境界を張るのが目的の変更で、無境界の待ちを新設しない。
+        // 述語が弾くのはルート(C:\ / \\server\share)とデバイスパスだけで、実ファイルは
+        // 拡張長 (\\?\C:\Temp\a.txt) や UNC (\\server\share\a.txt) も親フォルダーを持つ(実測)。
+        var norm = _reachabilityProbe.NormalizePathWithTimeout(path, NormalizeTimeout);
+        if (
+            norm.Status != PathNormalizeStatus.Ok
+            || string.IsNullOrEmpty(System.IO.Path.GetDirectoryName(norm.Full))
+        )
+        {
+            // 復元経路(RestoreSession)は WithLoadErrorPromptSuppressed の中でここへ来る。
+            // 無条件に出すと起動時に per-file ダイアログが増えるので、既存の失敗経路
+            // (LoadInto の catch / ReportUnreachable)と同じく抑止スコープを尊重する。
+            // 戻り値 null は抑止に関係なく伝播し、呼出元が failedPaths へ集約する。
+            if (!_suppressLoadErrorPrompt)
+            {
+                // 到達不能(TimedOut)と打ち間違い(Invalid・親フォルダー無し)で文言を分ける
+                // のは SaveAs 側と同じ理由(同じ文言だと、原因がネットワークなのに利用者が
+                // 入力を疑い続ける)。こちらは開く経路なので保存先ではなくファイルを指す。
+                // switch 式なのは可読性のため。網羅性検査が効かない事情は SaveAsDocument
+                // 側の同じ分岐のコメントに書いてある。
+                // 文言の「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
+                // CSV-L-5: path は外部入力(復元 JSON 由来もある)なので必ず無害化する。
+                _prompt.Error(
+                    norm.Status switch
+                    {
+                        PathNormalizeStatus.TimedOut =>
+                            $"ファイルに到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください: {SanitizeForDisplay.OneLine(path, 200)}",
+                        _ => $"パスが正しくありません: {SanitizeForDisplay.OneLine(path, 200)}",
+                    },
+                    "エラー"
+                );
+            }
+            return null;
+        }
+        // 以降の照合・ロード・最近のファイル登録はすべて正規化済みの full を使う
+        // (生の path を混ぜると設計書 §3.1 の不変条件が入口で破れる)。
+        string full = norm.Full;
+
+        var existing = _docs.FindByPath(full);
         if (existing is not null)
         {
             _docs.Activate(existing);
             // Task 10 review I-2: 復元経路(_suppressRegisterRecent=true)では fast-path でも
             // RegisterRecent を抑止する(重複パスの LastSession 復元で RecentFiles が汚染されるのを防ぐ)。
             if (!_suppressRegisterRecent)
-                RegisterRecent(path);
+                RegisterRecent(full);
             return existing;
         }
 
@@ -167,7 +232,7 @@ public sealed class FileController
         bool loaded;
         try
         {
-            loaded = LoadInto(doc, path, forcedCodePage: null);
+            loaded = LoadInto(doc, full, forcedCodePage: null);
         }
         catch
         {
@@ -586,13 +651,6 @@ public sealed class FileController
             return false;
         }
     }
-
-    /// <summary>
-    /// SaveAs の正規化に張る境界(S-15)。<b>警告文言の「n 秒」もこの値から補間する</b>ので、
-    /// ここを変えれば文言も追随する(Task 3 レビュー 脆弱-m-1: 以前は文言側が literal の
-    /// 二重管理で、文言だけを 30 秒に書き換える変異が全緑で生存した)。
-    /// </summary>
-    private static readonly TimeSpan NormalizeTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// A-19: 直入力の相対パス(memo.txt)を絶対パスへ正規化する。未正規化のまま State.Path に

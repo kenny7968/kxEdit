@@ -1589,6 +1589,267 @@ public class FileControllerTests
             Assert.Empty(host.OpenedFresh); // 選択+エディタフォーカスを機能させるため自動 CSV を抑止
         });
 
+    // ===== 境界付き正規化(Issue #48 / S-15): 開く入口 =====
+
+    [Fact]
+    public void TryOpenOrActivate_NormalizeTimesOut_ReturnsNull_AndLeavesNoTab() =>
+        Sta.Run(() =>
+        {
+            // 作りかけタブを残さないこと(残すと次の RestoreSession が initialEmpty を
+            // 閉じられない等の二次汚染につながる = 既存 Task 5 review I-1 の論点)。
+            using var host = new Host();
+            int before = host.Docs.Count;
+            // NormalizeResult は PathNormalizeResult? なので `default` と書くと null =
+            // 実装への委譲になり、この網が vacuous になる。必ず明示的に構築する。
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.TimedOut,
+                string.Empty
+            );
+
+            Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"));
+
+            Assert.Equal(before, host.Docs.Count);
+            // 文言の弁別: 到達不能側にだけ現れる語を見る(保存側と同じ思想)。
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("到達できません")
+            );
+            // 秒数は NormalizeTimeout から補間される。literal を書き戻す変異をここで kill する。
+            Assert.Contains(host.Prompt.Log, e => e.Text.Contains("5 秒"));
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("正しくありません"));
+        });
+
+    [Fact]
+    public void TryOpenOrActivate_NormalizeInvalid_ShowsInvalidPathMessage() =>
+        Sta.Run(() =>
+        {
+            // 対照群。Invalid と TimedOut を同じ文言にする変異をここで kill する。
+            using var host = new Host();
+            int before = host.Docs.Count;
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Invalid,
+                string.Empty
+            );
+
+            Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"));
+
+            Assert.Equal(before, host.Docs.Count);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("正しくありません")
+            );
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Text.Contains("到達できません"));
+        });
+
+    [Fact]
+    public void TryOpenOrActivate_StoresNormalizedAbsolutePath() =>
+        Sta.Run(() =>
+        {
+            // 不変条件(設計書 §3.1)の本体。区切りが混ざった入力でも State.Path は
+            // 正規化済み絶対パスになる。Fake の既定は実実装へ委譲するので、
+            // ここは本番の GetFullPath の答えを見ている。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            System.IO.File.WriteAllText(path, "x");
+
+            var doc = host.File.TryOpenOrActivate(path.Replace('\\', '/'))!;
+
+            Assert.Equal(path, doc.State.Path);
+        });
+
+    /// <summary>
+    /// <c>norm.Status != PathNormalizeStatus.Ok</c> が<b>単独で</b>開くのを止めることを pin する。
+    /// <para>
+    /// <b>機構</b>: 上の 2 本は fixture の <c>Full</c> が空なので、第 1 項を
+    /// <c>== PathNormalizeStatus.Invalid</c> へ変異させても(= TimedOut が素通り)
+    /// 第 2 項(親フォルダーのガード)が <c>GetDirectoryName("")</c> = null で同じ枝へ倒れ、
+    /// 文言 <c>switch</c> は独立に <c>norm.Status</c> を見るのでメッセージの assert まで通る
+    /// = <b>全緑で生存する</b>(Task 3 で実際に生存した形)。ここでは <c>Full</c> に
+    /// <b>実在するファイル</b>を載せて第 2 項が真にならない状況を作る。第 1 項が壊れると
+    /// その decoy が実際に開けてしまい <c>Assert.Null</c> が落ちる。
+    /// </para>
+    /// <para>
+    /// <b>なぜ現状の実装で実害が出ないのに網を張るか</b>: <c>RunNormalizeProbe</c> は失敗時に必ず
+    /// <c>Full = string.Empty</c> を返すので、今は内側の二重防御が効いている。しかし
+    /// <see cref="IReachabilityProbe"/> は interface で任意の実装を差せるうえ、「文言に打った値を
+    /// 出したいので失敗時も生パスを載せる」というごく自然な変更で内側は消える。そのとき
+    /// 第 1 項が唯一の門番になり、壊れていれば<b>正規化が一度も成功していないパスを開く</b>。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(PathNormalizeStatus.TimedOut)]
+    [InlineData(PathNormalizeStatus.Invalid)]
+    public void TryOpenOrActivate_NormalizeNotOk_WithNonEmptyFull_DoesNotOpen(
+        PathNormalizeStatus status
+    ) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string decoy = tmp.File("decoy.txt"); // 実在=親フォルダーのガードは発火しない
+            File2.WriteAllText(decoy, "decoy");
+            int before = host.Docs.Count;
+            host.Probe.NormalizeResult = new PathNormalizeResult(status, decoy);
+
+            // 入力側は「実在しない一時パス」にする(第 1 項を壊す変異で decoy が開くことを
+            // 見たいので、入力そのものが開けてしまう環境依存を排除する)。
+            Assert.Null(host.File.TryOpenOrActivate(tmp.File("typed.txt")));
+
+            Assert.Equal(before, host.Docs.Count);
+            Assert.DoesNotContain(host.Docs.Documents, d => d.State.Path == decoy);
+            Assert.Empty(host.Settings.RecentFiles); // 開いていない=履歴も汚さない
+        });
+
+    /// <summary>
+    /// 「seam を経由していること」ではなく「<b>FileController が直接 <c>Path.GetFullPath</c> を
+    /// 呼んでいないこと</b>」の網(保存側 <see cref="SaveAs_UsesNormalizedPathFromProbe_NotDirectGetFullPath"/>
+    /// と同じ発想)。<b>seam の答を実入力と食い違わせる</b>: 打たれたのは実在しない
+    /// <c>typed.txt</c> だが seam は実在する <c>redirected.txt</c> を返す。下流
+    /// (<c>LoadInto</c> / <c>FindByPath</c> / <c>RegisterRecent</c>)が本当に seam の出力を
+    /// 使っているなら、開けて・本文が読めて・履歴に載って・2 回目は同じタブが再利用される。
+    /// あわせて <c>NormalizeCallCount == 1</c> を pin する(「1 操作あたり正規化 1 本」=
+    /// 設計書 §3 の不変条件。境界付きにした意味がここに掛かっている)。
+    /// </summary>
+    [Fact]
+    public void TryOpenOrActivate_UsesNormalizedPathFromProbe_NotDirectGetFullPath() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string typed = tmp.File("typed.txt"); // 作らない=正規化を捨てる実装では開けない
+            string redirected = tmp.File("redirected.txt");
+            File2.WriteAllText(redirected, "redirected");
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Ok,
+                redirected
+            );
+
+            var doc = host.File.TryOpenOrActivate(typed);
+
+            Assert.NotNull(doc);
+            Assert.Equal(1, host.Probe.NormalizeCallCount); // 5 秒 × N にしない
+            Assert.Equal(typed, host.Probe.NormalizeLastPath); // 生入力がそのまま seam へ届く
+            Assert.Equal(redirected, doc!.State.Path); // LoadInto が seam の出力を使う
+            Assert.Equal("redirected", doc.Editor.Text);
+            Assert.Equal(redirected, host.Settings.RecentFiles[0]); // RegisterRecent も同じ
+
+            var again = host.File.TryOpenOrActivate(typed);
+
+            Assert.Same(doc, again); // FindByPath も seam の出力で照合している
+            Assert.Equal(1, host.Docs.Count);
+            // fast-path 側の RegisterRecent も seam の出力を使う(生入力を積むと、開いてすら
+            // いないパスが履歴の 2 件目として並ぶ)。1 件目の assert とは別の呼出点なので
+            // 独立に pin する。
+            Assert.Equal(redirected, Assert.Single(host.Settings.RecentFiles));
+        });
+
+    [Fact]
+    public void TryOpenOrActivate_PassesFiveSecondTimeoutToNormalizeProbe() =>
+        Sta.Run(() =>
+        {
+            // 5 秒契約の pin(保存側の双子 SaveAs_PassesFiveSecondTimeoutToNormalizeProbe と同じ思想)。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "abc");
+
+            Assert.NotNull(host.File.TryOpenOrActivate(path));
+
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.NormalizeLastTimeout);
+        });
+
+    /// <summary>
+    /// 保存側 V-1 / V-3 の開く側対称。予約デバイス名は <c>GetFullPath</c> が <c>\\.\NUL</c> へ
+    /// 正規化する = seam は <c>Ok</c> を返す(「文字列として正規化できた」以上の意味を持たない)。
+    /// ガードが無いと先頭 <c>\\</c> で <see cref="RemotePathDetector"/> がリモート判定し、
+    /// 到達性プローブを通って <c>File.OpenRead</c> まで届く。
+    /// <para>
+    /// fixture に <c>CON</c> ではなく <c>NUL</c> を選ぶのは<b>意図的</b>: 実測(2026-08-23)で
+    /// <c>File.OpenRead(@"\\.\CON")</c> は<b>無期限にブロック</b>する(3 秒で打ち切るまで戻らない)
+    /// ため、ガードを外す変異でテストが赤ではなく<b>ハング</b>する。<c>NUL</c> は 0 バイト読めて
+    /// 空タブが開くので、同じ穴を<b>赤で</b>観測できる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void TryOpenOrActivate_ReservedDeviceName_IsRejectedBeforeProbe() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            int before = host.Docs.Count;
+
+            Assert.Null(host.File.TryOpenOrActivate("NUL"));
+
+            Assert.Equal(before, host.Docs.Count); // 空タブが開かない
+            Assert.Equal(0, host.Probe.CallCount); // 到達性プローブまで届かせない
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("正しくありません")
+            );
+            // V-3 と同じ: リモート扱いによる的外れな文言に落とさない。
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Text.StartsWith("ネットワークパスに到達できません", StringComparison.Ordinal)
+            );
+        });
+
+    [Fact]
+    public void TryOpenOrActivate_DriveRoot_IsRejectedWithPathMessage() =>
+        Sta.Run(() =>
+        {
+            // ルートは正規化できるが親フォルダーが無い=ファイルとして確定しない。
+            // ガードが無いと LoadInto の catch(UnauthorizedAccessException)へ落ちて
+            // 「開けませんでした」になる=文言 assert が変異を kill する。
+            // ローカルパスをハードコードしないため root は TempDir から導出する。
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+            Assert.False(string.IsNullOrEmpty(root));
+            int before = host.Docs.Count;
+
+            Assert.Null(host.File.TryOpenOrActivate(root));
+
+            Assert.Equal(before, host.Docs.Count);
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "Error" && e.Text.Contains("正しくありません")
+            );
+        });
+
+    /// <summary>
+    /// 復元経路(<see cref="FileController.RestoreSession"/>)は
+    /// <see cref="FileController.WithLoadErrorPromptSuppressed"/> の中でここへ来る。
+    /// 新しい失敗経路が抑止スコープを無視すると、<b>起動時に per-file ダイアログが増える</b>
+    /// (既存の <c>LoadInto</c> catch / <c>ReportUnreachable</c> と同じ扱いに揃える)。
+    /// 戻り値 null は抑止に関係なく伝播し、呼出元が failedPaths へ集約する。
+    /// </summary>
+    [Fact]
+    public void TryOpenOrActivate_NormalizeFailure_RespectsSuppressedPromptScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.TimedOut,
+                string.Empty
+            );
+
+            // 通常経路: エラーダイアログが 1 個出る
+            Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"));
+            Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+
+            host.Prompt.Log.Clear();
+
+            // 抑止 ON: ダイアログは出ないが失敗自体は伝播する
+            host.File.WithLoadErrorPromptSuppressed(() =>
+                Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"))
+            );
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "Error");
+
+            // 抑止解除後: 再びダイアログが出る(finally での復元確認)
+            Assert.Null(host.File.TryOpenOrActivate(@"C:\Temp\a.txt"));
+            Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+        });
+
     // ===== HIGH-6: UNC ロードの短タイムアウトプローブ(LoadInto 冒頭) =====
 
     [Fact]
