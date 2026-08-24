@@ -528,8 +528,19 @@ public class MainFormSmokeTests
             {
                 var doc = Assert.Single(form.FileForTest.DocsForTest);
                 Assert.Equal("edited-dirty", doc.Editor.SnapshotText); // 移行復元済み
+                // A-8: silent path を外れると確認ループが実 MessageBox を出し、テストホストが
+                // 不可視のモーダルで永久停止する(ミューテーション検証中に実際に踏んだ)。
+                // override を置いて「ハング」を「clean な失敗」へ変え、ついでに
+                // 呼ばれないこと自体を silent path の証拠として固定する。
+                int confirmCalls = 0;
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true;
+                });
                 form.Close(); // hot exit(ON×BackupON・dirty ≤32M → silent)
                 Assert.Equal(true, form.LastCloseTookSilentPathForTest);
+                Assert.Equal(0, confirmCalls); // 確認は一度も出ない
             }
 
             // FinalFlush → Shutdown(keep) 後: レイアウトが dirty タブを実バックアップ Id で参照し、
@@ -805,6 +816,110 @@ public class MainFormSmokeTests
             Assert.Empty(BackupStore.LoadAll(tmp.BackupDir));
         });
 
+    /// <summary>A-8(設計 2026-08-24): hot exit の確認なしクローズは、本文バックアップが
+    /// 実際に書けなかったときは従来の未保存確認へ倒れる。
+    /// 失敗注入は Fake ではなく**実 SerialBackupWriter**に対して行う: backupDirectory の位置に
+    /// ファイルを置くと BackupStore.Write の Directory.CreateDirectory が IOException を投げ、
+    /// OnWriteFailed 経由で BackupCoordinator の失敗キューに積まれる。起動側(LoadAll は
+    /// Directory.Exists=false で空・sweep 2 種は try/catch)がこの状況に耐えることは
+    /// 2026-08-24 のスパイクで実測済み。
+    /// 修正前はこのテストで確認が 0 回・silent=true になり、session-state.json に
+    /// 実体の無い BackupId が残る(=次回起動で E4′ タブごと消失)。</summary>
+    [Fact]
+    public void OnFormClosing_UnifiedOn_BackupWriteFails_FallsThroughToConfirm() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            // backups ディレクトリの位置を「ファイル」で塞ぐ=実 writer の書込が必ず失敗する。
+            File2.WriteAllText(tmp.BackupDir, "occupied");
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            int confirmCalls = 0;
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                // Single: dirty タブが 1 個だけであることを固定する(後段の confirmCalls==1 の前提)。
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+                Assert.True(doc.Editor.Modified);
+                Assert.False(form.HasOversizedDirtyDocForTest()); // oversized 経路ではないことを固定
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true; // No=破棄して続行
+                });
+                form.Close();
+
+                // 事後条件が偽。false の一般的な意味は「退避できたと言い切れない」(timeout も false)
+                // だが、この fixture では実 writer の OnWriteFailed が積んだ失敗 Id が根拠になる。
+                Assert.Equal(false, form.LastCloseFinalFlushOkForTest);
+                Assert.Equal(false, form.LastCloseTookSilentPathForTest); // → 確認経路へ倒れた
+            }
+
+            Assert.Equal(1, confirmCalls); // dirty 1 タブに確認 1 回(silent close なら 0 回)
+
+            // A-8 の実害(実体の無い BackupId をレイアウトへ残すこと)が起きていない: No と答えた
+            // タブは MarkDiscarded でレイアウトから外れる=次回起動で空枠にも亡霊にもならない。
+            // 同型の assertion は BackupOff / oversized の fall-through テストにもあり、
+            // BuildLayout の _discarded ガードを落とす変異はそれらも同時に殺す。本行の新規性は
+            // 「fall-through の原因が書込失敗のときも同様である」点=末尾 flush を落とす退行を
+            // 実測で捕まえる(A-8 の実害そのものを直接見る唯一の assertion)。
+            // なお「バックアップが 1 バイトも書けていない」ことは assert しない: base dir 位置が
+            // ファイルである以上 Directory.Exists / LoadAll は常に空で、何も主張しないため。
+            var layout = SessionLayoutStore.Load(tmp.LayoutPath);
+            Assert.NotNull(layout);
+            Assert.Empty(layout!.Tabs);
+        });
+
+    /// <summary>A-8 の対照群: 書込が成功する通常構成では事後条件が真になり、
+    /// 従来どおり確認なしで閉じる(設計 §6.3「ON×BackupON×書込成功=変化なし」)。
+    /// ミューテーション被覆の増分は小さい: WaitForFinalFlush が常に false を返す変異は、
+    /// 既存の OnFormClosing_UnifiedOn_BackupOn_Dirty_SilentClose_FlushesLayoutAndBackup と
+    /// OnFormClosing_CanceledClose_DoesNotPersistDiscardMarks が(より強い assertion で)
+    /// 既に殺す。本テストの実効は (a) (silent, flushOk)=(true, true) の隅を固定する唯一の行
+    /// (下の LastCloseFinalFlushOkForTest)と、(b) 上の失敗テストが赤くなったときに
+    /// 「機構が壊れたのか失敗注入が壊れたのか」を切り分ける診断価値の 2 点。
+    /// 対照群が空虚にならないよう、事後条件が真である根拠(実 writer が本文を実ファイルへ
+    /// 書き切ったこと)まで見る。</summary>
+    [Fact]
+    public void OnFormClosing_UnifiedOn_BackupWriteSucceeds_StaysSilent() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            int confirmCalls = 0;
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+                Assert.True(doc.Editor.Modified); // 失敗テストと同じ dirty 前提から始める
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    return true;
+                });
+                form.Close();
+
+                // Note: この 1 行だけは実時間に依存する(実 writer のバリアが
+                // BackupCoordinator.FinalFlushWait=5 秒以内に完了する必要がある。実測は 1 秒未満だが、
+                // 極端に遅い CI では timeout→false で赤化しうる)。対の失敗テストは
+                // timeout でも書込失敗でも false のため、この依存を持たない。
+                Assert.Equal(true, form.LastCloseFinalFlushOkForTest);
+                Assert.Equal(true, form.LastCloseTookSilentPathForTest);
+            }
+
+            Assert.Equal(0, confirmCalls); // 確認なしで閉じる(hot exit 本来の挙動)
+            // Close() は Shutdown(keep) の writer ドレインまで同期完了している=決定的。
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "unsaved-body");
+        });
+
     // MarkDiscarded の確定は確認ループ完走後(MainForm 側の遅延適用): 途中キャンセルで close が
     // 中止された場合、既に No と答えたタブの破棄マークが残留しない=以後も通常どおり保護される。
     [Fact]
@@ -849,6 +964,63 @@ public class MainFormSmokeTests
                 BackupStore.LoadAll(tmp.BackupDir),
                 r => r.Id == dirtyTab.BackupId && r.Content == "normal-body"
             );
+        });
+
+    /// <summary>H-1(設計 2026-08-24 §10.7): OnFormClosing の再入ガード。
+    /// 実運用の再入は「STA スレッドの管理ブロッキング待機(A-8 で入れた
+    /// <see cref="BackupCoordinator.WaitForFinalFlush()"/>)が **SENT メッセージを配送する**」ために
+    /// WM_CLOSE(タスクマネージャーの「タスクの終了」)/ WM_QUERYENDSESSION(ログオフ)から起きる。
+    /// それをそのまま再現するには別スレッドからの <c>SendMessage</c> と実際に止まる writer が要るが、
+    /// 機構(= OnFormClosing の入れ子実行)は同じなので、ここでは確認ループの中から
+    /// <see cref="Form.Close"/> を呼んで決定的に作る(<see cref="Form.Close"/> は
+    /// <c>SendMessage(WM_CLOSE)</c>=同期再入)。
+    /// ガードなしでは入れ子 close が最後まで完走して Form を破棄し(=外側の
+    /// <c>e.Cancel</c> は無視される)、外側は破棄済み Form の上で確認ループを続行する
+    /// =同じ文書に 2 回確認し、その回答は全て捨てられる。</summary>
+    [Fact]
+    public void OnFormClosing_ReentrantClose_IsCanceled_OuterCloseSurvives() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false); // BackupEnabled=false
+            settings.RestoreOpenFilesOnStartup = true; // 前提ゲートが落ちて確認ループへ入る
+
+            int confirmCalls = 0;
+            bool disposedUnderOuterCall = false;
+            int closedEvents = 0;
+            var closingCancelFlags = new List<bool>();
+            using (var form = ShowMainForm_Unified(settings, tmp))
+            {
+                // Single: dirty タブが 1 個だけ=「同じ文書への確認は 1 回」の前提を固定する。
+                var doc = Assert.Single(form.FileForTest.DocsForTest);
+                doc.Editor.ReplaceCharRange(0, 0, "dirty-body");
+                Assert.True(doc.Editor.Modified);
+                form.FormClosed += (_, _) => closedEvents++;
+                form.FormClosing += (_, args) => closingCancelFlags.Add(args.Cancel);
+
+                form.SetConfirmDiscardOverrideForTest(_ =>
+                {
+                    confirmCalls++;
+                    if (confirmCalls == 1)
+                    {
+                        // 入れ子クローズ。1 回目だけに限るのは必須: ガードが無い実装では入れ子側も
+                        // 同じ確認ループへ入るため、無条件に呼ぶと無限再帰でテストホストごと落ちる
+                        // (赤ではなくクラッシュになり、何が起きたか読めなくなる)。
+                        form.Close();
+                        disposedUnderOuterCall = form.IsDisposed;
+                    }
+                    return true; // No=破棄して続行
+                });
+                form.Close();
+            }
+
+            Assert.Equal(1, confirmCalls); // 同じ文書への確認は 1 回だけ(回答が捨てられていない)
+            Assert.Equal(1, closedEvents); // close の完走はちょうど 1 回
+            Assert.False(disposedUnderOuterCall); // 入れ子が外側の足元で Form を破棄していない
+            // ガードは購読者へも WinForms の契約どおり通知する: 入れ子=取消(Cancel=true)、
+            // 外側=続行(Cancel=false)の順。ガード内の base.OnFormClosing(e) を落とすと
+            // 1 要素だけになりここで赤化する。
+            Assert.Equal(new[] { true, false }, closingCancelFlags);
         });
 
     // 設計 §10: 32M cap 判定の中核(IsOversizedDirty)。32M chars の実バッファを alloc せず

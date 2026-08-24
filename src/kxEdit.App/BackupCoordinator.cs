@@ -36,6 +36,14 @@ public sealed class BackupCoordinator : IDisposable
     /// seam (<see cref="_maxBackupChars"/>) を追加している(既定=この定数)。</summary>
     internal const int MaxBackupChars = 32 * 1024 * 1024;
 
+    /// <summary>A-8: hot exit の確認スキップ前に最終 flush の完了を待つ上限。
+    /// Windows のシャットダウン猶予に収まる長さとして 5 秒(設計 2026-08-24 §5.3)。
+    /// この待ちは <see cref="Shutdown"/> の Join(15 秒)を**置き換えず直列に足す**ため、
+    /// ワーカーが固まった場合の UI スレッド最悪ブロックは 15 秒 → 最大 20 秒に伸びる
+    /// (設計 §10.1 で受容・申し送り S-A8-6)。正常時(ワーカーが詰まっておらず、S-A8-2 の
+    /// 極端に遅いディスクでもない場合)はバリアが即返るため終了の体感は不変。</summary>
+    internal static readonly TimeSpan FinalFlushWait = TimeSpan.FromSeconds(5);
+
     private readonly DocumentManager _docs;
     private readonly string _dir;
 
@@ -686,6 +694,55 @@ public sealed class BackupCoordinator : IDisposable
             ReconcileMapMaintenance(); // 最終書込でも stale BackupId を残さない(I-1)
         if (_sessionRestoreEnabled)
             ReconcileLayout(force: true);
+    }
+
+    /// <summary>
+    /// A-8(設計 2026-08-24 §5): <see cref="FinalFlushForRestore"/> で投入した本文書込が
+    /// 全て成功したかを待ち合わせて答える。hot exit の確認スキップを決める**前**に呼ぶ事後条件検査。
+    /// </summary>
+    /// <remarks>
+    /// <para>false の意味は「未保存本文が永続化されたと言い切れない」であって「失敗が確定した」ではない
+    /// (timeout も false)。呼び出し側は従来の未保存確認へ倒すこと。</para>
+    /// <para><b>前提条件: 必ず <see cref="FinalFlushForRestore"/> の直後に、対で呼ぶこと。</b>
+    /// 先行 tick の失敗 Id を消すのは <see cref="ReconcileContent"/> 冒頭の drain だけなので、
+    /// 対で呼ばないと今回の flush と無関係な古い失敗を読む。とくに BackupEnabled OFF
+    /// (<c>_enabled == false</c>)では <see cref="Reconcile"/> が
+    /// <see cref="ReconcileMapMaintenance"/> 側へ分岐して drain が二度と走らないため、
+    /// 残留した失敗 Id を<b>恒久的に読み続けて false を返し続ける</b>
+    /// (現在の呼び出し側は BackupEnabled を前提ゲートに置くので到達しない)。
+    /// つまりこの API の正しさは、設計 §3 が掲げる事後条件検査そのものではなく
+    /// 「flush と対で呼ぶ」呼び出し規約に支えられている=前提ゲートを増やす向きの変更をするときは
+    /// ここを読み直すこと。</para>
+    /// <para>UI スレッドから呼ぶこと(<see cref="BackupCoordinator"/> は <c>_map</c> を
+    /// 非スレッドセーフな Dictionary で持つ UI スレッド専有クラスで、末尾バリア＝全保留ジョブの完了、
+    /// という <see cref="IBackupWriter.WaitForPendingJobs"/> の前提も UI スレッド単一が根拠)。
+    /// 最大 <see cref="FinalFlushWait"/> の間 UI スレッドをブロックする。</para>
+    /// </remarks>
+    public bool WaitForFinalFlush() => WaitForFinalFlush(FinalFlushWait);
+
+    /// <summary>実装本体。既定値(<see cref="FinalFlushWait"/>)の適用点を上のラッパ 1 箇所に
+    /// 閉じ込めるため timeout を明示引数で受ける。テストからは呼ばれない(timeout 経路の検証は
+    /// <see cref="IBackupWriter.WaitForPendingJobs"/> を false で返す fake writer と、
+    /// その fake が受け取った timeout の突き合わせで行う)ため private。</summary>
+    private bool WaitForFinalFlush(TimeSpan timeout)
+    {
+        // _shutDown の判定を先に置くのは必須: Shutdown/Dispose は _shutDown=true の直後に
+        // _writer を破棄するので「_writer is not null」では破棄済みを弾けない。破棄済みの
+        // WaitForPendingJobs は「これ以上投入されない」の意味で true を返す(=保留ゼロの保証では
+        // ない)ため、事後条件検査に使うと嘘になる(IBackupWriter の契約コメント参照)。
+        if (_shutDown || _writer is null)
+            return true; // 書くものが無い=失敗も無い
+        if (!_writer.WaitForPendingJobs(timeout))
+            return false; // 完了を確認できない=安全側で失敗扱い
+        // 意図的に dequeue しない: ここで吸い出すと、終了がキャンセルされたときに
+        // ReconcileContent 冒頭の ForceWrite 再試行が失敗を見失う(A-8 と同じ握り潰しの新設)。
+        // 代償(安全側の偽陽性)は、前提条件どおり flush と対で呼ぶ限り 1 機構に絞られる:
+        // 冒頭 drain より後・バリア完了より前に届いた「前 tick 由来の Write ジョブ」の失敗通知が、
+        // 今回の flush の失敗として数えられるケース(その文書を今回の flush が書き直して成功して
+        // いても false になる)。drain は同じ呼び出し連鎖の冒頭で走るので、それ以前の失敗 Id は
+        // ここには残っていない=「失敗後に clean 化した文書」の残留は前提条件を破った場合の話。
+        // いずれも実害は silent close をやめて既存の未保存確認へ倒すこと(申し送り S-A8-1)。
+        return _failed.IsEmpty;
     }
 
     /// <summary>

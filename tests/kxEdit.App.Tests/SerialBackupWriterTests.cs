@@ -313,4 +313,96 @@ public class SerialBackupWriterTests
         Assert.Null(second);
         Assert.Null(third);
     }
+
+    // ===== A-8: WaitForPendingJobs(投入済みジョブの待ち合わせ) =====
+
+    /// <summary>A-8: 投入済みジョブが全部実行し終わってから true を返す(正常系)。実ファイルの
+    /// 存在も併せて見る。ただし <c>Assert.True</c> の側は「即 true」実装に対して空虚であり、
+    /// この 1 本が実際に殺せるのは <c>Assert.Single</c> の側だけ・しかもレース依存
+    /// (margin は広い方向=LoadAll は空 dir 列挙で済むのに対し、ワーカーは
+    /// CreateDirectory + temp 書込 + File.Move を要する)。
+    /// 「待たずに true」変異クラスの構造的な kill は timeout 側の
+    /// <see cref="WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked"/> が担う。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsTrue_AfterQueuedJobsRan()
+    {
+        using var tmp = new SbwTempDir();
+        using var writer = new SerialBackupWriter(tmp.Root);
+
+        writer.Write(Rec("wait-ok", "body"));
+
+        Assert.True(writer.WaitForPendingJobs(TimeSpan.FromSeconds(15)));
+        Assert.Single(BackupStore.LoadAll(tmp.Root)); // 待った証拠=実ファイルが在る
+    }
+
+    /// <summary>A-8 §5.3: ワーカーが返らないうちは timeout で false。
+    /// 呼び出し側(WaitForFinalFlush)はこれを「確認できない=安全側で失敗扱い」に使う。
+    ///
+    /// 本ファイルの「待ちは一切入れない」原則の唯一の例外: timeout そのものが被検査対象。
+    /// 決定性は保たれている — 直列ワーカーは FIFO なので、塞がれた Write ジョブより先に
+    /// バリアが走ることは原理的にない(200 ms がどう転んでも false)。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked()
+    {
+        using var tmp = new SbwTempDir();
+        // 書込を決定的に失敗させ、その失敗コールバックの中でワーカーを塞ぐ。
+        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("wait-block") + ".json"));
+        using var gate = new ManualResetEventSlim(initialState: false);
+        var writer = new SerialBackupWriter(tmp.Root)
+        {
+            // OnWriteFailed は背景スレッドから同期発火する=ここで止めればワーカーが止まる。
+            OnWriteFailed = _ => gate.Wait(TimeSpan.FromSeconds(15)),
+        };
+        try
+        {
+            writer.Write(Rec("wait-block", "boom"));
+
+            Assert.False(writer.WaitForPendingJobs(TimeSpan.FromMilliseconds(200)));
+        }
+        finally
+        {
+            gate.Set(); // 先に開けないと Dispose の Join が 15 秒待つ
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>A-8: Dispose 済み(締切済み)なら待たずに true。
+    /// 締切後は Enqueue が捨てられるので、素朴に待つと必ず timeout 全長ブロックしてしまう。
+    ///
+    /// 名前の "Immediately" は時間を測ってはいない=実際の検査は「50 ms 以内に true」。
+    /// この短い 50 ms 自体が早期 return の kill 機構(早期 return を消すと Wait(50ms) が
+    /// バリア未実行のまま満了して false になり、本テストが赤化する)。</summary>
+    [Fact]
+    public void WaitForPendingJobs_ReturnsTrue_Immediately_AfterDispose()
+    {
+        using var tmp = new SbwTempDir();
+        var writer = new SerialBackupWriter(tmp.Root);
+        writer.Dispose();
+
+        Assert.True(writer.WaitForPendingJobs(TimeSpan.FromMilliseconds(50)));
+    }
+
+    /// <summary>A-8 設計 §4 の中核契約: WaitForPendingJobs は <see cref="IDisposable.Dispose"/>
+    /// しない。待ち合わせの後もライターが生きていて、後続の Write がディスクに届くことを固定する。
+    ///
+    /// この網が無いと「成功時だけ畳む」変異(Wait が true なら Dispose して return)が
+    /// 他 3 本を全緑のまま通過する(レビュー実測)。本番に入れば「事後条件検査が成功 →
+    /// ユーザーが終了をキャンセル → 以後そのセッションで 1 件も書かれない」= A-8 と同種の
+    /// サイレント喪失を新設するため、生存させてはならない変異である。
+    ///
+    /// 待ちは入れない: 2 件目の到達は using 脱出時の Dispose ドレイン
+    /// (CompleteAdding + Join)で同期確定する=本ファイルの決定化の原則どおり。</summary>
+    [Fact]
+    public void WaitForPendingJobs_DoesNotDisposeWriter_SubsequentWritesStillLand()
+    {
+        using var tmp = new SbwTempDir();
+        using (var w = new SerialBackupWriter(tmp.Root))
+        {
+            w.Write(Rec("live-1", "one"));
+            Assert.True(w.WaitForPendingJobs(TimeSpan.FromSeconds(15)));
+            w.Write(Rec("live-2", "two")); // 待ち合わせ後もライターが生きている
+        } // Dispose でドレイン
+
+        Assert.Equal(2, BackupStore.LoadAll(tmp.Root).Count);
+    }
 }

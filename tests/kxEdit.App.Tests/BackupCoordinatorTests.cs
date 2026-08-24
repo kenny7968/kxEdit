@@ -1973,4 +1973,110 @@ public class BackupCoordinatorTests
             Assert.Contains(id, host.Writer.Deletes);
             Assert.Null(host.Writer.LayoutWrites[^1].Tabs[0].BackupId);
         });
+
+    // ===== A-8: hot exit \u306E\u4E8B\u5F8C\u6761\u4EF6\u691C\u67FB(WaitForFinalFlush) =====
+
+    /// <summary>A-8: \u66F8\u8FBC\u304C\u5168\u90E8\u6210\u529F\u3057\u3066\u3044\u308C\u3070 true=silent close \u3092\u8A31\u3059\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_NoFailure_ReturnsTrue() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.NewDoc("body");
+            host.Backup.FinalFlushForRestore();
+
+            Assert.True(host.Backup.WaitForFinalFlush());
+            Assert.Equal(1, host.Writer.WaitCalls); // writer \u3078\u672C\u5F53\u306B\u554F\u3044\u5408\u308F\u305B\u3066\u3044\u308B
+            // \u56FA\u5B9A\u3059\u308B\u306E\u306F\u300C\u5F15\u6570\u306A\u3057\u516C\u958B API \u304C\u5B9A\u6570\u3092\u6E21\u3057\u3066\u3044\u308B\u3053\u3068\u300D\u3060\u3051\u3002expected \u3082 actual \u3082
+            // \u540C\u3058\u5B9A\u6570\u3092\u7D4C\u7531\u3059\u308B\u306E\u3067\u3001\u5B9A\u6570\u5024\u305D\u306E\u3082\u306E\u3092\u5909\u3048\u308B\u5909\u7570\u306F\u3053\u306E assert \u3067\u306F\u6B7B\u306A\u306A\u3044\u3002
+            Assert.Equal(BackupCoordinator.FinalFlushWait, host.Writer.LastWaitTimeout);
+            // \u5024\u305D\u306E\u3082\u306E\u306F\u8A2D\u8A08\u5224\u65AD(S-A8-6 \u3067 20 \u79D2\u306E\u6700\u60AA\u30D6\u30ED\u30C3\u30AF\u3092\u53D7\u5BB9\u3057\u305F\u524D\u63D0)\u306A\u306E\u3067 literal \u3067\u306F
+            // \u4E8C\u91CD\u5316\u305B\u305A\u3001\u5B89\u5168\u4E0A\u306E\u7BC4\u56F2\u3060\u3051\u3092\u56FA\u5B9A\u3059\u308B\u300260 \u79D2\u7B49\u3078\u5E83\u3052\u308B\u5909\u66F4\u306F\u3053\u306E assert \u3067\u6B62\u307E\u308B\u3002
+            Assert.InRange(
+                BackupCoordinator.FinalFlushWait,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(10)
+            );
+        });
+
+    /// <summary>A-8 \u306E\u4E2D\u6838: \u80CC\u666F\u66F8\u8FBC\u304C\u5931\u6557\u3057\u3066\u3044\u305F\u3089 false=\u78BA\u8A8D\u7D4C\u8DEF\u3078\u5012\u3059\u6839\u62E0\u3092\u8FD4\u3059\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_WriteFailed_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.NewDoc("body");
+            host.Backup.FinalFlushForRestore();
+            var written = Assert.Single(host.Writer.Writes);
+            host.Writer.OnWriteFailed!(written.Id); // \u80CC\u666F\u30B9\u30EC\u30C3\u30C9\u304B\u3089\u306E\u5931\u6557\u901A\u77E5\u3092\u518D\u73FE
+
+            Assert.False(host.Backup.WaitForFinalFlush());
+        });
+
+    /// <summary>A-8 \u00A75.3: \u30B8\u30E7\u30D6\u306E\u5B8C\u4E86\u3092\u78BA\u8A8D\u3067\u304D\u306A\u3044(timeout)\u306A\u3089\u5B89\u5168\u5074\u3067 false\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_WaitTimesOut_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.NewDoc("body");
+            host.Backup.FinalFlushForRestore();
+            host.Writer.WaitReturnsFalse = true;
+
+            Assert.False(host.Backup.WaitForFinalFlush());
+        });
+
+    /// <summary>A-8 \u00A75.1: \u5931\u6557 Id \u3092 dequeue \u3057\u306A\u3044\u3002dequeue \u3059\u308B\u3068\u7D42\u4E86\u30AD\u30E3\u30F3\u30BB\u30EB\u5F8C\u306B
+    /// \u65E2\u5B58\u306E ForceWrite \u518D\u8A66\u884C\u6A5F\u69CB(ReconcileContent \u5192\u982D)\u304C\u5931\u6557\u3092\u898B\u5931\u3044\u3001
+    /// A-8 \u3068\u540C\u3058\u63E1\u308A\u6F70\u3057\u3092\u65B0\u8A2D\u3057\u3066\u3057\u307E\u3046\u3002\u300C\u6B21\u306E Reconcile \u304C\u518D\u66F8\u8FBC\u3059\u308B\u300D\u3053\u3068\u3067\u56FA\u5B9A\u3059\u308B\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_DoesNotConsumeFailure_NextReconcileStillForceWrites() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.NewDoc("body");
+            host.Backup.FinalFlushForRestore();
+            var written = Assert.Single(host.Writer.Writes);
+            host.Writer.OnWriteFailed!(written.Id);
+
+            Assert.False(host.Backup.WaitForFinalFlush());
+
+            // \u7D42\u4E86\u304C\u30AD\u30E3\u30F3\u30BB\u30EB\u3055\u308C\u305F\u60F3\u5B9A\u3002\u672C\u6587\u306F\u5909\u3048\u306A\u3044=\u7F72\u540D\u306F\u540C\u3058\u3002ForceWrite \u304C
+            // \u751F\u304D\u3066\u3044\u306A\u3051\u308C\u3070 Decide \u304C\u300C\u66F8\u8FBC\u4E0D\u8981\u300D\u3068\u5224\u65AD\u3057\u3066 Writes \u306F\u5897\u3048\u306A\u3044\u3002
+            host.Backup.Reconcile();
+
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal(written.Id, host.Writer.Writes[1].Id);
+        });
+
+    /// <summary>A-8: writer \u304C\u7121\u3044(\u4E21\u6A5F\u80FD OFF)\u306F\u300C\u66F8\u304F\u3082\u306E\u304C\u7121\u3044=\u5931\u6557\u3082\u7121\u3044\u300D\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_NoWriter_ReturnsTrue() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(enabled: false, restoreSessionEnabled: false);
+
+            Assert.True(host.Backup.WaitForFinalFlush());
+            Assert.Equal(0, host.Writer.WaitCalls);
+        });
+
+    /// <summary>A-8: Shutdown \u6E08\u307F=writer \u306F\u7834\u68C4\u6E08\u307F\u3002\u7834\u68C4\u6E08\u307F\u30E9\u30A4\u30BF\u30FC\u306B\u554F\u3044\u5408\u308F\u305B\u306A\u3044
+    /// (Task 1 \u30EC\u30D3\u30E5\u30FC I-2 \u306E\u7A74)\u3002<c>_writer is not null</c> \u306F\u7834\u68C4\u6E08\u307F\u3092\u5F3E\u3051\u306A\u3044
+    /// (\u7834\u68C4\u6E08\u307F\u3067\u3082 null \u3067\u306F\u306A\u3044)\u306E\u3067\u3001\u77ED\u7D61\u3092\u62C5\u3063\u3066\u3044\u308B\u306E\u306F <c>_shutDown</c> \u306E\u65B9\u3067\u3042\u308B\u3001
+    /// \u3092\u56FA\u5B9A\u3059\u308B\u3002WaitForPendingJobs \u306F\u7834\u68C4\u6E08\u307F\u30E9\u30A4\u30BF\u30FC\u306B\u5BFE\u3057\u3066\u300C\u4FDD\u7559\u30B8\u30E7\u30D6\u304C\u7121\u3044\u300D\u3067\u306F\u306A\u304F
+    /// \u300C\u3053\u308C\u4EE5\u4E0A\u6295\u5165\u3055\u308C\u306A\u3044\u300D\u306E\u610F\u5473\u3067 true \u3092\u8FD4\u3059\u305F\u3081\u3001\u4E8B\u5F8C\u6761\u4EF6\u691C\u67FB\u306B\u4F7F\u3046\u3068\u5618\u306B\u306A\u308B\u3002</summary>
+    [Fact]
+    public void WaitForFinalFlush_AfterShutdown_ReturnsTrue_WithoutAskingWriter() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host(restoreSessionEnabled: true);
+            host.NewDoc("body");
+            host.Backup.FinalFlushForRestore();
+            Assert.Equal(1, host.WriterFactoryCalls); // \u975E vacuous: writer \u306F\u5B9F\u5728\u3059\u308B
+
+            host.Backup.Shutdown();
+
+            Assert.True(host.Backup.WaitForFinalFlush());
+            Assert.Equal(0, host.Writer.WaitCalls); // _shutDown \u3067\u77ED\u7D61=\u7834\u68C4\u6E08\u307F\u3078\u554F\u3044\u5408\u308F\u305B\u306A\u3044
+        });
 }
