@@ -19,7 +19,18 @@ public interface IBackupWriter : IDisposable
 
     void Write(BackupRecord record);
     void Delete(string id);
-    void DeleteAll();
+
+    /// <summary>E-2: 復元ダイアログ「すべて破棄」の実体。<paramref name="ids"/> のバックアップを
+    /// <paramref name="baseDir"/> 配下(flat + 全 <c>session-*</c>)を横断して削除する。
+    ///
+    /// <see cref="Write"/> / <see cref="Delete"/> が ctor で受けた自セッション dir に束縛されるのに対し、
+    /// 本 API は**意図的にそのスコープを外れる**(名前で明示している)。旧 <c>DeleteAll()</c> は
+    /// 自セッション dir だけを消していたため、提示した孤児が一件も消えなかった。
+    ///
+    /// 契約: 呼び出し側は「**ユーザーに提示した record の Id**」だけを渡すこと。一覧に出していない
+    /// Id を渡すと、同時起動している別インスタンスのライブバックアップを消し得る。
+    /// <paramref name="ids"/> は背景スレッドが後で読むため、呼び出し側で不変のスナップショットを渡す。</summary>
+    void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids);
 
     /// <summary>セッションレイアウトを path へ書き込むジョブを投入する(SessionLayoutStore.Save)。</summary>
     void WriteLayout(string path, kxEdit.Core.Session.SessionLayout layout);

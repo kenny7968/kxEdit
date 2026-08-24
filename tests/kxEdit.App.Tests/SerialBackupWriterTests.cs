@@ -107,23 +107,27 @@ public class SerialBackupWriterTests
     }
 
     /// <summary>
-    /// DeleteAll ジョブが投入順に BackupStore.DeleteAll に到達し、既存の *.json を全削除する。
-    /// 責務=「復元ダイアログの『すべて破棄』分岐」に対する統合パイプ担保。
+    /// DeleteAcrossSessions ジョブが投入順に BackupStore.DeleteByIds に到達し、
+    /// **ctor で受けた自セッション dir の外**(flat + 他 session-*)の指定 Id まで実削除する。
+    /// 責務=「復元ダイアログの『すべて破棄』分岐」に対する統合パイプ担保(E-2)。
     /// </summary>
     [Fact]
-    public void DeleteAll_RemovesEverything()
+    public void DeleteAcrossSessions_RemovesListedRecordsOutsideOwnSessionDir()
     {
         using var tmp = new SbwTempDir();
+        var own = Path.Combine(tmp.Root, "session-" + Guid.NewGuid().ToString("N"));
+        var orphan = Path.Combine(tmp.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(tmp.Root, Rec("flat", "1")); // flat 後方互換
+        BackupStore.Write(orphan, Rec("orphan", "2")); // 他セッション(孤児)
+        BackupStore.Write(orphan, Rec("keep", "3")); // 一覧に出ていない=残る
 
-        using (var w = new SerialBackupWriter(tmp.Root))
+        using (var w = new SerialBackupWriter(own))
         {
-            w.Write(Rec("a", "1"));
-            w.Write(Rec("b", "2"));
-            w.Write(Rec("c", "3"));
-            w.DeleteAll();
-        }
+            w.DeleteAcrossSessions(tmp.Root, new[] { HashId("flat"), HashId("orphan") });
+        } // Dispose で投入順に消化
 
-        Assert.Empty(BackupStore.LoadAll(tmp.Root));
+        var left = BackupStore.LoadAll(tmp.Root);
+        Assert.Equal("3", Assert.Single(left).Content);
     }
 
     // ===== 失敗回復 & ワーカー生存(1 件の書込失敗が後続ジョブを巻き添えにしない=内側 catch 経路) =====
@@ -282,11 +286,13 @@ public class SerialBackupWriterTests
         // catch (InvalidOperationException) の二重防御のいずれかで達成)。
         var writeEx = Record.Exception(() => w.Write(Rec("z", "zzz")));
         var deleteEx = Record.Exception(() => w.Delete("y"));
-        var deleteAllEx = Record.Exception(() => w.DeleteAll());
+        var discardEx = Record.Exception(() =>
+            w.DeleteAcrossSessions(tmp.Root, new[] { HashId("y") })
+        );
 
         Assert.Null(writeEx);
         Assert.Null(deleteEx);
-        Assert.Null(deleteAllEx);
+        Assert.Null(discardEx);
 
         // 補助観察: ディスクに何も書かれていない(worker は既に foreach を抜けているため当然)。
         Assert.Empty(BackupStore.LoadAll(tmp.Root));

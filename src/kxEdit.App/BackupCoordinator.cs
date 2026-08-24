@@ -209,6 +209,8 @@ public sealed class BackupCoordinator : IDisposable
     /// デリゲート(本文を載せ dirty のまま)。復元した文書には元 Id を引き継がせ、既存のバックアップ
     /// ファイルを継続使用する(孤児・無保護窓を作らない)。チェックしなかった項目は安全側で残し、
     /// 次回再提案する(明示的に消すのは「すべて破棄」のみ)。
+    /// (E-2: 「すべて破棄」は提示した record を base dir 横断で実削除する。一覧に出していない
+    /// バックアップ=表示後に他インスタンスが書いた分・自セッションが保護中の分は消さない。)
     /// confirm=false ではダイアログを出さず全件復元し、その件数を返す。
     /// confirm=true でも Restore 選択時は実復元件数を返す(設計 2026-07-24-restore-no-initial-untitled §1・
     /// 呼び出し側は件数&gt;0 で起動時の空無題タブを閉じる判断に使う)。DiscardAll/Later は 0。
@@ -287,13 +289,35 @@ public sealed class BackupCoordinator : IDisposable
                 return restored;
 
             case RestoreAction.DiscardAll:
-                _writer?.DeleteAll();
+                // E-2: 自セッション dir ではなく base dir を横断し、提示した record を実削除する。
+                // `?.` は引数式も短絡するため、writer 未生成時に集合を組み立てない。
+                _writer?.DeleteAcrossSessions(_dir, DiscardTargets(ordered));
                 return 0;
 
             case RestoreAction.Later:
             default:
                 return 0; // 何もしない(次回再提案)
         }
+    }
+
+    /// <summary>E-2: 「すべて破棄」で実削除する Id を決める。提示した record から、
+    /// **自セッションが現在保護中**の Id を除く。
+    ///
+    /// 除外の理由: 実ファイルだけ消えても <see cref="_map"/> は <c>HasBackup=true</c> のまま残るため、
+    /// 次に内容が変わるまで再書込が走らず無保護窓ができる(A-1 / M-31 で潰したのと同型)。
+    /// ダイアログ表示中に自分が書いた分は LoadAll 時点で存在せず元から対象外なので、
+    /// ここで守るのは「LoadAll の直前に Reconcile が走って書かれた分」。
+    ///
+    /// 戻り値は背景スレッドへ渡すため、呼び出し時点で確定した独立リストにする。
+    /// (素朴な foreach + if は S3267、引数の <c>IReadOnlyList</c> は CA1859 でビルドが止まる。
+    /// LINQ と具象 List はアナライザ要求であって、意味は上記のとおり集合差そのもの。)</summary>
+    private List<string> DiscardTargets(List<BackupRecord> offered)
+    {
+        var live = new HashSet<string>(
+            _map.Values.Where(info => info.HasBackup).Select(info => info.Id),
+            StringComparer.OrdinalIgnoreCase
+        );
+        return offered.Where(rec => !live.Contains(rec.Id)).Select(rec => rec.Id).ToList();
     }
 
     /// <summary>起動時復元の入力収集(sweep+LoadAll+trace)。OfferRestoreOnStartup と

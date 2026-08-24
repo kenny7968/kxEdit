@@ -11,9 +11,9 @@ namespace kxEdit.App;
 /// 次 Reconcile で強制再書込を促す(Stage 5 で IBackupWriter を実装)。
 /// Dispose で投入を締め切り、保留ジョブをドレインしてから戻る。
 /// BK-M-2: <c>_dir</c> は base backup directory ではなく **自セッション用 subdirectory** を保持する
-/// (<c>%APPDATA%\kxEdit\backups\session-{Guid.N}\</c>)。<see cref="DeleteAll"/> は
-/// <see cref="BackupStore.DeleteSessionDir(string)"/> 経由で自セッション dir のみを掃除する
-/// ため、他インスタンスのライブは無傷。base dir 側の LoadAll / SweepOldSessions は
+/// (<c>%APPDATA%\kxEdit\backups\session-{Guid.N}\</c>)。<see cref="Write"/> / <see cref="Delete"/> は
+/// この dir に束縛される。「すべて破棄」だけは例外で、<see cref="DeleteAcrossSessions"/> が
+/// 引数の base dir を横断する(E-2)。base dir 側の LoadAll / SweepOldSessions は
 /// BackupCoordinator が別途担当する。
 /// </summary>
 public sealed class SerialBackupWriter : IBackupWriter
@@ -65,13 +65,14 @@ public sealed class SerialBackupWriter : IBackupWriter
             }
         });
 
-    public void DeleteAll() =>
+    public void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids) =>
         Enqueue(() =>
         {
             try
             {
-                // BK-M-2: session dir のみを掃除する(他インスタンスの session-* / flat 配置は無傷)。
-                BackupStore.DeleteSessionDir(_dir);
+                // E-2: 自セッション dir(_dir)ではなく引数の base dir を横断する。
+                // BK-M-2 の DeleteSessionDir では、一覧に出した孤児が一件も消えなかった。
+                BackupStore.DeleteByIds(baseDir, ids);
             }
             catch
             { /* 一括削除失敗は致命でない・無音 */
@@ -106,7 +107,7 @@ public sealed class SerialBackupWriter : IBackupWriter
 
     /// <summary>ジョブを投入する(締め切り後・破棄後は無視)。投入できたら true。実装詳細。
     /// 呼び出しは UI スレッド前提。
-    /// Write/Delete/DeleteAll/WriteLayout/DeleteLayout の 5 箇所が戻り値を捨てるのは意図的
+    /// Write/Delete/DeleteAcrossSessions/WriteLayout/DeleteLayout の 5 箇所が戻り値を捨てるのは意図的
     /// (=投入失敗は無音、という既存挙動の保存)。戻り値を見るのは
     /// <see cref="WaitForPendingJobs"/> だけ。</summary>
     // _disposed は volatile 不要: 書き込み(Dispose)も読み取り(Enqueue)も UI スレッドのみ。
