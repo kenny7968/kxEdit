@@ -776,4 +776,173 @@ public class BackupStoreTests
         Assert.Null(recordException);
         Assert.Single(Directory.GetFiles(t.Root, "*.json"));
     }
+
+    // ===== E-2: DeleteByIds(復元ダイアログ「すべて破棄」の実体) =====
+    // 一覧(LoadAll)は flat + 全 session-* を集めるのに、削除(DeleteSessionDir)が自セッション
+    // dir 限定だったため「すべて破棄」が事実上 no-op だった(監査 E-2)。DeleteByIds は削除範囲を
+    // 「ユーザーに提示した Id」へ合わせ、一覧と削除の範囲を一致させる。
+
+    [Fact]
+    public void DeleteByIds_RemovesFlatRecord()
+    {
+        using var t = new TempDir();
+        BackupStore.Write(t.Root, Rec("flat", null, "flat-content"));
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("flat") });
+
+        Assert.Equal(1, deleted);
+        Assert.False(File.Exists(Path.Combine(t.Root, HashId("flat") + ".json")));
+    }
+
+    [Fact]
+    public void DeleteByIds_RemovesRecordInOtherSessionDir()
+    {
+        using var t = new TempDir();
+        // 前回クラッシュ由来の孤児 session dir(自セッションではない=E-2 で消えなかった側)。
+        var orphan = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(orphan, Rec("orphan", null, "orphan-content"));
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
+
+        Assert.Equal(1, deleted);
+        Assert.Empty(BackupStore.LoadAll(t.Root)); // 次回起動で再提案されない
+    }
+
+    [Fact]
+    public void DeleteByIds_KeepsRecordsNotListed()
+    {
+        using var t = new TempDir();
+        var dir = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(dir, Rec("offered", null, "offered-content"));
+        // 一覧に出していない = ダイアログ表示後に他インスタンスが書いたライブ backup 相当。
+        BackupStore.Write(dir, Rec("not-offered", null, "live-content"));
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("offered") });
+
+        Assert.Equal(1, deleted);
+        Assert.Equal("live-content", Assert.Single(BackupStore.LoadAll(t.Root)).Content);
+    }
+
+    [Fact]
+    public void DeleteByIds_RemovesEmptiedSessionDir_WithTmpResiduals()
+    {
+        using var t = new TempDir();
+        var orphan = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(orphan, Rec("orphan", null, "orphan-content"));
+        // 書込中クラッシュで残った平文の部分本文。dir が空になるなら一緒に消す。
+        File.WriteAllText(Path.Combine(orphan, "residual.tmp"), "partial plaintext");
+
+        BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
+
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
+    public void DeleteByIds_KeepsSessionDirAndTmp_WhenJsonRemains()
+    {
+        using var t = new TempDir();
+        var dir = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(dir, Rec("offered", null, "offered-content"));
+        BackupStore.Write(dir, Rec("not-offered", null, "live-content"));
+        string tmp = Path.Combine(dir, "inflight.tmp");
+        File.WriteAllText(tmp, "in-flight write of a live instance");
+
+        BackupStore.DeleteByIds(t.Root, new[] { HashId("offered") });
+
+        Assert.True(Directory.Exists(dir));
+        Assert.True(File.Exists(tmp)); // 書込中の別インスタンスを壊さない
+    }
+
+    [Fact]
+    public void DeleteByIds_DoesNotTouchSessionDirsWithoutTargets()
+    {
+        using var t = new TempDir();
+        var target = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        var untouched = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(target, Rec("orphan", null, "orphan-content"));
+        // *.json をまだ一つも持たない dir(=他インスタンスの初回書込中)。*.json が無いことを
+        // 根拠に掃除すると、この tmp を壊してしまう。掃除は「削除が発生した dir」限定であること。
+        Directory.CreateDirectory(untouched);
+        string tmp = Path.Combine(untouched, "inflight.tmp");
+        File.WriteAllText(tmp, "first write of a live instance (no .json yet)");
+
+        BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
+
+        Assert.False(Directory.Exists(target)); // 対象を含んだ dir は消える
+        Assert.True(File.Exists(tmp)); // 含まない dir には触れない
+    }
+
+    [Fact]
+    public void DeleteByIds_RemovesDuplicateIdFromBothLocations()
+    {
+        using var t = new TempDir();
+        var session = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        // adopt-move 失敗の残骸で同一 Id が 2 箇所に居ることがある(TryMoveToSessionDir の xmldoc)。
+        BackupStore.Write(t.Root, Rec("dup", null, "flat-copy"));
+        BackupStore.Write(session, Rec("dup", null, "session-copy"));
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("dup") });
+
+        Assert.Equal(2, deleted);
+        Assert.Empty(BackupStore.LoadAll(t.Root));
+    }
+
+    // 以下 2 本は「将来の実装変更に対するアンカー」。現行実装(パスへ連結せずファイル名の
+    // 完全一致で照合)では自明に緑だが、Path.Combine 方式へ書き換えられた瞬間に red 化する。
+    [Fact]
+    public void DeleteByIds_InvalidId_DoesNotThrow_AndKeepsDeletingOthers()
+    {
+        using var t = new TempDir();
+        BackupStore.Write(t.Root, Rec("good", null, "good-content"));
+
+        int deleted = 0;
+        var ex = Record.Exception(() =>
+            deleted = BackupStore.DeleteByIds(t.Root, new[] { @"..\..\evil", HashId("good") })
+        );
+
+        // Write / Delete は ArgumentException を投げる契約だが、一括削除で 1 件の不正が
+        // 全破棄を巻き添えにするのは安全側ではない。
+        Assert.Null(ex);
+        Assert.Equal(1, deleted);
+    }
+
+    [Fact]
+    public void DeleteByIds_InvalidId_CannotEscapeSearchedDirectories()
+    {
+        using var t = new TempDir();
+        var session = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(session, Rec("orphan", null, "orphan-content"));
+        string victim = Path.Combine(t.Root, "victim.json");
+        File.WriteAllText(victim, "must survive");
+
+        BackupStore.DeleteByIds(t.Root, new[] { @"..\victim", HashId("orphan") });
+
+        Assert.True(File.Exists(victim));
+    }
+
+    [Fact]
+    public void DeleteByIds_OnMissingBaseDir_IsHarmless()
+    {
+        using var t = new TempDir();
+        var missing = Path.Combine(t.Root, "does-not-exist");
+
+        int deleted = -1;
+        var ex = Record.Exception(() =>
+            deleted = BackupStore.DeleteByIds(missing, new[] { HashId("x") })
+        );
+
+        Assert.Null(ex);
+        Assert.Equal(0, deleted);
+    }
+
+    [Fact]
+    public void DeleteByIds_NeverDeletesBaseDirItself()
+    {
+        using var t = new TempDir();
+        BackupStore.Write(t.Root, Rec("flat", null, "flat-content"));
+
+        BackupStore.DeleteByIds(t.Root, new[] { HashId("flat") });
+
+        Assert.True(Directory.Exists(t.Root)); // flat が空になっても base dir は残す
+    }
 }
