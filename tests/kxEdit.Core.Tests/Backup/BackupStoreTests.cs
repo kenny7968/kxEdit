@@ -937,9 +937,41 @@ public class BackupStoreTests
         string victim = Path.Combine(t.Root, "victim.json");
         File.WriteAllText(victim, "must survive");
 
-        BackupStore.DeleteByIds(t.Root, new[] { @"..\victim", HashId("orphan") });
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { @"..\victim", HashId("orphan") });
 
+        // liveness: 探索が session dir まで到達し、正当な id は実際に消えたこと。
+        // これが無いと DeleteByIds が no-op 化する変異でも victim が残るので緑になってしまう。
+        Assert.Equal(1, deleted);
         Assert.True(File.Exists(victim));
+    }
+
+    [Fact]
+    public void DeleteByIds_DoesNotSearchNonSessionSubdirs()
+    {
+        using var t = new TempDir();
+        // LoadAll_IgnoresNonSessionSubdirs と対称の網。"session-" prefix でない subdir は
+        // ユーザが手で置いた/他アプリの残置物の可能性があるため、「すべて破棄」でも触らない。
+        var other = Path.Combine(t.Root, "other-dir");
+        BackupStore.Write(other, Rec("outside", null, "outside-content"));
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("outside") });
+
+        Assert.Equal(0, deleted);
+        Assert.True(File.Exists(Path.Combine(other, HashId("outside") + ".json")));
+    }
+
+    [Fact]
+    public void DeleteByIds_NullIds_Throws()
+    {
+        using var t = new TempDir();
+        BackupStore.Write(t.Root, Rec("flat", null, "flat-content"));
+
+        Assert.Throws<ArgumentNullException>(() => BackupStore.DeleteByIds(t.Root, null!));
+        // 引数検証は baseDir 不在ガード(= 0 を返す)より前に立つ。プログラムバグを
+        // 「たまたま dir が無かった」で隠さない。
+        Assert.Throws<ArgumentNullException>(() =>
+            BackupStore.DeleteByIds(Path.Combine(t.Root, "does-not-exist"), null!)
+        );
     }
 
     [Fact]
@@ -965,6 +997,8 @@ public class BackupStoreTests
 
         BackupStore.DeleteByIds(t.Root, new[] { HashId("flat") });
 
+        // 「消えたうえで dir は残る」条件付き不変条件にする(削除が起きない変異では前提が崩れる)。
+        Assert.Empty(Directory.GetFiles(t.Root, "*.json"));
         Assert.True(Directory.Exists(t.Root)); // flat が空になっても base dir は残す
     }
 }

@@ -44,12 +44,14 @@ public static class BackupStore
     /// <summary>ディレクトリ内の全バックアップを読み込む（破損・読めないファイルはスキップ）。
     /// BK-M-2: <paramref name="dir"/> 直下の flat 配置 (v0.3.0-sec 由来の後方互換) と、
     /// <paramref name="dir"/> 配下の <c>session-*</c> サブディレクトリ (BK-M-2 以降の正規配置) の
-    /// 両方を列挙する。他インスタンス/前回クラッシュ由来の session-* も全部復元候補に上げるため、
-    /// 「別インスタンスが『すべて破棄』を選ぶと自インスタンスのライブ backup が消える」問題を回避する
-    /// (BK-M-2 では削除を <see cref="DeleteSessionDir(string)"/> で自セッション限定に切り替えたが、
-    /// それでは提示した孤児が一件も消えなかった=E-2。現在「すべて破棄」は
-    /// <see cref="DeleteByIds(string, IReadOnlyCollection{string})"/> 経由で
-    /// 「提示した Id」限定=一覧と削除の範囲が一致する)。
+    /// 両方を列挙する。他インスタンス/前回クラッシュ由来の session-* まで広く拾うのは
+    /// **復元候補を取りこぼさないため**(異常終了した別インスタンスの未保存本文を捨てない)。
+    /// その代償として、一覧に載った他インスタンスのライブ backup は「すべて破棄」で消え得る
+    /// (設計 2026-08-24 §5 で受容したトレードオフ)。
+    /// 経緯: BK-M-2 はこの巻き添えを避けようと削除側だけを <see cref="DeleteSessionDir(string)"/> で
+    /// 自セッション限定にしたが、それでは提示した孤児が一件も消えなかった(=E-2)。現在
+    /// 「すべて破棄」は <see cref="DeleteByIds(string, IReadOnlyCollection{string})"/> 経由で
+    /// 「ユーザーに提示した Id」限定=一覧と削除の範囲が一致する。
     /// BK-L-6: optional <paramref name="traceSink"/> で破棄理由を可視化する。破棄自体は従来通り
     /// (LoadAll は落ちない・skip 挙動は変えない)が、silent catch では JSON パース失敗/攻撃者
     /// 植え込みの JSON が診断不能だったため kind 別に通知する:
@@ -279,9 +281,26 @@ public static class BackupStore
     /// (後者は起動時の <see cref="SweepTempFiles(string)"/> が担当)。
     /// 列挙・削除の失敗は dir 単位で握り潰し、他の dir の破棄は続行する(競合削除・ACL・
     /// 宙ぶらりん junction の 1 個が「すべて破棄」全体を中断させて部分破棄になるのを防ぐ。
-    /// <see cref="SweepOldSessions"/> と同型)。戻り値 = 実際に削除した件数。</summary>
+    /// <see cref="SweepOldSessions"/> と同型)。
+    /// 消し残った残骸の行方: <c>session-*</c> 配下なら次回起動の 30 日 sweep
+    /// (<see cref="SweepOldSessions"/>)が dir ごと回収する。**flat 配置の残骸は sweep 対象外**
+    /// (<see cref="SweepOldSessions"/> は <c>session-*</c> しか見ない)で自動回収されないが、
+    /// 次回起動でまた一覧に載るので、ユーザーの再試行機会は残る。
+    ///
+    /// 呼び出し側契約: <paramref name="ids"/> には <see cref="LoadAll"/> 由来の
+    /// (= <see cref="BackupIdValidator"/> 検証済みの)Id だけを渡すこと。本メソッドは Id を
+    /// 再検証しないため、非検証 Id を渡せば探索対象 dir 内の任意の <c>*.json</c> を消せる
+    /// (store の外へは出られないので脆弱性ではないが、将来 import 等の流入経路を足すときの契約)。
+    ///
+    /// 不変条件の但し書き: 「一覧と削除の範囲が一致する」は **ファイル名 == JSON 内の <c>Id</c>**
+    /// が成り立つ範囲でのみ真。外部から植えられた/手でコピーされた「ファイル名と Id が食い違う
+    /// ファイル」は <see cref="LoadAll"/> が一覧に出すのに本メソッドでは消せず、毎回再提案され
+    /// 続ける(根治は申し送り S-E2-3)。
+    ///
+    /// 戻り値 = 実際に削除した <c>*.json</c> の件数。</summary>
     public static int DeleteByIds(string baseDir, IReadOnlyCollection<string> ids)
     {
+        ArgumentNullException.ThrowIfNull(ids);
         if (!Directory.Exists(baseDir))
             return 0;
 
