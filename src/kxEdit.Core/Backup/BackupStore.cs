@@ -270,12 +270,16 @@ public static class BackupStore
     /// 検証は Id を Path.Combine へ流す設計ゆえに必要な防御であり、ここでは同じ防御を
     /// より強い形で満たしている)。
     ///
-    /// 掃除の範囲: **実際に削除が発生した <c>session-*</c> dir** に <c>*.json</c> が残らなければ、
-    /// その dir の <c>*.tmp</c>(書込中残骸=平文の部分本文)も消して dir 自体を削除する。
-    /// 削除対象を含まなかった dir には一切触れない(他インスタンスが書込中の <c>*.tmp</c> を
-    /// 壊さないため)。<paramref name="baseDir"/> 自体とその直下の <c>*.tmp</c> は対象外
+    /// 掃除の範囲: **実際に削除が発生した <c>session-*</c> dir** についてのみ、破棄した record の
+    /// 書込中残骸(<c>&lt;id&gt;.json.&lt;乱数&gt;.tmp</c>=平文の部分本文)も消し、その結果 dir が
+    /// 完全に空になれば dir 自体も削除する。削除対象を含まなかった dir には一切触れない。
+    /// dir 内の <c>*.tmp</c> を無差別には消さない(<see cref="DeleteTargetTempsIn"/>)=
+    /// 一覧に一度も出ていない他インスタンスの**初回**書込を壊さないため。
+    /// <paramref name="baseDir"/> 自体とその直下の <c>*.tmp</c> は対象外
     /// (後者は起動時の <see cref="SweepTempFiles(string)"/> が担当)。
-    /// 失敗は握り潰す(残骸は次回起動の 30 日 sweep で回収)。戻り値 = 実際に削除した件数。</summary>
+    /// 列挙・削除の失敗は dir 単位で握り潰し、他の dir の破棄は続行する(競合削除・ACL・
+    /// 宙ぶらりん junction の 1 個が「すべて破棄」全体を中断させて部分破棄になるのを防ぐ。
+    /// <see cref="SweepOldSessions"/> と同型)。戻り値 = 実際に削除した件数。</summary>
     public static int DeleteByIds(string baseDir, IReadOnlyCollection<string> ids)
     {
         if (!Directory.Exists(baseDir))
@@ -285,19 +289,44 @@ public static class BackupStore
         foreach (string id in ids)
             targets.Add(id + ".json");
 
+        int deleted = 0;
         // flat 配置(v0.3.0-sec 由来)。baseDir 自体は消さない。
-        int deleted = DeleteTargetsIn(baseDir, targets);
-
-        foreach (string sub in Directory.EnumerateDirectories(baseDir, "session-*"))
+        try
         {
-            int n = DeleteTargetsIn(sub, targets);
-            if (n == 0)
-                continue; // 破棄対象を含まなかった dir には触れない(他インスタンスの書込中 *.tmp 保護)
-            deleted += n;
-            if (!Directory.EnumerateFiles(sub, "*.json").Any())
+            deleted += DeleteTargetsIn(baseDir, targets);
+        }
+        catch
+        { /* 列挙失敗(競合削除・ACL)= 無害。session-* 側の破棄は続行する */
+        }
+
+        string[] subs;
+        try
+        {
+            // 遅延列挙(EnumerateDirectories)だと、他インスタンスのクリーン終了で dir が
+            // 消えた瞬間に foreach 自体が例外を投げる。先に確定させて race の面を減らす。
+            subs = Directory.GetDirectories(baseDir, "session-*");
+        }
+        catch
+        { /* baseDir が競合で消えた等 = これ以上できることはない */
+            return deleted;
+        }
+
+        foreach (string sub in subs)
+        {
+            try
             {
-                SweepTempFiles(sub);
+                int n = DeleteTargetsIn(sub, targets);
+                if (n == 0)
+                    continue; // 破棄対象を含まなかった dir には触れない(他インスタンスの書込中 *.tmp 保護)
+                deleted += n;
+                DeleteTargetTempsIn(sub, targets);
+                // 空になったときだけ消える(TryDeleteEmptySessionDir が中身の有無で判定するため、
+                // 呼び出し側で「*.json が残っていないか」を別途見る必要はない)。
                 TryDeleteEmptySessionDir(sub);
+            }
+            catch
+            { /* 1 個の壊れた dir(競合削除・ACL・宙ぶらりん junction)が
+                 他 dir の破棄を巻き添えにしない(SweepOldSessions と同型) */
             }
         }
         return deleted;
@@ -313,6 +342,28 @@ public static class BackupStore
             if (fileNames.Contains(Path.GetFileName(file)) && TryDelete(file))
                 n++;
         return n;
+    }
+
+    /// <summary>破棄対象の書込中残骸だけを消す(<see cref="DeleteByIds"/> の内部)。
+    /// <see cref="IO.AtomicFile"/> の temp 名は「&lt;対象ファイル名&gt;.&lt;乱数&gt;.tmp」なので、
+    /// <c>&lt;id&gt;.json.</c> で始まる *.tmp が「その record の書込中コピー」に相当する。
+    /// dir 内の *.tmp を無差別に消すと、一覧に一度も出ていない他インスタンスの**初回**書込
+    /// (&lt;別 id&gt;.json がまだ存在しない状態)を壊し、その文書に最大 1 tick(既定 300 秒)の
+    /// 無保護窓を作る。</summary>
+    private static void DeleteTargetTempsIn(string dir, HashSet<string> fileNames)
+    {
+        foreach (string file in Directory.EnumerateFiles(dir, "*.tmp"))
+        {
+            string name = Path.GetFileName(file);
+            // Any は最初の一致で短絡する(= 素朴な内側ループ + break と等価)。
+            // 内側を素の foreach で書くと SonarAnalyzer S3267 が -warnaserror で落とす。
+            if (
+                fileNames.Any(target =>
+                    name.StartsWith(target + ".", StringComparison.OrdinalIgnoreCase)
+                )
+            )
+                TryDelete(file);
+        }
     }
 
     /// <summary>BK-M-2: <paramref name="baseDir"/> 配下の <c>session-*</c> subdirectory のうち、

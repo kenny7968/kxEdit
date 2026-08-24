@@ -829,12 +829,34 @@ public class BackupStoreTests
         using var t = new TempDir();
         var orphan = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
         BackupStore.Write(orphan, Rec("orphan", null, "orphan-content"));
-        // 書込中クラッシュで残った平文の部分本文。dir が空になるなら一緒に消す。
-        File.WriteAllText(Path.Combine(orphan, "residual.tmp"), "partial plaintext");
+        // 書込中クラッシュで残った平文の部分本文。破棄対象 record 自身の残骸なので一緒に消す。
+        // 命名は AtomicFile 準拠の「<対象ファイル名>.<乱数>.tmp」= <id>.json.<乱数>.tmp。
+        File.WriteAllText(
+            Path.Combine(orphan, HashId("orphan") + ".json.abc12345.tmp"),
+            "partial plaintext"
+        );
 
         BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
 
         Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
+    public void DeleteByIds_KeepsInFlightTempOfUnofferedRecord()
+    {
+        using var t = new TempDir();
+        var live = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(live, Rec("offered", null, "offered-content"));
+        // 他インスタンスが「一覧に一度も出ていない」文書の初回書込中(<id>.json はまだ無い)。
+        // AtomicFile の命名は <対象ファイル名>.<乱数>.tmp。
+        string inFlight = Path.Combine(live, HashId("never-offered") + ".json.r4nd0m.tmp");
+        File.WriteAllText(inFlight, "in-flight first write of another document");
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("offered") });
+
+        Assert.Equal(1, deleted);
+        Assert.True(File.Exists(inFlight)); // 破棄意図の外にある書込を壊さない
+        Assert.True(Directory.Exists(live));
     }
 
     [Fact]
