@@ -19,7 +19,24 @@ public interface IBackupWriter : IDisposable
 
     void Write(BackupRecord record);
     void Delete(string id);
-    void DeleteAll();
+
+    /// <summary>E-2: 復元ダイアログ「すべて破棄」の実体。<paramref name="ids"/> のバックアップを
+    /// <paramref name="baseDir"/> 配下(flat + 全 <c>session-*</c>)を横断して削除する。
+    ///
+    /// <see cref="Write"/> / <see cref="Delete"/> が ctor で受けた自セッション dir に束縛されるのに対し、
+    /// 本 API は**意図的にそのスコープを外れる**(名前で明示している)。旧 <c>DeleteAll()</c> は
+    /// 自セッション dir だけを消していたため、提示した孤児が一件も消えなかった。
+    ///
+    /// 契約: 呼び出し側は「**ユーザーに提示した record の Id**」だけを渡すこと。一覧に出していない
+    /// Id を渡すと、同時起動している別インスタンスのライブバックアップを消し得る。
+    /// ただし逆は成り立たない=**提示した Id なら安全、ではない**。一覧(<c>BackupStore.LoadAll</c>)は
+    /// 他インスタンスの <c>session-*</c> まで広く拾うため、一覧に載った他インスタンスのライブも
+    /// 「すべて破棄」で消える(設計 2026-08-24 §5 で受容したトレードオフ・申し送り S-E2-1)。
+    /// <paramref name="ids"/> は背景スレッドが後で読み得るため、**実装側が投入時に複写して
+    /// 切り離す**契約(SerialBackupWriter は <c>ToArray</c>、Fake は同期消費+履歴コピー)。
+    /// 呼び出し側は渡した後にコレクションを再利用してよい=複写義務を呼び出し側へ移さない
+    /// (移すと、使い回しの List を渡す 2 人目の呼び出し側が現れた瞬間に別の集合を消す)。</summary>
+    void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids);
 
     /// <summary>セッションレイアウトを path へ書き込むジョブを投入する(SessionLayoutStore.Save)。</summary>
     void WriteLayout(string path, kxEdit.Core.Session.SessionLayout layout);

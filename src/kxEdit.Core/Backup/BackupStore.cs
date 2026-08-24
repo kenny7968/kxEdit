@@ -5,7 +5,15 @@ namespace kxEdit.Core.Backup;
 /// <summary>
 /// バックアップのサイドカー保存（1 文書＝1 JSON ファイル）。原子的に書き込み（同ディレクトリの
 /// temp に書いてから File.Replace／新規は Move）、破損ファイルは読み飛ばす。SR/スレッド非依存の純 I/O。
-/// 孤児ファイルの有無＝前回の異常終了の痕跡（クリーン終了時に DeleteAll される）。
+/// 孤児ファイルの有無＝前回の異常終了の痕跡。クリーン終了では App 層の
+/// BackupCoordinator.Shutdown が「当セッションが管理した文書」を 1 件ずつ
+/// <see cref="Delete(string, string)"/> するため、正常系では残らない
+/// (E-2 の調査時に判明: 旧記述「クリーン終了時に DeleteAll される」は誤りで、
+/// <see cref="DeleteAll(string)"/> はクリーン終了経路を通らない)。
+/// ただし hot exit(設定 RestoreOpenFilesOnStartup)が ON のときは MainForm が
+/// <c>Shutdown(keepForRestore: true)</c> を呼び、この 1 件ずつの削除を丸ごとスキップして
+/// **意図的に残す**(次回起動の統合復元に使う)。ON では「ファイルが残っている」ことが
+/// 異常終了の痕跡を意味しない。
 /// </summary>
 public static class BackupStore
 {
@@ -44,9 +52,14 @@ public static class BackupStore
     /// <summary>ディレクトリ内の全バックアップを読み込む（破損・読めないファイルはスキップ）。
     /// BK-M-2: <paramref name="dir"/> 直下の flat 配置 (v0.3.0-sec 由来の後方互換) と、
     /// <paramref name="dir"/> 配下の <c>session-*</c> サブディレクトリ (BK-M-2 以降の正規配置) の
-    /// 両方を列挙する。他インスタンス/前回クラッシュ由来の session-* も全部復元候補に上げるため、
-    /// 「別インスタンスが『すべて破棄』を選ぶと自インスタンスのライブ backup が消える」問題を回避する
-    /// (削除は <see cref="DeleteSessionDir(string)"/> 経由で自セッション限定に切り替える)。
+    /// 両方を列挙する。他インスタンス/前回クラッシュ由来の session-* まで広く拾うのは
+    /// **復元候補を取りこぼさないため**(異常終了した別インスタンスの未保存本文を捨てない)。
+    /// その代償として、一覧に載った他インスタンスのライブ backup は「すべて破棄」で消え得る
+    /// (設計 2026-08-24 §5 で受容したトレードオフ)。
+    /// 経緯: BK-M-2 はこの巻き添えを避けようと削除側だけを <see cref="DeleteSessionDir(string)"/> で
+    /// 自セッション限定にしたが、それでは提示した孤児が一件も消えなかった(=E-2)。現在
+    /// 「すべて破棄」は <see cref="DeleteByIds(string, IReadOnlyCollection{string})"/> 経由で
+    /// 「ユーザーに提示した Id」限定=一覧と削除の範囲が一致する。
     /// BK-L-6: optional <paramref name="traceSink"/> で破棄理由を可視化する。破棄自体は従来通り
     /// (LoadAll は落ちない・skip 挙動は変えない)が、silent catch では JSON パース失敗/攻撃者
     /// 植え込みの JSON が診断不能だったため kind 別に通知する:
@@ -126,8 +139,9 @@ public static class BackupStore
     }
 
     /// <summary>全バックアップ（*.json）と書込中残骸（*.tmp）を削除する（復元の「すべて破棄」用）。
-    /// BK-M-2 以降、SerialBackupWriter.DeleteAll は代わりに <see cref="DeleteSessionDir(string)"/> を
-    /// 呼ぶが、本メソッドは flat 後方互換の呼び出し元(将来の import 経路等)のために残す。</summary>
+    /// E-2 以降「すべて破棄」は <see cref="DeleteByIds(string, IReadOnlyCollection{string})"/> が担う。
+    /// 本メソッドは flat 後方互換の呼び出し元(将来の import 経路等)のために残す
+    /// (現在 src 側からの呼び出し元は無い)。</summary>
     public static void DeleteAll(string dir)
     {
         if (!Directory.Exists(dir))
@@ -231,7 +245,9 @@ public static class BackupStore
 
     /// <summary>BK-M-2: 指定した自セッション用 subdirectory の中身(*.json + *.tmp)を消し、
     /// 空になった dir 自体も削除する(冗長掃除)。他インスタンス由来の session-* には触れない
-    /// (SerialBackupWriter.DeleteAll の実体)。失敗は握り潰す(残骸は次回起動の 30 日 sweep で回収)。</summary>
+    /// (BK-M-2 では SerialBackupWriter.DeleteAll の実体だった。E-2 で「すべて破棄」は
+    /// <see cref="DeleteByIds(string, IReadOnlyCollection{string})"/> へ移り、現在 src 側からの
+    /// 呼び出し元は無い)。失敗は握り潰す(残骸は次回起動の 30 日 sweep で回収)。</summary>
     public static void DeleteSessionDir(string sessionDir)
     {
         if (!Directory.Exists(sessionDir))
@@ -247,6 +263,139 @@ public static class BackupStore
         }
         catch
         { /* 空でない/ロック中/既に消失 = 無害。30 日 sweep で最終回収される */
+        }
+    }
+
+    /// <summary>E-2: 指定した Id 群のバックアップを <paramref name="baseDir"/> **全体を横断して**
+    /// 削除する(復元ダイアログ「すべて破棄」の実体)。探索範囲は <see cref="LoadAll"/> と同じ
+    /// = <paramref name="baseDir"/> 直下(flat 後方互換)+ 配下の <c>session-*</c> 全部。
+    /// BK-M-2 の <see cref="DeleteSessionDir(string)"/> は自セッション dir しか消さないため、
+    /// LoadAll が提示した孤児が一件も消えず毎回再提案されていた(監査 E-2)。
+    ///
+    /// <paramref name="ids"/> は **パスへ連結しない**。各 dir を列挙して得たファイル名と
+    /// <c>&lt;id&gt;.json</c> の完全一致(<see cref="StringComparer.OrdinalIgnoreCase"/>)で
+    /// 照合してから削除するため、悪意ある Id(<c>..\..\evil</c>・ワイルドカード)は
+    /// 「どれにも一致しない」に落ちるだけで、Path.Combine 経由のトラバーサル入口が構造的に
+    /// 存在しない(<see cref="Write"/> / <see cref="Delete"/> の <see cref="BackupIdValidator"/>
+    /// 検証は Id を Path.Combine へ流す設計ゆえに必要な防御であり、ここでは同じ防御を
+    /// より強い形で満たしている)。
+    ///
+    /// 掃除の範囲: **実際に削除が発生した <c>session-*</c> dir** についてのみ、破棄した record の
+    /// 書込中残骸(<c>&lt;id&gt;.json.&lt;乱数&gt;.tmp</c>=平文の部分本文)も消し、その結果 dir が
+    /// 完全に空になれば dir 自体も削除する。削除対象を含まなかった dir には一切触れない。
+    /// dir 内の <c>*.tmp</c> を無差別には消さない(<see cref="DeleteTargetTempsIn"/>)=
+    /// 一覧に一度も出ていない他インスタンスの**初回**書込を壊さないため。
+    /// <paramref name="baseDir"/> 自体とその直下の <c>*.tmp</c> は対象外
+    /// (後者は起動時の <see cref="SweepTempFiles(string)"/> が担当)。
+    /// 列挙・削除の失敗は dir 単位で握り潰し、他の dir の破棄は続行する(競合削除・ACL・
+    /// 宙ぶらりん junction の 1 個が「すべて破棄」全体を中断させて部分破棄になるのを防ぐ。
+    /// <see cref="SweepOldSessions"/> と同型)。
+    /// 消し残った残骸の行方: <c>session-*</c> 配下なら次回起動の 30 日 sweep
+    /// (<see cref="SweepOldSessions"/>)が dir ごと回収する。**flat 配置の残骸は sweep 対象外**
+    /// (<see cref="SweepOldSessions"/> は <c>session-*</c> しか見ない)で自動回収されないが、
+    /// 次回起動でまた一覧に載るので、ユーザーの再試行機会は残る。
+    ///
+    /// 呼び出し側契約: <paramref name="ids"/> には <see cref="LoadAll"/> 由来の
+    /// (= <see cref="BackupIdValidator"/> 検証済みの)Id だけを渡すこと。本メソッドは Id を
+    /// 再検証しないため、非検証 Id を渡せば探索対象 dir 内の任意の <c>*.json</c> を消せる
+    /// (store の外へは出られないので脆弱性ではないが、将来 import 等の流入経路を足すときの契約)。
+    ///
+    /// 不変条件の但し書き: 「一覧と削除の範囲が一致する」は **ファイル名 == JSON 内の <c>Id</c>**
+    /// が成り立つ範囲でのみ真。外部から植えられた/手でコピーされた「ファイル名と Id が食い違う
+    /// ファイル」は <see cref="LoadAll"/> が一覧に出すのに本メソッドでは消せず、毎回再提案され
+    /// 続ける(根治は申し送り S-E2-3)。
+    ///
+    /// 戻り値 = 実際に削除した <c>*.json</c> の件数。</summary>
+    public static int DeleteByIds(string baseDir, IReadOnlyCollection<string> ids)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        if (!Directory.Exists(baseDir))
+            return 0;
+
+        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string id in ids)
+            targets.Add(id + ".json");
+
+        int deleted = 0;
+        // flat 配置(v0.3.0-sec 由来)。baseDir 自体は消さない。
+        try
+        {
+            deleted += DeleteTargetsIn(baseDir, targets);
+        }
+        catch
+        { /* 列挙失敗(競合削除・ACL)= 無害。session-* 側の破棄は続行する */
+        }
+
+        string[] subs;
+        try
+        {
+            // 遅延列挙(EnumerateDirectories)だと、他インスタンスのクリーン終了で dir が
+            // 消えた瞬間に foreach 自体が例外を投げる。先に確定させて race の面を減らす。
+            subs = Directory.GetDirectories(baseDir, "session-*");
+        }
+        catch
+        { /* baseDir が競合で消えた等 = これ以上できることはない */
+            return deleted;
+        }
+
+        foreach (string sub in subs)
+        {
+            try
+            {
+                int n = DeleteTargetsIn(sub, targets);
+                // 対象を 1 件も含まなかった dir には触れない(他インスタンスの**空** session dir を
+                // 消さない)。書込中 *.tmp の保護は DeleteTargetTempsIn の名前一致が担う
+                // (F-2 以降。ここのガードではない=当初のコメントは根拠が古かった)。
+                if (n == 0)
+                    continue;
+                deleted += n;
+                DeleteTargetTempsIn(sub, targets);
+                // 空になったときだけ消える(TryDeleteEmptySessionDir が中身の有無で判定するため、
+                // 呼び出し側で「*.json が残っていないか」を別途見る必要はない)。
+                TryDeleteEmptySessionDir(sub);
+            }
+            catch
+            { /* 1 個の壊れた dir(競合削除・ACL・宙ぶらりん junction)が
+                 他 dir の破棄を巻き添えにしない(SweepOldSessions と同型) */
+            }
+        }
+        return deleted;
+    }
+
+    /// <summary><paramref name="dir"/> 直下の <c>*.json</c> のうち、ファイル名が
+    /// <paramref name="fileNames"/> と完全一致するものを削除し、実際に消えた件数を返す
+    /// (<see cref="DeleteByIds"/> の内部)。</summary>
+    private static int DeleteTargetsIn(string dir, HashSet<string> fileNames)
+    {
+        int n = 0;
+        foreach (string file in Directory.EnumerateFiles(dir, "*.json"))
+            if (fileNames.Contains(Path.GetFileName(file)) && TryDelete(file))
+                n++;
+        return n;
+    }
+
+    /// <summary>破棄対象の書込中残骸だけを消す(<see cref="DeleteByIds"/> の内部)。
+    /// <see cref="IO.AtomicFile"/> の temp 名は「&lt;対象ファイル名&gt;.&lt;乱数&gt;.tmp」なので、
+    /// <c>&lt;id&gt;.json.</c> で始まる *.tmp が「その record の書込中コピー」に相当する。
+    /// dir 内の *.tmp を無差別に消すと、一覧に一度も出ていない他インスタンスの**初回**書込
+    /// (&lt;別 id&gt;.json がまだ存在しない状態)を壊し、その文書に最大 1 tick(既定 300 秒)の
+    /// 無保護窓を作る。
+    /// <paramref name="targetJsonNames"/> は <c>&lt;id&gt;.json</c> の集合。
+    /// <see cref="DeleteTargetsIn"/> がこれを**完全一致**で使うのに対し、ここでは**前置**として
+    /// 使う(同じ集合だが照合の意味が違うため引数名を分けている)。</summary>
+    private static void DeleteTargetTempsIn(string dir, HashSet<string> targetJsonNames)
+    {
+        foreach (string file in Directory.EnumerateFiles(dir, "*.tmp"))
+        {
+            string name = Path.GetFileName(file);
+            // Any は最初の一致で短絡する(= 素朴な内側ループ + break と等価)。
+            // 内側を素の foreach で書くと SonarAnalyzer S3267 が -warnaserror で落とす。
+            if (
+                targetJsonNames.Any(target =>
+                    name.StartsWith(target + ".", StringComparison.OrdinalIgnoreCase)
+                )
+            )
+                TryDelete(file);
         }
     }
 
@@ -282,15 +431,20 @@ public static class BackupStore
             TryDelete(file);
     }
 
-    private static void TryDelete(string p)
+    /// <summary>ファイルを削除し、実際に削除できたら true(<see cref="DeleteByIds"/> の件数集計用)。
+    /// 失敗・不在は false。例外は握り潰す(残骸は実害小)。</summary>
+    private static bool TryDelete(string p)
     {
         try
         {
-            if (File.Exists(p))
-                File.Delete(p);
+            if (!File.Exists(p))
+                return false;
+            File.Delete(p);
+            return true;
         }
         catch
         { /* 残骸は実害小 */
+            return false;
         }
     }
 }

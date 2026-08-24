@@ -18,8 +18,16 @@ public sealed class FakeBackupWriter : IBackupWriter
     /// <summary>Delete された Id の履歴。</summary>
     public List<string> Deletes { get; } = new();
 
-    /// <summary>DeleteAll 呼び出し回数。</summary>
-    public int DeleteAllCount;
+    /// <summary>E-2: DeleteAcrossSessions の呼び出し回数(旧 DeleteAllCount)。</summary>
+    public int DiscardCalls;
+
+    /// <summary>E-2: DeleteAcrossSessions に渡された base dir(最後の 1 回)。
+    /// 自セッション dir を渡す退行(=E-2 そのもの)を検出する証人。</summary>
+    public string? LastDiscardBaseDir;
+
+    /// <summary>E-2: DeleteAcrossSessions に渡された Id 群(最後の 1 回)。件数だけの assert では
+    /// 「どの Id を渡したか」の変異が生き残るため中身を保持する。</summary>
+    public List<string> LastDiscardIds { get; } = new();
 
     /// <summary>Dispose 呼び出し回数(冪等性検証に使う)。</summary>
     public int DisposeCount;
@@ -65,10 +73,15 @@ public sealed class FakeBackupWriter : IBackupWriter
         Store.Remove(id);
     }
 
-    public void DeleteAll()
+    public void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids)
     {
-        DeleteAllCount++;
-        Store.Clear();
+        DiscardCalls++;
+        LastDiscardBaseDir = baseDir;
+        LastDiscardIds.Clear();
+        LastDiscardIds.AddRange(ids);
+        // 旧 DeleteAll は Store.Clear() だったが、実装は「渡された Id だけ」を消す。
+        foreach (string id in ids)
+            Store.Remove(id);
     }
 
     public void WriteLayout(string path, kxEdit.Core.Session.SessionLayout layout)

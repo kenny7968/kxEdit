@@ -37,11 +37,14 @@ public class BackupCoordinatorTests
         /// 既定 DefaultPath(%APPDATA%)へ実 I/O が漏れないよう Host は常に明示注入する。</summary>
         public string LayoutPath { get; }
 
+        /// <param name="writerFactory">null(既定)なら共有の <see cref="Writer"/>(Fake)を返す。
+        /// E-2 の統合テストだけが実 SerialBackupWriter を注入する。</param>
         public Host(
             bool enabled = true,
             int intervalSeconds = 30,
             int? maxBackupCharsOverride = null,
-            bool restoreSessionEnabled = false
+            bool restoreSessionEnabled = false,
+            Func<string, IBackupWriter>? writerFactory = null
         )
         {
             var (form, docs) = HostForm.CreateWithDocs();
@@ -68,7 +71,7 @@ public class BackupCoordinatorTests
                 {
                     WriterFactoryCalls++;
                     CapturedSessionDir = sessionDir;
-                    return Writer;
+                    return writerFactory is null ? Writer : writerFactory(sessionDir);
                 },
                 Prompt,
                 TempDir,
@@ -937,11 +940,13 @@ public class BackupCoordinatorTests
         });
 
     [Fact]
-    public void OfferRestore_ConfirmTrue_DiscardAll_InvokesWriterDeleteAll() =>
+    public void OfferRestore_ConfirmTrue_DiscardAll_PassesOfferedIdsAndBaseDir() =>
         Sta.Run(() =>
         {
             using var host = new Host();
-            PlantBackup(host.TempDir, Rec("r1", "one"));
+            PlantBackup(host.TempDir, Rec("r1", "one")); // flat 後方互換
+            var orphanDir = Path.Combine(host.TempDir, "session-" + Guid.NewGuid().ToString("N"));
+            PlantBackup(orphanDir, Rec("r2", "two")); // 前回クラッシュ由来の孤児
             host.Prompt.NextOutcome = new RestoreOutcome(
                 RestoreAction.DiscardAll,
                 Array.Empty<BackupRecord>()
@@ -953,7 +958,82 @@ public class BackupCoordinatorTests
                 confirm: true
             );
 
-            Assert.Equal(1, host.Writer.DeleteAllCount);
+            Assert.Equal(1, host.Writer.DiscardCalls);
+            // E-2 の核心: 自セッション dir ではなく base dir を渡す。
+            Assert.Equal(host.TempDir, host.Writer.LastDiscardBaseDir);
+            Assert.NotEqual(host.CapturedSessionDir, host.Writer.LastDiscardBaseDir);
+            // 一覧に出した全件(flat + 孤児 session-*)を渡す。
+            Assert.Equal(2, host.Writer.LastDiscardIds.Count);
+            Assert.Contains(HashId("r1"), host.Writer.LastDiscardIds);
+            Assert.Contains(HashId("r2"), host.Writer.LastDiscardIds);
+        });
+
+    [Fact]
+    public void OfferRestore_DiscardAll_WithRealWriter_DeletesOrphanFilesOnDisk() =>
+        Sta.Run(() =>
+        {
+            // E-2 の本命。Fake writer は in-memory で「どの dir を消したか」を持たないため、
+            // 自セッション dir だけを消していた欠陥を旧テストは検出できなかった
+            // (旧 OfferRestore_ConfirmTrue_DiscardAll_InvokesWriterDeleteAll は E-2 の存在下で緑だった)。
+            // 実 SerialBackupWriter + 実ディスクで「消えること」自体を固定する。
+            SerialBackupWriter? real = null;
+            using var host = new Host(writerFactory: dir => real = new SerialBackupWriter(dir));
+            var orphanDir = Path.Combine(host.TempDir, "session-" + Guid.NewGuid().ToString("N"));
+            PlantBackup(orphanDir, Rec("orphan", "前回セッションの未保存本文"));
+            host.Prompt.NextOutcome = new RestoreOutcome(
+                RestoreAction.DiscardAll,
+                Array.Empty<BackupRecord>()
+            );
+
+            host.Backup.OfferRestoreOnStartup(
+                host.Form,
+                r => throw new Xunit.Sdk.XunitException("restore must not be called"),
+                confirm: true
+            );
+
+            Assert.NotNull(real);
+            // 背景直列ワーカーの末尾バリアで完了を確定させる(Sleep もリトライも使わない)。
+            Assert.True(real.WaitForPendingJobs(TimeSpan.FromSeconds(10)));
+            Assert.Empty(BackupStore.LoadAll(host.TempDir)); // 次回起動で再提案されない
+            Assert.False(Directory.Exists(orphanDir)); // 平文本文が dir ごと消える
+        });
+
+    [Fact]
+    public void OfferRestore_DiscardAll_ExcludesIdsProtectedByThisSession() =>
+        Sta.Run(() =>
+        {
+            // ダイアログ表示直前の Reconcile で自セッションが書いた backup は、一覧に載っていても
+            // 消さない(消すと _map は HasBackup=true のまま実体だけ消え、次に内容が変わるまで
+            // 無保護窓ができる=A-1 / M-31 と同型)。
+            using var host = new Host();
+            host.NewDoc("自セッションの未保存本文");
+            host.Backup.Reconcile();
+            string mine = Assert.Single(host.Writer.Writes).Id;
+            // Fake は書かないので、LoadAll が同じ Id を提示する状況を実ファイルで作る
+            // (これが無いと「除外できている」assertion が空虚になる)。
+            PlantBackup(
+                host.CapturedSessionDir!,
+                Rec("mine", "自セッションの未保存本文") with
+                {
+                    Id = mine,
+                }
+            );
+            var orphanDir = Path.Combine(host.TempDir, "session-" + Guid.NewGuid().ToString("N"));
+            PlantBackup(orphanDir, Rec("orphan", "前回の本文"));
+            host.Prompt.NextOutcome = new RestoreOutcome(
+                RestoreAction.DiscardAll,
+                Array.Empty<BackupRecord>()
+            );
+
+            host.Backup.OfferRestoreOnStartup(
+                host.Form,
+                r => throw new Xunit.Sdk.XunitException("restore must not be called"),
+                confirm: true
+            );
+
+            Assert.Equal(1, host.Writer.DiscardCalls);
+            Assert.Contains(HashId("orphan"), host.Writer.LastDiscardIds);
+            Assert.DoesNotContain(mine, host.Writer.LastDiscardIds);
         });
 
     [Fact]
@@ -970,7 +1050,7 @@ public class BackupCoordinatorTests
                 confirm: true
             );
 
-            Assert.Equal(0, host.Writer.DeleteAllCount);
+            Assert.Equal(0, host.Writer.DiscardCalls);
             Assert.Empty(host.Writer.Deletes);
             Assert.Empty(host.Writer.Writes);
         });
