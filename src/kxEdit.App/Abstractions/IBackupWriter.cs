@@ -29,6 +29,9 @@ public interface IBackupWriter : IDisposable
     ///
     /// 契約: 呼び出し側は「**ユーザーに提示した record の Id**」だけを渡すこと。一覧に出していない
     /// Id を渡すと、同時起動している別インスタンスのライブバックアップを消し得る。
+    /// ただし逆は成り立たない=**提示した Id なら安全、ではない**。一覧(<c>BackupStore.LoadAll</c>)は
+    /// 他インスタンスの <c>session-*</c> まで広く拾うため、一覧に載った他インスタンスのライブも
+    /// 「すべて破棄」で消える(設計 2026-08-24 §5 で受容したトレードオフ・申し送り S-E2-1)。
     /// <paramref name="ids"/> は背景スレッドが後で読むため、呼び出し側で不変のスナップショットを渡す。</summary>
     void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids);
 

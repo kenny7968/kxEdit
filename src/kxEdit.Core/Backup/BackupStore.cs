@@ -5,7 +5,11 @@ namespace kxEdit.Core.Backup;
 /// <summary>
 /// バックアップのサイドカー保存（1 文書＝1 JSON ファイル）。原子的に書き込み（同ディレクトリの
 /// temp に書いてから File.Replace／新規は Move）、破損ファイルは読み飛ばす。SR/スレッド非依存の純 I/O。
-/// 孤児ファイルの有無＝前回の異常終了の痕跡（クリーン終了時に DeleteAll される）。
+/// 孤児ファイルの有無＝前回の異常終了の痕跡。クリーン終了では App 層の
+/// BackupCoordinator.Shutdown が「当セッションが管理した文書」を 1 件ずつ
+/// <see cref="Delete(string, string)"/> するため、正常系では残らない
+/// (E-2 の調査時に判明: 旧記述「クリーン終了時に DeleteAll される」は誤りで、
+/// <see cref="DeleteAll(string)"/> はクリーン終了経路を通らない)。
 /// </summary>
 public static class BackupStore
 {

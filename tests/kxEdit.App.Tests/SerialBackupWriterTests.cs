@@ -107,7 +107,7 @@ public class SerialBackupWriterTests
     }
 
     /// <summary>
-    /// DeleteAcrossSessions ジョブが投入順に BackupStore.DeleteByIds に到達し、
+    /// DeleteAcrossSessions ジョブが BackupStore.DeleteByIds に到達し、
     /// **ctor で受けた自セッション dir の外**(flat + 他 session-*)の指定 Id まで実削除する。
     /// 責務=「復元ダイアログの『すべて破棄』分岐」に対する統合パイプ担保(E-2)。
     /// </summary>
@@ -124,7 +124,7 @@ public class SerialBackupWriterTests
         using (var w = new SerialBackupWriter(own))
         {
             w.DeleteAcrossSessions(tmp.Root, new[] { HashId("flat"), HashId("orphan") });
-        } // Dispose で投入順に消化
+        } // Dispose で保留ジョブを消化(FIFO 自体は WriteThenDelete_SameId_EndsAbsent が担保)
 
         var left = BackupStore.LoadAll(tmp.Root);
         Assert.Equal("3", Assert.Single(left).Content);
