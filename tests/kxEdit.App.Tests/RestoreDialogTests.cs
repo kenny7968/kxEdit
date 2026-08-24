@@ -254,4 +254,101 @@ public class RestoreDialogTests
         // ElideMiddle は maxLen=60 以下ならそのまま返すので dir="~" が保持される。
         Assert.Contains("— ~", d, StringComparison.Ordinal);
     }
+
+    // ---------- ボタン → RestoreAction のマッピング(E-2 で判明した未被覆リンク) ----------
+    //
+    // 「すべて破棄」を押したときに Action が DiscardAll になることは、これまでどのテストでも
+    // 検証されていなかった(このクラスは Describe だけを見ていた)。E-2 の欠陥は下流
+    // (BackupCoordinator → writer → BackupStore)にあったが、この入口が壊れても症状は同じ
+    // 「押しても何も消えない」になる。E-2 の下流を実 I/O で固めた以上、入口も固定しておく。
+    //
+    // 実 UI に触れるが ShowDialog はしない(モーダルループを起こすとテストが返らない)。
+    // ただし Button.PerformClick は CanSelect(=可視な親チェーン)を要求するため、
+    // Show していないフォームでは何も起きずに緑になる。DocumentInfoDialogTests と同じ
+    // 「画面外で Show する」流儀に合わせる(この一手が無いと 3 本とも空虚なテストになる)。
+
+    /// <summary>ダイアログを画面外に可視化する(PerformClick を機能させるために必要)。</summary>
+    private static RestoreDialog ShowOffScreen(params BackupRecord[] records)
+    {
+        var dlg = new RestoreDialog(records)
+        {
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new System.Drawing.Point(-32000, -32000),
+        };
+        dlg.Show();
+        return dlg;
+    }
+
+    private static T? FindControlOrNull<T>(Control root, Func<T, bool>? match = null)
+        where T : Control
+    {
+        foreach (Control c in root.Controls)
+        {
+            if (c is T t && (match is null || match(t)))
+                return t;
+            var found = FindControlOrNull(c, match);
+            if (found is not null)
+                return found;
+        }
+        return null;
+    }
+
+    private static Button FindButton(Control root, string text)
+    {
+        var b = FindControlOrNull<Button>(root, x => x.Text == text);
+        Assert.NotNull(b); // 文言を変えたらこのテスト群が探せなくなる=ここで気づく
+        return b!;
+    }
+
+    [Fact]
+    public void DiscardButton_SetsDiscardAllAction_IgnoringChecks() =>
+        Sta.Run(() =>
+        {
+            using var dlg = ShowOffScreen(Rec(path: null, untitled: 1));
+            // チェックを付けた状態から押す。既定(未チェック)から始めると
+            // 「Checked が空のまま」が既定値と区別できず空虚な assertion になる。
+            var list = FindControlOrNull<CheckedListBox>(dlg);
+            Assert.NotNull(list);
+            list!.SetItemChecked(0, true);
+
+            FindButton(dlg, "すべて破棄(&D)").PerformClick();
+
+            Assert.Equal(RestoreDialog.RestoreAction.DiscardAll, dlg.Action);
+            Assert.Empty(dlg.Checked); // 破棄は選択に依らない(Checked を拾わない)
+        });
+
+    [Fact]
+    public void RestoreButton_SetsRestoreAction_AndCapturesOnlyCheckedRecords() =>
+        Sta.Run(() =>
+        {
+            var kept = Rec(path: null, untitled: 1);
+            var skipped = Rec(path: null, untitled: 2);
+            using var dlg = ShowOffScreen(kept, skipped);
+            var list = FindControlOrNull<CheckedListBox>(dlg);
+            Assert.NotNull(list);
+            // ダイアログは既定で全件チェック済み。1 件を**外して**部分選択にする
+            // (チェックを付ける方向だと no-op になり、全選択と区別できない fixture になる)。
+            list!.SetItemChecked(1, false);
+
+            FindButton(dlg, "選択を復元(&R)").PerformClick();
+
+            Assert.Equal(RestoreDialog.RestoreAction.Restore, dlg.Action);
+            Assert.Same(kept, Assert.Single(dlg.Checked));
+        });
+
+    [Fact]
+    public void LaterButton_SetsLaterAction_FromNonDefaultState() =>
+        Sta.Run(() =>
+        {
+            using var dlg = ShowOffScreen(Rec(path: null, untitled: 1));
+            // Action の既定値が Later なので、まず DiscardAll へ倒してから押す
+            // (既定のままでも緑になる空虚な assertion を避ける)。
+            FindButton(dlg, "すべて破棄(&D)").PerformClick();
+            Assert.Equal(RestoreDialog.RestoreAction.DiscardAll, dlg.Action);
+
+            FindButton(dlg, "あとで(&L)").PerformClick();
+
+            Assert.Equal(RestoreDialog.RestoreAction.Later, dlg.Action);
+        });
 }
