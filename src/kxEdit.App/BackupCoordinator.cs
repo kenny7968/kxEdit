@@ -309,8 +309,11 @@ public sealed class BackupCoordinator : IDisposable
     /// ここで守るのは「LoadAll の直前に Reconcile が走って書かれた分」。
     ///
     /// 戻り値は背景スレッドへ渡すため、呼び出し時点で確定した独立リストにする。
-    /// (素朴な foreach + if は S3267、引数の <c>IReadOnlyList</c> は CA1859 でビルドが止まる。
-    /// LINQ と具象 List はアナライザ要求であって、意味は上記のとおり集合差そのもの。)</summary>
+    /// (素朴な foreach + if は S3267、**戻り値**を <c>IReadOnlyList&lt;string&gt;</c> にすると
+    /// CA1859「戻り値の型を 'IReadOnlyList&lt;string&gt;' から 'List&lt;string&gt;' に変更します」で
+    /// ビルドが止まる。LINQ と具象 List はアナライザ要求であって、意味は上記のとおり集合差そのもの。
+    /// なお CA1859 は戻り値に対する指摘で、**引数**を <c>IReadOnlyList&lt;BackupRecord&gt;</c> へ
+    /// 広げてもアナライザは黙る=引数が具象 List なのは呼び出し側の実型に合わせただけ。)</summary>
     private List<string> DiscardTargets(List<BackupRecord> offered)
     {
         var live = new HashSet<string>(

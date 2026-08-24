@@ -869,8 +869,11 @@ public class BackupStoreTests
         string tmp = Path.Combine(dir, "inflight.tmp");
         File.WriteAllText(tmp, "in-flight write of a live instance");
 
-        BackupStore.DeleteByIds(t.Root, new[] { HashId("offered") });
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("offered") });
 
+        // liveness: 本体が no-op 化する変異でも「dir も tmp も残っている」は成立してしまうため、
+        // 実際に破棄が起きたことを先に固定する(F-6 / F-7 と同型の欠陥の 3 本目)。
+        Assert.Equal(1, deleted);
         Assert.True(Directory.Exists(dir));
         Assert.True(File.Exists(tmp)); // 書込中の別インスタンスを壊さない
     }
@@ -882,16 +885,64 @@ public class BackupStoreTests
         var target = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
         var untouched = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
         BackupStore.Write(target, Rec("orphan", null, "orphan-content"));
-        // *.json をまだ一つも持たない dir(=他インスタンスの初回書込中)。*.json が無いことを
-        // 根拠に掃除すると、この tmp を壊してしまう。掃除は「削除が発生した dir」限定であること。
+        // *.json をまだ一つも持たない dir(=他インスタンスの初回書込中)。
         Directory.CreateDirectory(untouched);
         string tmp = Path.Combine(untouched, "inflight.tmp");
         File.WriteAllText(tmp, "first write of a live instance (no .json yet)");
 
-        BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
 
+        // 本テストが単独で kill するのは TryDeleteEmptySessionDir の呼び出し(下の Assert.False)。
+        // 下の tmp 生存は **n == 0 ガードと DeleteTargetTempsIn の名前一致の二重防御**に守られて
+        // いるため、片方ずつの変異では死なない(実測: 片方だけ潰すと緑・両方潰して初めて赤)。
+        // 各機構を単独で pin しているのは
+        //   - n == 0 ガード     → DeleteByIds_KeepsEmptySessionDirOfAnotherInstance
+        //   - 名前一致フィルタ  → DeleteByIds_KeepsInFlightTempOfUnofferedRecord
+        Assert.Equal(1, deleted);
         Assert.False(Directory.Exists(target)); // 対象を含んだ dir は消える
         Assert.True(File.Exists(tmp)); // 含まない dir には触れない
+    }
+
+    [Fact]
+    public void DeleteByIds_KeepsEmptySessionDirOfAnotherInstance()
+    {
+        using var t = new TempDir();
+        var target = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        // 起動直後で一度も書いていない他インスタンスの session dir(中身ゼロ)。
+        // 「対象を含まなかった dir には触れない」= ここを消さないことがガードの実効。
+        var empty = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(target, Rec("orphan", null, "orphan-content"));
+        Directory.CreateDirectory(empty);
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("orphan") });
+
+        Assert.Equal(1, deleted);
+        Assert.False(Directory.Exists(target)); // 対象を含んだ dir は空になって消える
+        Assert.True(Directory.Exists(empty)); // 含まない dir は空でも残す
+    }
+
+    [Fact]
+    public void DeleteByIds_MatchesFileNameCaseInsensitively()
+    {
+        using var t = new TempDir();
+        var session = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(session, Rec("cased", null, "cased-content"));
+        // NTFS は大文字小文字を区別しないので「ファイル名は大文字・JSON 内の Id は小文字」という
+        // 状態が実際に作れる(手コピー・外部ツール由来)。LoadAll は JSON の Id を読むので一覧には
+        // 出る。ここを Ordinal 比較にすると照合できず削除されない=「すべて破棄」が効かないまま
+        // 毎回再提案される(E-2 の縮小再現)。File.Move は大文字小文字だけの改名で挙動が処理系
+        // 依存なため、読み直して別名で書く形にしている。
+        string lower = Path.Combine(session, HashId("cased") + ".json");
+        string upper = Path.Combine(session, HashId("cased").ToUpperInvariant() + ".json");
+        string json = File.ReadAllText(lower);
+        File.Delete(lower);
+        File.WriteAllText(upper, json);
+        Assert.Single(BackupStore.LoadAll(t.Root)); // 前提: この状態でも一覧には出る
+
+        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("cased") });
+
+        Assert.Equal(1, deleted);
+        Assert.Empty(BackupStore.LoadAll(t.Root));
     }
 
     [Fact]
@@ -953,10 +1004,17 @@ public class BackupStoreTests
         // ユーザが手で置いた/他アプリの残置物の可能性があるため、「すべて破棄」でも触らない。
         var other = Path.Combine(t.Root, "other-dir");
         BackupStore.Write(other, Rec("outside", null, "outside-content"));
+        // liveness: 正当な session-* は探すこと。これが無いと「探さない」側だけの片肺の網になり、
+        // DeleteByIds が丸ごと no-op 化する変異でも緑のままになる。
+        var session = Path.Combine(t.Root, "session-" + Guid.NewGuid().ToString("N"));
+        BackupStore.Write(session, Rec("inside", null, "inside-content"));
 
-        int deleted = BackupStore.DeleteByIds(t.Root, new[] { HashId("outside") });
+        int deleted = BackupStore.DeleteByIds(
+            t.Root,
+            new[] { HashId("outside"), HashId("inside") }
+        );
 
-        Assert.Equal(0, deleted);
+        Assert.Equal(1, deleted); // inside だけが消え、outside は探索範囲外
         Assert.True(File.Exists(Path.Combine(other, HashId("outside") + ".json")));
     }
 

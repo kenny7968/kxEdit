@@ -32,7 +32,10 @@ public interface IBackupWriter : IDisposable
     /// ただし逆は成り立たない=**提示した Id なら安全、ではない**。一覧(<c>BackupStore.LoadAll</c>)は
     /// 他インスタンスの <c>session-*</c> まで広く拾うため、一覧に載った他インスタンスのライブも
     /// 「すべて破棄」で消える(設計 2026-08-24 §5 で受容したトレードオフ・申し送り S-E2-1)。
-    /// <paramref name="ids"/> は背景スレッドが後で読むため、呼び出し側で不変のスナップショットを渡す。</summary>
+    /// <paramref name="ids"/> は背景スレッドが後で読み得るため、**実装側が投入時に複写して
+    /// 切り離す**契約(SerialBackupWriter は <c>ToArray</c>、Fake は同期消費+履歴コピー)。
+    /// 呼び出し側は渡した後にコレクションを再利用してよい=複写義務を呼び出し側へ移さない
+    /// (移すと、使い回しの List を渡す 2 人目の呼び出し側が現れた瞬間に別の集合を消す)。</summary>
     void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids);
 
     /// <summary>セッションレイアウトを path へ書き込むジョブを投入する(SessionLayoutStore.Save)。</summary>

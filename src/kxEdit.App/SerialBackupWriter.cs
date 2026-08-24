@@ -65,19 +65,26 @@ public sealed class SerialBackupWriter : IBackupWriter
             }
         });
 
-    public void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids) =>
+    public void DeleteAcrossSessions(string baseDir, IReadOnlyList<string> ids)
+    {
+        // 設計 2026-08-24 §3.2: 背景スレッドが後で読むため、投入時に複写して切り離す。
+        // 呼び出し側の善意(毎回新しい List を渡す)に依存すると、使い回しの List を渡して
+        // 直後に書き換える 2 人目の呼び出し側が現れた瞬間、別の集合を消すことになる
+        // (=一覧に出していないライブを消す)。複写は投入 1 回きりで件数も小さい。
+        string[] snapshot = ids.ToArray();
         Enqueue(() =>
         {
             try
             {
                 // E-2: 自セッション dir(_dir)ではなく引数の base dir を横断する。
                 // BK-M-2 の DeleteSessionDir では、一覧に出した孤児が一件も消えなかった。
-                BackupStore.DeleteByIds(baseDir, ids);
+                BackupStore.DeleteByIds(baseDir, snapshot);
             }
             catch
             { /* 一括削除失敗は致命でない・無音 */
             }
         });
+    }
 
     public void WriteLayout(string path, kxEdit.Core.Session.SessionLayout layout) =>
         Enqueue(() =>

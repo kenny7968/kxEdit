@@ -10,6 +10,10 @@ namespace kxEdit.Core.Backup;
 /// <see cref="Delete(string, string)"/> するため、正常系では残らない
 /// (E-2 の調査時に判明: 旧記述「クリーン終了時に DeleteAll される」は誤りで、
 /// <see cref="DeleteAll(string)"/> はクリーン終了経路を通らない)。
+/// ただし hot exit(設定 RestoreOpenFilesOnStartup)が ON のときは MainForm が
+/// <c>Shutdown(keepForRestore: true)</c> を呼び、この 1 件ずつの削除を丸ごとスキップして
+/// **意図的に残す**(次回起動の統合復元に使う)。ON では「ファイルが残っている」ことが
+/// 異常終了の痕跡を意味しない。
 /// </summary>
 public static class BackupStore
 {
@@ -339,8 +343,11 @@ public static class BackupStore
             try
             {
                 int n = DeleteTargetsIn(sub, targets);
+                // 対象を 1 件も含まなかった dir には触れない(他インスタンスの**空** session dir を
+                // 消さない)。書込中 *.tmp の保護は DeleteTargetTempsIn の名前一致が担う
+                // (F-2 以降。ここのガードではない=当初のコメントは根拠が古かった)。
                 if (n == 0)
-                    continue; // 破棄対象を含まなかった dir には触れない(他インスタンスの書込中 *.tmp 保護)
+                    continue;
                 deleted += n;
                 DeleteTargetTempsIn(sub, targets);
                 // 空になったときだけ消える(TryDeleteEmptySessionDir が中身の有無で判定するため、
@@ -372,8 +379,11 @@ public static class BackupStore
     /// <c>&lt;id&gt;.json.</c> で始まる *.tmp が「その record の書込中コピー」に相当する。
     /// dir 内の *.tmp を無差別に消すと、一覧に一度も出ていない他インスタンスの**初回**書込
     /// (&lt;別 id&gt;.json がまだ存在しない状態)を壊し、その文書に最大 1 tick(既定 300 秒)の
-    /// 無保護窓を作る。</summary>
-    private static void DeleteTargetTempsIn(string dir, HashSet<string> fileNames)
+    /// 無保護窓を作る。
+    /// <paramref name="targetJsonNames"/> は <c>&lt;id&gt;.json</c> の集合。
+    /// <see cref="DeleteTargetsIn"/> がこれを**完全一致**で使うのに対し、ここでは**前置**として
+    /// 使う(同じ集合だが照合の意味が違うため引数名を分けている)。</summary>
+    private static void DeleteTargetTempsIn(string dir, HashSet<string> targetJsonNames)
     {
         foreach (string file in Directory.EnumerateFiles(dir, "*.tmp"))
         {
@@ -381,7 +391,7 @@ public static class BackupStore
             // Any は最初の一致で短絡する(= 素朴な内側ループ + break と等価)。
             // 内側を素の foreach で書くと SonarAnalyzer S3267 が -warnaserror で落とす。
             if (
-                fileNames.Any(target =>
+                targetJsonNames.Any(target =>
                     name.StartsWith(target + ".", StringComparison.OrdinalIgnoreCase)
                 )
             )
