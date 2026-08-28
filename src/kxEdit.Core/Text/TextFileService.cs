@@ -138,8 +138,8 @@ public static partial class TextFileService
     /// LineEnding は本文チャンク木の全体を byte 走査して多数決で決める
     /// (<see cref="LineEndingDetector.Detect(TextSnapshot)"/>)。A-9(2026-08-28)以前は先頭
     /// 4,096 code unit(UTF-16)だけを <c>GetText</c> して流していたが、1 行目がその窓より長い
-    /// LF / CR ファイルが
-    /// 改行 0 件と見なされて CRLF 既定へ倒れ、保存時に全行が無警告で書き換わっていた。
+    /// LF / CR ファイルが改行 0 件と見なされて CRLF 既定へ倒れ、保存時に全行が無警告で
+    /// 書き換わっていた。
     /// 窓は復活させないこと(string を実体化しない走査なのでピークメモリは増えない)。
     /// forcedCodePage 指定時は自動判定を飛ばし <see cref="HasBomFor"/> のみでプリアンブル判定。
     /// </remarks>

@@ -55,6 +55,20 @@ public class LineEndingDetectorTests
         Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(snapshot));
     }
 
+    // A-9(M3): 境界を跨いだ CRLF の LF を二重計上しないこと(持ち越し処理の `i = 1;`)。
+    // 二重計上すると crlf=1 / lf=1 が crlf=1 / lf=2 になり Crlf → Lf へ反転する=撃墜。
+    // 上の ..._crlf_spanning_chunk_boundary_as_one とは fixture の狙いが違う:
+    // あちらは「割れないこと」、こちらは「二重に数えないこと」。改行を 1 つだけにすると
+    // 二重計上しても同数のまま Crlf になり弁別できないので、ここでは "x\n" で同数を作る。
+    [Fact]
+    public void Snapshot_overload_does_not_double_count_boundary_crlf()
+    {
+        string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r\n" + "x\n";
+        var snapshot = TextBuffer.FromString(body).Current;
+        AssertTwoPiecesSplitBetween(snapshot, lastOfFirst: 0x0D, firstOfSecond: 0x0A);
+        Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(snapshot)); // crlf=1 / lf=1 の同数
+    }
+
     // A-9: 文書末尾の単独 CR が drain されること(foreach 後の `if (pendingCr) cr++`)。
     // drain を落とすと crlf=lf=cr=0 になり既定の Crlf が返る=Cr と弁別できる。
     [Fact]
