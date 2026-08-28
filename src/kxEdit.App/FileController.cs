@@ -500,6 +500,9 @@ public sealed class FileController
         // (2) WriteToPath より前 = ApplyEol / ConvertEols の副作用を起こす前に短絡する。
         //     ConvertEols が触るのは CR / LF だけで、CR / LF は 932 / 51932 のどちらでも
         //     表現可能なので、判定を前に出しても答えは変わらない。
+        //     ついでに WriteToPath 冒頭の TryInspectSaveTarget(リモートは 5 秒プローブ)よりも
+        //     前になる。これは望ましい副次効果で、到達不能なリモート保存先へ Ctrl+S したとき、
+        //     5 秒待たされてから諦めるのではなく、その前に劣化の確認で中止できる。
         // (3) State.Path is null 分岐より後 = 無題タブは SaveAsDocument が自前の警告を持つので
         //     二重に出ない。
         //

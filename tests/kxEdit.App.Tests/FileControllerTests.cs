@@ -1808,9 +1808,19 @@ public class FileControllerTests
         });
 
     /// <summary>
-    /// 対照群(過剰検知の防止・設計書 §4.3 ガードの網): UTF-8 文書は astral を含んでいても警告しない。
-    /// **警告が出ないことだけでなく、絵文字が往復すること**まで見る。前者だけだと
-    /// 「CanEncodeBuffer が UTF-8 でも false を返す」変異と区別できない。
+    /// 対照群(過剰検知の防止・設計書 §4.3 ガードの網): **ごく普通の** UTF-8 文書は astral を
+    /// 含んでいても警告せず、絵文字がそのまま往復する。既定=UTF-8 の主経路が A-10 で
+    /// 変わっていないことの被覆。
+    ///
+    /// この網が殺せる変異は限定的である(仕様レビュー指摘 2・実態に合わせて記述):
+    /// <c>CodePage != 65001</c> ガードを外す変異も、<c>!CanEncodeBuffer</c> の否定を落とす変異も、
+    /// この fixture では**殺せない**。どちらも短絡して警告が出ないまま緑になるためで、
+    /// 前者を殺すのは境界版の <see cref="Save_Utf8AstralAtReadChunkBoundary_DoesNotWarn"/>、
+    /// 後者を殺すのは <see cref="Save_SjisEncodableContent_DoesNotWarn"/> の役割。
+    /// ここで殺せるのは条件の連言を選言へ倒す変異(最後の <c>&amp;&amp;</c> を <c>||</c> にすると
+    /// UTF-8 でも <c>OkCancel</c> が呼ばれる)で、それは <c>Assert.Empty</c> が捕まえる。
+    /// 往復 assertion は弁別ではなく「保存が成功して内容が壊れていない」ことの確認として置く
+    /// (新しい走査コードがバッファやリーダーを壊していないことを見る)。
     /// </summary>
     [Fact]
     public void Save_Utf8WithAstral_DoesNotWarn_AndRoundTrips() =>
@@ -1820,12 +1830,50 @@ public class FileControllerTests
             using var tmp = new TempDir();
             string path = tmp.File("a.txt");
 
-            // 絵文字を CanEncodeBuffer の読み取りチャンク境界(8192 文字)にまたがらせる。
-            // CanEncodeBuffer はチャンクごとに独立して GetByteCount を呼ぶため、サロゲートペアが
-            // 境界で割れると各チャンクには孤立サロゲートしか見えず ExceptionFallback が飛ぶ
-            // = **UTF-8 でも false を返す**(実測)。これにより CodePage ガードは性能だけでなく
-            // 挙動も担っていることになり、ガードを外す変異をこの対照群が殺せる。
-            // 8191 文字の詰め物 + サロゲートペアで、1 チャンク目が「詰め物 + 上位サロゲート」になる。
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path; // State.Encoding は既定の UTF-8(65001)のまま
+            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600");
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 既定の前提を明示(黙って変わると空振りする)
+
+            Assert.True(host.File.Save());
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+            Assert.Equal(
+                "こんにちは\U0001F600",
+                File2.ReadAllText(path, System.Text.Encoding.UTF8)
+            );
+        });
+
+    /// <summary>
+    /// 上の対照群の境界版: 絵文字を <c>CanEncodeBuffer</c> の読み取りチャンク境界(8192 文字)に
+    /// またがらせると、正当な UTF-8 文書でも <c>CanEncodeBuffer</c> は false を返す。
+    /// <c>CanEncodeBuffer</c> がチャンクごとに**独立して** <c>GetByteCount</c> を呼ぶため、
+    /// サロゲートペアが境界で割れると各チャンクからは孤立サロゲートにしか見えず
+    /// <c>ExceptionFallback</c> が飛ぶ(実測)。8191 文字の詰め物 + サロゲートペアで、
+    /// 1 チャンク目が「詰め物 + 上位サロゲート」になる。
+    ///
+    /// **この網が何に依存しているか**(将来これを読む人への申し送り):
+    /// <list type="bullet">
+    /// <item>この網が <c>CodePage != 65001</c> ガードを外す変異を殺せるのは、上記の
+    /// <c>CanEncodeBuffer</c> のチャンク境界バグが存在する**あいだだけ**である。</item>
+    /// <item>そのバグを直せば(<c>Encoder</c> をチャンク間で使い回す等)<c>CanEncodeBuffer</c> は
+    /// UTF-8 に対して常に true を返すようになり、<c>CodePage</c> ガードは**純粋な性能ガード**へ
+    /// 変わる。その時点でこの網は原理的に空虚化するが、それは**正しい状態**である。
+    /// 性能ガードを挙動で殺すことはできないので、**偽の網を作って取り繕ってはいけない**
+    /// (そのときは本テストを削除し、ガードの根拠を性能として文書に残すのが正しい対応)。</item>
+    /// <item>詰め物の 8191 は <c>FileController.CanEncodeBuffer</c> の <c>new char[8 * 1024]</c> に
+    /// 暗黙に結合している。チャンク長を変えると**無警告でこの網が消える**(緑のまま空虚になる)。</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void Save_Utf8AstralAtReadChunkBoundary_DoesNotWarn() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+
             string filler = new string('a', 8191);
             var doc = host.Docs.CreateNew();
             doc.Editor.Text = filler;
