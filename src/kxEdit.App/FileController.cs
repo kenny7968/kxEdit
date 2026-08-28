@@ -810,28 +810,54 @@ public sealed class FileController
     /// 新規ファイルを常に到達不能と誤判定していた(= ネットワーク共有へ新規保存できない症状)。
     ///
     /// Batch A Task 1(2026-07-15): WriteToPath 失敗時に ConvertEols で書き換わった本文と保存点(Modified)
-    /// をロールバックする。ConvertEols(非 fast-path)は <c>ReplaceSource(builder.Build())</c> で新規
-    /// TextBuffer に差し替えるため、失敗しても本文の EOL が新値に変わったまま/新規バッファは fresh
-    /// (Modified=false)で保存点が破壊されたままになる 2 重の静音喪失導線があった。
-    /// 旧 <see cref="TextBuffer"/> 参照を保存前に握っておき、失敗時に <see cref="EditorControl.SetOrReplaceSource"/>
-    /// で参照だけを戻せば <see cref="TextBuffer"/> 内部の <c>_savedRoot</c>/<c>_current</c> は
-    /// ConvertEols で不変=Modified も本文も一括で復元される(旧バッファの内部状態は
-    /// ReplaceSource で置換されただけで書き換わっていない)。
+    /// をロールバックする。放置すると「保存に失敗したのに本文の EOL は書き換わったまま」という
+    /// 静音喪失が残る。
+    ///
+    /// A-11(2026-08-28): その機構を<b>作り直した</b>。旧機構は「ConvertEols 前の
+    /// <see cref="TextBuffer"/> 参照を握り、失敗時に <see cref="EditorControl.SetOrReplaceSource"/> で
+    /// 参照だけを戻す」もので、<b>ConvertEols がバッファ参照ごと差し替える</b>ことに全面的に
+    /// 依存していた。ConvertEols は in-place の 1 Undo 単位になったので、この前提は崩れている
+    /// (<c>ReferenceEquals</c> が常に true =ロールバックが<b>黙って no-op</b> になる)。
+    /// 現在は「ConvertEols が Undo 履歴へ記録したか」を戻り値で受け取り、記録したときだけ
+    /// <see cref="EditorControl.UndoEolConversion"/> で 1 つだけ取り消す。保存点も一緒に戻る
+    /// (<c>_savedRoot</c> は触らない設計なのでルートが変換前へ戻れば参照比較で復す)。
+    /// <para>
+    /// 設計上の要点が 3 つある:
+    /// <list type="bullet">
+    /// <item><b>fast-path では絶対に取り消さない</b>。ConvertEols が何も記録していないのに 1 つ戻すと
+    /// <b>ユーザーの直前の編集が消える</b>(設計書 2026-08-28 §5.3)。判別は経路からの推論ではなく
+    /// <c>ConvertEols</c> の戻り値で行う。</item>
+    /// <item><b><see cref="EditorControl.Undo"/> を流用しない</b>。<c>Undo</c> は <c>ReadOnly</c> で
+    /// 早期 return する。ここは ConvertEols の前後でだけ ReadOnly を外し、catch 節に来る時点では
+    /// 復元済みなので、CSV グリッドモード(<c>CsvController.Editor.ReadOnly = true</c>)では
+    /// ロールバックが黙って no-op になってしまう。</item>
+    /// <item><b>キャレット / 選択は変換前の位置を捕捉して明示的に戻す</b>。<c>Undo</c> 経路の
+    /// キャレット(=文書末尾)も旧機構の <c>ReplaceSource</c>(=0 へ潰す)も、ユーザーが Undo を
+    /// 要求していないこの場面では劣悪だから(§10.12 (2))。捕捉は ConvertEols を呼ぶ前に行う
+    /// =変換前のオフセットは、変換を取り消した本文に対してそのまま有効。</item>
+    /// </list>
+    /// </para>
     /// </remarks>
     private bool WriteToPath(Document doc, string path)
     {
         // CSV-M-2 → A-4: リモートは 5 秒プローブ。存在確認ではなく「書き込み先が確定できるか」を見る
         // (読み取り側の TryProbeFileExists は File.Exists 意味論で、新規ファイルを常に到達不能と誤判定した)。
-        // snapshotBefore を握る前・ConvertEols 副作用を起こす前に短絡することで、プローブ失敗時に
-        // 「本文の EOL が書き換わる」「新規バッファに差し替わる」を発生させない。
-        // exists は書込側では使わない(上書き確認は SaveAsDocument が事前に済ませる)。
+        // ConvertEols 副作用を起こす前に短絡することで、プローブ失敗時に「本文の EOL が書き換わる」を
+        // 発生させない。exists は書込側では使わない(上書き確認は SaveAsDocument が事前に済ませる)。
         if (!TryInspectSaveTarget(path, out _))
             return false;
 
-        // ConvertEols 前のバッファ参照を保持(失敗時ロールバック用=バグ 1+2 対策)。
-        // 旧 TextBuffer は不変=このハンドルを保持している限り、内部の _savedRoot/_current は
-        // ConvertEols/ReplaceSource で書き換わらない。成功パスでは使わない。
-        var snapshotBefore = doc.Editor.CurrentBuffer;
+        // A-11: ConvertEols 前のキャレット / 選択を捕捉する(失敗時ロールバックの復元値)。
+        // ConvertEols は変換後も同じ論理位置へ caret を復元するが、char オフセットは変換で動く。
+        // 変換を取り消せば本文は変換前と同一になるので、ここで捕捉した「変換前のオフセット」が
+        // そのまま正しい復元値になる(設計書 2026-08-28 §10.12 (2))。
+        // try の外で捕捉する: ConvertEols 自身が throw する経路(DocumentTooLargeException)でも
+        // catch 節から参照するため。
+        int anchorBefore = doc.Editor.SelectionAnchor;
+        int caretBefore = doc.Editor.CaretCharOffset;
+        // ConvertEols が Undo 履歴へ記録したか。false のまま catch へ落ちたら取り消してはならない
+        // (fast-path で 1 つ戻すとユーザーの直前の編集が消える=設計書 §5.3)。
+        bool eolConverted = false;
         try
         {
             ApplyEol(doc);
@@ -840,7 +866,7 @@ public sealed class FileController
                 doc.Editor.ReadOnly = false;
             try
             {
-                doc.Editor.ConvertEols(doc.Editor.EolMode);
+                eolConverted = doc.Editor.ConvertEols(doc.Editor.EolMode);
             }
             finally
             {
@@ -867,6 +893,11 @@ public sealed class FileController
         // そこから AtomicFile.Write の Path.Combine(null, ...) に届くと ArgumentNullException が
         // 素通りし、**ConvertEols 後のロールバックが発火しないまま Modified=false が残る**
         // = 保存していない本文が確認なしで閉じられる(ConfirmDiscardIfDirty は !Modified で即 true)。
+        // A-11(2026-08-28): DocumentTooLargeException を追加した。ConvertEols は LF → CRLF で
+        // 総バイト数を増やすため、512MB 直下の文書では TextBufferBuilder.AddChunk が投げうるのに
+        // 本フィルタに一致せず**未処理で抜けていた**(main 既存の穴)。ロールバックは no-op でよい:
+        // ConvertEols は木を組み終えてから初めて _buffer に触るので、この例外が飛ぶ時点では
+        // 本文もキャレットも EolMode も未変更のまま=eolConverted も false のままである。
         catch (Exception ex)
             when (ex
                     is System.IO.IOException
@@ -874,14 +905,12 @@ public sealed class FileController
                         or System.Security.SecurityException
                         or NotSupportedException
                         or ArgumentException
+                        or DocumentTooLargeException
             )
         {
-            // バグ 1+2 修正: ConvertEols が非 fast-path で新規 TextBuffer に差し替えている場合は
-            // 旧バッファ参照へ戻す(fast-path 済み=同一参照ならキャレット/スクロールリセットを避けて no-op)。
-            if (!ReferenceEquals(doc.Editor.CurrentBuffer, snapshotBefore))
-            {
-                doc.Editor.SetOrReplaceSource(snapshotBefore);
-            }
+            // A-11: ConvertEols が記録したときだけ 1 つ取り消す(fast-path は no-op)。キャレット /
+            // 選択は変換前へ明示復元し、スクロール位置は触らない(= ロールバックが動かさない)。
+            doc.Editor.UndoEolConversion(eolConverted, anchorBefore, caretBefore);
             // CSV-L-5: ex.Message にファイル名 (path) が混入し得るため、SanitizeForDisplay で無害化。
             _prompt.Error(
                 $"保存できませんでした: {SanitizeForDisplay.OneLine(ex.Message, 200)}",

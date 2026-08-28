@@ -1224,3 +1224,172 @@ c167fba (main)   ConvertEols 後  Expected: 30 / Actual: 0   ← 失う(main 既
   (`MakeHosted` / `SendMouseWheel` / `Field<T>(obj, name)`)を置いて集約する案を
   **独立テーマとして申し送る**(本ブランチでは実施しない。テスト資産全体に触る変更になり、
   A-9 / A-11 の差分に混ぜると挙動不変の証明が読めなくなるため)。
+
+### 10.14 Task 4(保存失敗ロールバックの組み替え)実装時の決定と逸脱記録(2026-08-29 追記)
+
+#### (1) ロールバック API の形(実装計画 Task 4 Step 4 からの逸脱)
+
+```csharp
+public bool UndoEolConversion(bool conversionRecorded, int anchorBefore, int caretBefore)
+```
+
+計画は引数 1 つ(`conversionRecorded`)で、キャレット復元の受け渡し方は「実装者が設計する」
+としていた。**変換前の anchor / caret を呼び出し元から受け取る形**にした理由:
+
+- §10.12 (2) が要求する「保存失敗前の位置へ明示復元」に必要な値は、`EditorControl` の中に
+  **残っていない**。`ConvertEols` は変換後の等価な論理位置へ caret を移してしまうため、
+  変換後の状態から変換前の char オフセットは復元できない(復元計算をもう一度やる案は、
+  `ConvertEols` の `(m, k)` 分解を逆向きに再実装することになり、2 つ目の写しを作る)。
+- 代替案「`ConvertEols` が捕捉して private フィールドに退避し、`UndoEolConversion` が黙って読む」は
+  **採らなかった**。退避値の有効期間がコードから読めず(`ConvertEols` と catch 節の間に何が
+  起きても構文上は通る)、将来「間に別の編集が入る」変更が入ったとき黙って古い位置を復元する。
+  引数にすれば「呼び出し元が変換前に捕捉した値」という契約が型と呼び出し位置に出る。
+- **anchor と caret の 2 値**にしたのは、選択範囲を保つため。`SetTo` 系(1 値)だと保存失敗の
+  たびに選択が解除される。網は `UndoEolConversion_RestoresGivenSelection_NotUndoResultCaretPos`
+  (`anchor != caret` の非既定状態から始める)。
+- 捕捉に使うのは既存 public API(`SelectionAnchor` / `CaretCharOffset`)だけで、
+  App 層向けに新しい観測点を増やしていない。
+
+**捕捉は `try` の外**に置いた。`ConvertEols` 自身が throw する経路((4) の
+`DocumentTooLargeException`)でも catch 節から参照するため。
+
+#### (2) スクロール位置は「触らないことが復元」である
+
+§10.12 (2) は「キャレットとスクロール位置を保存失敗前の位置へ明示復元する」と書いたが、
+実装は**スクロールについては何も書かない**形になった。`ConvertEols` の in-place 化以降、
+変換もルート差し戻しも `_topLine` / `_topSegment` / `_scrollX` を動かさないので、
+**何もしないことが復元**である。`ScrollX = saved` 等の明示復元を足すと、値が同じで常に
+早期 return する=網で殺せない等価な行が増えるだけになる。
+
+逆に「編集後の定番処理」を素直に呼ぶと壊れる。網
+`Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll` は次の 2 変異を実測で撃墜した((6) の表):
+
+- `AfterEdit()` を呼ぶ → `BringCaretIntoView` が復元済みの `TopLine` を動かす。
+- `UpdateHorizontalScrollbar()` を呼ぶ → 復元済みの `_topLine` で評価され、長い行が可視域に
+  無いと `HideAndResetHScroll` が走って `_scrollX` が 0 に落ちる(§10.13 (7) と同じ罠)。
+
+**fixture 設計の要点**: 後者は「長い行が可視域に残る」fixture では**生存する**。
+行 0 だけを長くして `ScrollX` を非 0 に置いた後、`TopLine` を遠く(150 行目)へ動かして
+長い行を可視域外にしてある(`TopLine` セッターは水平スクロールバーを再計算しないので、
+この状態は作れる)。§10.13 (7) の訂正がまさに「fixture 1 本から一般化した」失敗だったので、
+今回は最初から罠を踏める形に寄せた。
+
+垂直スクロールバーの再計算も**呼ばない**。EOL 変換は `LineCount` を変えず、取り消しても
+行数は同じなので、呼んでも no-op にしかならない(呼べば等価変異が 1 つ増える)。
+
+#### (3) Redo は捨てる(§5.3 が実装時決定に委ねた点の結論)
+
+`TextBuffer.DropRedo()`(→ `UndoHistory.ClearRedo()`)を足し、ロールバックの `Undo` が
+`_redo` へ積み直したエントリをその場で捨てる。
+
+- 捨てないと、保存に失敗しただけで「やり直し」メニューが有効になり、Ctrl+Y が
+  **ユーザーが一度も要求していない全文 EOL 変換**を再適用する。
+- 保存失敗**前**にユーザーが持っていた Redo は原理的に復元できない
+  (§10.11 (4) で受容済み。`Record` が既に `_redo.Clear()` している)。捨てる側にすると
+  ロールバック後の Redo スタックは「空」= 到達可能な状態のうち保存前に最も近い。
+- 実装計画は「どちらを採るかは実装時にユーザーへ確認」としていたが、上記のとおり
+  非対称(捨てない側に利点が無い)なので確認を待たずに決めた。**この判断自体を申し送る**:
+  PR レビューで異論があれば `DropRedo` の呼び出し 1 行を外すだけで反転できる。
+
+`ClearRedo` は `Clear()` と取り違えると Undo 履歴まで消える(=ユーザーの編集が全部消える)ので、
+L1 に `DropRedo_ClearsRedoOnly_AndKeepsUndoStack` / `DropRedo_DoesNotTouchSavePoint` を置いた。
+`Clear()` へ置換する変異は両方を撃墜する(実測)。
+
+#### (4) `DocumentTooLargeException` は拾う(§10.11 (8) の申し送りの回収)
+
+`WriteToPath` の catch フィルタへ追加した。**調査結果**:
+
+- `ConvertEols` で上限超過が起きうるのは走査中の `builder.Add`(内部 `AddChunk`)と
+  最後の `builder.Build()` の 2 箇所。どちらも **`_buffer` に触る前**である
+  (`rebuilt = builder.Build().Current` → `IsComposing` 判定 → `ReplaceAllRecordingUndo` の順)。
+- したがって例外が飛んだ時点で本文・キャレット・スクロール・`EolMode`・Undo 履歴はすべて未変更、
+  `eolConverted` も `false` のままで、**ロールバックは no-op でよい**。
+- `try` 内の他の文(`TextFileService.Save` / `SetSavePoint` / `UpdateLabel` / `_metaChanged`)は
+  `TextBufferBuilder` を使わないので、このフィルタが新たに飲み込む例外源は無い。
+
+拾う前は**未処理例外でアプリが落ちる**(= 他タブの未保存分も道連れ)。拾えば
+「保存できませんでした: 文書サイズ上限(512 MB)を超えました。」が出て編集を続けられる。
+
+**網は張れない**: 発火には 512MB 級の文書が要る。`TextBufferBuilder.MaxTotalBytes` は
+`internal init` で、`ConvertEols` が内部で `new TextBufferBuilder()` するため注入点が無い。
+「木を組み終えてから `_buffer` に触る」という上の順序も、同じ理由でテストでは固定できていない
+(**コードの読みでしか守られていない**)。順序を入れ替える変更をするときは本節を再検証すること。
+
+#### (5) 訂正: §10.13 (3) が予告した「失敗パスの `SavePointReached` 1 件」は発生しない
+
+§10.13 (3) の発火列の表は、Task 4 が `Undo` 相当(= `AfterEdit` 経由)を使う前提で
+「clean 文書の保存失敗 → ロールバックで `Reached` が 1 回焚かれる(新規挙動)」と書いた。
+**実装では焚かない。** `AfterEdit()` を使わず、`_wasModified` を `ConvertEols` と同じく
+**代入で揃える**形にしたため。§10.13 (3) の表の該当 2 行は次に置き換わる:
+
+| 経路 | main | Task 4 実装 | 一致 |
+|------|------|------------|------|
+| 失敗パス: `ConvertEols` → ロールバック (clean) | (なし) | (なし) | ○ |
+| 失敗パス: `ConvertEols` → ロールバック (dirty) | (なし) | (なし) | ○ |
+
+保存に失敗しただけで保存点到達イベントが飛ぶのは筋が悪く、§10.12 (1) が
+`SavePointLeft` について下した決定(保存処理の途中でイベントを焚かない)と非対称になる。
+**結果として失敗パスの発火列は main と完全一致**し、Task 3 が持ち込んだ「新規挙動」は
+Task 4 で消えた(= A-11 全体で `SavePoint` 系の発火列は挙動不変)。網は
+`UndoEolConversion_OnSavedDocument_FiresNoSavePointEvents`(clean 文書から始める= 変換で
+false→true、取り消しで true→false の**両方向の遷移が実在する**非既定条件)。
+
+**`_wasModified` の代入自体は落とすと実害が出る**: 落とすと `_wasModified` が true のまま残り、
+**次のユーザー編集で `SavePointLeft` が発火せずタブの「*」が出ない**(遷移検出が「もう dirty
+だった」と誤認する)。晴眼・弱視ユーザーに直接効く経路(CLAUDE.md §2)なので App 層に
+`Save_WriteFailure_OnNonFastPathEol_KeepsDirtyIndicatorWorking` を置いて固定した(実測で撃墜)。
+
+#### (6) 網が実際に何を守っているか(変異実測)
+
+判定はビルドの exit code、適用差分は毎回目視してから実行した(§10.4 のハーネスの罠対策)。
+
+| # | 変異 | 結果 | 撃墜したテスト |
+|---|------|------|--------------|
+| M1 | `conversionRecorded` の判定を落とす(常に取り消す) | kill | `Save_WriteFailure_OnFastPathEol_DoesNotUndoUserEdit` |
+| M2 | `UndoEolConversion` に `ReadOnly` ガードを足す(= `Undo` 流用と同じ) | kill | `Save_WriteFailure_WhileEditorReadOnly_StillRollsBackContentEol` |
+| M3 | `SetSelection(anchorBefore, caretBefore)` → `SetTo(UndoResult.CaretPos)` | kill | `Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll` |
+| M4 | 通知一式を `AfterEdit()` に置換 | kill | 同上(`TopLine` 1 → 0) |
+| M5 | `UpdateHorizontalScrollbar()` を足す | kill | 同上(`ScrollX` 40 → 0) |
+| M6 | `_buffer.DropRedo()` を落とす | kill | `Save_WriteFailure_OnNonFastPathEol_LeavesNothingToRedo` |
+| M7 | `WriteToPath` の `UndoEolConversion` 呼び出しごと落とす | kill | 上記の非 fast-path 系すべて + `Save_ExistingPathIsDriveRoot_...` + A-10 の既存 2 件 |
+| M8 | `UndoHistory.ClearRedo()` → `Clear()` | kill | `DropRedo_ClearsRedoOnly_AndKeepsUndoStack` / `DropRedo_DoesNotTouchSavePoint` / `Save_WriteFailure_OnNonFastPathEol_UndoesOnlyTheConversion` |
+| M9 | `_wasModified = _buffer.Modified;` を落とす | kill | `Save_WriteFailure_OnNonFastPathEol_KeepsDirtyIndicatorWorking` |
+| M10 | `_uia.OnSnapshotChanged(snap)` を落とす | kill | `UndoEolConversion_UpdatesUiaSnapshot` / `UndoEolConversion_RaisesUiaEventsAfterCaretRestore` |
+| M11 | `_uia.OnSnapshotChanged(snap)` を UIA イベント発火の後へ移す | kill | `UndoEolConversion_RaisesUiaEventsAfterCaretRestore`(発火時点の `TextLength` が旧値) |
+
+**M7 は `Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified` も撃墜した**
+=§10.13 (9)-1 が指摘した空振り(本文 assert が無く、ロールバックが no-op でも緑)は解消した。
+
+**当てた変異はこの 11 件だけであり、「網が完全」という主張はしない**(§10.8 の教訓)。
+既知の未撃墜・未観測は次のとおり:
+
+| 項目 | 状態 | 理由 |
+|---|---|---|
+| `_caretCtrl.DesiredXpx = -1` | **等価変異(生存する)** | `conversionRecorded == true` なら `ConvertEols` が直前に -1 を入れており、その間(`TextFileService.Save`)に誰も書き換えない。キャレットが動く経路の共通作法として残す(§10.3 の空ピースガードと同じ扱い) |
+| `Invalidate()` | 網なし | `EditorControl` は sealed で差し替え seam が無い(§10.13 (6) と同じ) |
+| system caret 再配置(`PositionCaret`) | 網なし | Win32 `SetCaretPos` は自動テストで観測できない。L5 の対象 |
+| `DocumentTooLargeException` 経路 | 網なし | (4) のとおり 512MB 級 fixture が要る |
+
+#### (7) 既存テストの説明文の更新(旧機構の説明を残さない)
+
+`FileControllerTests` の rollback 系 3 件(`SaveAs_WriteFailure_RollsBackContentEol` /
+`Save_WriteFailure_RollsBackContentEol_And_KeepsModifiedFlag` /
+`Save_WriteFailure_FastPath_PreservesCaretAndScroll`)のコメントは
+「旧 TextBuffer 参照へ戻す」「`!ReferenceEquals` guard を消す変異を kill する」と書いており、
+**assertion は正しいのに説明が事実と食い違う**状態になった。assertion は一切変えずに説明だけ
+新機構へ書き換えた。特に `..._FastPath_PreservesCaretAndScroll` は、A-11 後に kill する変異が
+別物(「fast-path なのに取り消してしまう」)へ変わっており、そちらの弁別力は本テストの fixture
+(`Text` セッター直後=履歴が空)には**無い**ことを明記して、担い手のテスト名を書いた。
+
+`Save_ExistingPathIsDriveRoot_...` には §10.13 (9)-1 の指示どおり本文 assert を足した。
+期待値は実行して確認した**ロールバック前**の値(`"xa\r\nb\r\nc"`)である。
+
+#### (8) L5 チェックリストへの追加候補
+
+§10.12 (3) が回収を求めている項目に加えて、Task 4 由来で 1 項目挙げておく:
+
+> 読み取り専用属性のファイル(または書き込み権限の無い場所)を EOL 変換が起きる条件で開き、
+> 文書の途中にキャレットを置いて Ctrl+S。
+> **期待**: 「保存できませんでした」ダイアログが出て、閉じた後もキャレット位置・選択範囲・
+> 表示位置が Ctrl+S の直前と同じ(本文も変換前のまま)。
+> **判定**: NVDA が「キャレットが飛んだ」と読む発話が挟まらないか。

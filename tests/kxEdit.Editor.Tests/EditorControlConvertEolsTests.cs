@@ -811,6 +811,144 @@ public class EditorControlConvertEolsTests
             using var ctrl = new EditorControl();
             Assert.False(ctrl.ConvertEols(LineEnding.Crlf));
         });
+
+    // ===== A-11 Task 4: UndoEolConversion(保存失敗ロールバック専用の取り消し)=====
+    // App 層(FileControllerTests)は「保存に失敗したら本文が戻る」を見る。ここでは
+    // 通知契約とキャレット規約という、App 層からは観測できない側面を固定する。
+
+    // 取り消し後、RPC スレッドが読む UIA スナップショットが**変換前の本文**に戻っていること。
+    // ここが古いままだと SR は画面と違う本文(変換後)を読み上げる。
+    [Fact]
+    public void UndoEolConversion_UpdatesUiaSnapshot() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            var host = (IUiaTextHost)ctrl;
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.Equal(7, host.TextLength); // 前提: 変換後の長さが見えている
+
+            Assert.True(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal(5, host.TextLength);
+            Assert.Equal("a\nb\nc", host.GetTextRange(0, 5));
+        });
+
+    // 取り消しも App 層のステータスバー更新契機=1 回だけ焚く(ConvertEols と対称)。
+    [Fact]
+    public void UndoEolConversion_FiresUpdateUiOnce() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(1, updateUi);
+        });
+
+    // 設計書 §5.3 の no-op 要件: conversionRecorded=false では**何も**してはならない。
+    // no-change テストなので非既定状態から始める(履歴 1 段・UpdateUI 済み・非 0 キャレット)。
+    [Fact]
+    public void UndoEolConversion_NotRecorded_DoesNothing() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb\r\nc"));
+            ctrl.ReplaceCharRange(0, 0, "x"); // ユーザーの編集(戻されたら消える)
+            ctrl.SetSelectionAnchored(anchor: 2, caret: 4);
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf); // fast-path=false
+            Assert.False(recorded); // 前提
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+
+            Assert.False(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal("xa\r\nb\r\nc", ctrl.SnapshotText); // ユーザーの編集が残っている
+            Assert.Equal(0, updateUi); // 通知も打たない
+            Assert.Equal(2, ctrl.SelectionAnchor); // キャレット/選択も動かさない
+            Assert.Equal(4, ctrl.CaretCharOffset);
+        });
+
+    // 設計書 §10.12 (2): UndoResult.CaretPos(=文書末尾)ではなく、呼び出し元が捕捉した
+    // 変換前の位置へ戻す。anchor != caret の非既定状態から始める
+    // (SetTo で戻す実装だと選択が潰れて anchor == caret になる)。
+    [Fact]
+    public void UndoEolConversion_RestoresGivenSelection_NotUndoResultCaretPos() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\ndef\nghi"));
+            ctrl.SetSelectionAnchored(anchor: 1, caret: 6);
+            int anchorBefore = ctrl.SelectionAnchor;
+            int caretBefore = ctrl.CaretCharOffset;
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.True(recorded); // 前提
+
+            ctrl.UndoEolConversion(recorded, anchorBefore, caretBefore);
+
+            Assert.Equal(1, ctrl.SelectionAnchor);
+            Assert.Equal(6, ctrl.CaretCharOffset); // 末尾(11)へ飛んでいない
+        });
+
+    // ReadOnly でも効くこと。Undo() を流用すると ReadOnly ガードで黙って no-op になる
+    // (CSV グリッドモード= CsvController.Editor.ReadOnly = true の経路)。
+    [Fact]
+    public void UndoEolConversion_WhileReadOnly_StillUndoes() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.ReadOnly = true;
+
+            Assert.True(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    // 保存処理の途中で SavePoint イベントを焚かない(ConvertEols 側の決定=設計書 §10.12 (1) と対称)。
+    // clean 文書から始める=変換で Modified が false→true、取り消しで true→false と
+    // **両方向の遷移が実在する**非既定条件(AfterEdit を呼ぶ実装なら Reached が 1 件記録される)。
+    [Fact]
+    public void UndoEolConversion_OnSavedDocument_FiresNoSavePointEvents() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.True(ctrl.Modified); // 前提: 変換で保存点から外れている
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.False(ctrl.Modified); // 保存点へ戻る(値は戻る=イベントだけ焚かない)
+            Assert.Empty(log);
+        });
+
+    // 記録したと言われても履歴が空なら false を返す(呼び出し側の bool を鵜呑みにしない防御)。
+    [Fact]
+    public void UndoEolConversion_NothingInHistory_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+
+            Assert.False(ctrl.UndoEolConversion(conversionRecorded: true, 0, 0));
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    [Fact]
+    public void UndoEolConversion_BeforeSetSource_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            Assert.False(ctrl.UndoEolConversion(conversionRecorded: true, 0, 0));
+        });
 }
 
 // A-11: UIA イベント発火は静的な TestHook_ForceUiaListen を使うため、既存の
@@ -1017,6 +1155,43 @@ public class EditorControlConvertEolsUiaEventTests
                 Assert.Equal(8, c.CaretCharOffset);
                 Assert.Equal(
                     new[] { ("TextChanged", 8, 8, 16), ("SelectionChanged", 8, 8, 16) },
+                    adapter.Fired
+                );
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    // A-11 Task 4: ロールバック側も同じ契約で打つ。ここで固定するのは 3 つ:
+    //  - TextChanged / SelectionChanged を 1 回ずつ(ConvertEols と対称)
+    //  - 発火時点の caret / anchor が**保存前の位置**であること(UndoResult.CaretPos =
+    //    文書末尾 14 でも、旧機構の 0 でもない)
+    //  - 発火時点の TextLength が取り消し後の長さであること
+    //    = OnSnapshotChanged が発火より前に済んでいる(SR が読み直す本文が戻った本文になる)
+    [Fact]
+    public void UndoEolConversion_RaisesUiaEventsAfterCaretRestore() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var f = new Form();
+                using var c = new EditorControl();
+                f.Controls.Add(c);
+                _ = f.Handle;
+                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc")); // 14 文字
+                c.SetSelectionAnchored(anchor: 3, caret: 7); // 非既定位置・anchor != caret
+                var adapter = InjectRecordingAdapter(c);
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                Assert.True(recorded); // 前提
+                adapter.Fired.Clear(); // 変換の分は捨てて、取り消しの分だけを見る
+
+                c.UndoEolConversion(recorded, anchorBefore: 3, caretBefore: 7);
+
+                Assert.Equal(
+                    new[] { ("TextChanged", 7, 3, 14), ("SelectionChanged", 7, 3, 14) },
                     adapter.Fired
                 );
             }

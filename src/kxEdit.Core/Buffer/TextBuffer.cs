@@ -89,6 +89,23 @@ public sealed class TextBuffer
     public void ClearUndo() => _history.Clear();
 
     /// <summary>
+    /// A-11(2026-08-28): Redoスタックだけを破棄する(Undoスタック・保存点・coalescing 状態は不変)。
+    /// </summary>
+    /// <remarks>
+    /// 用途は「ユーザーが要求していない <see cref="Undo"/>」の後始末=保存失敗時の EOL 変換
+    /// ロールバック(<c>EditorControl.UndoEolConversion</c>)だけである。通常の <see cref="Undo"/> は
+    /// エントリを <c>_redo</c> へ積んで Ctrl+Y でやり直せるようにするが、ロールバックで積まれる
+    /// エントリは「全文の EOL 変換」であり、ユーザーが一度も要求していない操作を Ctrl+Y に
+    /// 差し出すことになる(やり直しメニューも有効化される)。そのため呼び出し側が明示的に捨てる。
+    /// <para>
+    /// 保存失敗<b>前</b>にユーザーが持っていた Redo は復元できない
+    /// (<c>ReplaceAllRecordingUndo</c> の <c>Record</c> が既に <c>_redo.Clear()</c> 済み=
+    /// 設計書 2026-08-28 §10.11 (4) で受容)。本メソッドは「空のまま維持する」だけである。
+    /// </para>
+    /// </remarks>
+    public void DropRedo() => _history.ClearRedo();
+
+    /// <summary>
     /// A-11(2026-08-28): <paramref name="rebuilt"/> が指す木へ全文を差し替え、
     /// <b>1 Undo 単位として記録する</b>。保存時のEOL一括変換(<c>EditorControl.ConvertEols</c>)で
     /// Undo/Redo履歴が全消去されるのを防ぐための経路。

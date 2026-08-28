@@ -446,6 +446,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 変換を Undo 履歴へ記録したら true。fast-path(すでに目的 EOL で統一済み)・SetSource 前・
     /// 記録の結果が無変化だった場合は false。<b>呼び出し側は経路から推論せず本戻り値で判定する</b>
     /// (A-11: false のときに Undo を打つと直前のユーザー編集を巻き戻してしまう)。
+    /// 取り消し方は <see cref="UndoEolConversion"/> を使う(<see cref="Undo"/> は流用できない)。
     /// </returns>
     /// <remarks>
     /// <see cref="EolMode"/> は「以後の Enter 押下で挿入する改行」の設定であり、既存本文には
@@ -1399,6 +1400,92 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _caretCtrl.SetTo(pos, _buffer.Current);
         _caretCtrl.DesiredXpx = -1;
         AfterEdit();
+    }
+
+    /// <summary>
+    /// A-11(2026-08-28): 直前の <see cref="ConvertEols"/> が積んだ EOL 変換エントリを 1 つだけ
+    /// 取り消し、キャレット / 選択を<b>変換前の位置</b>へ戻す(保存失敗時のロールバック専用)。
+    /// 取り消したら true。
+    /// </summary>
+    /// <param name="conversionRecorded">
+    /// <see cref="ConvertEols"/> の戻り値をそのまま渡す(fast-path・SetSource 前・無変化なら false)。
+    /// </param>
+    /// <param name="anchorBefore"><see cref="ConvertEols"/> を呼ぶ<b>前</b>の <see cref="SelectionAnchor"/>。</param>
+    /// <param name="caretBefore"><see cref="ConvertEols"/> を呼ぶ<b>前</b>の <see cref="CaretCharOffset"/>。</param>
+    /// <remarks>
+    /// <b><see cref="Undo"/> を流用してはならない理由が 2 つある</b>:
+    /// <list type="number">
+    /// <item><see cref="Undo"/> は <see cref="ReadOnly"/> で早期 return する。<c>FileController.WriteToPath</c>
+    /// は <see cref="ConvertEols"/> の前後でだけ ReadOnly を外すので、catch 節に来る時点では
+    /// 復元済み= CSV グリッドモード(<c>CsvController.Editor.ReadOnly = true</c>)ではロールバックが
+    /// <b>黙って no-op</b> になる。本メソッドは ReadOnly を見ない(ユーザー編集ではなく、
+    /// 自分が直前に加えた変換の取り消しだから)。</item>
+    /// <item><see cref="Undo"/> はキャレットを <c>UndoResult.CaretPos</c>(全文差し替えでは
+    /// <b>文書末尾</b>)へ動かす。ユーザーが Ctrl+Z を押した場合はそれで妥当だが
+    /// (設計書 2026-08-28 §10.11 (5) で受容)、ロールバックはユーザーが Undo を要求していないので、
+    /// 保存失敗ダイアログの裏でキャレットが黙って末尾へ飛ぶ。本メソッドは戻り値を無視し、
+    /// 呼び出し元が変換前に捕捉した位置へ戻す(§10.12 (2) の決定)。EOL 変換前のオフセットは、
+    /// 変換を取り消した本文に対してそのまま有効である。</item>
+    /// </list>
+    /// <para>
+    /// <b>fast-path では絶対に取り消してはならない</b>: <see cref="ConvertEols"/> が何も記録して
+    /// いないのに <see cref="TextBuffer.Undo"/> を打つと、ユーザーの直前の編集が 1 つ消える
+    /// (設計書 §5.3)。判別は経路からの推論ではなく <paramref name="conversionRecorded"/> で行う。
+    /// </para>
+    /// <para>
+    /// <b>スクロール位置(<c>_topLine</c> / <c>_topSegment</c> / <c>_scrollX</c>)には触れない。</b>
+    /// これが §10.12 (2) の「スクロールを保存前の位置へ戻す」の実装である:
+    /// <see cref="ConvertEols"/> の in-place 化以降、変換もルート差し戻しもスクロール状態を
+    /// 動かさないため、<b>何もしないことが復元</b>になる。逆に <see cref="AfterEdit"/> を呼ぶと
+    /// <c>BringCaretIntoView</c> が復元済みの表示位置を動かし、<c>UpdateHorizontalScrollbar</c> が
+    /// 復元済みの <c>_topLine</c> で評価されて <c>_scrollX</c> を落とす(設計書 §10.13 (7))。
+    /// 垂直スクロールバーの再計算も不要である(EOL 変換は <c>LineCount</c> を変えないので
+    /// 取り消しても行数は同じ)。
+    /// </para>
+    /// <para>
+    /// 通知契約(UIA スナップショット / TextChanged / SelectionChanged / <see cref="UpdateUI"/> /
+    /// <c>Invalidate</c> / system caret 再配置)は <see cref="ConvertEols"/> の鏡写しで打つ。
+    /// <c>_wasModified</c> も <see cref="ConvertEols"/> と同じく<b>代入で揃える</b>=保存処理の途中で
+    /// <see cref="SavePointReached"/> を焚かない(main のロールバックもイベントを焚かなかった。
+    /// 設計書 §10.12 (1) と対称)。
+    /// </para>
+    /// <para>
+    /// IME 未確定の確定キャンセルは行わない: <paramref name="conversionRecorded"/> が true なら
+    /// <see cref="ConvertEols"/> が非 fast-path を通って既にキャンセル済みで、そこから本メソッドまでの
+    /// 間(<c>TextFileService.Save</c>)に新しい composition は始まらない。
+    /// </para>
+    /// <para>
+    /// Redo スタックは <see cref="TextBuffer.DropRedo"/> で捨てる。ユーザーが一度も要求していない
+    /// 「全文 EOL 変換」を Ctrl+Y に差し出さないため(設計書 §5.3 の「Redo の扱い」の結論)。
+    /// </para>
+    /// </remarks>
+    public bool UndoEolConversion(bool conversionRecorded, int anchorBefore, int caretBefore)
+    {
+        // fast-path(何も記録していない)で 1 つ戻すと、ユーザーの直前の編集が消える。
+        // 経路ではなく ConvertEols の戻り値で判定する=唯一の根拠。
+        if (!conversionRecorded || _buffer is null)
+            return false;
+        if (_buffer.Undo() is null)
+            return false;
+        _buffer.DropRedo();
+        var snap = _buffer.Current;
+        _caretCtrl.DesiredXpx = -1; // キャレットが動く経路の共通作法(縦移動の目標 X を捨てる)
+        // UndoResult.CaretPos(=文書末尾)は使わない。変換前のオフセットは取り消し後の本文に
+        // そのまま有効なので、呼び出し元が捕捉した anchor/caret を復元する(SetSelection がクランプ)。
+        _caretCtrl.SetSelection(anchorBefore, caretBefore, snap);
+        // ConvertEols と同じく caret 復元の直後(RPC スレッドから見える窓を最小にする)。
+        _uia.OnSnapshotChanged(snap);
+        if (_hasFocus)
+            PositionCaret();
+        Invalidate();
+        // ConvertEols と同じ扱い: 遷移検出(AfterEdit)に載せず代入で揃える。ここで
+        // SavePointReached を焚くと「保存に失敗しただけ」なのに保存点到達イベントが飛ぶ。
+        _wasModified = _buffer.Modified;
+        _uia.RaiseTextChanged();
+        if (RaiseUiaSelectionEvents)
+            _uia.RaiseSelectionChanged();
+        UpdateUI?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     /// <summary>

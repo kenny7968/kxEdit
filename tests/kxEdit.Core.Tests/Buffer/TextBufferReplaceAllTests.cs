@@ -220,4 +220,51 @@ public class TextBufferReplaceAllTests
         Assert.False(buf.ReplaceAllRecordingUndo(other));
         Assert.False(buf.CanUndo);
     }
+
+    // ===== DropRedo(A-11 Task 4: 保存失敗ロールバックの後始末)=====
+
+    // 契約: Redo スタック**だけ**を捨てる。Undo スタック・保存点・coalescing 状態には触れない。
+    // Clear() に取り違える変異は CanUndo / Undo 後の本文で撃墜する。
+    [Fact]
+    public void DropRedo_ClearsRedoOnly_AndKeepsUndoStack()
+    {
+        var buf = TextBuffer.FromString("a");
+        buf.Insert(1, "\nX"); // 履歴 1
+        buf.BreakUndoCoalescing();
+        buf.Insert(3, "\nY"); // 履歴 2
+        buf.Undo(); // Redo が立つ
+        Assert.True(buf.CanRedo); // 前提: 非既定状態(捨てる対象が実在する)
+        Assert.True(buf.CanUndo);
+
+        buf.DropRedo();
+
+        Assert.False(buf.CanRedo);
+        Assert.Null(buf.Redo()); // 実際にやり直せない(CanRedo だけの見かけ倒しでない)
+        Assert.Equal("a\nX", FullText(buf)); // Redo() が本文を進めていない
+        // Undo スタックは無傷=残りを最後まで戻せる(Clear() 変異はここで落ちる)。
+        Assert.True(buf.CanUndo);
+        buf.Undo();
+        Assert.Equal("a", FullText(buf));
+    }
+
+    // 保存点(_savedRoot)には触れない。Modified が非既定(true)の状態から始めて、
+    // DropRedo が保存点判定に副作用を持たないことを見る。
+    [Fact]
+    public void DropRedo_DoesNotTouchSavePoint()
+    {
+        var buf = TextBuffer.FromString("a");
+        buf.MarkSaved();
+        buf.Insert(1, "Z"); // 保存点から外れる
+        buf.BreakUndoCoalescing(); // 融合させない=2 段の履歴にする
+        buf.Insert(2, "W");
+        buf.Undo();
+        Assert.True(buf.Modified); // 前提: 非既定(dirty のまま Redo が立っている)
+        Assert.True(buf.CanRedo);
+
+        buf.DropRedo();
+
+        Assert.True(buf.Modified);
+        buf.Undo();
+        Assert.False(buf.Modified); // 保存点まで戻れば従来どおり false へ復す
+    }
 }
