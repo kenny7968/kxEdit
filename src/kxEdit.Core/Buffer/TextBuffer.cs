@@ -89,10 +89,14 @@ public sealed class TextBuffer
     public void ClearUndo() => _history.Clear();
 
     /// <summary>
-    /// A-11(2026-08-28): <paramref name="rebuilt"/> が保持する木へ全文を差し替え、
+    /// A-11(2026-08-28): <paramref name="rebuilt"/> が指す木へ全文を差し替え、
     /// <b>1 Undo 単位として記録する</b>。保存時のEOL一括変換(<c>EditorControl.ConvertEols</c>)で
     /// Undo/Redo履歴が全消去されるのを防ぐための経路。
     /// </summary>
+    /// <param name="rebuilt">差し替え後の内容を持つスナップショット(木のルートだけを取り込む)。
+    /// 別の <see cref="TextBuffer"/> が構築・編集したものでよい。</param>
+    /// <returns>記録したら true。現在のルートと同一(無変化)で何もしなければ false。
+    /// 呼び出し側は「Undo 1 回で差し替え前へ戻せるか」をこの戻り値で判定する(経路から推論しない)。</returns>
     /// <remarks>
     /// Undoエントリは永続木のルート参照だけを持つので、全文差し替えでもテキストの実体化や
     /// 差分計算は要らない(コストはほぼゼロ)。
@@ -101,42 +105,49 @@ public sealed class TextBuffer
     /// Undoで変換前=保存点のルートへ戻れば <see cref="Modified"/> も自動的にfalseへ復す。
     /// </para>
     /// <para>
-    /// 文書上限(<see cref="MaxTotalBytes"/>)はここで再判定しない。<see cref="TextBuffer"/> は
-    /// <see cref="TextBufferBuilder.Build"/> 経由でしか生成できず(internal ctorの唯一の呼び出し元)、
-    /// ビルダーが構築時に上限判定と <c>DocumentTooLargeException</c> を持つ。ただし両者の
-    /// MaxTotalBytes は独立したテスト注入点なので、注入値を食い違わせた場合に限り
-    /// 本APIは自バッファの上限を超える木を取り込みうる(既定値は同一なので実運用では起きない)。
+    /// 通常の編集と同じく<b>Redoスタックを破棄する</b>(<c>UndoHistory.Record</c> の
+    /// <c>_redo.Clear()</c>。<c>Splice</c> と同じ契約)。
     /// </para>
     /// <para>
-    /// 別バッファ由来のルートを取り込んでよい根拠: <see cref="Piece"/> は自分のチャンク参照を持ち、
-    /// 読み取り経路はチャンクの出自を仮定しない。<c>_append</c>(<c>AppendBuffer</c>)は
-    /// 新規挿入テキストの置き場でしかなく、差し替え後もそのまま使い続けてよい。
-    /// <paramref name="rebuilt"/> 側が編集済みで、そのAppendBufferのブロックを指すピースを
-    /// 含んでいても安全である(AppendBufferの「公開済み範囲は以後不変」不変条件が効く)。
+    /// 文書上限(<see cref="MaxTotalBytes"/>)はここで再判定しない。取り込む木の上限は
+    /// 渡し手が担保する(<see cref="TextBufferBuilder"/> が構築時に判定し
+    /// <c>DocumentTooLargeException</c> を投げる)。
+    /// </para>
+    /// <para>
+    /// 別バッファ由来のスナップショットでよい: <c>Piece</c> は自分のチャンク参照を持ち、
+    /// 読み取り経路はチャンクの出自を仮定しない(編集中バッファのスナップショットでも
+    /// <c>AppendBuffer</c> の「公開済み範囲は以後不変」不変条件が効く)。
     /// </para>
     /// </remarks>
-    /// <param name="rebuilt">差し替え後の内容を保持するバッファ(ルートだけを取り込む)。</param>
-    public void ReplaceAllRecordingUndo(TextBuffer rebuilt)
+    public bool ReplaceAllRecordingUndo(TextSnapshot rebuilt)
     {
         ArgumentNullException.ThrowIfNull(rebuilt);
         var rootBefore = _current.Root;
-        var newRoot = rebuilt._current.Root;
+        var newRoot = rebuilt.Root;
         // 参照比較で無変化なら履歴を汚さない(Splice の早期returnと同じ契約)。内容比較はしない:
         // 全文の突合はO(n)で、呼び出し側(ConvertEols)が変換不要を先に判定できるため。
-        // 自分自身を渡した場合もここで抜ける。
+        // 自分自身のスナップショットを渡した場合もここで抜ける。
         if (ReferenceEquals(rootBefore, newRoot))
-            return;
+            return false;
+
         int removed = _current.CharLength;
-        int inserted = rebuilt._current.CharLength;
-        // 全文差し替えは単一Undo単位。融合を前後どちらの向きにも起こさせない:
-        //  ・前(直前の小編集へ融合させない)= Record 前の BreakCoalescing。
-        //    通常形(removed>0 かつ inserted>0)はそもそも融合不可だが、全文削除形
-        //    (inserted==0 かつ removed≤2)はpureDeleteとして直前のBackspaceへ逆方向融合しうる
-        //    (pureDelete側の判定は insertHasBreak を見ない)。
-        //  ・後(直後の小編集を融合させない)= insertHasBreak: true。効くのは空文書→1〜2文字の
-        //    純挿入形だけで、通常形ではpureInsertにならないため判定に届かない。
-        _history.BreakCoalescing();
+        int inserted = rebuilt.CharLength;
         _current = new TextSnapshot(newRoot);
+
+        // 全文差し替えは単一Undo単位。EOL変換が作る通常形(removed>0 かつ inserted>0)は
+        // Record の融合判定(pureInsert / pureDelete)に構造的に掛からないので、次の2つの
+        // ガードが実際に効くのは退化形だけである。どちらも公開API契約のための防御で、
+        // ConvertEols 経路からは発生しない(EOL変換は本文を空にも非空にもしない):
+        //  ・前置 BreakCoalescing = 全文→空(純削除形・removed≤2)が直前の1〜2文字削除へ
+        //    逆方向融合(Backspace継続扱い)するのを止める。pureDelete側の判定は
+        //    insertHasBreak を見ないので、この向きはフラグでは止められない。
+        //    早期returnの後に置く: 無変化パスで _open を倒すと「履歴を汚さない」契約が崩れる。
+        //  ・insertHasBreak: true = 空文書→1〜2文字(純挿入形)の直後のタイプがこのエントリへ
+        //    融合するのを止める(Record 末尾の _open = coalescable を false にする)。
+        // 純削除の退化形では Record 後に _open = true が残るが、差し替え後は空文書で後続の
+        // 融合可能な編集が来ない(削除は Splice の早期return、挿入は prev.RemovedLen == 0 の
+        // 条件で弾かれる)ため観測できない。
+        _history.BreakCoalescing();
         _history.Record(
             rootBefore,
             newRoot,
@@ -145,6 +156,7 @@ public sealed class TextBuffer
             insertedLen: inserted,
             insertHasBreak: true
         );
+        return true;
     }
 
     public void Insert(int pos, string text)

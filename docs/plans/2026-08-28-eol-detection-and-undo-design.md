@@ -664,3 +664,136 @@ root を既存 `TextBuffer` へ取り込んでよい」は成立する。
   (`rootBefore` / `newRoot` / `removed` / `inserted`)は代入より前に確定したローカルなので、
   2 文の順序は観測可能な差を生まない。**当てた変異はこの 9 件だけであり、
   「網が完全」という主張はしない**(§10.8 の教訓)。
+
+### 10.11 Task 2 レビュー反映(fixup)と §10.10 の訂正(2026-08-28 追記)
+
+仕様適合レビュー・前倒しコード品質レビュー(別エージェント 2 本)の指摘を反映した。
+**§10.10 は履歴として残し、誤り・陳腐化は本節で訂正する**(CLAUDE.md §8 の追記原則)。
+
+#### (1) 訂正: 設計書 §5.1 の `insertHasBreak` に関する主張は 2 通りに誤っていた
+
+§5.1 は「`insertHasBreak: true` にするのは coalescing を必ず切るため
+(EOL 変換は『≤2 文字の連続タイピング』ではないので、直前のタイプ操作へ融合させてはならない)」
+と書いている。両レビュアーの独立検証により、次の 2 点で誤りと確定した(§5.1 自体は書き換えない)。
+
+1. **「必ず切る」は成立しない**。`UndoHistory.Record` の融合判定は `pureInsert` / `pureDelete` の
+   形でしか通らず、EOL 変換が作る通常形(`removed > 0` かつ `inserted > 0`)では
+   `insertHasBreak` は**参照すらされない**。
+2. **括弧内の向きが逆**。`insertHasBreak` が左右するのは `_open = coalescable`、すなわち
+   **後続**編集の融合可否である。「**直前**のタイプ操作への融合」は `pos = 0` では原理的に
+   起こらない(タイプ継続枝が `pos == prev.Pos + prev.InsertedLen && prev.InsertedLen > 0` を
+   要求するため、`pos = 0` と矛盾する)。
+
+実際に必要だったのは次の 2 本立てで、担い手が別である。
+
+| 止めたい融合 | 担い手 | 撃墜する fact |
+|---|---|---|
+| **後続**の小編集が差し替えエントリへ融合(空文書 → 1〜2 文字の純挿入形) | `insertHasBreak: true` | `..._PureInsertShape_DoesNotAbsorbFollowingTyping` |
+| **直前**の 1〜2 文字削除へ逆方向融合(全文 → 空の純削除形。`pureDelete` 側は `insertHasBreak` を見ない) | 前置 `BreakCoalescing()` | `..._PureDeleteShape_DoesNotMergeIntoPrecedingDelete` |
+
+**この 2 つの退化形は `ConvertEols` 経路からは発生しない**(EOL 変換は本文を空にも非空にもしない)。
+公開 API の契約を形に依らず成立させるための防御であり、A-11 の実害シナリオではない。
+
+#### (2) 訂正: §10.10 の変異表 M1 行が書いた撃墜「件数」は撤回する
+
+テスト数は文書に書かない(CLAUDE.md §5)。fact 追加で必ず陳腐化する。
+定性表現「早期 return と null ガードの fact 以外すべて」が正であり、数値は無効とする。
+
+#### (3) API シグネチャの変更(§5.1 からの逸脱・レビュー I-1 / I-2)
+
+```csharp
+public bool ReplaceAllRecordingUndo(TextSnapshot rebuilt)
+```
+
+- **戻り値 `bool`(記録したら true)**。Task 4 のロールバックは「Undo 1 回で差し替え前へ戻せるか」
+  の 1 bit に安全性が懸かる。戻り値が無いと `ConvertEols` 側が「非 fast-path を通った ⇒ 記録した」と
+  **推論**することになり、その推論は Editor 側 fast-path 判定(`IsEolAlreadyUniform`)と
+  Core 側早期 return という**独立した 2 コードの一致**に依存する。片方が変われば Task 4 が黙って
+  1 つ余分に Undo する=設計書 §5.3 が名指しした最悪シナリオ。推論を事実に置き換えた。
+- **引数を `TextBuffer` から `TextSnapshot` へ**。§5.1 は `TextBuffer` を受ける前提で書かれていたが、
+  「`TextBuffer` を受け取って root だけ盗み、履歴・保存点・`_append` を捨てる」契約は
+  **引数の型が嘘をついている**。`TextSnapshot` は public・不変で、既に読み取り経路の公開通貨。
+  §5.1 の要件「`PieceTree.Node` を public シグネチャへ露出させない」は同じく満たす。
+  自己渡しも `buf.ReplaceAllRecordingUndo(buf.Current)` と見るからに no-op になる。
+  これに伴い上限の説明も「取り込む木の上限は渡し手が担保する」へ改めた。
+
+#### (4) 受容: Redo スタックの破棄(レビュー I-4)
+
+`_history.Record` は `_redo.Clear()` を呼ぶ(`UndoHistory.cs:44`)。Task 4 に次の差が出る。
+
+| | 現行 main | 新設計(Task 4 後) |
+|---|---|---|
+| 入力 → Ctrl+Z(redo あり) | `_redo=[T]` | `_redo=[T]` |
+| Ctrl+S → `ConvertEols` | 新バッファへ差替(旧バッファの `_redo=[T]` は無傷) | **`_redo` を破棄** |
+| 保存失敗 → ロールバック | 旧バッファ参照へ戻す=`_redo=[T]` 復活 | `Undo()`=**ユーザーの redo は永久に失われる** |
+
+保存成功時は main と同じ(main も新バッファなので redo は消える)。**失敗時だけが挙動変更**。
+`_redo.Clear()` 済みから復元する手段が Core に無いため **Task 4 では原理的に直せない**。
+保存失敗と pending redo の同時発生は稀で、`_redo` の退避・復元 API を足すコストに見合わないため
+**受容**する。網は `..._DiscardsRedoStack`、XML doc にも 1 行明記した。
+
+#### (5) 受容: Undo 後のキャレットが文書末尾へ飛ぶ(レビュー I-5)
+
+`TextBuffer.Undo()` は `Pos + RemovedLen` を返し、全文差し替えでは `0 + 旧全長` = 文書末尾。
+`EditorControl.Undo()` がそれをキャレットに設定し `AfterEdit()` で追従スクロールするため、
+「文書途中で Ctrl+S(EOL 変換発生)→ Ctrl+Z」でキャレットと表示が末尾へ移動する。
+
+**受容**する。これは「全文を 1 Undo 単位にする」ことの標準的な帰結で、`Replace(0, len, text)` でも
+同じキャレットになる。Task 3 で `EditorControl` 側に EOL 変換専用の特例を作ると、汎用 Undo 経路に
+分岐が入って他の Undo 意味論を壊すリスクの方が大きい。
+
+**§8 の L5 チェックリスト項目 2 に追加する内容**(§8 は策定時記述なので本節に書く):
+現行の「Ctrl+Z → 変換前へ戻り、戻った旨が読まれること」に加え、
+**「文書の途中(例: 5,000 行目)で保存 → Ctrl+Z し、キャレットがどこへ移動するかを確認する」**を
+明示項目として実施する。実機で不評なら、Task 3 で `(m, k)` 復元位置へ戻す案を申し送りとして回収する。
+
+#### (6) 却下: `Record` の後にもう 1 回 `BreakCoalescing()` を置く案
+
+構造的に「前後どちらの向きも閉じる」形にはなるが、そうすると `insertHasBreak: true` が冗長になり
+M7 が等価変異に落ち、同時に「後置 `BreakCoalescing()` の削除」も等価変異になる。
+**撃墜できていた変異 1 件を失って等価変異 2 件を得る**取引で、観測可能な挙動は何も変わらない。
+現在の形は 2 つのガードがそれぞれ別の観測可能な仕事をしており、そちらが優れている。
+
+なお純削除の退化形では `Record` 後に `_open = true` が残るが、差し替え後は空文書で後続の融合可能な
+編集が来ない(削除は `Splice` の早期 return、挿入は `prev.RemovedLen == 0` の条件で弾かれる)ため
+**観測できない**。コードコメントもこの事実に合わせた。
+
+#### (7) 再実測: 変異 13 件(シグネチャ変更後の最終ソースに対して)
+
+I-1 / I-2 でシグネチャが変わったため**全変異を当て直した**。判定は exit code、
+適用差分を毎回 `diff` で目視してからテストを走らせている(§10.10 のハーネスの罠対策)。
+
+| 変異 | 結果 | 撃墜した fact |
+|---|---|---|
+| M1 `_history.Record(...)` を削除 | kill | 早期 return と null ガードの fact 以外すべて |
+| M2 `pos: 0` → `1` | kill | `..._UndoRedoCaretPos_IsEndOfDocument` |
+| M3 `removedLen` と `insertedLen` を入替 | kill | 同上 |
+| M4 早期 return を削除 | kill | `..._SameRoot_DoesNotRecord` ほか 2 件 |
+| M5 `_savedRoot = newRoot` を足す | kill | `..._ModifiedTogglesWithSavePoint` |
+| M6 `_current` 代入を `Record` の後へ移動 | **生存(等価変異)** | — |
+| M7 `insertHasBreak: true` → `false` | kill | `..._PureInsertShape_DoesNotAbsorbFollowingTyping` |
+| M8 前置 `BreakCoalescing()` を削除 | kill | `..._PureDeleteShape_DoesNotMergeIntoPrecedingDelete` |
+| M9 `ThrowIfNull` を削除 | kill | `..._Null_Throws` |
+| M10 `BreakCoalescing()` を早期 return の**前**へ移動 | 網追加前 **生存** → 追加後 kill | `..._SameRoot_DoesNotBreakCoalescing` |
+| M11 判定を `ReferenceEquals(_current, rebuilt)` へ | 網追加前 **生存** → 追加後 kill | `..._DistinctSnapshotWithSameRoot_DoesNotRecord` |
+| M12 末尾 `return true` → `false` | kill | `..._Undo_RestoresPreviousText` |
+| M13 早期 `return false` → `true` | kill | `..._SameRoot_DoesNotRecord` ほか 2 件 |
+
+- **M10 / M11 は両レビュアーが独立に見つけた穴**で、実測でも網追加前は生存した。
+  M10 は §10.10 が「早期 return の後に置く」と根拠まで書いた設計判断なのに網が無かった。
+  M11 は既存の `..._SameRoot_DoesNotRecord` が同一インスタンスを渡すため
+  「root 同一」と「インスタンス同一」を弁別できていなかった。空文書同士(別バッファ・別
+  スナップショット・どちらも `null` root)で弁別する fact を追加して撃墜した。
+- **M6 を等価変異と判断した根拠**: `UndoHistory.Record` は引数と `_undo` / `_redo` / `_open` しか
+  触らず `_current` を読まない。`BreakCoalescing()` も `_current` を読まない。渡す 4 値は
+  代入より前に確定したローカルなので、順序は観測可能な差を生まない。
+  **当てた変異はこの 13 件だけであり、「網が完全」という主張はしない**(§10.8 の教訓)。
+
+#### (8) Task 4 への申し送り: `DocumentTooLargeException` が catch フィルタを抜ける
+
+`ConvertEols` は LF → CRLF で総バイト数を増やすため、512 MB 直下の文書で
+`TextBufferBuilder.AddChunk` が `DocumentTooLargeException` を投げうる。しかし
+`FileController.WriteToPath` の catch フィルタ
+(`IOException or UnauthorizedAccessException or SecurityException or NotSupportedException or ArgumentException`)
+に一致せず、未処理で抜ける。**main 既存の穴**であり Task 2 の commit が作ったものではないが、
+Task 4 が catch 節を書き換えるので、そのタイミングで拾うか申し送るかを決める。

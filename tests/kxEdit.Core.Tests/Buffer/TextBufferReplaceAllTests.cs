@@ -9,7 +9,7 @@ namespace kxEdit.Core.Tests.Buffers;
 /// </summary>
 public class TextBufferReplaceAllTests
 {
-    private static TextBuffer Rebuilt(string text) => TextBuffer.FromString(text);
+    private static TextSnapshot Rebuilt(string text) => TextBuffer.FromString(text).Current;
 
     private static string FullText(TextBuffer b) => b.Current.GetText(0, b.Current.CharLength);
 
@@ -17,7 +17,7 @@ public class TextBufferReplaceAllTests
     public void ReplaceAllRecordingUndo_Undo_RestoresPreviousText()
     {
         var buf = TextBuffer.FromString("a\nb\nc");
-        buf.ReplaceAllRecordingUndo(Rebuilt("a\r\nb\r\nc"));
+        Assert.True(buf.ReplaceAllRecordingUndo(Rebuilt("a\r\nb\r\nc"))); // 記録した = true
 
         Assert.Equal("a\r\nb\r\nc", FullText(buf));
         Assert.True(buf.CanUndo);
@@ -36,6 +36,20 @@ public class TextBufferReplaceAllTests
         Assert.True(buf.CanRedo);
         buf.Redo();
         Assert.Equal("a\r\nb", FullText(buf));
+    }
+
+    // I-4: 通常の編集と同じく Redo スタックを破棄する(UndoHistory.Record の _redo.Clear())。
+    // Task 4 の保存失敗ロールバックでユーザーの redo が失われる帰結は受容(設計書 §10.11)。
+    [Fact]
+    public void ReplaceAllRecordingUndo_DiscardsRedoStack()
+    {
+        var buf = TextBuffer.FromString("a\nb");
+        buf.Insert(3, "Z");
+        buf.Undo();
+        Assert.True(buf.CanRedo);
+
+        buf.ReplaceAllRecordingUndo(Rebuilt("a\r\nb"));
+        Assert.False(buf.CanRedo);
     }
 
     // A-11 の本質的な回帰網: 差し替えの前に積んだ履歴が生き残ること。
@@ -76,11 +90,12 @@ public class TextBufferReplaceAllTests
         Assert.False(buf.Modified); // 保存点の root へ戻った
     }
 
-    // coalescing 境界(EOL 変換が作る通常形 = removed > 0 かつ inserted > 0)。
-    // 差し替えを直前・直後のタイプ操作で挟み、Undo 3 回でちょうど 3 段戻ることを固定する
-    // (融合すると 1 回の Undo で「入力 + EOL 変換」がまとめて消える)。
-    // 既定状態(履歴空)から始めると「直前へ融合しないこと」を検証できないため、
-    // 非既定状態=タイプ 1 回を積んだ状態から始める(CLAUDE.md §4-B)。
+    // EOL 変換が作る通常形(removed > 0 かつ inserted > 0)の characterization。
+    // この形は UndoHistory.Record の融合判定が pureInsert / pureDelete のどちらにもならず、
+    // 構造的に融合しない = 前置 BreakCoalescing / insertHasBreak のどちらを外しても結果は同じ
+    // (2 つのガードを実際に撃墜するのは下の退化形 2 件の fact)。
+    // ここで固定するのは「差し替えがタイプ 2 回の間で独立した 1 エントリになる」構造であり、
+    // Undo 3 回でちょうど 3 段戻ることを見ている。
     [Fact]
     public void ReplaceAllRecordingUndo_IsSingleUndoUnit_BetweenTypedEdits()
     {
@@ -168,12 +183,41 @@ public class TextBufferReplaceAllTests
     {
         var buf = TextBuffer.FromString("a\nb");
         buf.Insert(3, "Z");
-        var same = buf; // 同一インスタンス=同一 root
 
-        buf.ReplaceAllRecordingUndo(same);
+        // 同一 root のスナップショット(自分自身の Current)を渡す
+        Assert.False(buf.ReplaceAllRecordingUndo(buf.Current)); // 記録しなかった = false
 
         buf.Undo(); // 記録されていれば 1 回目の Undo が no-op 相当になり "a\nbZ" が残る
         Assert.Equal("a\nb", FullText(buf));
+        Assert.False(buf.CanUndo);
+    }
+
+    // 無変化パスは coalescing も汚さない(前置 BreakCoalescing を早期 return の「後」に置いた根拠)。
+    // 早期 return の前へ移すと _open が倒れ、直前のタイプの続きが別エントリになる。
+    [Fact]
+    public void ReplaceAllRecordingUndo_SameRoot_DoesNotBreakCoalescing()
+    {
+        var buf = TextBuffer.FromString("");
+        buf.Insert(0, "a"); // coalescing が開いた状態
+        Assert.False(buf.ReplaceAllRecordingUndo(buf.Current));
+        buf.Insert(1, "b"); // 直前のタイプへ融合し続けるはず
+
+        buf.Undo();
+        Assert.Equal("", FullText(buf)); // 融合が生きていれば 1 エントリで両方戻る
+    }
+
+    // 早期 return の判定基準が「root 同一」であることを、インスタンス同一と弁別できる形で固定する。
+    // 空文書同士は別バッファ・別スナップショットだが BuildBalanced がどちらも null root を返す。
+    // 判定を ReferenceEquals(_current, rebuilt) に変えると、ここで removed=0 / inserted=0 の
+    // 死んだ Undo 段が積まれる(..._SameRoot_DoesNotRecord は同一インスタンスなので弁別できない)。
+    [Fact]
+    public void ReplaceAllRecordingUndo_DistinctSnapshotWithSameRoot_DoesNotRecord()
+    {
+        var buf = TextBuffer.FromString("");
+        var other = TextBuffer.FromString("").Current;
+        Assert.NotSame(buf.Current, other); // 前提: スナップショットは別インスタンス
+
+        Assert.False(buf.ReplaceAllRecordingUndo(other));
         Assert.False(buf.CanUndo);
     }
 }
