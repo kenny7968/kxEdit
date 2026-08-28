@@ -1,0 +1,354 @@
+# 改行コード判定窓と EOL 変換の Undo 消失(A-9 / A-11)設計書
+
+- 日付: 2026-08-28
+- 対象: [v0.2 リリース前バグ監査](./2026-08-22-v0.2-release-bug-audit.md) §4 の **A-9** / **A-11**
+- ブランチ: `feature/eol-detection-and-undo`
+
+---
+
+## 1. 目的
+
+上書き保存で本文が無警告に書き換わり、しかも Undo で戻せない導線を塞ぐ。
+
+- **A-9** — 改行コード判定が読み込み後バッファの先頭 4,096 文字だけを見るため、
+  1 行目が 4,096 文字を超える LF ファイル(ミニファイ JSON・長いヘッダ行の CSV)が
+  CRLF と誤判定される。Ctrl+S で全行が CRLF 化されるが、Modified は立たず警告も出ない。
+- **A-11** — 保存経路の `ConvertEols` が非 fast-path で `ReplaceSource(builder.Build())` を呼び、
+  新しい `TextBuffer` に差し替わるため **Undo/Redo 履歴が全消去**される。
+  CRLF 文書に LF 混じりを貼って Ctrl+S すると、直後の Ctrl+Z が無反応になる。
+
+2 件を 1 ブランチにまとめる根拠は、症状が 1 本の線でつながることにある
+(A-9 が誤った EOL 変換を起動し、A-11 がその結果からの復旧路を奪う)。
+A-9 が引き金を減らし、A-11 が踏んだ後の復旧路を作る、という多層防御の関係にある。
+一方で修正面は Core の検出側と Editor / App の変換側に分かれるため、タスクは分離できる(§6)。
+
+---
+
+## 2. 現行 main での実在確認(2026-08-28)
+
+### 2.1 A-9
+
+`src/kxEdit.Core/Text/TextFileService.cs:187-192`:
+
+```csharp
+// 4) LineEnding 検出。バッファ先頭 4KB を GetText して LineEndingDetector に流す
+//    (空バッファなら 0 バイト=CRLF 既定)。
+var snap = buffer.Current;
+int probeChars = Math.Min(4096, snap.CharLength);
+string lineProbe = probeChars > 0 ? snap.GetText(0, probeChars) : string.Empty;
+LineEnding eol = LineEndingDetector.Detect(lineProbe);
+```
+
+`LineEndingDetector.Detect`(`src/kxEdit.Core/Text/LineEnding.cs`)は
+`crlf == 0 && lf == 0 && cr == 0` のとき `LineEnding.Crlf` を返す。
+窓内に改行が 1 つも無い文書は、実際の改行が何であれ CRLF と判定される。
+
+この窓は P6 Task 10 の Stream 化で入った退行である(旧 `DecodeBytes` は全文判定だった)。
+監査は「CSV-L-2『EOL 検出 4KB 窓』として受容済みだが、無警告の全行書換は受容範囲を超える」と
+評価している。
+
+### 2.2 A-11
+
+`src/kxEdit.Editor/EditorControl.cs:447-565` の `ConvertEols` は、
+fast-path(`IsEolAlreadyUniform` が true)でなければ `TextBufferBuilder` で
+新しい `TextBuffer` を組み、`ReplaceSource(builder.Build())`(`:545`)で差し替える。
+
+`ReplaceSource`(`:274-309`)は `_buffer = buffer;` でバッファ参照ごと置き換えるため、
+新バッファが持つ `UndoHistory` は空のインスタンスになる。旧履歴は到達不能になって消える。
+
+保存経路は `App/FileController.cs:843` の `doc.Editor.ConvertEols(doc.Editor.EolMode)`。
+その直後に `SetSavePoint()` が走るので Modified も立たない。
+
+### 2.3 A-11 を安く直せる根拠(実装調査で判明した事実)
+
+`UndoHistory`(`src/kxEdit.Core/Buffer/UndoHistory.cs`)のエントリは
+**永続木の root 参照 + 位置情報だけ**を持つ:
+
+```csharp
+internal readonly record struct Entry(
+    PieceTree.Node? RootBefore,
+    PieceTree.Node? RootAfter,
+    int Pos,
+    int RemovedLen,
+    int InsertedLen
+);
+```
+
+`TextBuffer.Undo()` は `_current = new TextSnapshot(e.Value.RootBefore);` するだけである。
+したがって **全文 EOL 変換を 1 エントリとして記録するコストはほぼゼロ**(テキストの実体化も
+差分計算も不要)。`ConvertEols` はすでに変換後の木を `TextBufferBuilder.Build()` で
+手に入れているので、その root を「1 Undo 単位の編集」として現在のバッファへ記録すればよい。
+
+---
+
+## 3. 決定した方針(2026-08-28・ユーザー承認済み)
+
+| 項目 | 決定 | 却下した対案と理由 |
+|------|------|------------------|
+| A-9 の検出範囲 | **全文バイトスキャン**。4,096 文字窓を撤廃し、PieceTree を byte 走査して CRLF / LF / CR を数える | 「改行 0 件のときだけ窓を延長する」= 報告症状しか塞がず、混在ファイルの誤判定が残る。「デコード中に数える」= 追加パスは無くせるが `LoadAsBuffer` の戻り値と責務が膨らむ |
+| A-11 の直し方 | **`ConvertEols` を 1 Undo 単位の編集にする**。`TextBuffer` に構築済み root を記録付きで差し替える API を足し、`ReplaceSource` をやめる | 「書き出し側で EOL 変換してバッファを触らない」= M-31 系の副作用まで一掃できるが、保存後もメモリ上は EOL 混在のまま残る**挙動変更**になる(§7 で申し送り)。「ReplaceSource 時に旧履歴を移植」= 変換で char オフセットが変わるため Undo が壊れる |
+
+監査 A-11 が引く「Scintilla の `SCI_CONVERTEOLS` は undo 可だった」という基準は、
+採用案(バッファは変換され、その変換を Undo で戻せる)と一致する。
+
+---
+
+## 4. 設計 — A-9(検出範囲)
+
+### 4.1 変更点
+
+`LineEndingDetector` に `TextSnapshot` を直接受ける判定を足し、`TextFileService` はそれを呼ぶ。
+`string` を受ける既存 `Detect(string)` は他所からも使われうるので**残す**(削らない)。
+
+- **新**: `LineEndingDetector.Detect(TextSnapshot snap)` — PieceTree を byte 走査して
+  CRLF / LF / CR を数え、既存 `Detect(string)` と**同じ多数決規則**で `LineEnding` を返す。
+- **変更**: `TextFileService.LoadAsBufferAuto` の 4)節を `LineEndingDetector.Detect(snap)` に置換。
+
+判定規則は現行と厳密に同一に保つ(移すのは走査範囲だけで、多数決の意味論は変えない):
+
+- 3 種すべて 0 件 → `Crlf`(空ファイルが CRLF 既定になる現行挙動は維持する。
+  `LoadAuto_EmptyFile_UsesUtf8Default_AndReturnsEmptyBuffer` が固定している)
+- `crlf >= lf && crlf >= cr` → `Crlf`
+- それ以外は `lf >= cr` なら `Lf`、さもなくば `Cr`
+
+### 4.2 走査の形
+
+`EditorControl.IsEolAlreadyUniform`(`:601-662`)と同型の byte 走査にする。
+`PieceTree.Enumerate(snap.Root)` で piece を辿り、`piece.Chunk.Span.Slice(...)` を 1 byte ずつ見る。
+`string` の実体化をしないので、512MB 上限の文書でもピーク メモリは増えない。
+
+**ピース境界の CR は `pendingCr` で持ち越す**。piece の末尾が `0x0D` のとき、
+次 piece の先頭が `0x0A` なら CRLF 1 件、そうでなければ CR 単独 1 件として数える。
+全 piece 走査後に `pendingCr` が残っていれば文書末尾の単独 CR = CR 1 件。
+この持ち越しを落とすと、4MB チャンク境界に CRLF が落ちた文書で CRLF が CR + LF に化けて
+多数決が反転しうる(`ConvertEols` が同じ罠を `pendingCr` で回避している)。
+
+UTF-8 では `0x0D` / `0x0A` はマルチバイト文字の継続バイトとして出現しない(継続バイトは
+すべて `0x80` 以上)ので、byte 走査と char 走査は同じ結果を返す。
+
+### 4.3 コスト
+
+読み込み済みバッファに対する 1 パスの byte 走査が増える。
+`LoadAsBufferAuto` はすでにファイル全体をストリームで読み・デコードし・
+`TextBufferBuilder` が全 byte を `Utf8Sanitizer.Sanitize` に通している。
+そこへメモリ上の 1 パスが増えるだけなので、相対コストは小さい。
+P6 Task 10 以前(`DecodeBytes` 全文判定)へ戻す変更でもある。
+
+### 4.4 A-9 修正後も残るもの(意図的)
+
+EOL が**混在**しているファイルは、修正後も多数決で決まった EOL に保存時へ黙って統一される。
+これは A-9 の対象外(長年の挙動)であり、本ブランチでは変えない。
+ただし A-11 の修正により、その変換は **Ctrl+Z で戻せる**ようになる。
+A-9 が「誤った引き金」を消し、A-11 が「踏んだ後の復旧路」を作る、という関係になる。
+
+---
+
+## 5. 設計 — A-11(EOL 変換を Undo 可能にする)
+
+### 5.1 Core: 記録付きの全文差し替え API
+
+`TextBuffer` に、構築済みの root を 1 Undo エントリとして記録しつつ現在スナップショットへ
+差し替える public API を足す(名称は実装時に確定。本書では仮に `ReplaceAllRecordingUndo` と呼ぶ)。
+
+契約:
+
+- 引数は `TextBufferBuilder.Build()` が返した `TextBuffer`(= 変換後の木の持ち主)。
+  root だけを取り込む。`PieceTree.Node` は Core 内部型なので、public シグネチャに露出させない。
+- `_history.Record(rootBefore, newRoot, pos: 0, removedLen: 旧 CharLength, insertedLen: 新 CharLength,
+  insertHasBreak: true)` を呼ぶ。`insertHasBreak: true` にするのは coalescing を必ず切るため
+  (EOL 変換は「≤2 文字の連続タイピング」ではないので、直前のタイプ操作へ融合させてはならない)。
+- `_current = new TextSnapshot(newRoot)` で差し替える。
+- `_savedRoot` は**触らない**。これにより「保存点に Undo で戻ると Modified が false に戻る」
+  という既存の参照比較セマンティクスがそのまま効く。
+- `MaxTotalBytes` 上限: EOL 変換で総 byte 数は増えうる(LF → CRLF)。
+  ただし木は `TextBufferBuilder` 側ですでに構築済みで、`TextBufferBuilder` 自身が
+  `MaxTotalBytes` 判定と `DocumentTooLargeException` を持つ。二重判定にせず、
+  ビルダー側のガードに委ねる(実装時に上限の重複判定が無いことを確認する)。
+
+**別チャンク由来の root を取り込んでよい根拠**: `TextBuffer._append`(`AppendBuffer`)は
+新規挿入テキストの置き場でしかなく、`Piece` は自分の `Chunk` 参照を持つ。
+`PieceTree` の操作は `Piece.Stats` のモノイド結合だけで完結し、
+「全 piece が `_append` 由来である」ことをどこも仮定していない。
+`TextBufferBuilder` が作る `TextChunk` は不変で、root から到達可能な限り生存する。
+**この不変条件は実装タスクで検証してから依存する**(§6 Task 2 の受け入れ条件)。
+
+### 5.2 Editor: `ConvertEols` の切替
+
+`EditorControl.ConvertEols` の `ReplaceSource(builder.Build());`(`:545`)を
+新 API 経由の in-place 差し替えに置き換える。**保たなければならない現行契約**:
+
+| 契約 | 現状の担い手 | 切替後 |
+|------|------------|-------|
+| caret / anchor の論理位置復元 | `(m, k)` 分解 → `SetSelection`(`:549-554`) | そのまま維持(バッファ参照は変わらないが `_caretCtrl` の再設定は必要 — 変換で char 位置がずれるため) |
+| `_topLine` / `_topSegment` / `_scrollX` 復元 | `SetTopPosition` + `ScrollX`(`:556-557`) | そのまま維持 |
+| system caret 再配置 | `PositionCaret()`(`:562-563`) | そのまま維持 |
+| UIA スナップショット更新 | `ReplaceSource` 内の `_uia.OnSnapshotChanged` | **明示的に呼ぶ**(`ReplaceSource` を通らなくなるため) |
+| UIA `TextChanged` 発火 | `ReplaceSource` 内の `_uia.RaiseTextChanged()` | **明示的に呼ぶ** |
+| `UpdateUI` 発火 | `ReplaceSource` 内 | **明示的に呼ぶ**(ステータスバー更新契機) |
+| スクロールバー同期 / `Invalidate` | `ReplaceSource` 内 | **明示的に呼ぶ** |
+| `_cellHighlight` 無効化 | `ReplaceSource` 内 | **維持する**(EOL 変換でセルのオフセットは動く) |
+| IME 未確定の確定キャンセル | `ReplaceSource` 冒頭の `if (IsComposing) CancelCompositionAndDefault()` | **維持する** |
+
+**意図的に変える点が 1 つある** — `ReplaceSource` は `_caretCtrl.SetTo(0, ...)` で
+キャレットを一度 0 に潰し、`RaiseUiaSelectionEvents` が有効なら
+`_uia.RaiseSelectionChanged()` を **caret=0 の状態で**発火する。
+監査 A-11 が「副作用として UIA `SelectionChanged` が caret=0 で先に飛ぶ」と書いている挙動である。
+in-place 化するとこの中間状態が消えるので、**caret 復元後に 1 回だけ**
+`SelectionChanged` を発火する形になる。これは A-11 が指摘した副作用の解消であり、
+挙動変更として PR description に明記する。SR の実発声への影響は L5 でのみ判定できる。
+
+fast-path(`IsEolAlreadyUniform` が true)は現状のまま変更しない。
+
+### 5.3 App: 保存失敗ロールバックの置き換え
+
+**これが本ブランチで最も慎重な扱いを要する箇所である。**
+
+`FileController.WriteToPath`(`src/kxEdit.App/FileController.cs:821-892`)は、
+保存失敗時に本文と保存点を戻すため
+
+```csharp
+var snapshotBefore = doc.Editor.CurrentBuffer;   // ConvertEols 前のバッファ参照を握る
+...
+if (!ReferenceEquals(doc.Editor.CurrentBuffer, snapshotBefore))
+    doc.Editor.SetOrReplaceSource(snapshotBefore);
+```
+
+という機構を持つ。これは「`ConvertEols` が**バッファ参照ごと差し替える**ので、
+旧参照の `_savedRoot` / `_current` は無傷のまま残っている」という前提に**全面的に依存**している。
+in-place 化するとこの前提が崩れ、**ロールバックが黙って no-op になる**
+(`ReferenceEquals` が常に true になるため)。放置すると
+「保存に失敗したのに本文の EOL は書き換わったまま」という silent な状態が残る。
+
+置き換え方針: `ConvertEols` が積んだ Undo エントリを 1 つ戻す。
+`EditorControl` 側に「直前の EOL 変換を取り消す」導線を用意し、
+`WriteToPath` の catch 節はそれを呼ぶ。要件:
+
+- **fast-path で何も積んでいない場合は no-op でなければならない**。
+  `ConvertEols` が変換を行ったかどうかを呼び出し元が知る必要がある
+  (`ConvertEols` の戻り値化、または `WriteToPath` 側で fast-path 判定を持つ)。
+  誤って 1 つ余分に Undo すると、**保存失敗時にユーザーの直前の編集が消える**。
+- 保存点(`Modified`)も一緒に戻ること。`_savedRoot` を触らない設計(§5.1)なので、
+  root が変換前に戻れば参照比較で `Modified` も自動的に元へ戻る。
+- Redo スタックを汚さない扱いを決める(`PopUndo` は `_redo` へ積む)。
+  保存失敗のロールバックが Ctrl+Y で「やり直せる」のは不自然なので、
+  実装時に Redo を捨てるか否かを決めて設計書へ追記する。
+
+`WriteToPath` の XML doc コメント(`:812-819`)は旧機構を詳細に説明しているので、
+新機構の説明へ**書き換える**(古い説明を残すと次の読者を誤導する)。
+
+---
+
+## 6. タスク分割
+
+| # | 内容 | 層 | 追加レビュー |
+|---|------|-----|------------|
+| 1 | A-9: `LineEndingDetector.Detect(TextSnapshot)` を追加し、`TextFileService` の 4,096 文字窓を撤廃 | L1 | — |
+| 2 | A-11: `TextBuffer` に記録付き全文差し替え API を追加 | L1 | **コード品質レビュー**(後続 2 タスクが依存する新 seam)+ **ミューテーション検証** |
+| 3 | A-11: `ConvertEols` を新 API へ切替。§5.2 の契約表を 1 行ずつ満たす | L2 | — |
+| 4 | A-11: `WriteToPath` のロールバックを新機構へ。XML doc も更新 | L3 | **仕様レビュー**(§5.3 の no-op 要件) |
+
+各タスクは実装 → 仕様レビュー → 指摘反映の順で進める(CLAUDE.md §3)。
+Task 2 は「後続タスクが依存する新しい抽象・seam」に該当するため前倒しでコード品質レビューを行う。
+セキュリティ敏感面(外部入力のパース・パス操作・プロセス起動・WebView・ネットワーク)には
+触れないため、脆弱性レビューの前倒しは行わない(最終ブランチレビューの脆弱性パスは実施する)。
+
+---
+
+## 7. テスト
+
+### 7.1 L1 — `kxEdit.Core.Tests`
+
+`Text/LineEndingDetectorTests.cs` / `Text/TextFileServiceLoadAsBufferAutoTests.cs` を拡張:
+
+- **A-9 の回帰網**: 1 行目が 4,096 文字を超える LF ファイルを読み、`LineEnding.Lf` が返ること。
+  fixture は先頭 4,096 文字に改行を 1 つも含まないこと(= 旧実装が確実に落ちる形)を
+  テスト内で明示する。**旧実装で赤になることを確認してから**新実装を入れる。
+- 同形の CR 版・CRLF 版。
+- ピース / チャンク境界に CRLF が跨る文書で CRLF が 2 件に割れないこと(§4.2)。
+  `EditorControlConvertEolsTests.ConvertEols_Utf8_LargeContent_ChunkBoundary_CrlfSpansChunks` が
+  使う fixture の作り方を流用する。
+- 混在文書の多数決が `Detect(string)` と一致すること(意味論不変の確認)。
+- 空ファイル → `Crlf` 既定が維持されること(既存テストで担保済み。削らない)。
+
+`Buffer/` に Task 2 の新 API のテスト:
+
+- 差し替え後に `Undo()` が変換前の本文へ戻ること / `Redo()` が変換後へ進むこと。
+- **既存履歴が消えないこと** — 編集を 2 回積んでから全文差し替えし、Undo 3 回で最初の状態まで
+  戻れること。これが A-11 の本質的な回帰網である。
+- 差し替え前後で `Modified` が期待どおり遷移し、Undo で保存点に戻ると `false` へ復すること。
+- coalescing が切れること(差し替え直後の 1 文字入力が差し替えエントリへ融合しない)。
+
+### 7.2 L2 — `kxEdit.Editor.Tests`
+
+`EditorControlConvertEolsTests.cs` を拡張。既存テスト(caret / anchor / チャンク境界 / 末尾単独 CR / fast-path)は
+**すべて維持**する(切替が挙動不変であることの対照群になる)。
+
+- 非 fast-path の `ConvertEols` 後に `CanUndo` が true で、Undo で変換前の本文へ戻ること。
+- `ConvertEols` 前に積んだ編集履歴が、変換後も Undo で辿れること。
+- fast-path では履歴に何も積まれないこと(no-change テストなので、
+  **非既定の状態から始める** — 履歴を 1 つ積んでおき、その数が変わらないことを見る。
+  CLAUDE.md §4-B の教訓)。
+
+### 7.3 L3 — `kxEdit.App.Tests`
+
+`FileControllerTests.cs` を拡張:
+
+- 保存失敗時に本文の EOL が変換前へ戻り、`Modified` が true のままであること
+  (既存のロールバック網があれば、それが新機構でも緑であることを確認する)。
+- **fast-path で保存失敗したとき、直前の編集が消えないこと**(§5.3 の no-op 要件)。
+  partial なロールバックを検出するため、fixture は「変換不要な EOL」かつ
+  「直前に Undo 可能な編集が 1 つ積まれている」状態から始める。
+
+### 7.4 ミューテーション検証
+
+**Task 2 の Undo 履歴管理部のみ**実施する。CLAUDE.md §4-A が
+「UNDO/REDO の履歴管理アルゴリズム」を有効な適用先として明示しており、
+本タスクはまさにそこへ新しいエントリ生成経路を足すため。
+
+検証対象は新 API の `Record` 引数(`pos` / `removedLen` / `insertedLen` / `insertHasBreak`)と
+`_savedRoot` を触らない判断。A-9 の検出ロジックはファイル入出力寄りだが、
+多数決の比較演算子(`>=`)は境界が効くため、**変異が生存したら網を足す**方針で
+スポットチェックに留める(全面適用はしない)。
+
+`ConvertEols` の GUI 側(caret / スクロール復元)と `WriteToPath` の
+ダイアログ経路には**適用しない**(CLAUDE.md §4-A の禁止領域)。
+
+---
+
+## 8. L5(実機 SR 検証)
+
+**必要と判定する**。§5.2 のとおり UIA の発火経路が変わる
+(`ReplaceSource` 経由の caret=0 中間状態が消え、`SelectionChanged` が
+caret 復元後の 1 回になる)。CLAUDE.md §5 の「SR 経路に触れる変更は必須」に該当する。
+
+チェックリストは実装完了時に `docs/plans/2026-08-28-eol-detection-and-undo-l5-checklist.md` へ作る。
+最低限の項目:
+
+1. LF 文書を CRLF 設定で Ctrl+S → 保存直後のキャレット位置が発声上ずれないこと。
+2. 同上の直後に Ctrl+Z → 変換前へ戻り、戻った旨が読まれること。
+3. 1 行目が 4,096 文字超の LF ファイルを開いて Ctrl+S → ステータスバーの EOL 表示が LF のままで、
+   保存後もファイルが LF であること(晴眼確認 + SR での EOL 読み上げ)。
+
+---
+
+## 9. 非目標(YAGNI)
+
+- **EOL 混在の警告ダイアログを出さない**。A-10 で入れた符号化劣化警告と同型の確認を
+  EOL にも足す案はあるが、A-9 の修正で誤検出が消え、A-11 の修正で Undo できるようになれば
+  「無警告のデータ書換」という監査の指摘は解消する。保存のたびにダイアログが増えるコストに見合わない。
+- **保存時の EOL 統一をやめない**(= 書き出し側変換への移行)。§3 のとおり挙動変更になるため
+  本ブランチでは扱わず、§10 の申し送りへ回す。
+- **文字コード判定窓(64KB・M-16)には触れない**。受容済みトレードオフであり、別テーマ。
+- **`Detect(string)` を削除しない**。呼び出し元の棚卸しは本テーマの範囲外。
+
+---
+
+## 10. 申し送り(実装時・レビュー時に追記する)
+
+- **書き出し側 EOL 変換案**: `TextFileService.Save` が EOL を変換しながら書けば、
+  バッファを一切触らずに済む。A-11 のロールバック機構(§5.3)そのものが不要になり、
+  監査 M-25(CSV F2 編集中に `ConvertEols` 差替え後の古い `start/length` で別位置を書換)も
+  同時に消える。代償は「保存後もメモリ上は EOL 混在のまま」という挙動変更。
+  次リリース以降のテーマ候補として記録する。
+- **A-9 の残余**: EOL が混在する文書は修正後も多数決で黙って統一される(§4.4)。
+  説明書へ明記するか否かは未決。
