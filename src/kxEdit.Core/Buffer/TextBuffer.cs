@@ -88,6 +88,101 @@ public sealed class TextBuffer
     /// <summary>EmptyUndoBuffer相当。両スタック破棄(保存点は維持)。</summary>
     public void ClearUndo() => _history.Clear();
 
+    /// <summary>
+    /// A-11(2026-08-28): Redoスタックだけを破棄する(Undoスタック・保存点・coalescing 状態は不変)。
+    /// </summary>
+    /// <remarks>
+    /// 用途は「ユーザーが要求していない <see cref="Undo"/>」の後始末=保存失敗時の EOL 変換
+    /// ロールバック(<c>EditorControl.UndoEolConversion</c>)だけである。通常の <see cref="Undo"/> は
+    /// エントリを <c>_redo</c> へ積んで Ctrl+Y でやり直せるようにするが、ロールバックで積まれる
+    /// エントリは「全文の EOL 変換」であり、ユーザーが一度も要求していない操作を Ctrl+Y に
+    /// 差し出すことになる(やり直しメニューも有効化される)。そのため呼び出し側が明示的に捨てる。
+    /// <para>
+    /// 保存失敗<b>前</b>にユーザーが持っていた Redo は復元できない
+    /// (<c>ReplaceAllRecordingUndo</c> の <c>Record</c> が既に <c>_redo.Clear()</c> 済み=
+    /// 設計書 2026-08-28 §10.11 (4) で受容)。本メソッドは「空のまま維持する」だけである。
+    /// </para>
+    /// </remarks>
+    public void DropRedo() => _history.ClearRedo();
+
+    /// <summary>
+    /// A-11(2026-08-28): <paramref name="rebuilt"/> が指す木へ全文を差し替え、
+    /// <b>1 Undo 単位として記録する</b>。保存時のEOL一括変換(<c>EditorControl.ConvertEols</c>)で
+    /// Undo/Redo履歴が全消去されるのを防ぐための経路。
+    /// </summary>
+    /// <param name="rebuilt">差し替え後の内容を持つスナップショット(木のルートだけを取り込む)。
+    /// 別の <see cref="TextBuffer"/> が構築・編集したものでよい。</param>
+    /// <returns>記録したら true。現在のルートと同一(無変化)で何もしなければ false。
+    /// 呼び出し側は「Undo 1 回で差し替え前へ戻せるか」をこの戻り値で判定する(経路から推論しない)。</returns>
+    /// <remarks>
+    /// Undoエントリは永続木のルート参照だけを持つので、全文差し替えでもテキストの実体化や
+    /// 差分計算は要らない(コストはほぼゼロ)。
+    /// <para>
+    /// <c>_savedRoot</c> は<b>触らない</b>: 保存点はルートの参照比較で判定されるため、
+    /// Undoで変換前=保存点のルートへ戻れば <see cref="Modified"/> も自動的にfalseへ復す。
+    /// </para>
+    /// <para>
+    /// 通常の編集と同じく<b>Redoスタックを破棄する</b>(<c>UndoHistory.Record</c> の
+    /// <c>_redo.Clear()</c>。<c>Splice</c> と同じ契約)。
+    /// </para>
+    /// <para>
+    /// <b>メモリ</b>: 差し替え<b>前</b>の木は Undo エントリ(<c>RootBefore</c>)が保持し続ける。
+    /// <paramref name="rebuilt"/> が別バッファ由来だとバイト列を共有しないため、全文 EOL 変換では
+    /// 文書 1 つぶんのメモリが増える(<c>UndoHistory</c> にエントリ数の上限は無い)。
+    /// 「Undo で戻せる」ことは「戻し先を持っている」ことなので、これは本 API に内在するコストである
+    /// (設計書 2026-08-28 §10.15)。
+    /// </para>
+    /// <para>
+    /// 文書上限(<see cref="MaxTotalBytes"/>)はここで再判定しない。取り込む木の上限は
+    /// 渡し手が担保する(<see cref="TextBufferBuilder"/> が構築時に判定し
+    /// <c>DocumentTooLargeException</c> を投げる)。
+    /// </para>
+    /// <para>
+    /// 別バッファ由来のスナップショットでよい: <c>Piece</c> は自分のチャンク参照を持ち、
+    /// 読み取り経路はチャンクの出自を仮定しない(編集中バッファのスナップショットでも
+    /// <c>AppendBuffer</c> の「公開済み範囲は以後不変」不変条件が効く)。
+    /// </para>
+    /// </remarks>
+    public bool ReplaceAllRecordingUndo(TextSnapshot rebuilt)
+    {
+        ArgumentNullException.ThrowIfNull(rebuilt);
+        var rootBefore = _current.Root;
+        var newRoot = rebuilt.Root;
+        // 参照比較で無変化なら履歴を汚さない(Splice の早期returnと同じ契約)。内容比較はしない:
+        // 全文の突合はO(n)で、呼び出し側(ConvertEols)が変換不要を先に判定できるため。
+        // 自分自身のスナップショットを渡した場合もここで抜ける。
+        if (ReferenceEquals(rootBefore, newRoot))
+            return false;
+
+        int removed = _current.CharLength;
+        int inserted = rebuilt.CharLength;
+        _current = new TextSnapshot(newRoot);
+
+        // 全文差し替えは単一Undo単位。EOL変換が作る通常形(removed>0 かつ inserted>0)は
+        // Record の融合判定(pureInsert / pureDelete)に構造的に掛からないので、次の2つの
+        // ガードが実際に効くのは退化形だけである。どちらも公開API契約のための防御で、
+        // ConvertEols 経路からは発生しない(EOL変換は本文を空にも非空にもしない):
+        //  ・前置 BreakCoalescing = 全文→空(純削除形・removed≤2)が直前の1〜2文字削除へ
+        //    逆方向融合(Backspace継続扱い)するのを止める。pureDelete側の判定は
+        //    insertHasBreak を見ないので、この向きはフラグでは止められない。
+        //    早期returnの後に置く: 無変化パスで _open を倒すと「履歴を汚さない」契約が崩れる。
+        //  ・insertHasBreak: true = 空文書→1〜2文字(純挿入形)の直後のタイプがこのエントリへ
+        //    融合するのを止める(Record 末尾の _open = coalescable を false にする)。
+        // 純削除の退化形では Record 後に _open = true が残るが、差し替え後は空文書で後続の
+        // 融合可能な編集が来ない(削除は Splice の早期return、挿入は prev.RemovedLen == 0 の
+        // 条件で弾かれる)ため観測できない。
+        _history.BreakCoalescing();
+        _history.Record(
+            rootBefore,
+            newRoot,
+            pos: 0,
+            removedLen: removed,
+            insertedLen: inserted,
+            insertHasBreak: true
+        );
+        return true;
+    }
+
     public void Insert(int pos, string text)
     {
         ArgumentNullException.ThrowIfNull(text);

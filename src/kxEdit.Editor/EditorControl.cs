@@ -270,6 +270,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <remarks>
     /// <c>SetSource</c> の 2 回目以降相当=バッファ参照の丸ごと差替え(本文の一部置換ではない=
     /// 部分置換は <see cref="ReplaceCharRange"/> を使う)。
+    /// <para>
+    /// <b>副作用を追加・削除するときは <see cref="ConvertEols"/> も見ること</b> —— A-11(2026-08-28)で
+    /// <c>ConvertEols</c> は本メソッドを呼ばなくなり、必要な副作用だけを<b>明示列挙</b>する形になった。
+    /// 列挙の同期はコードでもテストでも守られていない(ここに副作用を 1 行足しても
+    /// <c>ConvertEols_*</c> は 1 件も赤くならない)。同種の列挙は <see cref="SetSource"/> /
+    /// <c>AfterEdit</c> にもあり、現在 4 箇所に散っている。
+    /// </para>
     /// </remarks>
     public void ReplaceSource(TextBuffer buffer)
     {
@@ -431,23 +438,51 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>
     /// P6 Task 5: 本文中の改行を <paramref name="eol"/> に一括変換する(App 層互換=保存時の EOL 統一)。
-    /// 既存本文の <c>\r\n</c> / <c>\r</c> / <c>\n</c> を検出→指定 EOL に置換した文字列で
-    /// <see cref="ReplaceSource(TextBuffer)"/> し、<see cref="EolMode"/> も同時に更新する。
-    /// SetSource 前は no-op。
+    /// 既存本文の <c>\r\n</c> / <c>\r</c> / <c>\n</c> を検出→指定 EOL に置換した全文で
+    /// <b>現在の <see cref="TextBuffer"/> を in-place に差し替え</b>、<see cref="EolMode"/> も
+    /// 同時に更新する。SetSource 前は no-op。
     /// </summary>
+    /// <returns>
+    /// 変換を Undo 履歴へ記録したら true。fast-path(すでに目的 EOL で統一済み)・SetSource 前・
+    /// 記録の結果が無変化だった場合は false。<b>呼び出し側は経路から推論せず本戻り値で判定する</b>
+    /// (A-11: false のときに Undo を打つと直前のユーザー編集を巻き戻してしまう)。
+    /// 取り消し方は <see cref="UndoEolConversion"/> を使う(<see cref="Undo"/> は流用できない)。
+    /// </returns>
     /// <remarks>
     /// <see cref="EolMode"/> は「以後の Enter 押下で挿入する改行」の設定であり、既存本文には
     /// 効かない。App 層(FileController の保存経路)は保存前に本 API で本文の改行を統一する。
-    /// 実装は「一旦 LF に正規化 → 目的 EOL に置換」の 2 段階=CRLF/CR/LF 混在を安全に扱える。
-    /// no-op fast-path(=すでに目的 EOL で統一されている場合)では ReplaceSource による
-    /// キャレット/選択/スクロールリセット・UIA TextChanged 発火を回避する(EolMode だけ更新)。
-    /// non fast-path でも「行 index + 改行文字以外の相対 offset」の対で caret/anchor/topLine/
-    /// scrollX を保存→復元する(P6 レビュー I-2: Save 毎に caret が先頭へ飛ぶ退行を回避)。
+    /// <para>
+    /// A-11(2026-08-28): 旧実装は <see cref="ReplaceSource(TextBuffer)"/> でバッファ参照ごと
+    /// 差し替えており、新バッファの Undo 履歴が空=<b>変換前の Undo/Redo 履歴が全消去</b>されていた。
+    /// 現在は <see cref="TextBuffer.ReplaceAllRecordingUndo"/> で<b>同一バッファへ 1 Undo 単位として</b>
+    /// 記録する(=保存後の Ctrl+Z で変換が取り消せ、さらに遡って変換前の編集も辿れる)。
+    /// 保存点(<c>_savedRoot</c>)は触らないので、変換直後は <see cref="Modified"/> が true になり、
+    /// Undo で保存点のルートへ戻れば false へ復す。Redo スタックは通常の編集と同じく破棄される。
+    /// </para>
+    /// <para>
+    /// no-op fast-path(=すでに目的 EOL で統一されている場合)は <see cref="EolMode"/> だけ更新して
+    /// 抜ける=本文・キャレット・選択・スクロール・Undo 履歴のいずれにも触れず、UIA 通知も
+    /// <see cref="UpdateUI"/> も発火しない。
+    /// </para>
+    /// <para>
+    /// non fast-path では「行 index + 改行文字以外の相対 offset」の対で caret/anchor/topLine/
+    /// topSegment/scrollX を保存→復元する(P6 レビュー I-2: Save 毎に caret が先頭へ飛ぶ退行を回避)。
+    /// <see cref="ReplaceSource(TextBuffer)"/> が担っていた副作用のうち、EOL 変換で意味を失うもの
+    /// (セル強調・IME 未確定・DesiredXpx)の破棄と、通知契約(垂直スクロールバー同期・Invalidate・
+    /// UIA スナップショット更新/TextChanged/SelectionChanged・<see cref="UpdateUI"/>)は明示的に打つ。
+    /// <b>水平スクロールバーだけは再計算しない</b>(理由は該当行のコメント参照=復元済みの
+    /// <c>_topLine</c> で評価すると <c>_scrollX</c> が失われる。EOL 変換で水平 extent は不変)。
+    /// <c>AfterEdit</c> は<b>使わない</b>: <c>BringCaretIntoView</c> が復元済みのスクロール位置を
+    /// 上書きし、かつ <c>_wasModified</c> 遷移から保存処理の途中で <see cref="SavePointLeft"/> が
+    /// 焚かれるため(設計書 2026-08-28 §10.12 (1))。
+    /// <see cref="UpdateUI"/> の発火は旧経路(caret を 0 に潰した直後)から caret 復元後へ移った
+    /// =ハンドラが読む caret 位置が正しくなる(設計書 §10.13 (2) の表)。
+    /// </para>
     /// </remarks>
-    public void ConvertEols(LineEnding eol)
+    public bool ConvertEols(LineEnding eol)
     {
         if (_buffer is null)
-            return;
+            return false;
         byte[] targetBytes = eol switch
         {
             LineEnding.Crlf => new byte[] { 0x0D, 0x0A },
@@ -459,12 +494,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         var snap = _buffer.Current;
 
         // P7 I-3 Task 3: SnapshotText 全文化を撤廃=byte スキャンで fast-path 判定。
-        // すでに全 EOL が target で統一されていれば ReplaceSource(キャレット/選択/スクロールリセット
-        // + UIA TextChanged 発火)を回避し、EolMode だけ更新して抜ける。
+        // すでに全 EOL が target で統一されていれば差し替え(キャレット/選択/スクロール復元・
+        // Undo 記録・UIA 通知)を丸ごと回避し、EolMode だけ更新して抜ける。
+        // A-11: 何も記録していないので false を返す(呼び出し側が Undo を打たないための唯一の根拠)。
         if (IsEolAlreadyUniform(snap, targetBytes))
         {
             EolMode = eol;
-            return;
+            return false;
         }
 
         // 変換前の caret/anchor を「改行以外の文字数+改行数」で分解=変換後も同じ論理位置を再構成できる。
@@ -542,15 +578,60 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (outLen > 0)
             FlushBuf(ref outBuf, ref outLen, builder);
 
-        ReplaceSource(builder.Build());
-        int total = _buffer!.Current.CharLength;
+        // A-11: バッファ参照ごと差し替える ReplaceSource(=新バッファの空 UndoHistory へ乗り換え)を
+        // やめ、同一 TextBuffer へ 1 Undo 単位として記録する。ReplaceSource が担っていた副作用は
+        // 下で個別に打つ(AfterEdit を使わない理由は本メソッドの remarks / 設計書 §10.12 (1))。
+        // Build() を先に評価するのは旧 `ReplaceSource(builder.Build())` と同じ順序を保つため
+        // (Build は carry の不正 UTF-8 や上限超過で throw しうる=IME 取消より前に投げる)。
+        var rebuilt = builder.Build().Current;
+        // §4-6: 他の状態変異 API と同じく IME 未確定はまず確定キャンセルする(ReplaceSource 冒頭と同旨)。
+        if (IsComposing)
+            CancelCompositionAndDefault();
+        bool recorded = _buffer.ReplaceAllRecordingUndo(rebuilt);
+        _cellHighlight = null; // 変換前オフセット由来のセル強調は無効化(EOL 変換で位置がずれる)
+        _caretCtrl.DesiredXpx = -1; // ReplaceSource と同じく縦移動の目標 X を捨てる
+        // === スクロールバーの扱い(垂直は呼ぶ / 水平は呼ばない)===
+        // 前提(EOL 変換でスクロール extent が不変であることの根拠。ここが崩れたら本判断は無効。
+        //       設計書 §10.5 が PieceStats.Breaks への結合を却下したのと同じ「黙って壊れる結合」
+        //       なので、結論だけでなく依存先を書き出しておく):
+        //  - Piece.cs の Breaks 規約 = LF / 単独 CR(末尾 CR 含む)をそれぞれ 1 と数える
+        //    → 各改行が target 1 個へ 1:1 に写るので TextSnapshot.LineCount は不変。
+        //      垂直の Maximum/LargeChange も水平の lnWidth = MeasureLineNumberWidth(snap.LineCount)
+        //      も動かない。単独 CR を break と数えなくなる等の変更で同時に崩れる。
+        //  - ViewportLayout.VisualRow.SegmentLength は「改行を含まない」
+        //    → 幅測定の対象文字列が変換前後で完全に同一。含む定義に変われば LF→CRLF で幅が伸びる。
+        //
+        // 垂直: 値は動かないが、_vscroll.Value を _topLine へ同期する ReplaceSource の契約は維持する。
+        UpdateVerticalScrollbar();
+        // 水平: **あえて再計算しない**(A-11 レビュー I-1 のプローブで実測)。
+        // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるので、
+        // 評価時点の _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、
+        // in-place 化では _topLine を潰さないため、復元済みの起点で評価することになる。
+        // 長い行が可視域に無いと HideAndResetHScroll が走って _scrollX が 0 に落ち、
+        // 直後の `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する
+        // =保存のたびに水平スクロール位置が失われる。
+        // 上の前提より水平 extent は不変なので、そもそも再計算する理由が無い。
+        // 以後の編集/リサイズ/スクロールが従来どおり更新する。
+        // 契約は EditorControlConvertEolsTests の ConvertEols_NonFastPath_KeepsHorizontalScroll と
+        // ConvertEols_NonFastPath_KeepsHorizontalScroll_WhenLongLineOffFirstScreen で固定。
+        // 後者は main では赤い(main も _topLine=0 評価ゆえ同じ経路で _scrollX を失う)
+        // =本判断は挙動不変ではなく main 既存バグの解消でもある(設計書 §10.13 (7))。
+
+        int total = _buffer.Current.CharLength;
         // アンカー/キャレットは元の (m, k) 分解から再構成して復元する(ConvertEols 前後で
-        // 同じ論理位置を保つ)。ReplaceSource が両者を 0 に潰した後の再設定。
+        // 同じ論理位置を保つ)。in-place 化後も char 位置は変換でずれるため再設定が要る。
         _caretCtrl.SetSelection(
             Math.Min(anchorM + anchorK * targetCharLen, total),
             Math.Min(caretM + caretK * targetCharLen, total),
             _buffer.Current
         );
+        // A-11 レビュー I-4: RPC スレッド用スナップショットの差し替えは caret 復元の「直後」に置く。
+        // AfterEdit と同じ「caret 先 → snapshot 後」の順序を保ちつつ、両者の間の窓から
+        // PositionCaret(ComputeCaretPoint のレイアウト計算)と Invalidate を外して実質ゼロにする。
+        // 窓の中で RPC スレッドが観測しうる最悪値は「旧文書末尾に縮退した選択範囲」であり、
+        // 例外にも範囲外読みにもならない(根拠は設計書 §10.13 (5)-2=TextRangeProviderV2 の
+        // ctor が Math.Clamp(start, 0, owner.Host.TextLength) を掛けている)。
+        _uia.OnSnapshotChanged(_buffer.Current);
         // TopLine セッターは「その行の先頭視覚行から」の意味を持ち _topSegment を 0 に落とすため、
         // 視覚行位置を保つ SetTopPosition で復元する(クランプ+VScrollBar 同期は同じ)。
         SetTopPosition(savedTopLine, savedTopSegment);
@@ -559,9 +640,29 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // だと setter が no-op で PositionCaret 再発火されず、Win32 system caret(SetCaretPos)が
         // 復元前の pos 0 に残る。UIA v2 単一経路に統一した P7 以降は SR の system caret 追跡依存度が
         // 上がるため、Save 直後の system caret 位置ずれを避けるべく明示的に再配置する。
+        // A-11 で in-place 化した後は SetTopPosition / ScrollX が常に no-op(値を潰していないため)
+        // になるので、この再配置は「保険」ではなく system caret 更新の唯一の経路になった。
         if (_hasFocus)
             PositionCaret();
+        Invalidate();
+        // A-11: 以下は ReplaceSource が担っていた通知契約の再現
+        // (スナップショット差し替えは上の caret 復元直後で済ませてある)。
+        // 設計書 §10.12 (1): _wasModified は ReplaceSource:301 と同じく「代入で揃える」。
+        // ReplaceAllRecordingUndo は _savedRoot を触らない=Modified が false→true へ遷移するため、
+        // AfterEdit の遷移検出に載せると保存処理の途中で SavePointLeft が焚かれる(新規の挙動)。
+        _wasModified = _buffer.Modified;
+        _uia.RaiseTextChanged();
+        // 意図的な挙動変更(監査 A-11 が副作用として指摘): 旧経路は ReplaceSource が caret=0 に
+        // 潰した中間状態で SelectionChanged を先に飛ばしていた。in-place 化でその中間状態が消え、
+        // caret 復元後に 1 回だけ発火する。SR の実発声への影響は L5 でのみ判定できる。
+        if (RaiseUiaSelectionEvents)
+            _uia.RaiseSelectionChanged();
+        // P6 Task 4: 本文全差し替えは App 層のステータスバー更新契機なので UpdateUI 発火。
+        UpdateUI?.Invoke(this, EventArgs.Empty);
         EolMode = eol;
+        // 経路(非 fast-path)ではなく Core の記録結果をそのまま返す。IsEolAlreadyUniform を
+        // すり抜けた無変化(root 同一)でも false になり、呼び出し側の余分な Undo を防ぐ。
+        return recorded;
     }
 
     /// <summary>
@@ -1299,6 +1400,100 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _caretCtrl.SetTo(pos, _buffer.Current);
         _caretCtrl.DesiredXpx = -1;
         AfterEdit();
+    }
+
+    /// <summary>
+    /// A-11(2026-08-28): 直前の <see cref="ConvertEols"/> が積んだ EOL 変換エントリを 1 つだけ
+    /// 取り消し、キャレット / 選択を<b>変換前の位置</b>へ戻す(保存失敗時のロールバック専用)。
+    /// 取り消したら true。
+    /// </summary>
+    /// <param name="conversionRecorded">
+    /// <see cref="ConvertEols"/> の戻り値をそのまま渡す(fast-path・SetSource 前・無変化なら false)。
+    /// </param>
+    /// <param name="anchorBefore"><see cref="ConvertEols"/> を呼ぶ<b>前</b>の <see cref="SelectionAnchor"/>。</param>
+    /// <param name="caretBefore"><see cref="ConvertEols"/> を呼ぶ<b>前</b>の <see cref="CaretCharOffset"/>。</param>
+    /// <remarks>
+    /// <b><see cref="Undo"/> を流用してはならない理由が 2 つある</b>:
+    /// <list type="number">
+    /// <item><see cref="Undo"/> は <see cref="ReadOnly"/> で早期 return する。<c>FileController.WriteToPath</c>
+    /// は <see cref="ConvertEols"/> の前後でだけ ReadOnly を外すので、catch 節に来る時点では
+    /// 復元済み= CSV グリッドモード(<c>CsvController.Editor.ReadOnly = true</c>)ではロールバックが
+    /// <b>黙って no-op</b> になる。本メソッドは ReadOnly を見ない(ユーザー編集ではなく、
+    /// 自分が直前に加えた変換の取り消しだから)。</item>
+    /// <item><see cref="Undo"/> はキャレットを <c>UndoResult.CaretPos</c>(全文差し替えでは
+    /// <b>文書末尾</b>)へ動かす。ユーザーが Ctrl+Z を押した場合はそれで妥当だが
+    /// (設計書 2026-08-28 §10.11 (5) で受容)、ロールバックはユーザーが Undo を要求していないので、
+    /// 保存失敗ダイアログの裏でキャレットが黙って末尾へ飛ぶ。本メソッドは戻り値を無視し、
+    /// 呼び出し元が変換前に捕捉した位置へ戻す(§10.12 (2) の決定)。EOL 変換前のオフセットは、
+    /// 変換を取り消した本文に対してそのまま有効である。</item>
+    /// </list>
+    /// <para>
+    /// 保存点(<see cref="Modified"/>)も一緒に戻る: <c>TextBuffer._savedRoot</c> は誰も触らない設計
+    /// なので、ルートが変換前へ戻れば参照比較で自動的に復す(<c>TextBuffer.ReplaceAllRecordingUndo</c>)。
+    /// </para>
+    /// <para>
+    /// <b>fast-path では絶対に取り消してはならない</b>: <see cref="ConvertEols"/> が何も記録して
+    /// いないのに <see cref="TextBuffer.Undo"/> を打つと、ユーザーの直前の編集が 1 つ消える
+    /// (設計書 §5.3)。判別は経路からの推論ではなく <paramref name="conversionRecorded"/> で行う。
+    /// </para>
+    /// <para>
+    /// <b>スクロール位置(<c>_topLine</c> / <c>_topSegment</c> / <c>_scrollX</c>)には触れない。</b>
+    /// これが §10.12 (2) の「スクロールを保存前の位置へ戻す」の実装である:
+    /// <see cref="ConvertEols"/> の in-place 化以降、変換もルート差し戻しもスクロール状態を
+    /// 動かさないため、<b>何もしないことが復元</b>になる。逆に <see cref="AfterEdit"/> を呼ぶと
+    /// <c>BringCaretIntoView</c> が復元済みの表示位置を動かし、<c>UpdateHorizontalScrollbar</c> が
+    /// 復元済みの <c>_topLine</c> で評価されて <c>_scrollX</c> を落とす(設計書 §10.13 (7))。
+    /// 垂直スクロールバーの再計算も不要である(EOL 変換は <c>LineCount</c> を変えないので
+    /// 取り消しても行数は同じ)。
+    /// <b>注意(最終レビュー m-1)</b>: <see cref="ConvertEols"/> 側は同じ理由で no-op になった
+    /// <c>SetTopPosition</c> / <c>ScrollX</c> の復元を<b>あえて残している</b>(将来スクロールを
+    /// 動かす副作用が入ったときの防御)。<b>こちらには同等の防御が無い</b> —— 取り消し経路で
+    /// スクロールを動かす副作用を足すときは、ここにも復元を書き足すこと。
+    /// </para>
+    /// <para>
+    /// 通知契約(UIA スナップショット / TextChanged / SelectionChanged / <see cref="UpdateUI"/> /
+    /// <c>Invalidate</c> / system caret 再配置)は <see cref="ConvertEols"/> の鏡写しで打つ。
+    /// <c>_wasModified</c> も <see cref="ConvertEols"/> と同じく<b>代入で揃える</b>=保存処理の途中で
+    /// <see cref="SavePointReached"/> を焚かない(main のロールバックもイベントを焚かなかった。
+    /// 設計書 §10.12 (1) と対称)。
+    /// </para>
+    /// <para>
+    /// IME 未確定の確定キャンセルは行わない: <paramref name="conversionRecorded"/> が true なら
+    /// <see cref="ConvertEols"/> が非 fast-path を通って既にキャンセル済みで、そこから本メソッドまでの
+    /// 間(<c>TextFileService.Save</c>)に新しい composition は始まらない。
+    /// </para>
+    /// <para>
+    /// Redo スタックは <see cref="TextBuffer.DropRedo"/> で捨てる。ユーザーが一度も要求していない
+    /// 「全文 EOL 変換」を Ctrl+Y に差し出さないため(設計書 §5.3 の「Redo の扱い」の結論)。
+    /// </para>
+    /// </remarks>
+    public bool UndoEolConversion(bool conversionRecorded, int anchorBefore, int caretBefore)
+    {
+        // fast-path(何も記録していない)で 1 つ戻すと、ユーザーの直前の編集が消える。
+        // 経路ではなく ConvertEols の戻り値で判定する=唯一の根拠。
+        if (!conversionRecorded || _buffer is null)
+            return false;
+        if (_buffer.Undo() is null)
+            return false;
+        _buffer.DropRedo();
+        var snap = _buffer.Current;
+        _caretCtrl.DesiredXpx = -1; // キャレットが動く経路の共通作法(縦移動の目標 X を捨てる)
+        // UndoResult.CaretPos(=文書末尾)は使わない。変換前のオフセットは取り消し後の本文に
+        // そのまま有効なので、呼び出し元が捕捉した anchor/caret を復元する(SetSelection がクランプ)。
+        _caretCtrl.SetSelection(anchorBefore, caretBefore, snap);
+        // ConvertEols と同じく caret 復元の直後(RPC スレッドから見える窓を最小にする)。
+        _uia.OnSnapshotChanged(snap);
+        if (_hasFocus)
+            PositionCaret();
+        Invalidate();
+        // ConvertEols と同じ扱い: 遷移検出(AfterEdit)に載せず代入で揃える。ここで
+        // SavePointReached を焚くと「保存に失敗しただけ」なのに保存点到達イベントが飛ぶ。
+        _wasModified = _buffer.Modified;
+        _uia.RaiseTextChanged();
+        if (RaiseUiaSelectionEvents)
+            _uia.RaiseSelectionChanged();
+        UpdateUI?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     /// <summary>

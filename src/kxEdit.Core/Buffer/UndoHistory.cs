@@ -32,6 +32,9 @@ internal sealed class UndoHistory
         _open = false;
     }
 
+    /// <summary>Redoスタックだけを破棄する(Undoスタックと coalescing 状態には触れない)。</summary>
+    public void ClearRedo() => _redo.Clear();
+
     public void Record(
         PieceTree.Node? before,
         PieceTree.Node? after,

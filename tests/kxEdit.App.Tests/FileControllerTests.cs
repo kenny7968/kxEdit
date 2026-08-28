@@ -34,6 +34,14 @@ public class FileControllerTests
         public int SaveSettingsCount;
         public int RecentChangedCount;
         public int MetaChangedCount;
+
+        /// <summary>
+        /// 最終レビュー L-V3 (b): WriteToPath の <c>try</c> の内側から任意の例外を投げるための seam。
+        /// 実 catch フィルタは ConvertEols が投げる DocumentTooLargeException を拾うためにあるが、
+        /// その発火には 512MB 級の文書が要り自動テストでは作れない(設計書 §10.14 (4))。
+        /// <c>metaChanged</c> は try の最後にある唯一の注入点なので、フィルタと文言だけをここから固定する。
+        /// </summary>
+        public Action? MetaChangedThrow;
         public List<Document> OpenedFresh { get; } = new();
 
         public Host()
@@ -47,7 +55,11 @@ public class FileControllerTests
                 settings: () => Settings,
                 saveSettings: () => SaveSettingsCount++,
                 recentChanged: () => RecentChangedCount++,
-                metaChanged: () => MetaChangedCount++,
+                metaChanged: () =>
+                {
+                    MetaChangedCount++;
+                    MetaChangedThrow?.Invoke();
+                },
                 openedFresh: d => OpenedFresh.Add(d),
                 prompt: Prompt,
                 fileDialogs: Dialogs,
@@ -613,6 +625,14 @@ public class FileControllerTests
                     && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
             );
             Assert.True(doc.Editor.Modified); // ロールバック発火=未保存の本文が失われない
+            // A-11(2026-08-28): Modified だけでは**何も守れていなかった**。ロールバックが no-op でも
+            // _savedRoot は誰も触らないので Modified は true のまま=本文が EOL 変換後で残っていても
+            // このテストは緑になる(設計書 §10.13 (9)-1)。本文そのものが変換前へ戻ることを固定する。
+            // 期待値は「Text セッターで "a\r\nb\r\nc" を入れ、offset 0 に "x" を挿入した」結果=
+            // **ConvertEols 前の値(= ロールバックで復元されるべき値)**。ConvertEols(Lf) 後の
+            // "xa\nb\nc" を書くと網が反転する(実装計画 :875 の「ロールバック前の値」という
+            // 表現は逆に読めるので、ここでは復元先を名指ししてある。仕様適合レビュー 6)。
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
         });
 
     // ===== 境界付き正規化(Issue #48 / S-15)=====
@@ -3173,18 +3193,25 @@ public class FileControllerTests
 
     // ===== EOL 非ロールバックの修正確認(Batch A Task 1・2026-07-15) =====
     //
-    // 経緯: WriteToPath (:268-) は保存直前に doc.Editor.ConvertEols(EolMode) で本文中の
+    // 経緯: WriteToPath は保存直前に doc.Editor.ConvertEols(EolMode) で本文中の
     // 改行を State.LineEnding に一括変換してから TextFileService.Save を呼ぶ。以前は書込失敗時に
-    // SaveAsDocument (:231-236) が State(Encoding/LineEnding/HasBom)を元値へロールバックするだけで、
+    // SaveAsDocument が State(Encoding/LineEnding/HasBom)を元値へロールバックするだけで、
     // 本文の EOL(バグ 1)と、ConvertEols 非 fast-path の ReplaceSource で fresh 化された
     // TextBuffer の保存点(バグ 2=Save 前 dirty が Save 後 Modified=false に落ちる)が
     // ロールバックされない静音喪失導線があった。既存 SaveAs 系ロールバックテスト(本ファイル上部)は
     // fixture の本文が "abc"(改行なし)で ConvertEols が no-op のため、この 2 バグを検出できていなかった。
     //
-    // 修正(2026-07-15・fix(app) コミット): WriteToPath は ConvertEols 前に旧 TextBuffer 参照を握り、
-    // 失敗時にその参照へ戻す。TextBuffer 内部の _savedRoot/_current は ConvertEols/ReplaceSource で
-    // 書き換わらないため、参照を戻すだけで本文も Modified も一括で復元される。以下の 2 テストは
-    // かつて「バグ を pin する ★修正時に赤化」だったものを反転させ、修正後の担保として固定するもの。
+    // 現在の機構(A-11・2026-08-28): WriteToPath は ConvertEols の戻り値で「Undo 履歴へ記録したか」を
+    // 受け取り、記録したときだけ EditorControl.UndoEolConversion で変換エントリを 1 つ取り消す。
+    // 保存点は TextBuffer._savedRoot を誰も触らないので、ルートが変換前へ戻れば参照比較で復す。
+    // 以下の 2 テストは、かつて「バグを pin する ★修正時に赤化」だったものを反転させ、
+    // 修正後の担保として固定するものである。
+    //
+    // 【★★履歴】2026-07-15 の初回修正は別機構だった: ConvertEols 前の TextBuffer 参照を握り、
+    // 失敗時に SetOrReplaceSource でその参照へ戻す(= ConvertEols がバッファ参照ごと差し替える
+    // ことに全面的に依存する)。A-11 で ConvertEols が in-place の 1 Undo 単位になり
+    // ReferenceEquals が常に true =ロールバックが黙って no-op になったため、上の機構へ
+    // 置き換えた。この 2 テストは切り替えの途中で実際に赤くなっている。
     //
     // 【★★履歴】旧テスト名は SaveAs_WriteFailure_LeavesEolConverted_KnownBehavior /
     // Save_WriteFailure_LeavesEolNormalized_KnownBehavior。assertion は "a\nb"/"x\r\ny"/Modified=false を
@@ -3227,7 +3254,11 @@ public class FileControllerTests
 
             // ---- 本文ロールバック(バグ 1 修正で緑化=修正後の担保) ----
             // ConvertEols(Lf) で "a\r\nb" → "a\nb" に一旦変換されたが、Save 失敗の catch で WriteToPath が
-            // ConvertEols 前の TextBuffer 参照へ戻すため CRLF に復元される(以前は LF のまま残っていた=バグ 1)。
+            // それを取り消すため CRLF に復元される(以前は LF のまま残っていた=バグ 1)。
+            // A-11(2026-08-28): 取り消し方が変わった。旧機構は「ConvertEols 前の TextBuffer 参照へ
+            // 差し戻す」で、ConvertEols がバッファ参照ごと差し替えることに依存していた。in-place 化で
+            // その前提が崩れ(ReferenceEquals が常に true = 黙って no-op)、本テストは実際に赤くなった。
+            // 現機構は UndoEolConversion で変換エントリを 1 つだけ取り消す。
             Assert.Equal("a\r\nb", doc.Editor.SnapshotText); // ★バグ 1 修正で緑化=ConvertEols 済み本文の復元 ★
         });
 
@@ -3255,8 +3286,8 @@ public class FileControllerTests
                 // ため、そのままだと Save 前も後も Modified=false で「差替で dirty が消える」を検出できない。
                 // 1 文字挿入→即削除で content は "x\ny" のまま _current.Root だけ進める=
                 // 保存点(_savedRoot)からズレて Modified=true になる。この状態で Save 失敗させ、
-                // ConvertEols(Crlf) の非 fast-path が ReplaceSource で新規 TextBuffer に差し替えても、
-                // 修正後は WriteToPath catch で旧 TextBuffer 参照へ戻すため Modified=true が復元される。
+                // ConvertEols(Crlf) の非 fast-path が本文を書き換えても、修正後は WriteToPath catch の
+                // ロールバックで Modified=true が復元される。
                 doc.Editor.ReplaceCharRange(0, 0, "z"); // "zx\ny", root=B, Modified=true
                 doc.Editor.ReplaceCharRange(0, 1, ""); // "x\ny", root=C, Modified=true(_savedRoot=A のまま)
                 Assert.Equal("x\ny", doc.Editor.SnapshotText); // 前提: content は元に戻っている
@@ -3281,15 +3312,19 @@ public class FileControllerTests
 
                 // ---- 本文ロールバック(バグ 1 修正で緑化=修正後の担保) ----
                 // ConvertEols(Crlf) で "x\ny" → "x\r\ny" に一旦変換されたが、Save 失敗の catch で
-                // WriteToPath が ConvertEols 前の TextBuffer 参照へ戻すため LF に復元される
+                // WriteToPath がそれを取り消すため LF に復元される
                 // (以前は CRLF のまま残り、以後の Ctrl+S 成功で意図しない CRLF が確定していた=バグ 1)。
+                // A-11(2026-08-28): 取り消し機構が「旧 TextBuffer 参照への差し戻し」から
+                // 「UndoEolConversion で変換エントリを 1 つ取り消す」へ変わった(上の SaveAs 版と同旨)。
                 Assert.Equal("x\ny", doc.Editor.SnapshotText); // ★バグ 1 修正で緑化=ConvertEols 済み本文の復元 ★
 
                 // ---- Modified 保持(バグ 2 修正で緑化=修正後の担保) ----
                 // 以前は ConvertEols の非 fast-path が ReplaceSource で新規 TextBuffer(Modified=false)に
                 // 差し替えるため Save 失敗後に Modified=false へ落ちていた(セーブポイント破壊=バグ 2)。
-                // 修正後は WriteToPath catch で旧 TextBuffer 参照へ戻すため、_savedRoot は保持され
+                // A-11 後は _savedRoot を誰も触らないので、ルートが変換前へ戻れば参照比較で
                 // Save 前 dirty のままの状態が復元される(タブ「*」・終了時の保存確認が正しく動く)。
+                // 注意: この 1 行だけでは新機構の網にならない(ロールバックが no-op でも true のまま)。
+                // 本文の assert と対で見ること=設計書 §10.13 (9)-1 の教訓。
                 Assert.True(doc.Editor.Modified); // ★バグ 2 修正で緑化=保存点の復元 ★
             }
             finally
@@ -3301,17 +3336,19 @@ public class FileControllerTests
         });
 
     // Batch A Task 1 Minor-3(2026-07-15): 上の 2 テスト(SaveAs=CRLF→LF・Save=LF→CRLF)は
-    // どちらも ConvertEols が「本文の EOL ≠ target EOL」の非 fast-path 経路しか踏まない
-    // (=ReplaceSource で新規 TextBuffer に差替=CurrentBuffer 参照が変わる)。WriteToPath (:303)
-    // の <c>!ReferenceEquals(doc.Editor.CurrentBuffer, snapshotBefore)</c> guard は fast-path
-    // (本文 EOL=target EOL=IsEolAlreadyUniform が true → EolMode 更新のみ・buffer 差替なし)で
-    // <see cref="EditorControl.SetOrReplaceSource"/> をスキップし、キャレット/選択/スクロールが
-    // <see cref="EditorControl.ReplaceSource"/> によって 0 リセットされるのを防いでいる。
+    // どちらも ConvertEols が「本文の EOL ≠ target EOL」の非 fast-path 経路しか踏まない。
+    // fast-path(本文 EOL=target EOL=IsEolAlreadyUniform が true → EolMode 更新のみ)でも
+    // ロールバックがキャレット/選択/スクロールを壊さないことを、別に固定する必要がある。
     //
-    // この guard が将来のリファクタで削除されて「常に SetOrReplaceSource(snapshotBefore) を呼ぶ」
-    // 形に変わっても、上の 2 テストは非 fast-path しか踏まないため緑のまま通る=サイレント退行が
-    // 可能。本テストは fast-path で I/O 失敗を起こし、caret/anchor/topLine/scrollX が Save 前と
-    // 同じであることを固定して、その退行を kill する。
+    // 【★★履歴】当初この網が kill していたのは「WriteToPath の
+    // <c>!ReferenceEquals(doc.Editor.CurrentBuffer, snapshotBefore)</c> guard を消して常に
+    // SetOrReplaceSource を呼ぶ」変異だった(ReplaceSource が caret/anchor/topLine/scrollX を
+    // 0 へ潰すため)。A-11(2026-08-28)でその機構ごと無くなり、現在 kill するのは
+    // 「fast-path なのに UndoEolConversion が取り消してしまう」変異(=ConvertEols の戻り値を
+    // 無視して常に true を渡す等)である。fast-path では Undo 履歴が空なので本文は動かないが、
+    // 直前に編集がある fixture では**ユーザーの編集が消える**。その形の網は
+    // Save_WriteFailure_OnFastPathEol_DoesNotUndoUserEdit が受け持つ(本テストの fixture は
+    // Text セッター直後=履歴が空なので、そちらの弁別力は無い)。
     [Fact]
     public void Save_WriteFailure_FastPath_PreservesCaretAndScroll() =>
         Sta.Run(() =>
@@ -3354,14 +3391,12 @@ public class FileControllerTests
                 // WriteToPath catch フィルタで false 返却+prompt.Error 通知される。
                 Assert.False(host.File.Save());
 
-                // ---- fast-path guard の kill 対象(★ここが本テストの核) ----
-                // 現行実装: CurrentBuffer 参照が snapshotBefore と同一(fast-path=ReplaceSource 未発火)
-                // のため WriteToPath catch は SetOrReplaceSource をスキップ=caret/anchor/topLine は保持。
-                // guard 削除後: SetOrReplaceSource(snapshotBefore) → ReplaceSource が発火し、
-                // caret=0/anchor=0/topLine=0/scrollX=0 に全リセット=下 3 行が赤化して mutation を kill。
-                Assert.Equal(caretBefore, doc.Editor.CaretCharOffset); // ★ guard 削除で 0 に落ちる ★
-                Assert.Equal(anchorBefore, doc.Editor.SelectionAnchor); // ★ 同上 ★
-                Assert.Equal(topLineBefore, doc.Editor.TopLine); // ★ 同上 ★
+                // ---- fast-path でロールバックが何も動かさないこと(★ここが本テストの核) ----
+                // A-11 後の現行実装: ConvertEols が false を返す(fast-path=履歴に何も積まない)ので
+                // UndoEolConversion は即 return=caret/anchor/topLine/scrollX は Save 前のまま。
+                Assert.Equal(caretBefore, doc.Editor.CaretCharOffset);
+                Assert.Equal(anchorBefore, doc.Editor.SelectionAnchor);
+                Assert.Equal(topLineBefore, doc.Editor.TopLine);
                 Assert.Equal(scrollXBefore, doc.Editor.ScrollX); // 観測制約=常に 0=documentation 目的
                 Assert.Contains(
                     host.Prompt.Log,
@@ -3379,6 +3414,331 @@ public class FileControllerTests
                 // (必須の後始末=既存 Save_ReadOnlyDocument_WriteFailure_StillRestoresReadOnly と同旨)。
                 File2.SetAttributes(path, System.IO.FileAttributes.Normal);
             }
+        });
+
+    // ===== A-11(2026-08-28): 保存失敗ロールバックを Undo ベースへ組み替えた分の網 =====
+    //
+    // 以下のテストはすべてドライブルート(State.Path = "X:\")で失敗を作る。Path.GetDirectoryName が
+    // null を返し AtomicFile.Write の Path.Combine が ArgumentNullException を投げる=WriteToPath の
+    // catch フィルタに載る、という既存の失敗導線(Save_ExistingPathIsDriveRoot... と同型)。
+    // ReadOnly 属性ファイルを使う方式より後始末が要らないぶん fixture が短くなる。
+
+    /// <summary>
+    /// 設計書 2026-08-28 §5.3 の no-op 要件。fast-path(すでに目的 EOL で統一済み)では
+    /// ConvertEols が履歴に何も積まない。ロールバックが無条件に Undo すると
+    /// <b>ユーザーの直前の編集が消える</b>(保存に失敗しただけなのに 1 手戻る)。
+    /// fixture は「変換不要な EOL」かつ「直前に Undo 可能な編集が 1 つ積まれている」状態から始める
+    /// =Text セッター直後(履歴が空)だと余分な Undo が no-op になって弁別できない。
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_OnFastPathEol_DoesNotUndoUserEdit() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // ユーザーの直前の編集(履歴 1)
+            doc.State.LineEnding = LineEnding.Crlf; // 本文と一致=ConvertEols は fast-path
+            doc.State.Path = root;
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 前提
+            Assert.True(doc.Editor.CanUndo); // 前提: 戻せる編集が 1 つある(空だと網が空振りする)
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            // ★ ロールバックが余分に 1 つ Undo していれば "x" が消えて "a\r\nb\r\nc" になる ★
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
+            Assert.True(doc.Editor.Modified);
+            // ユーザーの編集は「消えていない」だけでなく「まだ自分で戻せる」ことまで固定する。
+            doc.Editor.Undo();
+            Assert.Equal("a\r\nb\r\nc", doc.Editor.SnapshotText);
+        });
+
+    /// <summary>
+    /// A-11: 非 fast-path の保存失敗では EOL 変換<b>だけ</b>が取り消され、その前のユーザー編集は残る
+    /// (1 つだけ戻す=戻しすぎない)。Redo スタックを捨てる決定(設計書 §5.3)も併せて固定する。
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_OnNonFastPathEol_UndoesOnlyTheConversion() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // ユーザーの直前の編集(履歴 1)
+            doc.State.LineEnding = LineEnding.Lf; // CRLF → LF =非 fast-path
+            doc.State.Path = root;
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 前提
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 変換前へ戻る
+            Assert.True(doc.Editor.Modified);
+            // ★ 2 つ戻していたらここが "a\r\nb\r\nc" になり、下の Undo 後が "a\r\nb\r\nc" のままになる ★
+            Assert.True(doc.Editor.CanUndo);
+            doc.Editor.Undo();
+            Assert.Equal("a\r\nb\r\nc", doc.Editor.SnapshotText); // 残っていたのはユーザーの編集 1 つだけ
+        });
+
+    /// <summary>
+    /// A-11 設計書 §5.3 / §10.11 (4): ロールバックが積む Redo は捨てる。ユーザーが一度も要求して
+    /// いない「全文 EOL 変換」を Ctrl+Y に差し出さないため(やり直しメニューも有効化されてしまう)。
+    /// no-change 系の網なので<b>非既定状態</b>から始める= Save 直前に CanRedo を true にしておき、
+    /// 「元から false だった」と区別できるようにする(CLAUDE.md §4-B)。
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_OnNonFastPathEol_LeavesNothingToRedo() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x");
+            doc.Editor.Undo(); // ユーザー自身の Undo =ここで Redo スタックが立つ
+            Assert.True(doc.Editor.CanRedo); // 前提: 非既定状態(Save 前は「やり直せる」)
+            doc.State.LineEnding = LineEnding.Lf; // 非 fast-path
+            doc.State.Path = root;
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            // ConvertEols の Record が元の Redo を捨て(§10.11 (4) で受容済み)、ロールバックの
+            // Undo が積み直した「EOL 変換」も UndoEolConversion が捨てる=空のまま。
+            Assert.False(doc.Editor.CanRedo);
+            Assert.Equal("a\r\nb\r\nc", doc.Editor.SnapshotText); // 本文は Save 直前の状態のまま
+        });
+
+    /// <summary>
+    /// A-11: <c>ReadOnly = true</c>(CSV グリッドモード相当)でもロールバックが効くこと。
+    /// <see cref="EditorControl.Undo"/> は ReadOnly で早期 return するので、それを流用すると
+    /// ここが<b>黙って no-op</b> になる(WriteToPath は ConvertEols の前後でだけ ReadOnly を外し、
+    /// catch 節に来る時点では復元済み)。専用 API を使う決定を固定する網。
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_WhileEditorReadOnly_StillRollsBackContentEol() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb\r\nc";
+            doc.Editor.ReplaceCharRange(0, 0, "x"); // ReadOnly にする前に dirty にしておく
+            doc.State.LineEnding = LineEnding.Lf; // 非 fast-path
+            doc.State.Path = root;
+            doc.Editor.ReadOnly = true; // CSV グリッドモード(CsvController.Editor.ReadOnly = true)相当
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 前提
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            // ★ Undo() を流用すると ReadOnly ガードで戻らず "xa\nb\nc" のまま残る ★
+            Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
+            Assert.True(doc.Editor.Modified);
+            Assert.True(doc.Editor.ReadOnly); // WriteToPath は ReadOnly を元に戻して抜ける
+        });
+
+    /// <summary>
+    /// A-11: ロールバック後も「次の編集で dirty 表示が出る」こと。
+    /// ConvertEols は <c>_savedRoot</c> を触らないので変換で <c>Modified</c> が false→true になり、
+    /// ロールバックで false へ戻る。このとき <c>_wasModified</c> を戻し忘れると、
+    /// <b>次のユーザー編集で <c>SavePointLeft</c> が発火せずタブの「*」が出ない</b>
+    /// (遷移検出が「もう dirty だった」と誤認する)。晴眼・弱視ユーザーに直接効く経路なので
+    /// (CLAUDE.md §2)、保存失敗の後始末として固定する。
+    /// clean な文書から始める=変換で遷移が起きる非既定条件(dirty のままだと遷移が無く空振りする)。
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_OnNonFastPathEol_KeepsDirtyIndicatorWorking() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "x\ny"; // Text セッターは fresh buffer =保存点上(Modified=false)
+            doc.State.LineEnding = LineEnding.Crlf; // LF → CRLF =非 fast-path
+            doc.State.Path = root;
+            DocumentManager.UpdateLabel(doc);
+            Assert.False(doc.Editor.Modified); // 前提: clean(ここが dirty だと遷移が起きない)
+            Assert.DoesNotContain("*", doc.Page.Text); // 前提: 「*」なし
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            Assert.Equal("x\ny", doc.Editor.SnapshotText);
+            Assert.False(doc.Editor.Modified); // 保存点まで戻っている
+            Assert.DoesNotContain("*", doc.Page.Text); // 保存に失敗しただけ=表示は clean のまま
+
+            doc.Editor.ReplaceCharRange(0, 0, "z"); // 次のユーザー編集
+
+            Assert.True(doc.Editor.Modified);
+            Assert.StartsWith("* ", doc.Page.Text); // ★ _wasModified を戻し忘れると「*」が出ない ★
+        });
+
+    /// <summary>
+    /// A-11 設計書 §10.12 (2): ロールバックはユーザーが Undo を要求していないので、キャレットと
+    /// スクロール位置を<b>保存失敗前の位置へ明示復元する</b>。
+    /// 落ちる先が 2 つあり、どちらも劣悪なので両方を弁別できる非既定位置から始める:
+    /// <list type="bullet">
+    /// <item><c>UndoResult.CaretPos</c> を使う → 全文差し替えなのでキャレットが<b>文書末尾</b>へ飛ぶ。</item>
+    /// <item><c>AfterEdit()</c> を呼ぶ → <c>BringCaretIntoView</c> が TopLine を動かし、
+    /// <c>UpdateHorizontalScrollbar</c> が復元済み <c>_topLine</c> で評価されて ScrollX を落とす
+    /// (設計書 §10.13 (7) と同じ罠)。</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string root = System.IO.Path.GetPathRoot(tmp.Root)!;
+
+            var doc = host.Docs.CreateNew();
+            // fixture: 行 0 だけを長くして HScrollBar を出し、ScrollX を非 0 に置いてから
+            // **長い行が可視域から外れるまで**縦スクロールする(TopLine セッターは水平スクロール
+            // バーを再計算しないので、この状態は作れる)。こうしておくと
+            // 「復元済みの _topLine で UpdateHorizontalScrollbar を評価する」変異が
+            // HideAndResetHScroll を踏んで ScrollX を 0 に落とす=下の ScrollX の assert が効く
+            // (設計書 §10.13 (7) と同じ罠。長い行が可視域に残る fixture では kill できない)。
+            var sb = new StringBuilder(new string('W', 200));
+            for (int i = 1; i < 200; i++)
+                sb.Append("\r\nline").Append(i);
+            string before = sb.ToString();
+            doc.Editor.Text = before;
+            doc.State.LineEnding = LineEnding.Lf; // CRLF → LF =非 fast-path(変換が実際に起きる)
+            doc.State.Path = root;
+
+            // 非既定位置から始める(既定 0 と「潰された 0」を区別するため=CLAUDE.md §4-B)。
+            // caret / anchor は**行 0 の外**に置く(行 0 は 'W' x 200 で改行を含まないため、
+            // 行 0 の中だと CRLF → LF 変換でオフセットが動かず「捕捉が ConvertEols の前か後か」を
+            // 弁別できない=§10.12 (2) の核心要求が無防備になる。仕様適合レビュー ①)。
+            // 行 0 = [0,200) / CRLF = 200,201 / "line1" = [202,207) / CRLF = 207,208 /
+            // "line2" = [209,214)。caret 209 の手前には CRLF が 2 個あるので、捕捉を
+            // ConvertEols の後へ動かすと復元値が 207(= 209 - 2)へずれる。
+            doc.Editor.SetSelectionAnchored(anchor: 205, caret: 209); // 行 1 の途中 → 行 2 の先頭
+            doc.Editor.ScrollX = 40; // 長い行が見えている間(TopLine=0)に置く
+            doc.Editor.TopLine = 150; // どんな画面高でも行 0 は可視域外になる行数
+            int caretBefore = doc.Editor.CaretCharOffset;
+            int anchorBefore = doc.Editor.SelectionAnchor;
+            int topLineBefore = doc.Editor.TopLine;
+            int scrollXBefore = doc.Editor.ScrollX;
+            // 前提を固定する: どれかが 0 に落ちていると、以降の assert は「潰れた 0」を
+            // 「保たれた 0」と取り違えて空振りする。
+            Assert.Equal(209, caretBefore);
+            Assert.Equal(205, anchorBefore);
+            Assert.Equal(150, topLineBefore);
+            Assert.True(scrollXBefore > 0, $"ScrollX を非 0 に置けていない(={scrollXBefore})");
+
+            Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
+
+            Assert.Equal(before, doc.Editor.SnapshotText);
+            // ★ 末尾ワープ / 0 潰し / **捕捉を ConvertEols の後へ動かす**(207 へずれる)を kill ★
+            Assert.Equal(caretBefore, doc.Editor.CaretCharOffset);
+            Assert.Equal(anchorBefore, doc.Editor.SelectionAnchor); // ★ 選択も保つ(SetTo だと anchor=caret) ★
+            Assert.Equal(topLineBefore, doc.Editor.TopLine); // ★ BringCaretIntoView を kill ★
+            Assert.Equal(scrollXBefore, doc.Editor.ScrollX); // ★ UpdateHorizontalScrollbar を kill ★
+        });
+
+    /// <summary>
+    /// 最終レビュー L-V3: <c>WriteToPath</c> の catch フィルタに <c>DocumentTooLargeException</c> が
+    /// 載っていること(落とすと**未処理例外でアプリが落ちる**)と、上限超過だけ文言を分けていることを
+    /// 固定する。実経路は ConvertEols(LF → CRLF で総バイト数が増える)だが、発火には 512MB 級の
+    /// 文書が要り、<c>TextBufferBuilder.MaxTotalBytes</c> は <c>internal init</c> で ConvertEols 内の
+    /// <c>new</c> に注入点が無い(設計書 §10.14 (4))。ここでは try の内側にある唯一の注入点
+    /// (<c>metaChanged</c>)から同じ例外を投げ、**フィルタと文言だけ**を固定する。
+    /// 文言を分ける理由: 文書自体は上限内で、超えるのは変換後である。共通文言のままだと
+    /// 「この文書は一切保存できない」と読め、逃げ道(改行コードを LF にする)に辿り着けない。
+    /// </summary>
+    [Fact]
+    public void Save_DocumentTooLarge_IsCaught_AndSuggestsLfEol() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb";
+            doc.State.Path = tmp.File("a.txt"); // 書き込み自体は成功する
+            host.MetaChangedThrow = () =>
+                throw new DocumentTooLargeException(
+                    600L * 1024 * 1024,
+                    "文書サイズ上限(512 MB)を超えました。"
+                );
+
+            // フィルタから DocumentTooLargeException を落とすと、ここで未処理例外になる。
+            Assert.False(host.File.Save());
+
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.Contains(
+                        "改行コードを変換すると文書サイズ上限",
+                        StringComparison.Ordinal
+                    )
+                    && e.Text.Contains("LF", StringComparison.Ordinal) // 逃げ道の案内
+            );
         });
 
     // ===== CSV-L-5: _prompt.Error/Warn に生 path を載せる導線を SanitizeForDisplay で無害化 =====

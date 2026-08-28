@@ -1,4 +1,9 @@
+using System.Collections.Generic;
+using System.Reflection;
+using System.Windows.Automation;
+using System.Windows.Automation.Provider;
 using System.Windows.Forms;
+using kxEdit.Accessibility;
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Text;
 using kxEdit.Editor;
@@ -222,5 +227,1174 @@ public class EditorControlConvertEolsTests
             // caret は「a」の直後(=位置 1)。変換前の論理位置と一致(prefix=1 非改行+0 改行)
             Assert.Equal(1, ctrl.CaretCharOffset);
         });
+    }
+
+    // ===== A-11: ConvertEols の Undo/Redo 履歴保存(2026-08-28) =====
+    // 監査 A-11: 非 fast-path の ConvertEols が ReplaceSource で新規 TextBuffer に差し替わり、
+    // 変換前の Undo/Redo 履歴が全消去されていた。CRLF 文書に LF 混じりを貼って Ctrl+S すると
+    // 直後の Ctrl+Z が無反応になる症状。
+
+    /// <summary>SavePointLeft / SavePointReached の発火列を記録する(購読後の分だけ)。</summary>
+    private static List<string> RecordSavePointEvents(EditorControl ctrl)
+    {
+        var log = new List<string>();
+        ctrl.SavePointLeft += (_, _) => log.Add("Left");
+        ctrl.SavePointReached += (_, _) => log.Add("Reached");
+        return log;
+    }
+
+    [Fact]
+    public void ConvertEols_NonFastPath_IsUndoable() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.Equal("a\r\nb\r\nc", ctrl.SnapshotText);
+            Assert.True(ctrl.CanUndo);
+            ctrl.Undo();
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    // A-11 の本質: 変換前に積んだ編集履歴が変換後も辿れること。
+    [Fact]
+    public void ConvertEols_NonFastPath_PreservesEarlierUndoHistory() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a"));
+            ctrl.ReplaceCharRange(1, 0, "\nX");
+            ctrl.CurrentBuffer.BreakUndoCoalescing();
+            ctrl.ReplaceCharRange(3, 0, "\nY");
+            Assert.Equal("a\nX\nY", ctrl.SnapshotText);
+            ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.Equal("a\r\nX\r\nY", ctrl.SnapshotText);
+            ctrl.Undo();
+            Assert.Equal("a\nX\nY", ctrl.SnapshotText);
+            ctrl.Undo();
+            Assert.Equal("a\nX", ctrl.SnapshotText);
+            ctrl.Undo();
+            Assert.Equal("a", ctrl.SnapshotText);
+        });
+
+    // 変換エントリは 1 Undo 単位=1 回の Undo で変換前へ戻り、2 回目は変換前の編集へ進む
+    // (=変換が複数エントリに割れていないことの確認)。
+    [Fact]
+    public void ConvertEols_NonFastPath_RecordsExactlyOneUndoEntry() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.ReplaceCharRange(5, 0, "d"); // "a\nb\ncd"(変換前の編集を 1 つ積む)
+            ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.Equal("a\r\nb\r\ncd", ctrl.SnapshotText);
+            ctrl.Undo();
+            Assert.Equal("a\nb\ncd", ctrl.SnapshotText); // 1 回で変換前へ
+            ctrl.Undo();
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText); // 2 回目は直前の編集を戻す
+            Assert.False(ctrl.CanUndo);
+        });
+
+    // 変換エントリが直前のタイプ操作と別エントリになること(Undo 1 回で変換だけが戻る)の
+    // characterization。
+    // **これは前置 BreakCoalescing / insertHasBreak: true の網ではない**(最終レビュー I-2 の訂正):
+    // fixture は通常形(removed=4 / inserted=5)で、UndoHistory.Record の融合判定は
+    // pureInsert / pureDelete の形でしか通らないため coalescable が構造的に false になる。
+    // どちらのガードを外しても本テストは緑のままである。2 つのガードの担い手は
+    // TextBufferReplaceAllTests の退化形 2 件
+    // (..._PureInsertShape_DoesNotAbsorbFollowingTyping / ..._PureDeleteShape_DoesNotMergeIntoPrecedingDelete)。
+    // 設計書 §10.11 (1) が同じ事実を正確に書いており、ここのコメントだけが訂正前の誤解を残していた。
+    [Fact]
+    public void ConvertEols_NonFastPath_DoesNotCoalesceWithPrecedingTyping() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb"));
+            ctrl.ReplaceCharRange(3, 0, "x"); // 1 文字タイプ相当="a\nbx"
+            ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.Undo();
+            // 融合していれば "a\nb" まで一気に戻ってしまう。
+            Assert.Equal("a\nbx", ctrl.SnapshotText);
+        });
+
+    // fast-path では履歴に何も積まれないこと。
+    // no-change テストなので既定値(履歴空)ではなく、履歴を 1 つ積んだ非既定状態から始める
+    // (CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_RecordsNothingInHistory() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb"));
+            ctrl.ReplaceCharRange(4, 0, "Z");
+            Assert.Equal("a\r\nbZ", ctrl.SnapshotText);
+            ctrl.ConvertEols(LineEnding.Crlf); // すでに CRLF 統一=fast-path
+            ctrl.Undo();
+            Assert.Equal("a\r\nb", ctrl.SnapshotText);
+            Assert.False(ctrl.CanUndo);
+        });
+
+    // ===== A-11: SavePoint イベント発火列(設計書 §10.12 (1)) =====
+    // AfterEdit() を呼ぶ素直な実装は _wasModified の false→true 遷移で
+    // 「保存処理の途中に」SavePointLeft を焚く。main は ReplaceSource:301 の直接代入で
+    // 一切焚かないため、それが退行にならないことをここで固定する。
+    //
+    // **位置づけ(最終レビュー I-5)**: 以下は clean / dirty x 単体 / 成功パス / 失敗パス の
+    // マトリクスを埋めた **characterization(main との対照群)**であり、6 件のうち
+    // **弁別力を持つのは ..._OnSavedDocument_FiresNoSavePointEvents だけ**である
+    // (AfterEdit() 置換の変異で赤くなるのはこの 1 件。残りは変異下でも緑)。
+    // とくに ..._ThenSetSavePoint_FiresReachedOnce は **ConvertEols の呼び出しを丸ごと削除しても
+    // 緑**になる(SetSavePoint() が SavePointReached を無条件発火するため)。
+    // 名前が ConvertEols_NonFastPath_ で始まるのは過大主張なので、ここに明示しておく。
+    // 残す理由: main と切替後で同じ発火列になることを 1 行ずつ照合した記録(設計書 §10.13 (3) の表)
+    // そのものであり、将来 main と比較し直す人の出発点になる。
+
+    [Fact]
+    public void ConvertEols_NonFastPath_OnSavedDocument_FiresNoSavePointEvents() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint(); // 保存済み=Modified false から始める
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Empty(log);
+        });
+
+    [Fact]
+    public void ConvertEols_NonFastPath_OnDirtyDocument_FiresNoSavePointEvents() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            ctrl.ReplaceCharRange(5, 0, "d"); // dirty 化(ここで SavePointLeft は消費済み)
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Empty(log);
+        });
+
+    // 保存成功パス: ConvertEols → SetSavePoint。発火列は ["Reached"] 1 件のみ。
+    [Fact]
+    public void ConvertEols_NonFastPath_ThenSetSavePoint_FiresReachedOnce() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.SetSavePoint(); // 書き込み成功後に App 層が打つ保存点
+
+            Assert.Equal(new[] { "Reached" }, log);
+            Assert.False(ctrl.Modified);
+        });
+
+    // 保存失敗パス(Task 4 のロールバック形): ConvertEols → Undo。
+    // _savedRoot を触らない設計なので Undo で保存点の root に戻り Modified が false へ復す。
+    [Fact]
+    public void ConvertEols_NonFastPath_ThenUndo_RestoresSavePoint() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.True(ctrl.Modified); // 差し替えで保存点から離れる(イベントは焚かない)
+            Assert.Empty(log);
+
+            ctrl.Undo();
+
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+            Assert.False(ctrl.Modified);
+            Assert.Equal(new[] { "Reached" }, log);
+        });
+
+    // 保存成功パス(dirty 文書): ConvertEols → SetSavePoint。dirty でも発火列は ["Reached"]。
+    [Fact]
+    public void ConvertEols_NonFastPath_OnDirtyDocument_ThenSetSavePoint_FiresReachedOnce() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            ctrl.ReplaceCharRange(5, 0, "d"); // dirty 化
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.SetSavePoint();
+
+            Assert.Equal(new[] { "Reached" }, log);
+            Assert.False(ctrl.Modified);
+        });
+
+    // 保存失敗パス(dirty 文書): ConvertEols → Undo。保存点には戻らない=遷移が無いので無発火。
+    [Fact]
+    public void ConvertEols_NonFastPath_OnDirtyDocument_ThenUndo_FiresNoSavePointEvents() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            ctrl.ReplaceCharRange(5, 0, "d"); // dirty 化="a\nb\ncd"
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.Undo();
+
+            Assert.Equal("a\nb\ncd", ctrl.SnapshotText);
+            Assert.True(ctrl.Modified);
+            Assert.Empty(log);
+        });
+
+    // ===== A-11: ReplaceSource が担っていた副作用の明示化(設計書 §5.2 契約表) =====
+
+    // UIA スナップショット更新: RPC スレッドが読む _bufferSnapshot が変換後本文になっていること。
+    [Fact]
+    public void ConvertEols_NonFastPath_UpdatesUiaSnapshot() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            var host = (IUiaTextHost)ctrl;
+            Assert.Equal(5, host.TextLength);
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(7, host.TextLength);
+            Assert.Equal("a\r\nb\r\nc", host.GetTextRange(0, 7));
+        });
+
+    // UpdateUI(App 層ステータスバー更新契機)は変換 1 回につき 1 回。
+    [Fact]
+    public void ConvertEols_NonFastPath_FiresUpdateUiOnce() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(1, updateUi);
+        });
+
+    // fast-path は EolMode 更新のみ=UpdateUI も焚かない。
+    // 非既定状態(1 回カウント済み)から始めて既定値 0 と区別する(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_FiresNoUpdateUi() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+            ctrl.ConvertEols(LineEnding.Crlf); // 非 fast-path=1 回焚かれる
+            Assert.Equal(1, updateUi);
+
+            ctrl.ConvertEols(LineEnding.Crlf); // 2 回目は fast-path
+
+            Assert.Equal(1, updateUi);
+        });
+
+    // ===== A-11 レビュー I-1: 「新しい test hook が要る」は過小申告だった =====
+    // 既存の観測手段(private フィールドのリフレクション / MouseInputTests の SendMouseWheel /
+    // EditorControl.Ime.cs の __Test* 診断アクセサ)だけで、§5.2 契約表の残りに網を張れる。
+
+    /// <summary>
+    /// セル強調(private フィールド)を取り出す。<c>VisualRowScrollTests.VScroll</c> と同じ理由で、
+    /// リネームで静かに緑になる事故を防ぐためフィールド名つきで明示的に落とす。
+    /// </summary>
+    private static object? CellHighlight(EditorControl c)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_cellHighlight",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(
+            fi is not null,
+            "EditorControl に private フィールド _cellHighlight が見つからない"
+        );
+        return fi!.GetValue(c);
+    }
+
+    /// <summary><c>UiaTextHostAdapterTests</c> と同じ流儀で <c>_caretCtrl</c> を借りる。</summary>
+    private static CaretController Caret(EditorControl c)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_caretCtrl",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(
+            fi is not null,
+            "EditorControl に private フィールド _caretCtrl が見つからない"
+        );
+        return (CaretController)fi!.GetValue(c)!;
+    }
+
+    /// <summary><c>MouseInputTests.SendMouseWheel</c> と同じ受け口(OnMouseWheel 直叩き)。</summary>
+    private static void SendMouseWheel(EditorControl c, int delta)
+    {
+        var mi = typeof(EditorControl).GetMethod(
+            "OnMouseWheel",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, delta) });
+    }
+
+    private static (Form F, EditorControl C) MakeHosted(string text, int width, int height)
+    {
+        var f = new Form { Size = new System.Drawing.Size(width, height) };
+        var c = new EditorControl { Dock = DockStyle.Fill };
+        f.Controls.Add(c);
+        _ = f.Handle; // ネイティブキャレット/描画経路を有効化(MouseInputTests.MakeControl と同旨)
+        c.SetSource(TextBuffer.FromString(text));
+        return (f, c);
+    }
+
+    // 設計書 §10.12 (1): _wheelAccum のリセットも MouseDragging と同じく意図的に落とす。
+    // MouseInputTests.MouseWheel_AccumulatesSmallDeltas と同じ 40x3=120 の蓄積を使い、
+    // その途中に変換を挟んで「3 発目で発火する=蓄積が生き残っている」ことを黒箱で観測する。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsWheelAccumulation() =>
+        Sta.Run(() =>
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 30; i++)
+                sb.Append("line").Append(i).Append('\n');
+            var (f, c) = MakeHosted(sb.ToString(), width: 400, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 10;
+                int before = c.TopLine;
+                SendMouseWheel(c, 40);
+                SendMouseWheel(c, 40);
+                Assert.Equal(before, c.TopLine); // まだ 120 に満たない=変化なし
+
+                c.ConvertEols(LineEnding.Crlf); // 非 fast-path
+                Assert.Equal(before, c.TopLine); // スクロール位置は復元される
+
+                SendMouseWheel(c, 40); // 3 発目。蓄積が生きていれば 120 に到達して発火する
+                Assert.True(
+                    c.TopLine < before,
+                    $"_wheelAccum が変換で破棄された疑い(TopLine={c.TopLine}, before={before})"
+                );
+            }
+        });
+
+    // §5.2 契約表「スクロールバー同期」— A-11 レビュー I-1 のプローブが実測した退行の網。
+    // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるため評価時点の
+    // _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、in-place 化では
+    // _topLine を潰さない。長い行が可視域に無い状態で水平再計算を走らせると HideAndResetHScroll が
+    // _scrollX を 0 に落とし、直後の `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する
+    // =保存のたびに水平スクロール位置が消える。
+    //
+    // fixture A: 長い行(行 3)が**先頭スクリーンフル内**・表示は行 5。
+    // この形では main も _topLine=0 評価で長い行を拾うため HScroll が残る=main では緑
+    // (挙動不変の対照群)。commit e185ef9 の初版実装に対しては赤だった。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsHorizontalScroll() =>
+        Sta.Run(() =>
+        {
+            using var f = HostForm.CreateVisible();
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 40; i++)
+                sb.Append(i == 3 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0; // 折り返し OFF(水平スクロールが意味を持つ条件)
+            c.TopLine = 5;
+            c.Invalidate();
+            Application.DoEvents(); // 描画を 1 回起こしてレイアウトを確定
+            c.ScrollX = 30;
+            Assert.Equal(5, c.TopLine);
+            // fixture 前提: hscroll が表示されていないと ScrollX setter は no-op。
+            Assert.Equal(30, c.ScrollX);
+
+            c.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(5, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
+        });
+
+    // fixture B(A-11 コード品質レビュー I-3): 長い行(行 40)が**先頭スクリーンフルの外**。
+    // この形では main も _topLine=0 で短い行だけを走査するので HideAndResetHScroll を踏み、
+    // ScrollX を失う=**main 既存バグ**。本テストは main で赤く、切替後で緑になる。
+    // したがって「水平を再計算しない」判断は退行修正であると同時に挙動改善である
+    // (CLAUDE.md §2 の文書化対象。設計書 §10.13 (7))。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsHorizontalScroll_WhenLongLineOffFirstScreen() =>
+        Sta.Run(() =>
+        {
+            using var f = HostForm.CreateVisible();
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 60; i++)
+                sb.Append(i == 40 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0;
+            c.TopLine = 40; // 長い行を可視域に置く(先頭スクリーンフルからは外れている)
+            c.ShowLineNumbers = true;
+            c.Invalidate();
+            Application.DoEvents();
+            c.ScrollX = 30;
+            Assert.Equal(40, c.TopLine);
+            // fixture 前提: ここが 0 だと以後の assert が空振りする(hscroll 非表示)。
+            Assert.Equal(30, c.ScrollX);
+
+            c.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
+        });
+
+    // §5.2 契約表「IME 未確定の確定キャンセル」: ReplaceSource 冒頭のガードを維持していること。
+    // (EditorControlImeTests.ReplaceCharRange_DuringComposition_CancelsFirst と同流儀)
+    [Fact]
+    public void ConvertEols_NonFastPath_DuringComposition_CancelsFirst() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\nb\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                var m = new Message
+                {
+                    HWnd = c.Handle,
+                    Msg = NativeMethods.WM_IME_STARTCOMPOSITION,
+                };
+                c.__TestProcessMessage(ref m);
+                c.__TestApplyComposition("あ", cursorPos: 1, attrs: [0], clauses: [0, 1]);
+                Assert.True(c.__TestIsComposing());
+
+                c.ConvertEols(LineEnding.Crlf);
+
+                Assert.False(c.__TestIsComposing()); // 強制取消で _ime クリア
+                Assert.Equal("a\r\nb\r\nc", c.SnapshotText); // 取消は変換自体を妨げない
+            }
+        });
+
+    // fast-path は差し替えを一切行わないので未確定も取り消さない(main の実挙動=現行契約)。
+    // no-change テストなので非既定状態(未確定期間中)から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_DuringComposition_DoesNotCancel() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\r\nb\r\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                var m = new Message
+                {
+                    HWnd = c.Handle,
+                    Msg = NativeMethods.WM_IME_STARTCOMPOSITION,
+                };
+                c.__TestProcessMessage(ref m);
+                c.__TestApplyComposition("あ", cursorPos: 1, attrs: [0], clauses: [0, 1]);
+                Assert.True(c.__TestIsComposing());
+
+                c.ConvertEols(LineEnding.Crlf); // すでに CRLF 統一=fast-path
+
+                Assert.True(c.__TestIsComposing());
+            }
+        });
+
+    // §5.2 契約表「_cellHighlight 無効化」: EOL 変換でセルのオフセットが動くので破棄する。
+    [Fact]
+    public void ConvertEols_NonFastPath_ClearsCellHighlight() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nbbb\nc"));
+            ctrl.HighlightCharRange(2, 3);
+            Assert.NotNull(CellHighlight(ctrl));
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Null(CellHighlight(ctrl));
+        });
+
+    // fast-path はオフセットが動かないのでセル強調を残す。
+    // no-change テストなので非既定状態(強調あり)から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_KeepsCellHighlight() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nbbb\r\nc"));
+            ctrl.HighlightCharRange(3, 3);
+            Assert.NotNull(CellHighlight(ctrl));
+
+            ctrl.ConvertEols(LineEnding.Crlf); // fast-path
+
+            Assert.NotNull(CellHighlight(ctrl));
+        });
+
+    // §5.2 契約表に無かった 11 行目(設計書 §10.13 (2)): ReplaceSource は DesiredXpx を -1 に潰す。
+    // 挙動不変を優先して維持した決定を固定する。非既定値から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_NonFastPath_ResetsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999;
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(-1, caret.DesiredXpx);
+        });
+
+    [Fact]
+    public void ConvertEols_FastPath_KeepsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb\r\nc"));
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999;
+
+            ctrl.ConvertEols(LineEnding.Crlf); // fast-path
+
+            Assert.Equal(999, caret.DesiredXpx);
+        });
+
+    // 設計書 §10.12 (1): MouseDragging のリセットは in-place 化で意図的に落とす
+    // (バッファ参照が変わらない=ドラッグ選択の途中状態を破棄する理由が無い)。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsMouseDragging() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.MouseDragging = true;
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.True(ctrl.MouseDragging);
+        });
+
+    // ===== A-11: 戻り値の契約(Task 4 のロールバック判定の唯一の根拠) =====
+
+    [Fact]
+    public void ConvertEols_NonFastPath_ReturnsTrue() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            Assert.True(ctrl.ConvertEols(LineEnding.Crlf));
+        });
+
+    [Fact]
+    public void ConvertEols_FastPath_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb\r\nc"));
+            Assert.False(ctrl.ConvertEols(LineEnding.Crlf));
+        });
+
+    // 改行を 1 つも持たない本文は fast-path(=どの target でも「統一済み」)。
+    [Fact]
+    public void ConvertEols_NoLineBreaks_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc"));
+            Assert.False(ctrl.ConvertEols(LineEnding.Crlf));
+            Assert.False(ctrl.CanUndo);
+        });
+
+    [Fact]
+    public void ConvertEols_BeforeSetSource_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            Assert.False(ctrl.ConvertEols(LineEnding.Crlf));
+        });
+
+    // ===== A-11 Task 4: UndoEolConversion(保存失敗ロールバック専用の取り消し)=====
+    // App 層(FileControllerTests)は「保存に失敗したら本文が戻る」を見る。ここでは
+    // 通知契約とキャレット規約という、App 層からは観測できない側面を固定する。
+
+    // 取り消し後、RPC スレッドが読む UIA スナップショットが**変換前の本文**に戻っていること。
+    // ここが古いままだと SR は画面と違う本文(変換後)を読み上げる。
+    [Fact]
+    public void UndoEolConversion_UpdatesUiaSnapshot() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            var host = (IUiaTextHost)ctrl;
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.Equal(7, host.TextLength); // 前提: 変換後の長さが見えている
+
+            Assert.True(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal(5, host.TextLength);
+            Assert.Equal("a\nb\nc", host.GetTextRange(0, 5));
+        });
+
+    // 取り消しも App 層のステータスバー更新契機=1 回だけ焚く(ConvertEols と対称)。
+    [Fact]
+    public void UndoEolConversion_FiresUpdateUiOnce() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(1, updateUi);
+        });
+
+    // 設計書 §5.3 の no-op 要件: conversionRecorded=false では**何も**してはならない。
+    // no-change テストなので非既定状態から始める(履歴 1 段・UpdateUI 済み・非 0 キャレット)。
+    [Fact]
+    public void UndoEolConversion_NotRecorded_DoesNothing() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb\r\nc"));
+            ctrl.ReplaceCharRange(0, 0, "x"); // ユーザーの編集(戻されたら消える)
+            ctrl.SetSelectionAnchored(anchor: 2, caret: 4);
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf); // fast-path=false
+            Assert.False(recorded); // 前提
+            int updateUi = 0;
+            ctrl.UpdateUI += (_, _) => updateUi++;
+
+            Assert.False(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal("xa\r\nb\r\nc", ctrl.SnapshotText); // ユーザーの編集が残っている
+            Assert.Equal(0, updateUi); // 通知も打たない
+            Assert.Equal(2, ctrl.SelectionAnchor); // キャレット/選択も動かさない
+            Assert.Equal(4, ctrl.CaretCharOffset);
+        });
+
+    // 設計書 §10.12 (2): UndoResult.CaretPos(=文書末尾)ではなく、呼び出し元が捕捉した
+    // 変換前の位置へ戻す。anchor != caret の非既定状態から始める
+    // (SetTo で戻す実装だと選択が潰れて anchor == caret になる)。
+    [Fact]
+    public void UndoEolConversion_RestoresGivenSelection_NotUndoResultCaretPos() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\ndef\nghi"));
+            ctrl.SetSelectionAnchored(anchor: 1, caret: 6);
+            int anchorBefore = ctrl.SelectionAnchor;
+            int caretBefore = ctrl.CaretCharOffset;
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.True(recorded); // 前提
+
+            ctrl.UndoEolConversion(recorded, anchorBefore, caretBefore);
+
+            Assert.Equal(1, ctrl.SelectionAnchor);
+            Assert.Equal(6, ctrl.CaretCharOffset); // 末尾(11)へ飛んでいない
+        });
+
+    // ReadOnly でも効くこと。Undo() を流用すると ReadOnly ガードで黙って no-op になる
+    // (CSV グリッドモード= CsvController.Editor.ReadOnly = true の経路)。
+    [Fact]
+    public void UndoEolConversion_WhileReadOnly_StillUndoes() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            ctrl.ReadOnly = true;
+
+            Assert.True(ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0));
+
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    // 保存処理の途中で SavePoint イベントを焚かない(ConvertEols 側の決定=設計書 §10.12 (1) と対称)。
+    // clean 文書から始める=変換で Modified が false→true、取り消しで true→false と
+    // **両方向の遷移が実在する**非既定条件(AfterEdit を呼ぶ実装なら Reached が 1 件記録される)。
+    [Fact]
+    public void UndoEolConversion_OnSavedDocument_FiresNoSavePointEvents() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.SetSavePoint();
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.True(ctrl.Modified); // 前提: 変換で保存点から外れている
+            var log = RecordSavePointEvents(ctrl);
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.False(ctrl.Modified); // 保存点へ戻る(値は戻る=イベントだけ焚かない)
+            Assert.Empty(log);
+        });
+
+    // 記録したと言われても履歴が空なら false を返す(呼び出し側の bool を鵜呑みにしない防御)。
+    [Fact]
+    public void UndoEolConversion_NothingInHistory_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+
+            Assert.False(ctrl.UndoEolConversion(conversionRecorded: true, 0, 0));
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    [Fact]
+    public void UndoEolConversion_BeforeSetSource_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            Assert.False(ctrl.UndoEolConversion(conversionRecorded: true, 0, 0));
+        });
+
+    // ===== 仕様適合レビュー ②: 「網が無い」と申告した 3 項目は既存インフラで書けた =====
+    // 直前の ConvertEols から状態を**ずらしてから**取り消しを呼べば、いずれも観測できる。
+    // 「WriteToPath 経由では ConvertEols が直前に同じ値を入れているから等価」という論法は、
+    // API 単体の契約テストには当てはまらない(設計書 §10.14 (6) の訂正)。
+
+    // キャレットが動く経路の共通作法(縦移動の目標 X を捨てる)。
+    // ConvertEols が入れた -1 とは別に、取り消し**直前**に非既定値を入れて弁別する。
+    [Fact]
+    public void UndoEolConversion_ResetsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999; // ConvertEols が入れた -1 を上書き=非既定状態
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(-1, caret.DesiredXpx);
+        });
+
+    // 再描画要求。EditorControl は sealed だが seam は要らなかった —— WinForms 標準の
+    // public event Control.Invalidated で数えられる(設計書 §10.13 (6) / §10.14 (6) の訂正)。
+    // ホストは非フォーカス(MakeHosted は Show / Focus しない)なので _hasFocus が false =
+    // PositionCaret 経路の Invalidate が混ざらず、明示 Invalidate だけを数えられる。
+    [Fact]
+    public void UndoEolConversion_InvalidatesOnce() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\nb\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                int invalidated = 0;
+                c.Invalidated += (_, _) => invalidated++;
+
+                c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+                Assert.Equal(1, invalidated);
+            }
+        });
+
+    // system caret(Win32 SetCaretPos)の再配置。GetCaretPos で観測できる
+    // (先例 = CaretScrollTests.EnsureVisibleCharRange_RestoresSystemCaretPosition。
+    //  フォーカスが要るので CreateVisible ではなく Show + Focus を使うのも同じ理由)。
+    // 取り消し直前にキャレットを行 0 へ動かしておき、復元先(行 1)へ system caret が
+    // 追随することを見る=ConvertEols 自身の PositionCaret とは弁別できる。
+    [Fact]
+    public void UndoEolConversion_RepositionsSystemCaret() =>
+        Sta.Run(() =>
+        {
+            using var f = new Form { Size = new System.Drawing.Size(400, 200) };
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            f.Show(); // Focus を得るには可視化が必要(GetCaretPos はフォーカス側でのみ有効)
+            c.Focus();
+            c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc"));
+            try
+            {
+                c.SetCaretCharOffset(7); // 行 1 の 2 文字目=非既定位置
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                c.SetCaretCharOffset(0); // system caret を行 0 へずらす
+
+                c.UndoEolConversion(recorded, anchorBefore: 7, caretBefore: 7);
+
+                Assert.Equal(7, c.CaretCharOffset);
+                var expected = c.PointFromCharOffset(7);
+                Assert.NotEqual(System.Drawing.Point.Empty, expected); // 前提: 復元先は可視域内
+                Assert.True(GetCaretPos(out var actual), "GetCaretPos failed");
+                Assert.Equal(expected.X, actual.X);
+                Assert.Equal(expected.Y, actual.Y); // PositionCaret を落とすと行 0 の Y に残る
+            }
+            finally
+            {
+                c.Dispose();
+                f.Close();
+            }
+        });
+
+    // 仕様適合レビュー ② (c): App 層 1 本だけが守っていた 2 項目に L2 の網を足す。
+    // Redo 破棄。no-change 系なので非既定状態(取り消し前はやり直せる)から始める。
+    [Fact]
+    public void UndoEolConversion_DropsRedo() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.ReplaceCharRange(0, 0, "x");
+            ctrl.Undo();
+            Assert.True(ctrl.CanRedo); // 前提: 非既定状態
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.False(ctrl.CanRedo); // 前提: Record が元の Redo を捨てている(§10.11 (4))
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.False(ctrl.CanRedo); // 取り消しが積み直した分も捨てる
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    // 水平スクロールバーを再計算しないこと。長い行を**可視域の外**に置いた状態で取り消す
+    // (可視域に残る fixture では UpdateHorizontalScrollbar を足す変異が生存する。
+    //  設計書 §10.13 (7) / §10.14 (2))。
+    [Fact]
+    public void UndoEolConversion_KeepsHorizontalScroll_WhenLongLineOffScreen() =>
+        Sta.Run(() =>
+        {
+            using var f = HostForm.CreateVisible();
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 60; i++)
+                sb.Append(i == 0 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0;
+            c.Invalidate();
+            Application.DoEvents();
+            c.ScrollX = 30; // 長い行(行 0)が見えている間に置く
+            c.TopLine = 40; // 長い行を可視域の外へ(TopLine セッターは HScroll を再計算しない)
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX); // fixture 前提: ここが 0 だと以後の assert が空振りする
+
+            bool recorded = c.ConvertEols(LineEnding.Crlf);
+            c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
+        });
+
+    // 最終レビュー m-2: スクロール系の網はすべて WrapColumns = 0 で、_topSegment が常に 0 =
+    // 「視覚行位置を保つ」契約(§5.2 契約表 #2 の SetTopPosition)に網が無かった。
+    // 折り返し ON の垂直位置は A-5 / A-6 で継続的に事故が出ている領域なので、
+    // **WrapColumns 非 0 かつ TopSegment 非 0** から始めて、変換でも取り消しでも動かないことを見る。
+    // ConvertEols の SetTopPosition(savedTopLine, savedTopSegment) を TopLine セッターへ変える変異
+    // (= 論理行だけ戻してセグメントを 0 に潰す)で撃墜する。
+    [Fact]
+    public void ConvertEolsAndUndo_KeepVisualRowPosition_WhenWrapOn() =>
+        Sta.Run(() =>
+        {
+            using var f = new HostForm();
+            using var c = new EditorControl { WrapColumns = 2 };
+            f.Controls.Add(c);
+            _ = f.Handle;
+            c.ClientSize = new System.Drawing.Size(800, c.LineHeightPx * 3);
+            c.SetSource(TextBuffer.FromString("abcdefghij\nklmnopqrst\nuvwx"));
+
+            c.SetTopPosition(1, 2); // 論理行 1 の 3 番目の視覚行=どちらも非既定
+            Assert.Equal(1, c.TopLine); // 前提: ここが 0 だと以後の assert が空振りする
+            Assert.Equal(2, c.TopSegment);
+
+            bool recorded = c.ConvertEols(LineEnding.Crlf);
+            Assert.True(recorded); // 前提: 非 fast-path を通っている
+
+            Assert.Equal(1, c.TopLine);
+            Assert.Equal(2, c.TopSegment); // ★ TopLine セッターで戻す変異はここで落ちる ★
+
+            c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(1, c.TopLine);
+            Assert.Equal(2, c.TopSegment);
+            Assert.Equal("abcdefghij\nklmnopqrst\nuvwx", c.SnapshotText);
+        });
+
+    // GetCaretPos は EditorControl 内部の NativeMethods が internal のためテスト側で個別に
+    // P/Invoke 宣言する(CaretScrollTests と同じ理由・同じ宣言)。
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(
+        System.Runtime.InteropServices.UnmanagedType.Bool
+    )]
+    private static extern bool GetCaretPos(out System.Drawing.Point lpPoint);
+}
+
+// A-11: UIA イベント発火は静的な TestHook_ForceUiaListen を使うため、既存の
+// EditorControlUiaEventsTests と同じ collection に入れて並列実行から隔離する。
+[Collection("UiaEventHook")]
+public class EditorControlConvertEolsUiaEventTests
+{
+    // 設計書 §5.2 契約表: ReplaceSource が担っていた UIA TextChanged / SelectionChanged を
+    // in-place 化後も同じ回数だけ打つ(発火「順序」= caret 復元後になった点は意図的な変更で、
+    // 回数では区別できない。L5 で SR の実発声を確認する)。
+    [Fact]
+    public void ConvertEols_NonFastPath_RaisesTextChangedAndSelectionChangedOnce() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var ctrl = new EditorControl();
+                ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+                using var form = new Form();
+                form.Controls.Add(ctrl);
+                form.Show();
+                try
+                {
+                    // WM_GETOBJECT 経由でプロバイダを生成させる(=RaiseUia の early return を回避)
+                    var msg = Message.Create(
+                        ctrl.Handle,
+                        0x003D,
+                        System.IntPtr.Zero,
+                        new System.IntPtr(-25)
+                    );
+                    EditorControl.TestHook_WndProc(ctrl, ref msg);
+                    EditorControl.TestHook_ResetUiaEventCounts(ctrl);
+
+                    ctrl.ConvertEols(LineEnding.Crlf);
+                    Application.DoEvents();
+
+                    var (textChanged, selChanged, _) = EditorControl.TestHook_UiaEventCounts(ctrl);
+                    Assert.Equal(1, textChanged);
+                    Assert.Equal(1, selChanged);
+                }
+                finally
+                {
+                    form.Close();
+                }
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    // fast-path は UIA 通知も打たない。no-change テストなので非既定状態
+    // (非 fast-path で 1 回ずつ焚いた後)から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_RaisesNoUiaEvents() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var ctrl = new EditorControl();
+                ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+                using var form = new Form();
+                form.Controls.Add(ctrl);
+                form.Show();
+                try
+                {
+                    var msg = Message.Create(
+                        ctrl.Handle,
+                        0x003D,
+                        System.IntPtr.Zero,
+                        new System.IntPtr(-25)
+                    );
+                    EditorControl.TestHook_WndProc(ctrl, ref msg);
+                    EditorControl.TestHook_ResetUiaEventCounts(ctrl);
+
+                    ctrl.ConvertEols(LineEnding.Crlf); // 非 fast-path=1 回ずつ焚く
+                    Application.DoEvents();
+                    Assert.Equal((1, 1), Counts(ctrl));
+
+                    ctrl.ConvertEols(LineEnding.Crlf); // 2 回目は fast-path
+                    Application.DoEvents();
+                    Assert.Equal((1, 1), Counts(ctrl));
+                }
+                finally
+                {
+                    form.Close();
+                }
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    /// <summary>
+    /// 発火時点の caret / anchor / <see cref="IUiaTextHost.TextLength"/> を記録するアダプタ。
+    /// <c>UiaTextHostAdapterTests.ThrowingAdapter</c> と同じ <c>PerformRaiseAutomationEvent</c>
+    /// seam を使う(実 UIA インフラを叩かない)。
+    /// </summary>
+    /// <remarks>
+    /// TextLength は「発火時点で <c>OnSnapshotChanged</c> が済んでいるか」を <c>OnSnapshotChanged</c>
+    /// を virtual 化せずに観測するための代理量(A-11 コード品質レビュー I-4 (1))。
+    /// production の可視性を網のために広げないための選択。
+    /// </remarks>
+    private sealed class RecordingAdapter : UiaTextHostAdapter
+    {
+        private readonly CaretController _caret;
+
+        public RecordingAdapter(EditorControl host, CaretController caret)
+            : base(host, caret) => _caret = caret;
+
+        public List<(string Event, int Caret, int Anchor, int TextLength)> Fired { get; } = [];
+
+        protected internal override void PerformRaiseAutomationEvent(
+            AutomationEvent ev,
+            IRawElementProviderSimple provider,
+            AutomationEventArgs args
+        )
+        {
+            string name =
+                ev == TextPatternIdentifiers.TextChangedEvent ? "TextChanged"
+                : ev == TextPatternIdentifiers.TextSelectionChangedEvent ? "SelectionChanged"
+                : "Other";
+            Fired.Add((name, _caret.Caret, _caret.Anchor, ((IUiaTextHost)this).TextLength));
+        }
+    }
+
+    private static RecordingAdapter InjectRecordingAdapter(EditorControl c)
+    {
+        var caretField = typeof(EditorControl).GetField(
+            "_caretCtrl",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            caretField is not null,
+            "EditorControl に private フィールド _caretCtrl が見つからない"
+        );
+        var adapter = new RecordingAdapter(c, (CaretController)caretField!.GetValue(c)!);
+
+        // _provider != null を作らないと RaiseUia は早期 return する
+        // (UiaTextHostAdapterTests.RaiseUia_WhenPerformThrows_* と同じ手順)。
+        var providerField = typeof(UiaTextHostAdapter).GetField(
+            "_provider",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            providerField is not null,
+            "UiaTextHostAdapter に private フィールド _provider が見つからない"
+        );
+        providerField!.SetValue(adapter, new TextControlProviderV2(adapter));
+
+        var uiaField = typeof(EditorControl).GetField(
+            "_uia",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            uiaField is not null,
+            "EditorControl に private フィールド _uia が見つからない"
+        );
+        uiaField!.SetValue(c, adapter);
+        // 注入直後の _bufferSnapshot は null=TextLength 0 になる。旧スナップショットで prime して
+        // 「発火時点の TextLength が旧長なら OnSnapshotChanged がまだ / 新長なら済んでいる」を
+        // 意味のある対比にする。
+        adapter.OnSnapshotChanged(c.CurrentBuffer.Current);
+        return adapter;
+    }
+
+    // A-11 レビュー I-2 / コード品質レビュー I-4 (1): このブランチの目玉である挙動変更の網。
+    // 旧経路は ReplaceSource が caret を 0 に潰した中間状態で TextChanged / SelectionChanged を
+    // 飛ばしていた(監査 A-11 が副作用として指摘)。in-place 化でその中間状態が消え、
+    // caret 復元後に発火する。回数では main と区別できない(隣の
+    // RaisesTextChangedAndSelectionChangedOnce は main でも緑)ので、
+    // PerformRaiseAutomationEvent seam で発火「時点」の状態を固定する。
+    // 固定するのは 2 つ:
+    //  - caret / anchor が復元後の位置であること(main は 0 / 0)
+    //  - TextLength が新値であること=OnSnapshotChanged が発火より前に済んでいること
+    //    (SR が TextChanged を受けて読み直す本文が新本文である、という契約)
+    // fixture は非既定位置の caret から始める(caret=0 だと main と区別できない・CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_NonFastPath_RaisesUiaEventsAfterCaretRestore() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var f = new Form();
+                using var c = new EditorControl();
+                f.Controls.Add(c);
+                _ = f.Handle;
+                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc")); // 14 文字
+                c.SetCaretCharOffset(7); // 行 1 の 2 文字目=非既定位置
+                Assert.Equal(7, c.CaretCharOffset);
+
+                var adapter = InjectRecordingAdapter(c);
+                Assert.Equal(14, ((IUiaTextHost)adapter).TextLength); // prime 済み=旧長
+
+                c.ConvertEols(LineEnding.Crlf);
+
+                // 変換後の同じ論理位置 = 非改行 6("aaaa"+"bb")+ 改行 1 x 2 = 8。
+                // main はここが 0 / 0 になる(ReplaceSource が caret を潰した後に発火するため)。
+                // TextLength 16 = 変換後の長さ(旧長 14 のままなら OnSnapshotChanged が後回し)。
+                Assert.Equal(8, c.CaretCharOffset);
+                Assert.Equal(
+                    new[] { ("TextChanged", 8, 8, 16), ("SelectionChanged", 8, 8, 16) },
+                    adapter.Fired
+                );
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    // A-11 Task 4: ロールバック側も同じ契約で打つ。ここで固定するのは 3 つ:
+    //  - TextChanged / SelectionChanged を 1 回ずつ(ConvertEols と対称)
+    //  - 発火時点の caret / anchor が**保存前の位置**であること(UndoResult.CaretPos =
+    //    文書末尾 14 でも、旧機構の 0 でもない)
+    //  - 発火時点の TextLength が取り消し後の長さであること
+    //    = OnSnapshotChanged が発火より前に済んでいる(SR が読み直す本文が戻った本文になる)
+    [Fact]
+    public void UndoEolConversion_RaisesUiaEventsAfterCaretRestore() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var f = new Form();
+                using var c = new EditorControl();
+                f.Controls.Add(c);
+                _ = f.Handle;
+                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc")); // 14 文字
+                c.SetSelectionAnchored(anchor: 3, caret: 7); // 非既定位置・anchor != caret
+                var adapter = InjectRecordingAdapter(c);
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                Assert.True(recorded); // 前提
+                adapter.Fired.Clear(); // 変換の分は捨てて、取り消しの分だけを見る
+
+                c.UndoEolConversion(recorded, anchorBefore: 3, caretBefore: 7);
+
+                Assert.Equal(
+                    new[] { ("TextChanged", 7, 3, 14), ("SelectionChanged", 7, 3, 14) },
+                    adapter.Fired
+                );
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    private static (int TextChanged, int SelChanged) Counts(EditorControl ctrl)
+    {
+        var (textChanged, selChanged, _) = EditorControl.TestHook_UiaEventCounts(ctrl);
+        return (textChanged, selChanged);
     }
 }
