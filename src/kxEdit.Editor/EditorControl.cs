@@ -460,8 +460,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// non fast-path では「行 index + 改行文字以外の相対 offset」の対で caret/anchor/topLine/
     /// topSegment/scrollX を保存→復元する(P6 レビュー I-2: Save 毎に caret が先頭へ飛ぶ退行を回避)。
     /// <see cref="ReplaceSource(TextBuffer)"/> が担っていた副作用のうち、EOL 変換で意味を失うもの
-    /// (セル強調・IME 未確定・DesiredXpx)の破棄と、通知契約(スクロールバー再計算・Invalidate・
+    /// (セル強調・IME 未確定・DesiredXpx)の破棄と、通知契約(垂直スクロールバー同期・Invalidate・
     /// UIA スナップショット更新/TextChanged/SelectionChanged・<see cref="UpdateUI"/>)は明示的に打つ。
+    /// <b>水平スクロールバーだけは再計算しない</b>(理由は該当行のコメント参照=復元済みの
+    /// <c>_topLine</c> で評価すると <c>_scrollX</c> が失われる。EOL 変換で水平 extent は不変)。
     /// <c>AfterEdit</c> は<b>使わない</b>: <c>BringCaretIntoView</c> が復元済みのスクロール位置を
     /// 上書きし、かつ <c>_wasModified</c> 遷移から保存処理の途中で <see cref="SavePointLeft"/> が
     /// 焚かれるため(設計書 2026-08-28 §10.12 (1))。
@@ -578,10 +580,20 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         bool recorded = _buffer.ReplaceAllRecordingUndo(rebuilt);
         _cellHighlight = null; // 変換前オフセット由来のセル強調は無効化(EOL 変換で位置がずれる)
         _caretCtrl.DesiredXpx = -1; // ReplaceSource と同じく縦移動の目標 X を捨てる
-        // ReplaceSource 内と同じ位置でスクロールバーを再計算する(行数は不変だが最長行の
-        // pixel 幅は EOL 幅の変化で動きうる。ScrollX 復元より前=非表示化時の _scrollX=0 も同順)。
+        // 垂直だけ ReplaceSource と同じ位置で再計算する。Maximum/LargeChange は LineCount と
+        // ClientSize から決まり、EOL 変換で LineCount は変わらない(各改行が target 1 個へ 1:1)
+        // =値は動かないが、_vscroll.Value の同期という ReplaceSource の契約は維持する。
         UpdateVerticalScrollbar();
-        UpdateHorizontalScrollbar();
+        // A-11 レビュー I-1 のプローブで実測した退行のため、水平は**あえて再計算しない**。
+        // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるので、
+        // 評価時点の _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、
+        // in-place 化では _topLine を潰さないため、復元済みの起点で評価することになる。
+        // 長い行から離れた位置を表示していると HideAndResetHScroll が走って _scrollX が 0 に落ち、
+        // 直後の `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する
+        // =保存のたびに水平スクロール位置が失われる(main には無い退行)。
+        // EOL 変換は行本文(改行を除く)も LineCount も変えない=水平 extent は不変なので、
+        // そもそも再計算する理由が無い。以後の編集/リサイズ/スクロールが従来どおり更新する。
+        // 契約は EditorControlConvertEolsTests.ConvertEols_NonFastPath_KeepsHorizontalScroll で固定。
 
         int total = _buffer.Current.CharLength;
         // アンカー/キャレットは元の (m, k) 分解から再構成して復元する(ConvertEols 前後で

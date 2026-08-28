@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+using System.Reflection;
+using System.Windows.Automation;
+using System.Windows.Automation.Provider;
 using System.Windows.Forms;
 using kxEdit.Accessibility;
 using kxEdit.Core.Buffers;
@@ -485,6 +488,243 @@ public class EditorControlConvertEolsTests
             Assert.Equal(1, updateUi);
         });
 
+    // ===== A-11 レビュー I-1: 「新しい test hook が要る」は過小申告だった =====
+    // 既存の観測手段(private フィールドのリフレクション / MouseInputTests の SendMouseWheel /
+    // EditorControl.Ime.cs の __Test* 診断アクセサ)だけで、§5.2 契約表の残りに網を張れる。
+
+    /// <summary>
+    /// セル強調(private フィールド)を取り出す。<c>VisualRowScrollTests.VScroll</c> と同じ理由で、
+    /// リネームで静かに緑になる事故を防ぐためフィールド名つきで明示的に落とす。
+    /// </summary>
+    private static object? CellHighlight(EditorControl c)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_cellHighlight",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(
+            fi is not null,
+            "EditorControl に private フィールド _cellHighlight が見つからない"
+        );
+        return fi!.GetValue(c);
+    }
+
+    /// <summary><c>UiaTextHostAdapterTests</c> と同じ流儀で <c>_caretCtrl</c> を借りる。</summary>
+    private static CaretController Caret(EditorControl c)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_caretCtrl",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(
+            fi is not null,
+            "EditorControl に private フィールド _caretCtrl が見つからない"
+        );
+        return (CaretController)fi!.GetValue(c)!;
+    }
+
+    /// <summary><c>MouseInputTests.SendMouseWheel</c> と同じ受け口(OnMouseWheel 直叩き)。</summary>
+    private static void SendMouseWheel(EditorControl c, int delta)
+    {
+        var mi = typeof(EditorControl).GetMethod(
+            "OnMouseWheel",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        mi!.Invoke(c, new object[] { new MouseEventArgs(MouseButtons.None, 0, 0, 0, delta) });
+    }
+
+    private static (Form F, EditorControl C) MakeHosted(string text, int width, int height)
+    {
+        var f = new Form { Size = new System.Drawing.Size(width, height) };
+        var c = new EditorControl { Dock = DockStyle.Fill };
+        f.Controls.Add(c);
+        _ = f.Handle; // ネイティブキャレット/描画経路を有効化(MouseInputTests.MakeControl と同旨)
+        c.SetSource(TextBuffer.FromString(text));
+        return (f, c);
+    }
+
+    // 設計書 §10.12 (1): _wheelAccum のリセットも MouseDragging と同じく意図的に落とす。
+    // MouseInputTests.MouseWheel_AccumulatesSmallDeltas と同じ 40x3=120 の蓄積を使い、
+    // その途中に変換を挟んで「3 発目で発火する=蓄積が生き残っている」ことを黒箱で観測する。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsWheelAccumulation() =>
+        Sta.Run(() =>
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 30; i++)
+                sb.Append("line").Append(i).Append('\n');
+            var (f, c) = MakeHosted(sb.ToString(), width: 400, height: 60);
+            using (f)
+            using (c)
+            {
+                c.TopLine = 10;
+                int before = c.TopLine;
+                SendMouseWheel(c, 40);
+                SendMouseWheel(c, 40);
+                Assert.Equal(before, c.TopLine); // まだ 120 に満たない=変化なし
+
+                c.ConvertEols(LineEnding.Crlf); // 非 fast-path
+                Assert.Equal(before, c.TopLine); // スクロール位置は復元される
+
+                SendMouseWheel(c, 40); // 3 発目。蓄積が生きていれば 120 に到達して発火する
+                Assert.True(
+                    c.TopLine < before,
+                    $"_wheelAccum が変換で破棄された疑い(TopLine={c.TopLine}, before={before})"
+                );
+            }
+        });
+
+    // §5.2 契約表「スクロールバー同期」— A-11 レビュー I-1 のプローブが実測した退行の網。
+    // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるため評価時点の
+    // _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、in-place 化では
+    // _topLine を潰さない。長い行から離れた位置を表示中に水平再計算を走らせると
+    // HideAndResetHScroll が _scrollX を 0 に落とし、直後の `ScrollX = savedScrollX` は
+    // 「HScroll 非表示」で早期 return する=保存のたびに水平スクロール位置が消える。
+    // fixture は「長い行(行 3)から離れた行(行 5)を表示中・scrollX 非ゼロ」という
+    // 非既定状態から始める(CLAUDE.md §4-B)。main では緑=挙動不変の対照群でもある。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsHorizontalScroll() =>
+        Sta.Run(() =>
+        {
+            using var f = new Form { Size = new System.Drawing.Size(300, 120) };
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            _ = f.Handle;
+            f.Show(); // HScrollBar の Visible を機能させる
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < 40; i++)
+                    sb.Append(i == 3 ? new string('W', 200) : $"line{i}").Append('\n');
+                c.SetSource(TextBuffer.FromString(sb.ToString()));
+                c.TopLine = 5;
+                c.ScrollX = 30;
+                Assert.Equal(5, c.TopLine);
+                Assert.Equal(30, c.ScrollX); // 非既定位置から始まっていることを明示
+
+                c.ConvertEols(LineEnding.Crlf);
+
+                Assert.Equal(5, c.TopLine);
+                Assert.Equal(30, c.ScrollX);
+            }
+            finally
+            {
+                f.Close();
+            }
+        });
+
+    // §5.2 契約表「IME 未確定の確定キャンセル」: ReplaceSource 冒頭のガードを維持していること。
+    // (EditorControlImeTests.ReplaceCharRange_DuringComposition_CancelsFirst と同流儀)
+    [Fact]
+    public void ConvertEols_NonFastPath_DuringComposition_CancelsFirst() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\nb\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                var m = new Message
+                {
+                    HWnd = c.Handle,
+                    Msg = NativeMethods.WM_IME_STARTCOMPOSITION,
+                };
+                c.__TestProcessMessage(ref m);
+                c.__TestApplyComposition("あ", cursorPos: 1, attrs: [0], clauses: [0, 1]);
+                Assert.True(c.__TestIsComposing());
+
+                c.ConvertEols(LineEnding.Crlf);
+
+                Assert.False(c.__TestIsComposing()); // 強制取消で _ime クリア
+                Assert.Equal("a\r\nb\r\nc", c.SnapshotText); // 取消は変換自体を妨げない
+            }
+        });
+
+    // fast-path は差し替えを一切行わないので未確定も取り消さない(main の実挙動=現行契約)。
+    // no-change テストなので非既定状態(未確定期間中)から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_DuringComposition_DoesNotCancel() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\r\nb\r\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                var m = new Message
+                {
+                    HWnd = c.Handle,
+                    Msg = NativeMethods.WM_IME_STARTCOMPOSITION,
+                };
+                c.__TestProcessMessage(ref m);
+                c.__TestApplyComposition("あ", cursorPos: 1, attrs: [0], clauses: [0, 1]);
+                Assert.True(c.__TestIsComposing());
+
+                c.ConvertEols(LineEnding.Crlf); // すでに CRLF 統一=fast-path
+
+                Assert.True(c.__TestIsComposing());
+            }
+        });
+
+    // §5.2 契約表「_cellHighlight 無効化」: EOL 変換でセルのオフセットが動くので破棄する。
+    [Fact]
+    public void ConvertEols_NonFastPath_ClearsCellHighlight() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nbbb\nc"));
+            ctrl.HighlightCharRange(2, 3);
+            Assert.NotNull(CellHighlight(ctrl));
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Null(CellHighlight(ctrl));
+        });
+
+    // fast-path はオフセットが動かないのでセル強調を残す。
+    // no-change テストなので非既定状態(強調あり)から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_FastPath_KeepsCellHighlight() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nbbb\r\nc"));
+            ctrl.HighlightCharRange(3, 3);
+            Assert.NotNull(CellHighlight(ctrl));
+
+            ctrl.ConvertEols(LineEnding.Crlf); // fast-path
+
+            Assert.NotNull(CellHighlight(ctrl));
+        });
+
+    // §5.2 契約表に無かった 11 行目(設計書 §10.13 (2)): ReplaceSource は DesiredXpx を -1 に潰す。
+    // 挙動不変を優先して維持した決定を固定する。非既定値から始める(CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_NonFastPath_ResetsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999;
+
+            ctrl.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(-1, caret.DesiredXpx);
+        });
+
+    [Fact]
+    public void ConvertEols_FastPath_KeepsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\r\nb\r\nc"));
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999;
+
+            ctrl.ConvertEols(LineEnding.Crlf); // fast-path
+
+            Assert.Equal(999, caret.DesiredXpx);
+        });
+
     // 設計書 §10.12 (1): MouseDragging のリセットは in-place 化で意図的に落とす
     // (バッファ参照が変わらない=ドラッグ選択の途中状態を破棄する理由が無い)。
     [Fact]
@@ -627,6 +867,108 @@ public class EditorControlConvertEolsUiaEventTests
                 {
                     form.Close();
                 }
+            }
+            finally
+            {
+                EditorControl.TestHook_ForceUiaListen = false;
+            }
+        });
+
+    /// <summary>
+    /// 発火時点の caret / anchor を記録するアダプタ。<c>UiaTextHostAdapterTests.ThrowingAdapter</c> と
+    /// 同じ <c>PerformRaiseAutomationEvent</c> seam を使う(実 UIA インフラを叩かない)。
+    /// </summary>
+    private sealed class RecordingAdapter : UiaTextHostAdapter
+    {
+        private readonly CaretController _caret;
+
+        public RecordingAdapter(EditorControl host, CaretController caret)
+            : base(host, caret) => _caret = caret;
+
+        public List<(string Event, int Caret, int Anchor)> Fired { get; } = [];
+
+        protected internal override void PerformRaiseAutomationEvent(
+            AutomationEvent ev,
+            IRawElementProviderSimple provider,
+            AutomationEventArgs args
+        )
+        {
+            string name =
+                ev == TextPatternIdentifiers.TextChangedEvent ? "TextChanged"
+                : ev == TextPatternIdentifiers.TextSelectionChangedEvent ? "SelectionChanged"
+                : "Other";
+            Fired.Add((name, _caret.Caret, _caret.Anchor));
+        }
+    }
+
+    private static RecordingAdapter InjectRecordingAdapter(EditorControl c)
+    {
+        var caretField = typeof(EditorControl).GetField(
+            "_caretCtrl",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            caretField is not null,
+            "EditorControl に private フィールド _caretCtrl が見つからない"
+        );
+        var adapter = new RecordingAdapter(c, (CaretController)caretField!.GetValue(c)!);
+
+        // _provider != null を作らないと RaiseUia は早期 return する
+        // (UiaTextHostAdapterTests.RaiseUia_WhenPerformThrows_* と同じ手順)。
+        var providerField = typeof(UiaTextHostAdapter).GetField(
+            "_provider",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            providerField is not null,
+            "UiaTextHostAdapter に private フィールド _provider が見つからない"
+        );
+        providerField!.SetValue(adapter, new TextControlProviderV2(adapter));
+
+        var uiaField = typeof(EditorControl).GetField(
+            "_uia",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.True(
+            uiaField is not null,
+            "EditorControl に private フィールド _uia が見つからない"
+        );
+        uiaField!.SetValue(c, adapter);
+        return adapter;
+    }
+
+    // A-11 レビュー I-2: このブランチの目玉である挙動変更の網。
+    // 旧経路は ReplaceSource が caret を 0 に潰した中間状態で TextChanged / SelectionChanged を
+    // 飛ばしていた(監査 A-11 が副作用として指摘)。in-place 化でその中間状態が消え、
+    // caret 復元後に発火する。回数では main と区別できない(隣の
+    // RaisesTextChangedAndSelectionChangedOnce は main でも緑)ので、
+    // PerformRaiseAutomationEvent seam で発火「時点」の caret を固定する。
+    // fixture は非既定位置の caret から始める(caret=0 だと main と区別できない・CLAUDE.md §4-B)。
+    [Fact]
+    public void ConvertEols_NonFastPath_RaisesUiaEventsAfterCaretRestore() =>
+        Sta.Run(() =>
+        {
+            EditorControl.TestHook_ForceUiaListen = true;
+            try
+            {
+                using var f = new Form();
+                using var c = new EditorControl();
+                f.Controls.Add(c);
+                _ = f.Handle;
+                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc"));
+                c.SetCaretCharOffset(7); // 行 1 の 2 文字目=非既定位置
+                Assert.Equal(7, c.CaretCharOffset);
+
+                var adapter = InjectRecordingAdapter(c);
+                c.ConvertEols(LineEnding.Crlf);
+
+                // 変換後の同じ論理位置 = 非改行 6("aaaa"+"bb")+ 改行 1 x 2 = 8。
+                // main はここが 0 / 0 になる(ReplaceSource が caret を潰した後に発火するため)。
+                Assert.Equal(8, c.CaretCharOffset);
+                Assert.Equal(
+                    new[] { ("TextChanged", 8, 8), ("SelectionChanged", 8, 8) },
+                    adapter.Fired
+                );
             }
             finally
             {
