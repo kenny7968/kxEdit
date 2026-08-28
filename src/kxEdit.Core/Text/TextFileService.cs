@@ -184,12 +184,11 @@ public static partial class TextFileService
         // 3) 本体を Stream で TextBuffer に読み込み
         var (buffer, hadReplacement) = LoadAsBuffer(path, enc, det.HasBom);
 
-        // 4) LineEnding 検出。バッファ先頭 4KB を GetText して LineEndingDetector に流す
-        //    (空バッファなら 0 バイト=CRLF 既定)。
-        var snap = buffer.Current;
-        int probeChars = Math.Min(4096, snap.CharLength);
-        string lineProbe = probeChars > 0 ? snap.GetText(0, probeChars) : string.Empty;
-        LineEnding eol = LineEndingDetector.Detect(lineProbe);
+        // 4) LineEnding 検出。A-9(2026-08-28): 先頭 4,096 文字窓を撤廃し、バッファ全体を
+        //    byte 走査する(string 化なし)。旧実装は 1 行目が窓より長い LF ファイルを
+        //    CRLF と誤判定し、Ctrl+S で全行を無警告に書き換えていた。
+        //    窓は P6 Task 10 の Stream 化で入った退行で、旧 DecodeBytes は全文判定だった。
+        LineEnding eol = LineEndingDetector.Detect(buffer.Current);
 
         return new LoadedBuffer
         {
