@@ -452,6 +452,7 @@ public sealed class FileController
     /// <summary>
     /// 指定ドキュメントを保存。Path 未確定なら SaveAs にフォールバック。
     /// A-7 (b) 残余(Task 6b・2026-08-23): 同一パスを 2 タブが持っている状態での上書き保存を止める。
+    /// A-10(2026-08-28): 符号化で表せない文字がある場合は保存前に確認する(SaveAs と対称)。
     /// </summary>
     public bool SaveDocument(Document doc)
     {
@@ -485,6 +486,59 @@ public sealed class FileController
                     + SanitizeForDisplay.OneLine(doc.State.Path, 200),
                 "エラー"
             );
+            return false;
+        }
+
+        // A-10: 上書き保存経路にも符号化劣化の事前確認を置く(SaveAs の C-2 追補 I-2 と対称)。
+        // 従来は CanEncodeBuffer の呼出元が SaveAsDocument だけで、Ctrl+S は
+        // TextFileService.Save の EncoderFallback.ReplacementFallback に素通りしていた
+        // = 表せない文字が無警告で '?' になる。読込側の U+FFFD と違い、置換はディスク上でしか
+        // 起きずバッファは元の文字を保持するので、画面にも文字数にも SR の読み上げにも痕跡が出ない。
+        //
+        // 位置は 3 点とも load-bearing:
+        // (1) 重複タブガードより後 = 重複時はそもそも保存させないので全走査を無駄打ちしない。
+        // (2) WriteToPath より前 = ApplyEol / ConvertEols の副作用を起こす前に短絡する。
+        //     ConvertEols が触るのは CR / LF だけで、CR / LF は 932 / 51932 のどちらでも
+        //     表現可能なので、判定を前に出しても答えは変わらない。ただしこの理由だけでは
+        //     不十分で、第 2 の理由に依存している(M-5): ConvertEols は**総文字数を変える**ため
+        //     §8.1 の 8192 チャンク境界の位置が動き、CanEncodeBuffer は一般には位置非依存でない。
+        //     不変が成り立つのは、上のガードで残る 932 / 51932 では astral 文字が境界のどこに
+        //     来ても符号化不能だから。将来 CodePage ガードをゆるめると、この不変性は
+        //     CR / LF の議論だけでは導けなくなる(設計書 §8.3 の予告と同じ条件)。
+        //     ついでに WriteToPath 冒頭の TryInspectSaveTarget(リモートは 5 秒プローブ)よりも
+        //     前になる。これは望ましい副次効果で、到達不能なリモート保存先へ Ctrl+S したとき、
+        //     5 秒待たされてから諦めるのではなく、その前に劣化の確認で中止できる。
+        // (3) State.Path is null 分岐より後 = 無題タブは SaveAsDocument が自前の警告を持つので
+        //     二重に出ない。
+        //
+        // CodePage != 65001 のガードも load-bearing。当初は性能だけの理由(UTF-8 は BMP + astral を
+        // 全表現できるので走査が常に無駄)と考えていたが、Task 3 のセルフチェックで**挙動**も
+        // 担っていることが実測で判明した: CanEncodeBuffer は 8192 文字のチャンクごとに独立して
+        // GetByteCount を呼ぶため、サロゲートペアが境界で割れると各チャンクからは孤立サロゲートに
+        // しか見えず ExceptionFallback が飛ぶ = **正当な UTF-8 文書でも false を返す**。
+        // このガードを外すと、8192 の境界に絵文字が来た UTF-8 文書の Ctrl+S が毎回警告を出す。
+        // (CanEncodeBuffer 自体のチャンク境界バグは SaveAs 側にも既存。非 UTF-8 では
+        //  astral を含む時点で実際に劣化するので誤警告にならず、実害は UTF-8 経路だけ。)
+        //
+        // 文言は SaveAs 版と共有しない。SaveAs は「選択した文字コード」(いまダイアログで選んだ値)、
+        // ここは「現在の文字コード」(文書が持っている値)で主語が違う。逃げ道ボタンは出さず
+        // (Ctrl+S が文書の文字コードを変える挙動変更を避ける)、文中で SaveAs へ誘導する。
+        // 問いを末尾に置くのは既存 2 件と同じ形: SR は本文を頭から読む。
+        //
+        // defaultCancel: true は S-12 と対称。既定が OK 側だと、Ctrl+S 直後の Enter や
+        // 閉じる確認「はい」からの連鎖で、確認を足したこと自体が無力化される。
+        if (
+            doc.State.Encoding.CodePage != 65001
+            && !CanEncodeBuffer(doc.Editor.CurrentBuffer, doc.State.Encoding)
+            && !_prompt.OkCancel(
+                "現在の文字コードで表せない文字が含まれています。'?' として保存されデータが失われます。"
+                    + "元の文字を残すには「名前を付けて保存」で UTF-8 を選んでください。続行しますか?",
+                "文字コードの警告",
+                defaultCancel: true
+            )
+        )
+        {
+            // SaveAs と違い戻る先のダイアログが無いので中止する(SaveAs は continue で再表示)。
             return false;
         }
 
@@ -684,7 +738,13 @@ public sealed class FileController
         }
     }
 
-    /// <summary>指定エンコードでバッファ全文が損失なく符号化できるかを事前判定する(SaveAs のダウングレード警告用)。</summary>
+    /// <summary>
+    /// 指定エンコードでバッファ全文が損失なく符号化できるかを事前判定する
+    /// (SaveAs のダウングレード警告用 + A-10 で Ctrl+S の劣化警告からも呼ぶ)。
+    /// 既知の限界: 8192 文字のチャンクごとに独立して GetByteCount を呼ぶため、サロゲートペアが
+    /// チャンク境界で割れると孤立サロゲートと見なして false を返す(誤検知)。呼出側は 2 箇所とも
+    /// UTF-8 を対象外にしており、非 UTF-8 で astral を含む文書は実際に劣化するため実害はない。
+    /// </summary>
     private static bool CanEncodeBuffer(TextBuffer buffer, Encoding encoding)
     {
         try

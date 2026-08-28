@@ -1208,7 +1208,12 @@ public class FileControllerTests
             var tabB = host.Docs.CreateNew(); // 後から生まれた重複タブ(復元 dedup 漏れ相当)
             tabB.Editor.Text = "tabB-content";
             tabB.State.Path = shared; // SaveAs を経由せず衝突状態を作る
-            tabB.Editor.ReplaceCharRange(0, 0, "x"); // dirty=保存点が打たれていないことを観測可能にする
+            // 末尾の A-10 順序の網を効かせるための fixture: 符号化劣化の条件を**成立させて**おく。
+            // 既定の UTF-8 のままだと CodePage ガードが短絡するため、警告ブロックを重複ガードより
+            // 前へ動かす変異を入れても警告が出ず、順序の網が空虚になる(実測で確認済み)。
+            // 重複ガード自体は文字コードに依存しないので、この fixture 変更は本来の主張を弱めない。
+            tabB.State.Encoding = EncodingCatalog.Get(932);
+            tabB.Editor.ReplaceCharRange(0, 0, "\U0001F600"); // dirty かつ SJIS で表せない
             Assert.True(tabB.Editor.Modified);
             // 生成順で先勝ち = FindByPath は tabA を返す(tabB が「新しい方」であることを固定する)。
             Assert.Same(tabA, host.Docs.FindByPath(shared));
@@ -1230,6 +1235,9 @@ public class FileControllerTests
             );
             Assert.Equal(0, host.Dialogs.PickSaveAsCount); // Path 確定済み=SaveAs へは落ちない
             Assert.True(tabB.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
+            // A-10: 符号化劣化の確認は**この重複ガードより後**に置く契約(順序の網)。
+            // 重複時は保存させないので、バッファ全走査を無駄打ちしてはいけない。
+            Assert.Empty(host.Prompt.OkCancelCalls);
         });
 
     /// <summary>
@@ -1722,6 +1730,273 @@ public class FileControllerTests
             Assert.True(host.File.SaveAs());
 
             Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "OkCancel");
+        });
+
+    // ===== 符号化劣化警告(上書き保存経路・A-10) =====
+
+    /// <summary>
+    /// A-10: Shift_JIS 文書に SJIS で表せない文字(絵文字)を貼って Ctrl+S → 警告に「キャンセル」で
+    /// ディスクにも保存点にも一切触れない。
+    ///
+    /// fixture の要点(CLAUDE.md §4.B「no-change は非既定状態から」): ディスクには **SJIS で書いた
+    /// 元内容**を先に置く。「ファイルが存在しない」を assert すると、上書きが阻止されたのか
+    /// そもそも作られなかったのかを区別できない。
+    /// <see cref="Fakes.FakePrompt.OkCancelResult"/> は 1 つしか無いが取り合いにならない:
+    /// Ctrl+S 経路で <c>OkCancel</c> を出すのはこの警告だけである(上書き確認は SaveAs 専用で、
+    /// <c>WriteToPath</c> は <c>TryInspectSaveTarget</c> の <c>exists</c> を捨てる)。
+    ///
+    /// 本文(<c>Text</c>)まで assert するのは、文言を SaveAs 版と**共有しない**という設計判断に
+    /// 網を張るため(最終レビュー I-1)。キャプションは両方とも "文字コードの警告" で同一なので、
+    /// 2 つの警告を DRY にまとめるリファクタが入ると、Ctrl+S なのに「**選択した**文字コード」と
+    /// 読み上げられる = その場面にコンボボックスは無く直前に何も選んでいないので、SR ユーザーが
+    /// 実行不能な前提を聞かされる。キャプションだけ見る網では全緑のまま通ってしまう。
+    /// 先例 = <see cref="Save_PathAlsoOpenInAnotherTab_IsBlocked_AndFileKeepsOtherTabContent"/>
+    /// (重複タブの文言差を同じ型で pin している)。A-7 の教訓「重複を消すリファクタが網を弱めた」
+    /// の再演を防ぐ。
+    ///
+    /// EOL を**混在**(裸 LF + CRLF)にしてあるのも load-bearing(最終レビュー M-4)。
+    /// 改行が無い本文だと <c>ConvertEols</c> が <c>IsEolAlreadyUniform</c> の fast-path で抜けて
+    /// <c>ReplaceSource</c> が起きず、「警告ブロックが <c>ConvertEols</c> より後ろへ動く」変異を
+    /// どの assertion も検出できない。混在にしたうえで <c>CurrentBuffer</c> の参照同一性を見ると、
+    /// 中止時にバッファ差し替えの副作用が起きていないことを直接観測できる。
+    /// </summary>
+    [Fact]
+    public void Save_LossyEncoding_Cancel_WritesNothingAndKeepsModified() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var sjis = EncodingCatalog.Get(932);
+            File2.WriteAllText(path, "あ\r\nい\r\nう", sjis);
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "あ\nい\r\nう"; // 裸 LF と CRLF の混在=ConvertEols の fast-path を外す
+            doc.State.Path = path;
+            doc.State.Encoding = sjis;
+            doc.State.LineEnding = LineEnding.Crlf; // 変換先 CRLF ≠ 現状(裸 LF がある)
+            doc.Editor.ReplaceCharRange(6, 0, "\U0001F600"); // 絵文字を貼る=dirty かつ SJIS で表せない
+            Assert.True(doc.Editor.Modified);
+            var bufferBefore = doc.Editor.CurrentBuffer; // ConvertEols が走れば別参照へ差し替わる
+
+            host.Prompt.OkCancelResult = false; // 警告に「キャンセル」
+
+            Assert.False(host.File.Save());
+
+            Assert.Equal("あ\r\nい\r\nう", File2.ReadAllText(path, sjis)); // 原本不変=? 置換が起きていない
+            // M-4: ApplyEol / ConvertEols の副作用より前に短絡している(バッファが差し替わっていない)。
+            // Modified の assert より**先**に置く: ConvertEols が走ると保存点も巻き添えで落ちるため、
+            // 順序を逆にすると Modified 側が先に落ちて「何が起きたか」が読み取りにくくなる。
+            Assert.Same(bufferBefore, doc.Editor.CurrentBuffer);
+            Assert.True(doc.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
+            );
+            // I-1: 文言が Ctrl+S 版であること(SaveAs 版へ統合されると SR に嘘の前提が伝わる)。
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Text.Contains("現在の文字コード")
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Text.Contains("選択した文字コード")
+            );
+        });
+
+    /// <summary>
+    /// 「続行」を選べば従来どおり保存する(警告は保存を禁止するものではない)。
+    /// 期待値の <c>"こんにちは??"</c> は .NET 9 実測に基づく: <c>ReplacementFallback</c> は
+    /// サロゲートペアを <c>?</c> **2 個**にする(1 個と書くと落ちる)。
+    /// </summary>
+    [Fact]
+    public void Save_LossyEncoding_OkProceedsAndWrites() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var sjis = EncodingCatalog.Get(932);
+            File2.WriteAllText(path, "こんにちは", sjis);
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path;
+            doc.State.Encoding = sjis;
+            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600");
+
+            host.Prompt.OkCancelResult = true; // 「続行」
+
+            Assert.True(host.File.Save());
+
+            Assert.Equal("こんにちは??", File2.ReadAllText(path, sjis)); // 承諾どおり ? で保存される
+            Assert.False(doc.Editor.Modified); // 保存点が進む
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
+            );
+        });
+
+    /// <summary>
+    /// 対照群(過剰検知の防止・設計書 §4.3 ガードの網): **ごく普通の** UTF-8 文書は astral を
+    /// 含んでいても警告せず、絵文字がそのまま往復する。既定=UTF-8 の主経路が A-10 で
+    /// 変わっていないことの被覆。
+    ///
+    /// この網が殺せる変異は限定的である(仕様レビュー指摘 2・実態に合わせて記述):
+    /// <c>CodePage != 65001</c> ガードを外す変異も、<c>!CanEncodeBuffer</c> の否定を落とす変異も、
+    /// この fixture では**殺せない**。どちらも短絡して警告が出ないまま緑になるためで、
+    /// 前者を殺すのは境界版の <see cref="Save_Utf8AstralAtReadChunkBoundary_DoesNotWarn"/>、
+    /// 後者を殺すのは <see cref="Save_SjisEncodableContent_DoesNotWarn"/> の役割。
+    /// ここで殺せるのは条件の連言を選言へ倒す変異(最後の <c>&amp;&amp;</c> を <c>||</c> にすると
+    /// UTF-8 でも <c>OkCancel</c> が呼ばれる)で、それは <c>Assert.Empty</c> が捕まえる。
+    /// 往復 assertion は弁別ではなく「保存が成功して内容が壊れていない」ことの確認として置く
+    /// (新しい走査コードがバッファやリーダーを壊していないことを見る)。
+    /// </summary>
+    [Fact]
+    public void Save_Utf8WithAstral_DoesNotWarn_AndRoundTrips() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path; // State.Encoding は既定の UTF-8(65001)のまま
+            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600");
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 既定の前提を明示(黙って変わると空振りする)
+
+            Assert.True(host.File.Save());
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+            Assert.Equal(
+                "こんにちは\U0001F600",
+                File2.ReadAllText(path, System.Text.Encoding.UTF8)
+            );
+        });
+
+    /// <summary>
+    /// 上の対照群の境界版: 絵文字を <c>CanEncodeBuffer</c> の読み取りチャンク境界(8192 文字)に
+    /// またがらせると、正当な UTF-8 文書でも <c>CanEncodeBuffer</c> は false を返す。
+    /// <c>CanEncodeBuffer</c> がチャンクごとに**独立して** <c>GetByteCount</c> を呼ぶため、
+    /// サロゲートペアが境界で割れると各チャンクからは孤立サロゲートにしか見えず
+    /// <c>ExceptionFallback</c> が飛ぶ(実測)。8191 文字の詰め物 + サロゲートペアで、
+    /// 1 チャンク目が「詰め物 + 上位サロゲート」になる。
+    ///
+    /// **この網が何に依存しているか**(将来これを読む人への申し送り):
+    /// <list type="bullet">
+    /// <item>この網が <c>CodePage != 65001</c> ガードを外す変異を殺せるのは、上記の
+    /// <c>CanEncodeBuffer</c> のチャンク境界バグが存在する**あいだだけ**である。</item>
+    /// <item>そのバグを直せば(<c>Encoder</c> をチャンク間で使い回す等)<c>CanEncodeBuffer</c> は
+    /// UTF-8 に対して常に true を返すようになり、<c>CodePage</c> ガードは**純粋な性能ガード**へ
+    /// 変わる。その時点でこの網は原理的に空虚化するが、それは**正しい状態**である。
+    /// 性能ガードを挙動で殺すことはできないので、**偽の網を作って取り繕ってはいけない**
+    /// (そのときは本テストを削除し、ガードの根拠を性能として文書に残すのが正しい対応)。</item>
+    /// <item>詰め物の 8191 は <c>FileController.CanEncodeBuffer</c> の <c>new char[8 * 1024]</c> に
+    /// 暗黙に結合している。チャンク長を変えると**無警告でこの網が消える**(緑のまま空虚になる)。</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void Save_Utf8AstralAtReadChunkBoundary_DoesNotWarn() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+
+            string filler = new string('a', 8191);
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = filler;
+            doc.State.Path = path; // State.Encoding は既定の UTF-8(65001)のまま
+            doc.Editor.ReplaceCharRange(8191, 0, "\U0001F600");
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 既定の前提を明示(黙って変わると空振りする)
+
+            Assert.True(host.File.Save());
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+            Assert.Equal(filler + "\U0001F600", File2.ReadAllText(path, System.Text.Encoding.UTF8));
+        });
+
+    /// <summary>
+    /// 対照群(空振り警告の防止): Shift_JIS でも**表現可能な本文**なら警告しない。
+    /// <see cref="Save_Utf8WithAstral_DoesNotWarn_AndRoundTrips"/> とは別方向の網で、
+    /// こちらが無いと「非 UTF-8 なら常に警告する」変異が生き残る。
+    /// </summary>
+    [Fact]
+    public void Save_SjisEncodableContent_DoesNotWarn() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var sjis = EncodingCatalog.Get(932);
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path;
+            doc.State.Encoding = sjis;
+            doc.Editor.ReplaceCharRange(5, 0, "世界"); // SJIS で表現可能
+
+            Assert.True(host.File.Save());
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+            Assert.Equal("こんにちは世界", File2.ReadAllText(path, sjis));
+        });
+
+    /// <summary>
+    /// 既定フォーカスはキャンセル側(S-12 / SaveAs の劣化警告と対称)。
+    /// <c>defaultCancel: false</c> へ倒す変異をここで殺す。破壊的な確認で既定が OK だと、
+    /// Ctrl+S 直後の Enter や閉じる確認「はい」からの連鎖で警告が知覚されずに確定する。
+    /// </summary>
+    [Fact]
+    public void Save_LossyEncoding_WarnsWithCancelAsDefault() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var sjis = EncodingCatalog.Get(932);
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path;
+            doc.State.Encoding = sjis;
+            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600");
+            host.Prompt.OkCancelResult = false;
+
+            Assert.False(host.File.Save());
+
+            Assert.Equal(("文字コードの警告", true), Assert.Single(host.Prompt.OkCancelCalls));
+        });
+
+    /// <summary>
+    /// 閉じる確認「はい」→ 保存 → 劣化警告に「キャンセル」で、**クローズが中止される**
+    /// (<c>ConfirmDiscardIfDirty</c> が false を返す)。A-10 修正に伴う挙動変更なので固定する。
+    /// 先例 = <see cref="ConfirmDiscardIfDirty_Yes_WithoutPath_FallsBackToSaveAs_CancelMeansFalse"/>。
+    /// <c>YesNoCancelResult</c> と <c>OkCancelResult</c> は別ノブなので取り合わない。
+    /// </summary>
+    [Fact]
+    public void ConfirmDiscardIfDirty_Yes_LossyEncodingDeclined_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var sjis = EncodingCatalog.Get(932);
+            File2.WriteAllText(path, "こんにちは", sjis);
+
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "こんにちは";
+            doc.State.Path = path;
+            doc.State.Encoding = sjis;
+            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600");
+            host.Prompt.YesNoCancelResult = DialogResult.Yes; // 「保存する」
+            host.Prompt.OkCancelResult = false; // ただし劣化警告は「キャンセル」
+
+            Assert.False(host.File.ConfirmDiscardIfDirty(doc)); // 閉じない
+
+            Assert.Equal("こんにちは", File2.ReadAllText(path, sjis)); // 原本不変
+            Assert.True(doc.Editor.Modified);
         });
 
     // ===== 開く系(TryOpenOrActivate は path を開く唯一の経路) =====
