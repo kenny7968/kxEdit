@@ -217,3 +217,87 @@ CLAUDE.md §4.A の**禁止側**に該当する(ファイルの入出力処理�
 これは正しい状態であって、偽の網を作って取り繕ってはいけない。§8.2 に着手する際は、
 このテストの xmldoc を読み、網の役割を終えたことを明記して整理すること。
 `8 * 1024` は `CanEncodeBuffer` の読み取りチャンク長で、**変えると無警告で網が消える**。
+
+### 8.4 §8.2 の「実害はない」は、新しい呼出元では厳密に成立しない(最終レビュー M-2)
+
+§8.2 は「呼出元 2 箇所とも `CodePage != 65001` で UTF-8 を対象外にしており、
+`EncodingCatalog.SelectableEncodings` の残り(932 / 51932)はどちらも astral を表現できない」
+ことを実害なしの根拠にした。**この論証は SaveAs 側でしか成立しない。**
+
+- SaveAs 側(`FileController.cs:711`)は `EncodingCatalog.Get(picked.CodePage)` = ピッカー由来
+  なのでカタログの 3 種に閉じる。論証はそのまま正しい。
+- **本ブランチが足した `SaveDocument` 側は `doc.State.Encoding` をそのまま渡す。**
+  復元タブではこの値の出所が `SafeEncodingOrFallback`(`:1457`)で、これは
+  `Encoding.GetEncoding` が**投げたときだけ** UTF-8 へ倒す。`BackupRecord.CodePage`
+  (`Core/Backup/BackupRecord.cs:14`)は素の `int` で、`LineEndingId`(BK-L-1)や
+  `SettingsStore.DefaultCodePage`(`IsSelectableCodePage`)と違い**カタログ検証がない**。
+
+したがって破損 / 改竄された `%AppData%` のバックアップ JSON が `CodePage: 1200`(UTF-16LE)
+を持つと、`Encoding.GetEncoding(1200)` は投げないのでそのまま通り、astral のサロゲートペアが
+8,192 境界にかかった時点で `CanEncodeBuffer` が false を返す。**UTF-16 は絵文字を完全に
+表現できるのに「'?' として保存されデータが失われます」という嘘の警告が出る。**
+
+被害は誤警告のみで**データ喪失はない**(実際の書込はステートフルな `Encoder` なので正しく
+保存される)。前提も破損 JSON なので優先度は低い。恒久対応するなら、復元時に
+`State.Encoding` をカタログの 3 種へ正規化するのが筋。
+
+### 8.5 §4.6「新しい待機を足さない」の確認結果(最終レビュー M-3)
+
+§4.6 は「実装時に確認する」で止まり結論を書いていなかった。**確認した結果を記録する。**
+
+**結論: A-8 型の新しい待機は作っていない。** `WaitForFinalFlush` のような管理待機は増えて
+おらず、閉じる確認経路(`MainForm.cs:552`)には既に `YesNoCancel` の MessageBox があるので、
+外側が `OnFormClosing` のときの再入は `_closeInProgress`(`MainForm.cs:486-490`)が既に塞ぐ。
+
+**残余(既存クラス・退行ではない)**: Ctrl+S 経路の MessageBox は従来
+「重複エラー(`:483`)」「保存失敗エラー(`:871`)」の 2 つだけで、**どちらも直後に
+`return false` する終端**だった。A-10 の `OkCancel` は「OK なら続行 → `WriteToPath` が
+文書を変更する」型で、モーダル中に外部からクローズが来る余地を持つ。MessageBox の
+モーダルループは posted も配送するので、`WM_CLOSE` / `WM_QUERYENDSESSION` が入れ子の
+`OnFormClosing` を走らせうる(このとき `_closeInProgress` はまだ false)。
+
+ただし**これは A-10 が作った新種ではない**。SaveAs が既に同じ形
+(`PickSaveAs` → 上書き確認 → 劣化警告 → `WriteToPath`)を持っている。Ctrl+S で初出である
+ことだけが新しい。本ブランチでは受容し、緩和(プロンプトが OK を返した直後に
+「Form が破棄 / クローズ中なら中止」を足す)は将来タスクへ送る。
+
+### 8.6 §4.6 の性能記述は誤導的だった(最終レビュー M-6)
+
+§4.6 は「損失ありの文書は最初の該当文字で短絡するので、**警告が出るケースほど速い**」と
+書いた。事実だが誤導的で、**遅くなるのは警告が出ない通常ケースの方**である。
+
+非 UTF-8 かつ内容が表現可能な文書(SJIS / EUC-JP ユーザーの通常ケース)では短絡が効かず、
+全走査が丸ごと 1 パス増える。しかもこのパスは `TextFileService.Save` の非 UTF-8 書込ループと
+**同じ機構**(`CreateReader()` → 8,192 文字チャンク)を通るので、実質 **Ctrl+S の符号化
+フェーズが 2 倍**になる。`SnapshotReader.Ensure` はピースごとに `Chunk.GetString` で文字列を
+実体化し、`TextBufferBuilder.TargetChunkBytes` は 4MB なので 4MB 級の一時 string(LOH)が
+追加で発生する。
+
+数 MB 級では体感差なし。100MB 超では UI スレッド上で秒オーダーの追加になり得る
+(キャンセル手段も進捗表示もない)。恒久対応するなら判定を書込へ畳み込む
+(`ExceptionFallback` のステートフル `Encoder` で 1 パス化)= §8.2 の根治と同じ方向。
+
+### 8.7 位置の根拠 (2) は、想定より重い不変条件を守っていた(M-4 の実測から判明)
+
+§4.2 の (2)「`WriteToPath` より前 = `ApplyEol` / `ConvertEols` の副作用を起こす前に短絡する」
+は、当初「副作用を避ける」程度の意味で書いた。M-4 の網を張る過程で変異を実際に当てたところ、
+**この順序はデータ喪失導線を塞いでいる**ことが判明した。
+
+警告ブロックを `ConvertEols` の後ろへ動かした状態でキャンセルすると:
+
+```
+Expected: TextBuffer { CanRedo = False, CanUndo = True,  ... CharLength = 8, Modified = True }
+Actual:   TextBuffer { CanRedo = False, CanUndo = False, ... CharLength = 9, Modified = False }
+```
+
+`ConvertEols` の非 fast-path が `ReplaceSource` で新しい `TextBuffer` に差し替えるため、
+**キャンセルしたのに `Modified=false` かつ `CanUndo=false`** になる。この状態では
+`ConfirmDiscardIfDirty`(`:902-903`)が `!Modified` で**即 true** を返すので、
+**未保存の本文が確認なしに閉じられる**。
+
+これは `WriteToPath` の remarks が「バグ 1+2」として記録している 2 重の静音喪失導線と同型で、
+A-11(監査)が指摘する `ConvertEols` の Undo 履歴全消去とも同根である。
+順序を動かす変更を検討する者は、まずこの節を読むこと。網は
+`Save_LossyEncoding_Cancel_WritesNothingAndKeepsModified` の `Assert.Same` が持つ
+(`Assert.True(Modified)` より**前**に置いてある。後ろだと先に `Modified` が落ちて
+この網が発火しない)。
