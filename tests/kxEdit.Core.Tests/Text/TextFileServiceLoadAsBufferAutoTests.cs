@@ -178,6 +178,12 @@ public class TextFileServiceLoadAsBufferAutoTests
         }
     }
 
+    /// <summary>
+    /// A-9 の 4,096 文字窓(<see cref="TextFileService.LoadAsBufferAuto"/> の旧実装)。
+    /// 撤廃済みで src 側にはもう存在しないため、fixture の前提はテスト側で固定するしかない。
+    /// </summary>
+    private const int OldProbeWindowChars = 4096;
+
     // A-9(監査 2026-08-22): 改行判定が先頭 4,096 文字窓だったため、1 行目が窓より長い
     // LF ファイル(ミニファイ JSON・長いヘッダ行の CSV)が CRLF と誤判定され、
     // Ctrl+S で全行 CRLF 化されていた(Modified も立たず警告も出ない)。
@@ -189,6 +195,7 @@ public class TextFileServiceLoadAsBufferAutoTests
         try
         {
             string body = new string('a', 5000) + "\n" + new string('b', 10) + "\n";
+            Assert.True(body.IndexOf('\n') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Lf, loaded.LineEnding);
@@ -207,9 +214,31 @@ public class TextFileServiceLoadAsBufferAutoTests
         try
         {
             string body = new string('a', 5000) + "\r" + new string('b', 10) + "\r";
+            Assert.True(body.IndexOf('\r') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Cr, loaded.LineEnding);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    // A-9: 上 2 件の対照群。1 行目が旧窓より長い CRLF ファイルは Crlf のまま。
+    // 旧実装でも偶然 Crlf を返すのでバグの弁別力は無いが、「窓の撤廃が過剰修正になって
+    // CRLF ファイルまで LF 側へ倒れる」変化はこれが捕まえる。
+    [Fact]
+    public void LoadAuto_CrlfFile_FirstLineLongerThanOldProbeWindow_DetectsCrlf()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            string body = new string('a', 5000) + "\r\n" + new string('b', 10) + "\r\n";
+            Assert.True(body.IndexOf('\r') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
+            File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
+            var loaded = TextFileService.LoadAsBufferAuto(path);
+            Assert.Equal(LineEnding.Crlf, loaded.LineEnding);
         }
         finally
         {
@@ -231,6 +260,12 @@ public class TextFileServiceLoadAsBufferAutoTests
         {
             string body =
                 new string('a', 4094) + "\r\n" + string.Concat(Enumerable.Repeat("x\n", 50));
+            // fixture 前提。旧窓のコードはもう無いので、filler を縮めても "x\n" を減らしても
+            // 実装は黙って Lf を返し続け、テストは緑のまま弁別力だけを失う。ここで固定する。
+            Assert.Equal(OldProbeWindowChars - 2, body.IndexOf('\r')); // CRLF が旧窓の末尾 2 文字
+            Assert.Equal(OldProbeWindowChars - 1, body.IndexOf('\n')); // = 旧窓内は crlf 1 件のみ
+            // LF 多数派(50 件)はすべて旧窓の外にある=窓を撤廃しないと多数決に効かない
+            Assert.Equal(50, body.Skip(OldProbeWindowChars).Count(c => c == '\n'));
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Lf, loaded.LineEnding);

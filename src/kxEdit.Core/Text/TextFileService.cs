@@ -135,8 +135,11 @@ public static partial class TextFileService
     /// (BOM は先頭 3 バイト固定・UtfUnknown CharsetDetector は数十 KB で十分な精度・
     /// 厳格 UTF-8 判定は UTF-8 の chunk 境界で multibyte が分断されないよう <see cref="Utf8SafePrefixLength"/>
     /// で prefix 末尾を UTF-8 sequence 境界にトリムしてから渡す)。
-    /// LineEnding は本文チャンク木の先頭 4KB code unit を <see cref="LineEndingDetector.Detect"/> に流す
-    /// (実運用のテキストファイルは改行種別が全編で統一されているため=数行で判別可)。
+    /// LineEnding は本文チャンク木の全体を byte 走査して多数決で決める
+    /// (<see cref="LineEndingDetector.Detect(TextSnapshot)"/>)。A-9(2026-08-28)以前は先頭 4KB
+    /// code unit だけを <c>GetText</c> して流していたが、1 行目が窓より長い LF / CR ファイルが
+    /// 改行 0 件と見なされて CRLF 既定へ倒れ、保存時に全行が無警告で書き換わっていた。
+    /// 窓は復活させないこと(string を実体化しない走査なのでピークメモリは増えない)。
     /// forcedCodePage 指定時は自動判定を飛ばし <see cref="HasBomFor"/> のみでプリアンブル判定。
     /// </remarks>
     public static LoadedBuffer LoadAsBufferAuto(string path, int? forcedCodePage = null)

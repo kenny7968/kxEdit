@@ -66,6 +66,34 @@ public class LineEndingDetectorTests
         Assert.Equal(LineEnding.Cr, LineEndingDetector.Detect(snapshot));
     }
 
+    // A-9: ピース末尾 CR の次が LF 以外だったとき、持ち越し CR を単独 CR として数え、
+    // かつ現バイトを落とさずに通常処理へ進めること(pendingCr ブロックの `cr++` と fall-through)。
+    // 実ファイルでの再現条件は「4MB チャンク境界がちょうど CR に落ちる CR 単独(旧 Mac)文書」。
+    // 上の 2 fact は境界 CR が LF に当たる経路と drain 経路しか通らず、この分岐に入らない。
+    //
+    // 次バイトが通常文字のケース。`cr++` を落とすと改行 0 件になり既定の Crlf へ倒れる=撃墜。
+    // (fall-through を落としても 'x' は改行ではないので結果が変わらない=こちらは殺せない)
+    [Fact]
+    public void Snapshot_overload_counts_carried_cr_before_non_lf_byte()
+    {
+        string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r" + "x";
+        var snapshot = TextBuffer.FromString(body).Current;
+        AssertTwoPiecesSplitBetween(snapshot, 0x0D, 0x78); // CR で切れ 'x' で始まる
+        Assert.Equal(LineEnding.Cr, LineEndingDetector.Detect(snapshot));
+    }
+
+    // 次バイトがまた CR のケース。fall-through を落として現バイトを捨てると、続く CRLF の
+    // CR が失われて LF 単独に化け、crlf=1/cr=1 が lf=1/cr=1 になり Crlf → Lf へ反転する=撃墜。
+    // (`cr++` を落としても crlf=1 が残り Crlf のまま=こちらは殺せない。2 fixture で 1 行ずつ受け持つ)
+    [Fact]
+    public void Snapshot_overload_counts_carried_cr_before_crlf()
+    {
+        string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r" + "\r\nx";
+        var snapshot = TextBuffer.FromString(body).Current;
+        AssertTwoPiecesSplitBetween(snapshot, 0x0D, 0x0D); // CR で切れ CR で始まる
+        Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(snapshot));
+    }
+
     /// <summary>
     /// fixture の前提検証。スナップショットがちょうど 2 ピースで、1 つ目の末尾バイトが
     /// <paramref name="lastOfFirst"/>、2 つ目の先頭バイトが <paramref name="firstOfSecond"/>

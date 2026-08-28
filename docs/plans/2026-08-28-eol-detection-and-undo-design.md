@@ -352,3 +352,64 @@ caret 復元後の 1 回になる)。CLAUDE.md §5 の「SR 経路に触れる�
   次リリース以降のテーマ候補として記録する。
 - **A-9 の残余**: EOL が混在する文書は修正後も多数決で黙って統一される(§4.4)。
   説明書へ明記するか否かは未決。
+
+### 10.1 Task 1(A-9)実装時の逸脱記録(2026-08-28 追記)
+
+実装計画 `2026-08-28-eol-detection-and-undo.md` Task 1 の記載からの逸脱。src のロジックは
+計画どおりで、逸脱はすべて fixture と網の側。
+
+- **`LoadAuto_MajorityLfOutsideOldProbeWindow_DetectsLf` の filler を 4,000 → 4,094 文字**。
+  計画の 4,000 だと後続の `"x\n"` が旧窓(4,096 文字)の内側に 47 組入り、窓内が
+  crlf=1 / lf=47 になる。旧実装でも多数決で `Lf` を返すため、Step 2 の赤の確認で
+  この 1 件だけが緑になった。4,094 にすると CRLF がちょうど窓の末尾 2 文字に収まり、
+  窓内が crlf=1 / lf=0 =旧実装が `Crlf` を返す形になる。
+- **チャンク境界 fact の fixture から末尾の `"tail\r\n"` を削除**。計画のままでは網にならない。
+  境界の CRLF が CR + LF に割れた場合の内訳は crlf=1 / lf=1 / cr=1 で、判定は `Crlf` のまま
+  =正解と区別できない。改行を境界の CRLF 1 つだけにすると、正=`Crlf` / 割れた場合=`Lf` で弁別できる。
+- **チャンク境界の前提をテスト内で自己検証**(`AssertTwoPiecesSplitBetween`)。
+  `PieceTree.Enumerate` でピース数と境界前後のバイトを固定し、`TargetChunkBytes` も定数参照にした。
+  分割規則が変わって境界を跨がなくなったとき、fixture が黙って通り続けるのを防ぐ。
+- **`Snapshot_overload_counts_trailing_lone_cr` の filler を `TargetChunkBytes - 1` →
+  `TargetChunkBytes`**。ピース数の主張(計画の値だと 1 ピースにしかならない)は正しい
+  (`off + len < bodyLen` が `4MB < 4MB` で偽になり分割ループが 1 回で終わる)。
+  **ただし「drain 経路を通らない」という当初の説明は誤り**で、1 ピースでも末尾バイト 0x0D は
+  `i + 1 < span.Length` が偽になり `pendingCr = true` → foreach 後の drain を通る。
+  実測でも drain 削除変異は計画の fixture で撃墜できていた。
+  変更は「複数ピース文書の最終ピースが CR 単独」という追加ケースを得る点で有益なので維持する。
+- **多数決の同数(tie)fixture を 3 件追加**。§7.4 が「比較演算子の変異が生存したら網を足す」
+  としており、計画の theory には crlf==lf / crlf==cr / lf==cr のケースが 1 件も無く、
+  3 つの `>=` すべてで変異が生存した。`"a\r\nb\nc"` / `"a\r\nb\rc"` / `"a\nb\rc"` を追加。
+- **`using System.Linq;` の追加は不要だった**(`Directory.Build.props` で `ImplicitUsings` 有効)。
+- **`snap` ローカル変数は削除した**。同ファイル別メソッドの同名変数はそのまま。
+
+### 10.2 Task 1 仕様適合レビューの指摘と対応(2026-08-28 追記)
+
+全 5 件を fixup commit で修正した(元 commit は書き換えない= CLAUDE.md §4)。
+
+- **§4.2 の `pendingCr` fall-through 分岐に網が無かった**(最重要)。「ピース末尾 CR +
+  次ピース先頭が LF 以外 → CR 単独 1 件として数え、現バイトは落とさず通常処理へ進める」経路が、
+  初回コミットの fixture では一度も実行されていなかった。境界 CRLF の fact は `b == 0x0A` 側へ、
+  trailing CR の fact は drain へ抜けるため。等価変異ではなく、撃墜できる fixture が実在した。
+  `Snapshot_overload_counts_carried_cr_before_non_lf_byte`
+  (`'a'*(TargetChunkBytes-1) + "\r" + "x"` → `Cr`)と
+  `Snapshot_overload_counts_carried_cr_before_crlf`
+  (`'a'*(TargetChunkBytes-1) + "\r" + "\r\nx"` → `Crlf`)を追加。
+  実ファイルでの再現条件は「4MB チャンク境界がちょうど CR に落ちる CR 単独(旧 Mac)文書」。
+  変異実測: `cr++` 削除は前者のみ撃墜(`Cr` → `Crlf`)、`cr++` 後に `continue` を足す
+  (現バイトを捨てる)変異は後者のみ撃墜(`Crlf` → `Lf`)。2 fixture が 1 行ずつ受け持つ。
+- **削除した 4KB 窓を「意図的な設計」と説明する XML doc が 2 箇所残っていた**
+  (`LoadedBuffer.LineEnding` / `LoadAsBufferAuto` の `<remarks>`)。A-9 のバグそのものを
+  「1GB 級の全文カウントを避けるため意図的に prefix 限定」と記述しており、次の読者を
+  「窓を戻す」方向へ誘導する状態だった。§5.3 が A-11 側に課している基準を A-9 にも当て、
+  全文 byte 走査であること・窓が A-9 の原因だったこと・窓を復活させないことを明記した。
+- **§7.1 の「同形の CRLF 版」が未実装だった**。
+  `LoadAuto_CrlfFile_FirstLineLongerThanOldProbeWindow_DetectsCrlf` を追加。
+  旧実装でも偶然 `Crlf` を返すのでバグの弁別力は無く、
+  「窓の撤廃が過剰修正になって CRLF ファイルまで LF 側へ倒れる」変化を捕まえる対照群としての価値。
+- **`LoadAuto_MajorityLfOutsideOldProbeWindow_DetectsLf` の前提がコメントでしか守られていなかった**。
+  旧窓のコードはもう src に無いため、filler を縮めても `"x\n"` を減らしてもテストは黙って
+  緑のまま弁別力だけを失う(チャンク境界 fact には自己検証を入れたのに、こちらには入れていなかった)。
+  `OldProbeWindowChars` 定数を置き、CRLF の位置と「LF 多数派 50 件が窓の外にある」ことを
+  assertion で固定した。filler を 4,000 に戻すと `Expected: 4094 / Actual: 4000` で落ちることを実測済み。
+  LF 版 / CR 版にも同形の「旧窓に改行が無い」前提 assertion を入れて扱いを揃えた。
+- **逸脱が文書に記録されていなかった**(CLAUDE.md §2)。本節 §10.1 として追記した。

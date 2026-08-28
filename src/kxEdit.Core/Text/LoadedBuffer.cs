@@ -26,9 +26,11 @@ public sealed class LoadedBuffer
     public required bool HasBom { get; init; }
 
     /// <summary>
-    /// 検出した改行種別(先頭 4KB decoded prefix での多数決=<see cref="LineEndingDetector.Detect"/>)。
-    /// 実運用のテキストファイルは全編で改行種別が統一されている前提=先頭数行で判別可能なので prefix
-    /// スキャンで十分。1GB 級ファイルの全文カウントを避けるため意図的に prefix 限定。
+    /// 検出した改行種別(本文全体の byte 走査による多数決=<see cref="LineEndingDetector.Detect(Buffers.TextSnapshot)"/>)。
+    /// A-9(2026-08-28)以前は先頭 4KB の decoded prefix だけを見ていたが、1 行目が窓より長い
+    /// LF / CR ファイル(ミニファイ JSON・長いヘッダ行の CSV)が改行 0 件と見なされて CRLF 既定へ倒れ、
+    /// 保存時に全行が無警告で書き換わっていた。窓は設けず PieceTree を byte 走査する
+    /// (string を実体化しないので 1GB 級でもピークメモリは増えない)。
     /// </summary>
     public required LineEnding LineEnding { get; init; }
 
