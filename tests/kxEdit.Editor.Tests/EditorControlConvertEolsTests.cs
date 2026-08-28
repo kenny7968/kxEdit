@@ -577,40 +577,73 @@ public class EditorControlConvertEolsTests
     // §5.2 契約表「スクロールバー同期」— A-11 レビュー I-1 のプローブが実測した退行の網。
     // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるため評価時点の
     // _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、in-place 化では
-    // _topLine を潰さない。長い行から離れた位置を表示中に水平再計算を走らせると
-    // HideAndResetHScroll が _scrollX を 0 に落とし、直後の `ScrollX = savedScrollX` は
-    // 「HScroll 非表示」で早期 return する=保存のたびに水平スクロール位置が消える。
-    // fixture は「長い行(行 3)から離れた行(行 5)を表示中・scrollX 非ゼロ」という
-    // 非既定状態から始める(CLAUDE.md §4-B)。main では緑=挙動不変の対照群でもある。
+    // _topLine を潰さない。長い行が可視域に無い状態で水平再計算を走らせると HideAndResetHScroll が
+    // _scrollX を 0 に落とし、直後の `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する
+    // =保存のたびに水平スクロール位置が消える。
+    //
+    // fixture A: 長い行(行 3)が**先頭スクリーンフル内**・表示は行 5。
+    // この形では main も _topLine=0 評価で長い行を拾うため HScroll が残る=main では緑
+    // (挙動不変の対照群)。commit e185ef9 の初版実装に対しては赤だった。
     [Fact]
     public void ConvertEols_NonFastPath_KeepsHorizontalScroll() =>
         Sta.Run(() =>
         {
-            using var f = new Form { Size = new System.Drawing.Size(300, 120) };
+            using var f = HostForm.CreateVisible();
             using var c = new EditorControl { Dock = DockStyle.Fill };
             f.Controls.Add(c);
-            _ = f.Handle;
-            f.Show(); // HScrollBar の Visible を機能させる
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < 40; i++)
-                    sb.Append(i == 3 ? new string('W', 200) : $"line{i}").Append('\n');
-                c.SetSource(TextBuffer.FromString(sb.ToString()));
-                c.TopLine = 5;
-                c.ScrollX = 30;
-                Assert.Equal(5, c.TopLine);
-                Assert.Equal(30, c.ScrollX); // 非既定位置から始まっていることを明示
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 40; i++)
+                sb.Append(i == 3 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0; // 折り返し OFF(水平スクロールが意味を持つ条件)
+            c.TopLine = 5;
+            c.Invalidate();
+            Application.DoEvents(); // 描画を 1 回起こしてレイアウトを確定
+            c.ScrollX = 30;
+            Assert.Equal(5, c.TopLine);
+            // fixture 前提: hscroll が表示されていないと ScrollX setter は no-op。
+            Assert.Equal(30, c.ScrollX);
 
-                c.ConvertEols(LineEnding.Crlf);
+            c.ConvertEols(LineEnding.Crlf);
 
-                Assert.Equal(5, c.TopLine);
-                Assert.Equal(30, c.ScrollX);
-            }
-            finally
-            {
-                f.Close();
-            }
+            Assert.Equal(5, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
+        });
+
+    // fixture B(A-11 コード品質レビュー I-3): 長い行(行 40)が**先頭スクリーンフルの外**。
+    // この形では main も _topLine=0 で短い行だけを走査するので HideAndResetHScroll を踏み、
+    // ScrollX を失う=**main 既存バグ**。本テストは main で赤く、切替後で緑になる。
+    // したがって「水平を再計算しない」判断は退行修正であると同時に挙動改善である
+    // (CLAUDE.md §2 の文書化対象。設計書 §10.13 (7))。
+    [Fact]
+    public void ConvertEols_NonFastPath_KeepsHorizontalScroll_WhenLongLineOffFirstScreen() =>
+        Sta.Run(() =>
+        {
+            using var f = HostForm.CreateVisible();
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 60; i++)
+                sb.Append(i == 40 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0;
+            c.TopLine = 40; // 長い行を可視域に置く(先頭スクリーンフルからは外れている)
+            c.ShowLineNumbers = true;
+            c.Invalidate();
+            Application.DoEvents();
+            c.ScrollX = 30;
+            Assert.Equal(40, c.TopLine);
+            // fixture 前提: ここが 0 だと以後の assert が空振りする(hscroll 非表示)。
+            Assert.Equal(30, c.ScrollX);
+
+            c.ConvertEols(LineEnding.Crlf);
+
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
         });
 
     // §5.2 契約表「IME 未確定の確定キャンセル」: ReplaceSource 冒頭のガードを維持していること。
@@ -875,9 +908,15 @@ public class EditorControlConvertEolsUiaEventTests
         });
 
     /// <summary>
-    /// 発火時点の caret / anchor を記録するアダプタ。<c>UiaTextHostAdapterTests.ThrowingAdapter</c> と
-    /// 同じ <c>PerformRaiseAutomationEvent</c> seam を使う(実 UIA インフラを叩かない)。
+    /// 発火時点の caret / anchor / <see cref="IUiaTextHost.TextLength"/> を記録するアダプタ。
+    /// <c>UiaTextHostAdapterTests.ThrowingAdapter</c> と同じ <c>PerformRaiseAutomationEvent</c>
+    /// seam を使う(実 UIA インフラを叩かない)。
     /// </summary>
+    /// <remarks>
+    /// TextLength は「発火時点で <c>OnSnapshotChanged</c> が済んでいるか」を <c>OnSnapshotChanged</c>
+    /// を virtual 化せずに観測するための代理量(A-11 コード品質レビュー I-4 (1))。
+    /// production の可視性を網のために広げないための選択。
+    /// </remarks>
     private sealed class RecordingAdapter : UiaTextHostAdapter
     {
         private readonly CaretController _caret;
@@ -885,7 +924,7 @@ public class EditorControlConvertEolsUiaEventTests
         public RecordingAdapter(EditorControl host, CaretController caret)
             : base(host, caret) => _caret = caret;
 
-        public List<(string Event, int Caret, int Anchor)> Fired { get; } = [];
+        public List<(string Event, int Caret, int Anchor, int TextLength)> Fired { get; } = [];
 
         protected internal override void PerformRaiseAutomationEvent(
             AutomationEvent ev,
@@ -897,7 +936,7 @@ public class EditorControlConvertEolsUiaEventTests
                 ev == TextPatternIdentifiers.TextChangedEvent ? "TextChanged"
                 : ev == TextPatternIdentifiers.TextSelectionChangedEvent ? "SelectionChanged"
                 : "Other";
-            Fired.Add((name, _caret.Caret, _caret.Anchor));
+            Fired.Add((name, _caret.Caret, _caret.Anchor, ((IUiaTextHost)this).TextLength));
         }
     }
 
@@ -934,15 +973,23 @@ public class EditorControlConvertEolsUiaEventTests
             "EditorControl に private フィールド _uia が見つからない"
         );
         uiaField!.SetValue(c, adapter);
+        // 注入直後の _bufferSnapshot は null=TextLength 0 になる。旧スナップショットで prime して
+        // 「発火時点の TextLength が旧長なら OnSnapshotChanged がまだ / 新長なら済んでいる」を
+        // 意味のある対比にする。
+        adapter.OnSnapshotChanged(c.CurrentBuffer.Current);
         return adapter;
     }
 
-    // A-11 レビュー I-2: このブランチの目玉である挙動変更の網。
+    // A-11 レビュー I-2 / コード品質レビュー I-4 (1): このブランチの目玉である挙動変更の網。
     // 旧経路は ReplaceSource が caret を 0 に潰した中間状態で TextChanged / SelectionChanged を
     // 飛ばしていた(監査 A-11 が副作用として指摘)。in-place 化でその中間状態が消え、
     // caret 復元後に発火する。回数では main と区別できない(隣の
     // RaisesTextChangedAndSelectionChangedOnce は main でも緑)ので、
-    // PerformRaiseAutomationEvent seam で発火「時点」の caret を固定する。
+    // PerformRaiseAutomationEvent seam で発火「時点」の状態を固定する。
+    // 固定するのは 2 つ:
+    //  - caret / anchor が復元後の位置であること(main は 0 / 0)
+    //  - TextLength が新値であること=OnSnapshotChanged が発火より前に済んでいること
+    //    (SR が TextChanged を受けて読み直す本文が新本文である、という契約)
     // fixture は非既定位置の caret から始める(caret=0 だと main と区別できない・CLAUDE.md §4-B)。
     [Fact]
     public void ConvertEols_NonFastPath_RaisesUiaEventsAfterCaretRestore() =>
@@ -955,18 +1002,21 @@ public class EditorControlConvertEolsUiaEventTests
                 using var c = new EditorControl();
                 f.Controls.Add(c);
                 _ = f.Handle;
-                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc"));
+                c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc")); // 14 文字
                 c.SetCaretCharOffset(7); // 行 1 の 2 文字目=非既定位置
                 Assert.Equal(7, c.CaretCharOffset);
 
                 var adapter = InjectRecordingAdapter(c);
+                Assert.Equal(14, ((IUiaTextHost)adapter).TextLength); // prime 済み=旧長
+
                 c.ConvertEols(LineEnding.Crlf);
 
                 // 変換後の同じ論理位置 = 非改行 6("aaaa"+"bb")+ 改行 1 x 2 = 8。
                 // main はここが 0 / 0 になる(ReplaceSource が caret を潰した後に発火するため)。
+                // TextLength 16 = 変換後の長さ(旧長 14 のままなら OnSnapshotChanged が後回し)。
                 Assert.Equal(8, c.CaretCharOffset);
                 Assert.Equal(
-                    new[] { ("TextChanged", 8, 8), ("SelectionChanged", 8, 8) },
+                    new[] { ("TextChanged", 8, 8, 16), ("SelectionChanged", 8, 8, 16) },
                     adapter.Fired
                 );
             }

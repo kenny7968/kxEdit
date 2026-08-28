@@ -270,6 +270,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <remarks>
     /// <c>SetSource</c> の 2 回目以降相当=バッファ参照の丸ごと差替え(本文の一部置換ではない=
     /// 部分置換は <see cref="ReplaceCharRange"/> を使う)。
+    /// <para>
+    /// <b>副作用を追加・削除するときは <see cref="ConvertEols"/> も見ること</b> —— A-11(2026-08-28)で
+    /// <c>ConvertEols</c> は本メソッドを呼ばなくなり、必要な副作用だけを<b>明示列挙</b>する形になった。
+    /// 列挙の同期はコードでもテストでも守られていない(ここに副作用を 1 行足しても
+    /// <c>ConvertEols_*</c> は 1 件も赤くならない)。同種の列挙は <see cref="SetSource"/> /
+    /// <c>AfterEdit</c> にもあり、現在 4 箇所に散っている。
+    /// </para>
     /// </remarks>
     public void ReplaceSource(TextBuffer buffer)
     {
@@ -467,6 +474,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <c>AfterEdit</c> は<b>使わない</b>: <c>BringCaretIntoView</c> が復元済みのスクロール位置を
     /// 上書きし、かつ <c>_wasModified</c> 遷移から保存処理の途中で <see cref="SavePointLeft"/> が
     /// 焚かれるため(設計書 2026-08-28 §10.12 (1))。
+    /// <see cref="UpdateUI"/> の発火は旧経路(caret を 0 に潰した直後)から caret 復元後へ移った
+    /// =ハンドラが読む caret 位置が正しくなる(設計書 §10.13 (2) の表)。
     /// </para>
     /// </remarks>
     public bool ConvertEols(LineEnding eol)
@@ -580,20 +589,32 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         bool recorded = _buffer.ReplaceAllRecordingUndo(rebuilt);
         _cellHighlight = null; // 変換前オフセット由来のセル強調は無効化(EOL 変換で位置がずれる)
         _caretCtrl.DesiredXpx = -1; // ReplaceSource と同じく縦移動の目標 X を捨てる
-        // 垂直だけ ReplaceSource と同じ位置で再計算する。Maximum/LargeChange は LineCount と
-        // ClientSize から決まり、EOL 変換で LineCount は変わらない(各改行が target 1 個へ 1:1)
-        // =値は動かないが、_vscroll.Value の同期という ReplaceSource の契約は維持する。
+        // === スクロールバーの扱い(垂直は呼ぶ / 水平は呼ばない)===
+        // 前提(EOL 変換でスクロール extent が不変であることの根拠。ここが崩れたら本判断は無効。
+        //       設計書 §10.5 が PieceStats.Breaks への結合を却下したのと同じ「黙って壊れる結合」
+        //       なので、結論だけでなく依存先を書き出しておく):
+        //  - Piece.cs の Breaks 規約 = LF / 単独 CR(末尾 CR 含む)をそれぞれ 1 と数える
+        //    → 各改行が target 1 個へ 1:1 に写るので TextSnapshot.LineCount は不変。
+        //      垂直の Maximum/LargeChange も水平の lnWidth = MeasureLineNumberWidth(snap.LineCount)
+        //      も動かない。単独 CR を break と数えなくなる等の変更で同時に崩れる。
+        //  - ViewportLayout.VisualRow.SegmentLength は「改行を含まない」
+        //    → 幅測定の対象文字列が変換前後で完全に同一。含む定義に変われば LF→CRLF で幅が伸びる。
+        //
+        // 垂直: 値は動かないが、_vscroll.Value を _topLine へ同期する ReplaceSource の契約は維持する。
         UpdateVerticalScrollbar();
-        // A-11 レビュー I-1 のプローブで実測した退行のため、水平は**あえて再計算しない**。
+        // 水平: **あえて再計算しない**(A-11 レビュー I-1 のプローブで実測)。
         // UpdateHorizontalScrollbar は「可視行のうち最長 pixel 幅」で extent を決めるので、
         // 評価時点の _topLine に依存する。ReplaceSource は _topLine=0 に潰した後に呼んでいたが、
         // in-place 化では _topLine を潰さないため、復元済みの起点で評価することになる。
-        // 長い行から離れた位置を表示していると HideAndResetHScroll が走って _scrollX が 0 に落ち、
+        // 長い行が可視域に無いと HideAndResetHScroll が走って _scrollX が 0 に落ち、
         // 直後の `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する
-        // =保存のたびに水平スクロール位置が失われる(main には無い退行)。
-        // EOL 変換は行本文(改行を除く)も LineCount も変えない=水平 extent は不変なので、
-        // そもそも再計算する理由が無い。以後の編集/リサイズ/スクロールが従来どおり更新する。
-        // 契約は EditorControlConvertEolsTests.ConvertEols_NonFastPath_KeepsHorizontalScroll で固定。
+        // =保存のたびに水平スクロール位置が失われる。
+        // 上の前提より水平 extent は不変なので、そもそも再計算する理由が無い。
+        // 以後の編集/リサイズ/スクロールが従来どおり更新する。
+        // 契約は EditorControlConvertEolsTests の ConvertEols_NonFastPath_KeepsHorizontalScroll と
+        // ConvertEols_NonFastPath_KeepsHorizontalScroll_WhenLongLineOffFirstScreen で固定。
+        // 後者は main では赤い(main も _topLine=0 評価ゆえ同じ経路で _scrollX を失う)
+        // =本判断は挙動不変ではなく main 既存バグの解消でもある(設計書 §10.13 (7))。
 
         int total = _buffer.Current.CharLength;
         // アンカー/キャレットは元の (m, k) 分解から再構成して復元する(ConvertEols 前後で
@@ -603,6 +624,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             Math.Min(caretM + caretK * targetCharLen, total),
             _buffer.Current
         );
+        // A-11 レビュー I-4: RPC スレッド用スナップショットの差し替えは caret 復元の「直後」に置く。
+        // AfterEdit と同じ「caret 先 → snapshot 後」の順序を保ちつつ、両者の間の窓から
+        // PositionCaret(ComputeCaretPoint のレイアウト計算)と Invalidate を外して実質ゼロにする。
+        // 窓の中で RPC スレッドが観測しうる最悪値は「旧文書末尾に縮退した選択範囲」であり、
+        // 例外にも範囲外読みにもならない(根拠は設計書 §10.13 (5)-2=TextRangeProviderV2 の
+        // ctor が Math.Clamp(start, 0, owner.Host.TextLength) を掛けている)。
+        _uia.OnSnapshotChanged(_buffer.Current);
         // TopLine セッターは「その行の先頭視覚行から」の意味を持ち _topSegment を 0 に落とすため、
         // 視覚行位置を保つ SetTopPosition で復元する(クランプ+VScrollBar 同期は同じ)。
         SetTopPosition(savedTopLine, savedTopSegment);
@@ -616,9 +644,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_hasFocus)
             PositionCaret();
         Invalidate();
-        // A-11: 以下は ReplaceSource が担っていた通知契約の再現。RPC スレッド用スナップショットは
-        // caret 復元「後」に差し替える(新本文と旧 caret オフセットが同時に見える窓を作らない)。
-        _uia.OnSnapshotChanged(_buffer.Current);
+        // A-11: 以下は ReplaceSource が担っていた通知契約の再現
+        // (スナップショット差し替えは上の caret 復元直後で済ませてある)。
         // 設計書 §10.12 (1): _wasModified は ReplaceSource:301 と同じく「代入で揃える」。
         // ReplaceAllRecordingUndo は _savedRoot を触らない=Modified が false→true へ遷移するため、
         // AfterEdit の遷移検出に載せると保存処理の途中で SavePointLeft が焚かれる(新規の挙動)。

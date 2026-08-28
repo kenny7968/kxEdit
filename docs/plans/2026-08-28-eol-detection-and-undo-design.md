@@ -897,7 +897,8 @@ Core 側の変更は不要。
 融合条件を変更する将来のタスクは、`ReplaceAllRecordingUndo` のコメントを再検証すること。
 ### 10.13 Task 3(`ConvertEols` の in-place 化)実装時の検証と逸脱記録(2026-08-28 追記)
 
-> 本節は Task 3 の仕様適合レビュー(2026-08-28)の指摘 I-1〜I-6 を反映した版である。
+> 本節は Task 3 の仕様適合レビュー(指摘 I-1〜I-6)と**コード品質レビュー**
+> (指摘 I-1〜I-4 / m-1〜m-4)を反映した版である。
 > 初版で書いた「件数」「網が無い」「a11y 論拠」の 3 箇所は誤り/過小申告だったため
 > **本節内で直接修正した**(§10.13 は本タスクが書いた節であり、訂正の追記ではなく
 > 書いたばかりの記述の修正として扱う。§1〜§9 および §10.1〜§10.12 は無改変)。
@@ -952,7 +953,7 @@ Core 側の変更は不要。
 | 3 | system caret 再配置 | `if (_hasFocus) PositionCaret()` を維持。#2 の no-op 化により**これが system caret 更新の唯一の経路になった** | **網なし**(Win32 `SetCaretPos` は自動テストで観測できない)。L5 で確認 |
 | 4 | UIA スナップショット更新 | `_uia.OnSnapshotChanged` を明示。**caret 復元の後**に置いた(下記 (5)-2) | `ConvertEols_NonFastPath_UpdatesUiaSnapshot` |
 | 5 | UIA `TextChanged` 発火 | `_uia.RaiseTextChanged()` を明示 | `..._RaisesTextChangedAndSelectionChangedOnce`(回数)+ `..._RaisesUiaEventsAfterCaretRestore`(発火時点の caret) |
-| 6 | `UpdateUI` 発火 | `UpdateUI?.Invoke` を明示 | `..._FiresUpdateUiOnce` / `ConvertEols_FastPath_FiresNoUpdateUi` |
+| 6 | `UpdateUI` 発火 | `UpdateUI?.Invoke` を明示。**発火時点が「caret を 0 に潰した直後」から「caret 復元後」へ移った**(コード品質レビュー m-3・下記 (10)) | `..._FiresUpdateUiOnce` / `ConvertEols_FastPath_FiresNoUpdateUi`(回数のみ。時点の網は無し) |
 | 7 | スクロールバー同期 / `Invalidate` | **垂直のみ**明示的に呼ぶ。**水平は意図的に呼ばない**(下記 (7)=レビュー I-1 のプローブが実測した退行)。`Invalidate()` は caret 復元後に 1 回 | `ConvertEols_NonFastPath_KeepsHorizontalScroll`(水平を呼ばない決定を固定)。`Invalidate` は**網なし**(下記 (6)) |
 | 8 | `_cellHighlight` 無効化 | `_cellHighlight = null;` を維持(`ClearHighlight()` ではなく直接代入=`ReplaceSource` と同形) | `ConvertEols_NonFastPath_ClearsCellHighlight` / `ConvertEols_FastPath_KeepsCellHighlight` |
 | 9 | IME 未確定の確定キャンセル | `if (IsComposing) CancelCompositionAndDefault();` を差し替え直前に維持 | `..._DuringComposition_CancelsFirst` / `ConvertEols_FastPath_DuringComposition_DoesNotCancel` |
@@ -1017,9 +1018,17 @@ Core 側の変更は不要。
      `OnSnapshotChanged` までの間、RPC スレッドの `IUiaTextHost.GetSelection()`
      (`UiaTextHostAdapter.cs` — **クランプしない**。クランプするのは `GetTextRange` だけ)は
      **旧スナップショット長を超えるオフセット**を返しうる。main は caret=0 なのでこの窓が無い。
-   - **決め手は既存パターンとの整合**: `AfterEdit()` が全編集経路で同じ順序
-     (caret 移動済み → `OnSnapshotChanged`)を採っている。`ConvertEols` だけ逆順にすると
-     RPC 側の想定が経路ごとに割れる。よって `AfterEdit` と同順に揃えた。
+   - **整合は一貫性の根拠であって安全性の根拠ではない**(コード品質レビュー I-4 (3))。
+     順序を `AfterEdit` に揃えたのは一貫性のためだが、**安全なのは別の理由**である:
+     `TextProviderImplV2.GetSelection()` は生オフセットを `TextRangeProviderV2` へ渡すが、
+     **その ctor が `Math.Clamp(start, 0, owner.Host.TextLength)` を掛ける**
+     (`src/kxEdit.Accessibility/TextRangeProviderV2.cs`)。したがって窓の中で RPC スレッドが
+     観測しうる最悪値は「**旧文書末尾に縮退した選択範囲**」であり、例外も範囲外読みも起きない。
+     **将来 `TextProviderImplV2.GetSelection` がクランプを通さない経路を足したら本判断は再検証が要る。**
+   - **窓そのものを縮めた**(コード品質レビュー I-4 (2)): `_uia.OnSnapshotChanged(...)` を
+     `SetSelection` の**直後**へ移し、窓から `PositionCaret`(`ComputeCaretPoint` の
+     レイアウト計算を含む)と `Invalidate` を外した。「caret 先 → snapshot 後」の
+     `AfterEdit` 整合は保たれるのでデメリットが無い。
 3. **`builder.Build()` を IME 取消より前に評価する**。旧 `ReplaceSource(builder.Build())` は
    引数評価が先=`Build()` が例外(上限超過・carry の不正 UTF-8)で抜けるとき IME 未確定は
    取り消されないまま throw していた。順序を保つため `var rebuilt = builder.Build().Current;`
@@ -1033,6 +1042,27 @@ Core 側の変更は不要。
    `EditorControlConvertEolsTests.cs` のまま)。
 6. **`Modified` / SavePoint 系のテストを計画外に足した**。計画のテスト案は Undo 履歴だけを
    見ており、§10.12 (1) が要求する発火列の固定が無かった。
+7. **「水平を再計算しない」判断が依存する不変条件をコードに書き出した**
+   (コード品質レビュー I-2)。結論(「EOL 変換で水平 extent は不変」)は **Editor の外**にある
+   2 つの実装詳細に全面的に依存している:
+   - `src/kxEdit.Core/Buffer/Piece.cs` の `Breaks` 規約(LF / 単独 CR をそれぞれ 1 と数える)
+     → 各改行が target 1 個へ 1:1 に写るので `LineCount` 不変。ここが変われば
+     **垂直の「値は動かない」も水平の「extent 不変」も同時に崩れる**。
+   - `src/kxEdit.Core/Layout/ViewportLayout.cs` の `VisualRow.SegmentLength` が
+     「改行を含まない」こと → 幅測定の対象文字列が変換前後で同一。
+   これは §10.5 が `PieceStats.Breaks` への結合を却下した構図と同型(「定義が変われば黙って
+   誤動作する」)であり、今回は結合が暗黙だったぶん見つけにくい。該当行のコメント冒頭に
+   「前提」として明記した。
+8. **`ReplaceSource` の `<remarks>` に逆方向参照を入れた**(コード品質レビュー I-1)。
+   `ConvertEols` → `ReplaceSource` の参照は元々あったが**一方向**で、
+   「`ReplaceSource` に副作用を 1 行足したとき `ConvertEols` も直す必要がある」という
+   手がかりがコードにもテストにも無かった(`ReplaceSource` に副作用を足しても
+   `ConvertEols_*` は 1 件も赤くならない)。同種の列挙は `SetSource` / `AfterEdit` にもあり
+   **現在 4 箇所に散っている**。防げないので「防げない」と書いた。
+9. **可視ホストを `HostForm.CreateVisible()` に揃えた**(コード品質レビュー m-1)。
+   `new Form() + Show()` はフォームをアクティブ化し、CI 非対話セッションで
+   フォーカス奪取・チラつきを招く。`EditorControlBoundingRectsTests.GetBoundingRectangles_SubtractsScrollX`
+   の手順(`CreateVisible()` → `ClientSize` → `PerformLayout()` → `DoEvents()`)に合わせた。
 
 #### (6) 網の状況(レビュー I-1 を受けた訂正)
 
@@ -1056,12 +1086,32 @@ Core 側の変更は不要。
 - **system caret 再配置(`PositionCaret`)**: Win32 `SetCaretPos` の結果は自動テストで
   観測できない。L5 の対象。
 
+**`OnSnapshotChanged` の順序について、網が殺せる変異と殺せない変異**
+(コード品質レビュー I-4 (1)。`ConvertEols` 内の呼び出しだけを一意にアンカーして実測。
+素の `_uia.OnSnapshotChanged(_buffer.Current);` は `SetSource` / `ReplaceSource` /
+`AfterEdit` にも現れるので、1 個目を置換すると別メソッドが変異する=§10.12 (4) の罠を踏んだ):
+
+| 変異 | 結果 | 撃墜したテスト |
+|---|---|---|
+| `OnSnapshotChanged` を削除 | **撃墜** | `..._UpdatesUiaSnapshot` / `..._RaisesUiaEventsAfterCaretRestore` |
+| UIA イベント発火の**後**へ移す | **撃墜** | `..._RaisesUiaEventsAfterCaretRestore`(発火時点の `TextLength` が旧値 14 になる) |
+| `SetSelection` の**前**へ移す | **生存** | — |
+
+最後の 1 つは**殺せない**。発火時点では caret も `TextLength` もどちらの順序でも新値であり、
+差が出るのは `SetSelection` と `OnSnapshotChanged` の間の**別スレッドからの観測**だけだからである。
+`OnSnapshotChanged` は非 virtual で `_uia` の静的型経由で呼ばれるため、サブクラスでは横取りできない。
+**網のために production の可視性を広げるのは順序が逆**なので `virtual` 化はしない(レビュアーの指示)。
+上記 (5)-2 の窓縮小によりこの 2 文は隣接しており、変異が動かす距離は 1 文である。
+
 #### (7) レビュー I-1 のプローブが実測した退行 —— 水平スクロール位置が保存のたびに失われていた
+
+> **先に結論**: これは初版実装が持ち込んだ退行であると同時に、**main も条件次第で同じ挙動を持つ
+> 既存バグ**だった(本節末尾の「訂正」参照)。修正は挙動不変ではなく**挙動改善**である。
 
 `_vscroll` / `_hscroll` の観測可能な状態を `ConvertEols` の前後で比べるプローブを書いたところ、
 **初版実装(commit `e185ef9`)は main と異なる結果を出した**。
 
-fixture: 40 行・行 3 だけ 200 文字の長い行・`TopLine = 5`(長い行から離れた位置)・`ScrollX = 30`。
+fixture A: 40 行・行 3 だけ 200 文字の長い行・`TopLine = 5`(長い行は先頭スクリーンフル内)・`ScrollX = 30`。
 
 ```
 BEFORE           H(max=3265, lc=267, val=30, vis=True)  topLine=5, scrollX=30
@@ -1075,7 +1125,8 @@ in-place 化では `_topLine` を潰さないため、復元済みの起点(=長
 その結果 `HideAndResetHScroll()` が走って `_scrollX` が 0 に落ち、直後の
 `ScrollX = savedScrollX` は「HScroll 非表示」で早期 return する。
 **Ctrl+S のたびに水平スクロール位置が消える**という、晴眼・弱視ユーザーに直接効く退行だった
-(CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
+(CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。main が fixture A で無事なのは
+`_topLine=0` 評価がたまたま長い行を拾うからにすぎない(下記「訂正」)。
 
 **修正**: 水平スクロールバーの再計算を**呼ばない**ことにした。EOL 変換は行本文(改行を除く)も
 `LineCount` も変えないので**水平 extent は不変**であり、そもそも再計算する理由が無い
@@ -1084,7 +1135,27 @@ in-place 化では `_topLine` を潰さないため、復元済みの起点(=長
 契約があるので**そのまま呼ぶ**(プローブでも main と同一)。
 
 **網**: `ConvertEols_NonFastPath_KeepsHorizontalScroll`。commit `e185ef9` に対して
-`Expected: 30 / Actual: 0` で赤、main と修正後で緑=挙動不変の対照群でもある。
+`Expected: 30 / Actual: 0` で赤、main と修正後で緑。
+
+**訂正(コード品質レビュー I-3): 「main では緑」は上の fixture に限った事実だった。**
+上の fixture は長い行(行 3)が**先頭スクリーンフル内**にあるため、main の `_topLine=0` 評価でも
+長い行を拾って HScroll が残る。**長い行が先頭スクリーンフルの外にある文書では main も
+同じ経路で `_scrollX` を失う**。実測(fixture B: 60 行・行 40 だけ `'W'x200`・
+`ClientSize 300x120`・`TopLine=40`・`ShowLineNumbers=true`・`ScrollX=30`。
+前提 assert は main でも両方 PASS):
+
+```
+c167fba (main)   ConvertEols 後  Expected: 30 / Actual: 0   ← 失う(main 既存バグ)
+本タスク修正後   ConvertEols 後  PASS                        ← 保つ
+```
+
+したがって「水平を再計算しない」決定は、初版実装が持ち込んだ退行の修正であると同時に
+**main 既存バグの解消**でもある=**挙動不変ではなく挙動改善**であり、CLAUDE.md §2 の
+「意図的な挙動変更は文書化する」の対象になる。PR description にも記載すること。
+網は `ConvertEols_NonFastPath_KeepsHorizontalScroll_WhenLongLineOffFirstScreen`(**main で赤**)。
+
+**この訂正自体が §10.8 の教訓の再演である**(「過大申告が 1 つ混じると資料全体の信頼が落ちる」)。
+初版の §10.13 (7) は fixture 1 本の観測から「main には無い退行」と一般化していた。
 
 **教訓**: 「`ReplaceSource` の副作用のうち意味を失うものだけ再現する」という判断は、
 **副作用の入力が何に依存しているか**まで見ないと安全でない。`UpdateHorizontalScrollbar` は
@@ -1131,3 +1202,25 @@ in-place 化では `_topLine` を潰さないため、復元済みの起点(=長
 5. (7) の教訓は Task 4 にもそのまま効く。`WriteToPath` のロールバックで caret / スクロールを
    明示復元する(§10.12 (2) の決定)とき、**復元値を捕捉する時点**と**復元を適用する時点**で
    依存する状態(`_hscroll.Visible` など)が変わっていないかを確認すること。
+
+#### (10) コード品質レビューで却下したもの / 申し送りにしたもの
+
+- **却下: byte 走査ブロックの抽出(m-2)**。レビュアー自身が「§10.6 が `EolSegments` seam として
+  既に所有しており、本ブランチで先に取ると §10.6 の judgement(2 系統の変更を混ぜない)を崩す」
+  として却下を推奨し、同意した。**§10.6 を回収するときは `ConvertEols` の byte 走査ブロックが
+  最初の対象になる**(`EmitEol` / `FlushBuf` / `pendingCr` の carry を含む一式)。
+- **`UpdateUI` の発火時点が変わった(m-3)**。旧経路は `ReplaceSource` 内=caret を 0 に潰した
+  直後に発火していたが、in-place 化で caret 復元後になった。**実害なしを確認済み**:
+  `MainForm.UpdateStatus()` の EOL 表示は `doc.State.LineEnding` を読んでおり `Editor.EolMode`
+  ではない。caret 依存の表示も、成功パスでは `WriteToPath` 後段の `_metaChanged()` が再描画するため
+  main の「保存後に『行 1, 桁 1』が残る」挙動は元々マスクされていた。
+  **新実装のほうが素の状態では正しい**(ハンドラが読む caret が実際の位置になる)。
+  網は回数のみで、発火「時点」の網は張っていない。
+- **申し送り(m-4): テストヘルパの 4 コピー目**。本ファイルの `MakeHosted` は
+  `MouseInputTests.MakeControl` / `VisualRowScrollTests.MakeControl` と、`SendMouseWheel` は
+  `MouseInputTests.SendMouseWheel` と同型である。ただし既存はすべて `private static` で
+  再利用不能な形なので、これは本ファイルが作った債務ではなく**既存慣行の踏襲**。
+  `tests/kxEdit.Editor.Tests/TestHost.cs` に `internal static class EditorProbe`
+  (`MakeHosted` / `SendMouseWheel` / `Field<T>(obj, name)`)を置いて集約する案を
+  **独立テーマとして申し送る**(本ブランチでは実施しない。テスト資産全体に触る変更になり、
+  A-9 / A-11 の差分に混ぜると挙動不変の証明が読めなくなるため)。
