@@ -617,7 +617,9 @@ public class FileControllerTests
             // _savedRoot は誰も触らないので Modified は true のまま=本文が EOL 変換後で残っていても
             // このテストは緑になる(設計書 §10.13 (9)-1)。本文そのものが変換前へ戻ることを固定する。
             // 期待値は「Text セッターで "a\r\nb\r\nc" を入れ、offset 0 に "x" を挿入した」結果=
-            // **ロールバック前**の値。ConvertEols(Lf) 後の "xa\nb\nc" を書くと網が反転する。
+            // **ConvertEols 前の値(= ロールバックで復元されるべき値)**。ConvertEols(Lf) 後の
+            // "xa\nb\nc" を書くと網が反転する(実装計画 :875 の「ロールバック前の値」という
+            // 表現は逆に読めるので、ここでは復元先を名指ししてある。仕様適合レビュー 6)。
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
         });
 
@@ -3179,18 +3181,25 @@ public class FileControllerTests
 
     // ===== EOL 非ロールバックの修正確認(Batch A Task 1・2026-07-15) =====
     //
-    // 経緯: WriteToPath (:268-) は保存直前に doc.Editor.ConvertEols(EolMode) で本文中の
+    // 経緯: WriteToPath は保存直前に doc.Editor.ConvertEols(EolMode) で本文中の
     // 改行を State.LineEnding に一括変換してから TextFileService.Save を呼ぶ。以前は書込失敗時に
-    // SaveAsDocument (:231-236) が State(Encoding/LineEnding/HasBom)を元値へロールバックするだけで、
+    // SaveAsDocument が State(Encoding/LineEnding/HasBom)を元値へロールバックするだけで、
     // 本文の EOL(バグ 1)と、ConvertEols 非 fast-path の ReplaceSource で fresh 化された
     // TextBuffer の保存点(バグ 2=Save 前 dirty が Save 後 Modified=false に落ちる)が
     // ロールバックされない静音喪失導線があった。既存 SaveAs 系ロールバックテスト(本ファイル上部)は
     // fixture の本文が "abc"(改行なし)で ConvertEols が no-op のため、この 2 バグを検出できていなかった。
     //
-    // 修正(2026-07-15・fix(app) コミット): WriteToPath は ConvertEols 前に旧 TextBuffer 参照を握り、
-    // 失敗時にその参照へ戻す。TextBuffer 内部の _savedRoot/_current は ConvertEols/ReplaceSource で
-    // 書き換わらないため、参照を戻すだけで本文も Modified も一括で復元される。以下の 2 テストは
-    // かつて「バグ を pin する ★修正時に赤化」だったものを反転させ、修正後の担保として固定するもの。
+    // 現在の機構(A-11・2026-08-28): WriteToPath は ConvertEols の戻り値で「Undo 履歴へ記録したか」を
+    // 受け取り、記録したときだけ EditorControl.UndoEolConversion で変換エントリを 1 つ取り消す。
+    // 保存点は TextBuffer._savedRoot を誰も触らないので、ルートが変換前へ戻れば参照比較で復す。
+    // 以下の 2 テストは、かつて「バグを pin する ★修正時に赤化」だったものを反転させ、
+    // 修正後の担保として固定するものである。
+    //
+    // 【★★履歴】2026-07-15 の初回修正は別機構だった: ConvertEols 前の TextBuffer 参照を握り、
+    // 失敗時に SetOrReplaceSource でその参照へ戻す(= ConvertEols がバッファ参照ごと差し替える
+    // ことに全面的に依存する)。A-11 で ConvertEols が in-place の 1 Undo 単位になり
+    // ReferenceEquals が常に true =ロールバックが黙って no-op になったため、上の機構へ
+    // 置き換えた。この 2 テストは切り替えの途中で実際に赤くなっている。
     //
     // 【★★履歴】旧テスト名は SaveAs_WriteFailure_LeavesEolConverted_KnownBehavior /
     // Save_WriteFailure_LeavesEolNormalized_KnownBehavior。assertion は "a\nb"/"x\r\ny"/Modified=false を
@@ -3596,7 +3605,13 @@ public class FileControllerTests
             doc.State.Path = root;
 
             // 非既定位置から始める(既定 0 と「潰された 0」を区別するため=CLAUDE.md §4-B)。
-            doc.Editor.SetSelectionAnchored(anchor: 2, caret: 5); // 行 0 内の選択
+            // caret / anchor は**行 0 の外**に置く(行 0 は 'W' x 200 で改行を含まないため、
+            // 行 0 の中だと CRLF → LF 変換でオフセットが動かず「捕捉が ConvertEols の前か後か」を
+            // 弁別できない=§10.12 (2) の核心要求が無防備になる。仕様適合レビュー ①)。
+            // 行 0 = [0,200) / CRLF = 200,201 / "line1" = [202,207) / CRLF = 207,208 /
+            // "line2" = [209,214)。caret 209 の手前には CRLF が 2 個あるので、捕捉を
+            // ConvertEols の後へ動かすと復元値が 207(= 209 - 2)へずれる。
+            doc.Editor.SetSelectionAnchored(anchor: 205, caret: 209); // 行 1 の途中 → 行 2 の先頭
             doc.Editor.ScrollX = 40; // 長い行が見えている間(TopLine=0)に置く
             doc.Editor.TopLine = 150; // どんな画面高でも行 0 は可視域外になる行数
             int caretBefore = doc.Editor.CaretCharOffset;
@@ -3605,15 +3620,16 @@ public class FileControllerTests
             int scrollXBefore = doc.Editor.ScrollX;
             // 前提を固定する: どれかが 0 に落ちていると、以降の assert は「潰れた 0」を
             // 「保たれた 0」と取り違えて空振りする。
-            Assert.Equal(5, caretBefore);
-            Assert.Equal(2, anchorBefore);
+            Assert.Equal(209, caretBefore);
+            Assert.Equal(205, anchorBefore);
             Assert.Equal(150, topLineBefore);
             Assert.True(scrollXBefore > 0, $"ScrollX を非 0 に置けていない(={scrollXBefore})");
 
             Assert.False(host.File.Save());
 
             Assert.Equal(before, doc.Editor.SnapshotText);
-            Assert.Equal(caretBefore, doc.Editor.CaretCharOffset); // ★ 末尾ワープ / 0 潰しを kill ★
+            // ★ 末尾ワープ / 0 潰し / **捕捉を ConvertEols の後へ動かす**(207 へずれる)を kill ★
+            Assert.Equal(caretBefore, doc.Editor.CaretCharOffset);
             Assert.Equal(anchorBefore, doc.Editor.SelectionAnchor); // ★ 選択も保つ(SetTo だと anchor=caret) ★
             Assert.Equal(topLineBefore, doc.Editor.TopLine); // ★ BringCaretIntoView を kill ★
             Assert.Equal(scrollXBefore, doc.Editor.ScrollX); // ★ UpdateHorizontalScrollbar を kill ★

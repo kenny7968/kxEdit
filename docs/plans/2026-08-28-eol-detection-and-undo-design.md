@@ -1302,10 +1302,16 @@ L1 に `DropRedo_ClearsRedoOnly_AndKeepsUndoStack` / `DropRedo_DoesNotTouchSaveP
 - `ConvertEols` で上限超過が起きうるのは走査中の `builder.Add`(内部 `AddChunk`)と
   最後の `builder.Build()` の 2 箇所。どちらも **`_buffer` に触る前**である
   (`rebuilt = builder.Build().Current` → `IsComposing` 判定 → `ReplaceAllRecordingUndo` の順)。
-- したがって例外が飛んだ時点で本文・キャレット・スクロール・`EolMode`・Undo 履歴はすべて未変更、
+- したがって例外が飛んだ時点で本文・キャレット・選択・スクロール・Undo 履歴はすべて未変更、
   `eolConverted` も `false` のままで、**ロールバックは no-op でよい**。
-- `try` 内の他の文(`TextFileService.Save` / `SetSavePoint` / `UpdateLabel` / `_metaChanged`)は
-  `TextBufferBuilder` を使わないので、このフィルタが新たに飲み込む例外源は無い。
+- **訂正(仕様適合レビュー 5-2)**: 初版はここに `EolMode` も挙げていたが**誤り**。
+  同じ `try` の先頭にある `ApplyEol(doc)` が `EolMode = doc.State.LineEnding` を先に代入するので、
+  `EolMode` は既に新値になっている。ただし (a) 代入元はユーザーが選んだ `State.LineEnding` であり、
+  (b) main も同じ位置で同じ代入をして失敗時に戻さないので、**挙動は main と同じ**である
+  (「本文の書き換えは起きていない」という結論は変わらない)。
+- `try` 内の他の文(`ApplyEol` / `ReadOnly` セッター / `TextFileService.Save` / `SetSavePoint` /
+  `DocumentManager.UpdateLabel` / `_metaChanged`)は `TextBufferBuilder` を使わないので、
+  このフィルタが新たに飲み込む例外源は無い。
 
 拾う前は**未処理例外でアプリが落ちる**(= 他タブの未保存分も道連れ)。拾えば
 「保存できませんでした: 文書サイズ上限(512 MB)を超えました。」が出て編集を続けられる。
@@ -1329,8 +1335,13 @@ L1 に `DropRedo_ClearsRedoOnly_AndKeepsUndoStack` / `DropRedo_DoesNotTouchSaveP
 
 保存に失敗しただけで保存点到達イベントが飛ぶのは筋が悪く、§10.12 (1) が
 `SavePointLeft` について下した決定(保存処理の途中でイベントを焚かない)と非対称になる。
-**結果として失敗パスの発火列は main と完全一致**し、Task 3 が持ち込んだ「新規挙動」は
-Task 4 で消えた(= A-11 全体で `SavePoint` 系の発火列は挙動不変)。網は
+**保存操作そのもの(失敗・成功の両パス)の発火列は main と完全一致**し、Task 3 が持ち込んだ
+「新規挙動」は Task 4 で消えた。ただし**保存成功後の Ctrl+Z は新規に `SavePointLeft` を焚く**
+(main は保存で履歴が消えるので `CanUndo=False` =無反応。現行は変換を巻き戻してタブに「*」が付く)
+—— これは A-11 が直した対象バグ(§1 / §4.4 / §8 の L5 項目 2)の帰結であり、**意図した挙動変更**である。
+初版はここに「= A-11 全体で `SavePoint` 系の発火列は挙動不変」と書いていたが**言い過ぎ**だった
+(仕様適合レビュー 4 が main と現行に同一プローブを入れて 11 ケース実測し、
+保存成功直後の Ctrl+Z だけが `[Reached]` → `[Reached, Left]` と食い違うことを確認)。網は
 `UndoEolConversion_OnSavedDocument_FiresNoSavePointEvents`(clean 文書から始める= 変換で
 false→true、取り消しで true→false の**両方向の遷移が実在する**非既定条件)。
 
@@ -1342,13 +1353,14 @@ false→true、取り消しで true→false の**両方向の遷移が実在す�
 #### (6) 網が実際に何を守っているか(変異実測)
 
 判定はビルドの exit code、適用差分は毎回目視してから実行した(§10.4 のハーネスの罠対策)。
+M3 / M4 / M5 は (11) の fixture 変更(caret を行 0 の外へ)後に**当て直して**撃墜を再確認した。
 
 | # | 変異 | 結果 | 撃墜したテスト |
 |---|------|------|--------------|
 | M1 | `conversionRecorded` の判定を落とす(常に取り消す) | kill | `Save_WriteFailure_OnFastPathEol_DoesNotUndoUserEdit` |
 | M2 | `UndoEolConversion` に `ReadOnly` ガードを足す(= `Undo` 流用と同じ) | kill | `Save_WriteFailure_WhileEditorReadOnly_StillRollsBackContentEol` |
 | M3 | `SetSelection(anchorBefore, caretBefore)` → `SetTo(UndoResult.CaretPos)` | kill | `Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll` |
-| M4 | 通知一式を `AfterEdit()` に置換 | kill | 同上(`TopLine` 1 → 0) |
+| M4 | 通知一式を `AfterEdit()` に置換 | kill | 同上(`TopLine` 150 → 2 = `BringCaretIntoView` が caret の行へ寄せる) |
 | M5 | `UpdateHorizontalScrollbar()` を足す | kill | 同上(`ScrollX` 40 → 0) |
 | M6 | `_buffer.DropRedo()` を落とす | kill | `Save_WriteFailure_OnNonFastPathEol_LeavesNothingToRedo` |
 | M7 | `WriteToPath` の `UndoEolConversion` 呼び出しごと落とす | kill | 上記の非 fast-path 系すべて + `Save_ExistingPathIsDriveRoot_...` + A-10 の既存 2 件 |
@@ -1356,19 +1368,13 @@ false→true、取り消しで true→false の**両方向の遷移が実在す�
 | M9 | `_wasModified = _buffer.Modified;` を落とす | kill | `Save_WriteFailure_OnNonFastPathEol_KeepsDirtyIndicatorWorking` |
 | M10 | `_uia.OnSnapshotChanged(snap)` を落とす | kill | `UndoEolConversion_UpdatesUiaSnapshot` / `UndoEolConversion_RaisesUiaEventsAfterCaretRestore` |
 | M11 | `_uia.OnSnapshotChanged(snap)` を UIA イベント発火の後へ移す | kill | `UndoEolConversion_RaisesUiaEventsAfterCaretRestore`(発火時点の `TextLength` が旧値) |
+| M12 | 捕捉 2 行を `ConvertEols` の**後**へ移す | 初版 fixture では **生存** → (11) の fixture 修正後 kill | `Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll`(`Expected 209 / Actual 207`) |
 
 **M7 は `Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified` も撃墜した**
 =§10.13 (9)-1 が指摘した空振り(本文 assert が無く、ロールバックが no-op でも緑)は解消した。
 
-**当てた変異はこの 11 件だけであり、「網が完全」という主張はしない**(§10.8 の教訓)。
-既知の未撃墜・未観測は次のとおり:
-
-| 項目 | 状態 | 理由 |
-|---|---|---|
-| `_caretCtrl.DesiredXpx = -1` | **等価変異(生存する)** | `conversionRecorded == true` なら `ConvertEols` が直前に -1 を入れており、その間(`TextFileService.Save`)に誰も書き換えない。キャレットが動く経路の共通作法として残す(§10.3 の空ピースガードと同じ扱い) |
-| `Invalidate()` | 網なし | `EditorControl` は sealed で差し替え seam が無い(§10.13 (6) と同じ) |
-| system caret 再配置(`PositionCaret`) | 網なし | Win32 `SetCaretPos` は自動テストで観測できない。L5 の対象 |
-| `DocumentTooLargeException` 経路 | 網なし | (4) のとおり 512MB 級 fixture が要る |
+**当てた変異は本表と (10) の表に挙げたものだけであり、「網が完全」という主張はしない**
+(§10.8 の教訓)。**初版がここに書いた「未撃墜 4 項目」のうち 3 項目は過小申告だった** —— (10) で訂正する。
 
 #### (7) 既存テストの説明文の更新(旧機構の説明を残さない)
 
@@ -1382,7 +1388,10 @@ false→true、取り消しで true→false の**両方向の遷移が実在す�
 (`Text` セッター直後=履歴が空)には**無い**ことを明記して、担い手のテスト名を書いた。
 
 `Save_ExistingPathIsDriveRoot_...` には §10.13 (9)-1 の指示どおり本文 assert を足した。
-期待値は実行して確認した**ロールバック前**の値(`"xa\r\nb\r\nc"`)である。
+期待値は実行して確認した **`ConvertEols` 前の値(= ロールバックで復元されるべき値)**
+`"xa\r\nb\r\nc"` である。実装計画 `:875` と初版の本節が使った「**ロールバック前**の値」という
+表現は、文字どおり読むと「ロールバックする直前の値」= 変換**後**の値になり網が反転するので、
+テストコメントともども復元先を名指しする表現へ直した(仕様適合レビュー 6)。
 
 #### (8) L5 チェックリストへの追加候補
 
@@ -1393,3 +1402,113 @@ false→true、取り消しで true→false の**両方向の遷移が実在す�
 > **期待**: 「保存できませんでした」ダイアログが出て、閉じた後もキャレット位置・選択範囲・
 > 表示位置が Ctrl+S の直前と同じ(本文も変換前のまま)。
 > **判定**: NVDA が「キャレットが飛んだ」と読む発話が挟まらないか。
+
+#### (9) `EditorControl.Undo()` を流用しない判断(記録漏れの補完・仕様適合レビュー 5-1)
+
+本タスク最重要の設計判断だが、初版の §10.14 は (1) で引数の形しか論じておらず、
+記録が XML doc・commit message・(6) の変異表 M2 行に散っていた。ここに集約する。
+
+`Undo()` を流用してはならない理由は 2 つあり、**どちらも「黙って何もしない」形で失敗する**:
+
+1. **`Undo()` は `ReadOnly` で早期 return する**(`EditorControl.cs` の `Undo` 本体)。
+   `WriteToPath` は `ConvertEols` の前後でだけ `ReadOnly` を外し、`finally` で元へ戻すので、
+   **catch 節に来る時点では `ReadOnly` が復元済み**である。CSV グリッドモード
+   (`CsvController.Editor.ReadOnly = true`)で保存に失敗すると、ロールバックが no-op になり
+   本文が EOL 変換後のまま残る=まさに A-11 が塞ごうとしている静音喪失が別経路で復活する。
+   `UndoEolConversion` は `ReadOnly` を見ない。ユーザー編集ではなく、**自分が直前に加えた
+   変換の取り消し**だからである(「読み取り専用なのに書き換わったまま」を防ぐ側に倒す)。
+2. **`Undo()` はキャレットを `UndoResult.CaretPos` へ動かす**((1) と §10.12 (2))。
+
+網は `Save_WriteFailure_WhileEditorReadOnly_StillRollsBackContentEol`(L3)と
+`UndoEolConversion_WhileReadOnly_StillUndoes`(L2)。(6) の M2(`UndoEolConversion` に
+`ReadOnly` ガードを足す=流用と同じ形にする)で撃墜を実測済み。
+
+#### (10) 訂正: 「網が無い」と書いた 3 項目は既存インフラで書けた(過小申告・このブランチで 3 回目)
+
+初版の (6) は未撃墜・未観測を 4 項目挙げたが、**そのうち 3 項目が過小申告**だった
+(仕様適合レビュー 2 が既存インフラだけでプローブを書き、すべて撃墜することを実測)。
+CLAUDE.md の「**書けるはずの網を『書けない』と宣言するのも同種の事故**」に真正面から該当し、
+§10.13 (6) が同じ教訓を書いた直後の再演である。
+
+**過小申告の原因**は論法の取り違えだった。初版は「`WriteToPath` 経由では `ConvertEols` が
+直前に同じ値を入れているから等価」と考えたが、それは**呼び出し元 1 本に限った話**である。
+`UndoEolConversion` は public API で、**取り消しの直前に状態をずらしてから呼べば**
+いずれも観測できる。API 単体の契約テストにこの論法を持ち込んだのが誤りだった。
+
+| 初版の申告 | 実測 | 使った既存インフラ | 追加した網 |
+|---|---|---|---|
+| `DesiredXpx = -1` は等価変異 | **誤り。kill する** | 同ファイルの `Caret(EditorControl)` ヘルパ(`ConvertEols_NonFastPath_ResetsDesiredXpx` が既に使用) | `UndoEolConversion_ResetsDesiredXpx` |
+| `Invalidate()` は sealed で seam 無し | **誤り。kill する** | WinForms 標準の public event `Control.Invalidated`。**seam は不要だった** | `UndoEolConversion_InvalidatesOnce` |
+| `PositionCaret` は観測不能・L5 対象 | **誤り。kill する** | `CaretScrollTests` の `GetCaretPos` P/Invoke と `Show()` + `Focus()` の先例 | `UndoEolConversion_RepositionsSystemCaret` |
+| `DocumentTooLargeException` 経路 | **正しい** | — ((4) のとおり注入点が無い) | — |
+
+変異実測(いずれも変異前は全件緑・変異後にこの 1 件だけが落ちる):
+
+| 変異 | 結果 | 撃墜したテスト |
+|---|---|---|
+| N1 `_caretCtrl.DesiredXpx = -1;` を落とす | kill | `UndoEolConversion_ResetsDesiredXpx` |
+| N2 `Invalidate();` を落とす | kill | `UndoEolConversion_InvalidatesOnce` |
+| N3 `if (_hasFocus) PositionCaret();` を落とす | kill | `UndoEolConversion_RepositionsSystemCaret` |
+| N4 `if (_hasFocus)` → `if (true)` | **生存(真の等価変異)** | — |
+
+**申告すべきだったのは N4 だった**。`PositionCaret()` 自身が冒頭で自己ガードするため
+`if (_hasFocus)` は冗長で、外しても観測可能な差が出ない(`kxEdit.Editor.Tests` 全件で確認)。
+ガードは呼び出し側の意図を読ませる目的で残す。
+
+**`Invalidate` の網が精密に効く理由**: ホストを `MakeHosted`(`Show` / `Focus` しない)で作ると
+`_hasFocus` が false になり `PositionCaret` 経路の再描画要求が混ざらないので、明示 `Invalidate()`
+だけを数えられる。逆に system caret の網はフォーカスが要るので `Show()` + `Focus()` を使う
+(§10.13 (5)-9 が採用した `HostForm.CreateVisible()` は `ShowWithoutActivation` でフォーカスを
+取らないため、この 1 件だけは `CaretScrollTests` の先例に合わせる)。
+
+**同じ過小申告が §10.13 (2) 表 #3 と §10.13 (6) にも残っている**
+(`ConvertEols` 側の `Invalidate` / system caret 再配置)。策定済み節なので書き換えず、
+ここで訂正する: **どちらも上と同じ手法で観測できる**。`ConvertEols` 側に網を張るのは
+本 fixup の範囲外(仕様適合レビューは §10.13 については訂正追記のみを求めた)なので、
+**申し送りとして残す**。手法は上表のとおり確立済みで、`UndoEolConversion_InvalidatesOnce` /
+`UndoEolConversion_RepositionsSystemCaret` をそのまま `ConvertEols` へ写せばよい。
+
+#### (11) 訂正: 捕捉が `ConvertEols` の「前」であることに網が無かった(仕様適合レビュー 1)
+
+`WriteToPath` の捕捉 2 行を **`ConvertEols` の直後へ移す変異が生存していた**
+(`kxEdit.App.Tests` / `kxEdit.Editor.Tests` 全件緑)。§10.12 (2) の核心要求
+「位置は `ConvertEols` を呼ぶ前に捕捉する」が完全に無防備だった。
+
+**原因は fixture**。初版の `Save_WriteFailure_OnNonFastPathEol_RestoresCaretAndScroll` は
+caret / anchor を `'W' * 200` の**行 0 の中**(2 / 5)に置いていた。行 0 は改行を含まないので
+CRLF → LF 変換でオフセットが 1 も動かず、「変換前に捕捉したか / 変換後に捕捉したか」を
+**原理的に弁別できない**。実運用でキャレットが行 0 にあることは稀で、この退行が入れば
+保存失敗のたびに**キャレットが「その位置より前にある改行の数」だけ手前へずれる**。
+
+**対応**: caret / anchor を行 0 の外へ移した(anchor 205 / caret 209 =行 1 の途中 → 行 2 の先頭。
+行 0 = `[0,200)` / CRLF = 200,201 / `"line1"` = `[202,207)` / CRLF = 207,208 / `"line2"` = `[209,214)`)。
+caret 209 の手前には CRLF が 2 個あるので、捕捉を後ろへ動かすと復元値が 207 へずれる。
+
+実測: **旧 fixture では同じ変異が生存**(App 全件緑)、**新 fixture では `Expected 209 / Actual 207`
+で撃墜**。ScrollX / TopLine の設定はこの行より後なので、(2) の「長い行を可視域外へ」という
+罠の仕込みには影響しない。
+
+**教訓**: 「非既定位置から始める」(CLAUDE.md §4-B)は座標が 0 でないだけでは足りない。
+**検証したい差分がその位置で実際に現れるか**まで確かめること。今回は「変換でオフセットが動く
+位置か」が条件だった。§10.13 (7) の「fixture 1 本から一般化した」失敗と同型である。
+
+#### (12) 受容としてユーザー / PR へ上げるもの(コードは変更しない)
+
+1. **(6) の M4 / M5 は §7.4 の宣言に反して GUI 側へ変異を当てている。**
+   §7.4 は「`ConvertEols` の GUI 側(caret / スクロール復元)と `WriteToPath` のダイアログ経路には
+   **適用しない**(CLAUDE.md §4-A の禁止領域)」と自ら宣言していた。M4(`AfterEdit()` 置換)と
+   M5(`UpdateHorizontalScrollbar()` 追加)はまさにその領域である。
+   §10.13 (7) が実測した実退行(Ctrl+S のたびに水平スクロール位置が消えていた)を理由に
+   **例外として実施**したが、CLAUDE.md §4-A の文言は「全面禁止」であり、
+   **規範解釈はユーザー判断を仰ぐ**。テスト自体は退行を実際に捕まえているので削除しない。
+2. **Redo 破棄((3))にユーザー承認が無い。** 実装計画 Task 4 Step 4 は「どちらを採るかは
+   実装時にユーザーへ確認し、§5.3 へ結論を追記する」と明示していた。判断の中身と逸脱は
+   (3) に記録済みだが、承認は未取得のまま。PR で明示して承認を得る。
+3. **網の層の偏り(解消済み)。** 仕様適合レビュー時点では M5(水平スクロールバー)と
+   M6(`DropRedo`)が **`kxEdit.Editor.Tests` では完全に生存**し、App 統合テスト 2 本だけが
+   唯一の防壁だった。本 fixup で L2 の網
+   (`UndoEolConversion_KeepsHorizontalScroll_WhenLongLineOffScreen` /
+   `UndoEolConversion_DropsRedo`)を追加し、両変異が L2 単独でも撃墜されることを実測した。
+   **App 側の 2 本(`..._RestoresCaretAndScroll` / `..._LeavesNothingToRedo`)も取り外さないこと**:
+   L2 は API 単体の契約を、L3 は「`WriteToPath` がその契約を正しく使っているか」を守っており、
+   守備範囲が違う((11) の捕捉順の網は L3 にしか置けない)。

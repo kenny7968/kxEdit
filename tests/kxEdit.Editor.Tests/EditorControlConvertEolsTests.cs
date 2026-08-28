@@ -949,6 +949,146 @@ public class EditorControlConvertEolsTests
             using var ctrl = new EditorControl();
             Assert.False(ctrl.UndoEolConversion(conversionRecorded: true, 0, 0));
         });
+
+    // ===== 仕様適合レビュー ②: 「網が無い」と申告した 3 項目は既存インフラで書けた =====
+    // 直前の ConvertEols から状態を**ずらしてから**取り消しを呼べば、いずれも観測できる。
+    // 「WriteToPath 経由では ConvertEols が直前に同じ値を入れているから等価」という論法は、
+    // API 単体の契約テストには当てはまらない(設計書 §10.14 (6) の訂正)。
+
+    // キャレットが動く経路の共通作法(縦移動の目標 X を捨てる)。
+    // ConvertEols が入れた -1 とは別に、取り消し**直前**に非既定値を入れて弁別する。
+    [Fact]
+    public void UndoEolConversion_ResetsDesiredXpx() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            var caret = Caret(ctrl);
+            caret.DesiredXpx = 999; // ConvertEols が入れた -1 を上書き=非既定状態
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(-1, caret.DesiredXpx);
+        });
+
+    // 再描画要求。EditorControl は sealed だが seam は要らなかった —— WinForms 標準の
+    // public event Control.Invalidated で数えられる(設計書 §10.13 (6) / §10.14 (6) の訂正)。
+    // ホストは非フォーカス(MakeHosted は Show / Focus しない)なので _hasFocus が false =
+    // PositionCaret 経路の Invalidate が混ざらず、明示 Invalidate だけを数えられる。
+    [Fact]
+    public void UndoEolConversion_InvalidatesOnce() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted("a\nb\nc", width: 200, height: 60);
+            using (f)
+            using (c)
+            {
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                int invalidated = 0;
+                c.Invalidated += (_, _) => invalidated++;
+
+                c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+                Assert.Equal(1, invalidated);
+            }
+        });
+
+    // system caret(Win32 SetCaretPos)の再配置。GetCaretPos で観測できる
+    // (先例 = CaretScrollTests.EnsureVisibleCharRange_RestoresSystemCaretPosition。
+    //  フォーカスが要るので CreateVisible ではなく Show + Focus を使うのも同じ理由)。
+    // 取り消し直前にキャレットを行 0 へ動かしておき、復元先(行 1)へ system caret が
+    // 追随することを見る=ConvertEols 自身の PositionCaret とは弁別できる。
+    [Fact]
+    public void UndoEolConversion_RepositionsSystemCaret() =>
+        Sta.Run(() =>
+        {
+            using var f = new Form { Size = new System.Drawing.Size(400, 200) };
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            f.Show(); // Focus を得るには可視化が必要(GetCaretPos はフォーカス側でのみ有効)
+            c.Focus();
+            c.SetSource(TextBuffer.FromString("aaaa\nbbbb\ncccc"));
+            try
+            {
+                c.SetCaretCharOffset(7); // 行 1 の 2 文字目=非既定位置
+                bool recorded = c.ConvertEols(LineEnding.Crlf);
+                c.SetCaretCharOffset(0); // system caret を行 0 へずらす
+
+                c.UndoEolConversion(recorded, anchorBefore: 7, caretBefore: 7);
+
+                Assert.Equal(7, c.CaretCharOffset);
+                var expected = c.PointFromCharOffset(7);
+                Assert.NotEqual(System.Drawing.Point.Empty, expected); // 前提: 復元先は可視域内
+                Assert.True(GetCaretPos(out var actual), "GetCaretPos failed");
+                Assert.Equal(expected.X, actual.X);
+                Assert.Equal(expected.Y, actual.Y); // PositionCaret を落とすと行 0 の Y に残る
+            }
+            finally
+            {
+                c.Dispose();
+                f.Close();
+            }
+        });
+
+    // 仕様適合レビュー ② (c): App 層 1 本だけが守っていた 2 項目に L2 の網を足す。
+    // Redo 破棄。no-change 系なので非既定状態(取り消し前はやり直せる)から始める。
+    [Fact]
+    public void UndoEolConversion_DropsRedo() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\nb\nc"));
+            ctrl.ReplaceCharRange(0, 0, "x");
+            ctrl.Undo();
+            Assert.True(ctrl.CanRedo); // 前提: 非既定状態
+            bool recorded = ctrl.ConvertEols(LineEnding.Crlf);
+            Assert.False(ctrl.CanRedo); // 前提: Record が元の Redo を捨てている(§10.11 (4))
+
+            ctrl.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.False(ctrl.CanRedo); // 取り消しが積み直した分も捨てる
+            Assert.Equal("a\nb\nc", ctrl.SnapshotText);
+        });
+
+    // 水平スクロールバーを再計算しないこと。長い行を**可視域の外**に置いた状態で取り消す
+    // (可視域に残る fixture では UpdateHorizontalScrollbar を足す変異が生存する。
+    //  設計書 §10.13 (7) / §10.14 (2))。
+    [Fact]
+    public void UndoEolConversion_KeepsHorizontalScroll_WhenLongLineOffScreen() =>
+        Sta.Run(() =>
+        {
+            using var f = HostForm.CreateVisible();
+            using var c = new EditorControl { Dock = DockStyle.Fill };
+            f.Controls.Add(c);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 60; i++)
+                sb.Append(i == 0 ? new string('W', 200) : $"line{i}").Append('\n');
+            c.SetSource(TextBuffer.FromString(sb.ToString()));
+            f.ClientSize = new System.Drawing.Size(300, 120);
+            f.PerformLayout();
+            c.WrapColumns = 0;
+            c.Invalidate();
+            Application.DoEvents();
+            c.ScrollX = 30; // 長い行(行 0)が見えている間に置く
+            c.TopLine = 40; // 長い行を可視域の外へ(TopLine セッターは HScroll を再計算しない)
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX); // fixture 前提: ここが 0 だと以後の assert が空振りする
+
+            bool recorded = c.ConvertEols(LineEnding.Crlf);
+            c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(40, c.TopLine);
+            Assert.Equal(30, c.ScrollX);
+        });
+
+    // GetCaretPos は EditorControl 内部の NativeMethods が internal のためテスト側で個別に
+    // P/Invoke 宣言する(CaretScrollTests と同じ理由・同じ宣言)。
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(
+        System.Runtime.InteropServices.UnmanagedType.Bool
+    )]
+    private static extern bool GetCaretPos(out System.Drawing.Point lpPoint);
 }
 
 // A-11: UIA イベント発火は静的な TestHook_ForceUiaListen を使うため、既存の
