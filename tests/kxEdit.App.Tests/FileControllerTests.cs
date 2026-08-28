@@ -1744,6 +1744,21 @@ public class FileControllerTests
     /// <see cref="Fakes.FakePrompt.OkCancelResult"/> は 1 つしか無いが取り合いにならない:
     /// Ctrl+S 経路で <c>OkCancel</c> を出すのはこの警告だけである(上書き確認は SaveAs 専用で、
     /// <c>WriteToPath</c> は <c>TryInspectSaveTarget</c> の <c>exists</c> を捨てる)。
+    ///
+    /// 本文(<c>Text</c>)まで assert するのは、文言を SaveAs 版と**共有しない**という設計判断に
+    /// 網を張るため(最終レビュー I-1)。キャプションは両方とも "文字コードの警告" で同一なので、
+    /// 2 つの警告を DRY にまとめるリファクタが入ると、Ctrl+S なのに「**選択した**文字コード」と
+    /// 読み上げられる = その場面にコンボボックスは無く直前に何も選んでいないので、SR ユーザーが
+    /// 実行不能な前提を聞かされる。キャプションだけ見る網では全緑のまま通ってしまう。
+    /// 先例 = <see cref="Save_PathAlsoOpenInAnotherTab_IsBlocked_AndFileKeepsOtherTabContent"/>
+    /// (重複タブの文言差を同じ型で pin している)。A-7 の教訓「重複を消すリファクタが網を弱めた」
+    /// の再演を防ぐ。
+    ///
+    /// EOL を**混在**(裸 LF + CRLF)にしてあるのも load-bearing(最終レビュー M-4)。
+    /// 改行が無い本文だと <c>ConvertEols</c> が <c>IsEolAlreadyUniform</c> の fast-path で抜けて
+    /// <c>ReplaceSource</c> が起きず、「警告ブロックが <c>ConvertEols</c> より後ろへ動く」変異を
+    /// どの assertion も検出できない。混在にしたうえで <c>CurrentBuffer</c> の参照同一性を見ると、
+    /// 中止時にバッファ差し替えの副作用が起きていないことを直接観測できる。
     /// </summary>
     [Fact]
     public void Save_LossyEncoding_Cancel_WritesNothingAndKeepsModified() =>
@@ -1753,24 +1768,39 @@ public class FileControllerTests
             using var tmp = new TempDir();
             string path = tmp.File("a.txt");
             var sjis = EncodingCatalog.Get(932);
-            File2.WriteAllText(path, "こんにちは", sjis);
+            File2.WriteAllText(path, "あ\r\nい\r\nう", sjis);
 
             var doc = host.Docs.CreateNew();
-            doc.Editor.Text = "こんにちは";
+            doc.Editor.Text = "あ\nい\r\nう"; // 裸 LF と CRLF の混在=ConvertEols の fast-path を外す
             doc.State.Path = path;
             doc.State.Encoding = sjis;
-            doc.Editor.ReplaceCharRange(5, 0, "\U0001F600"); // 絵文字を貼る=dirty かつ SJIS で表せない
+            doc.State.LineEnding = LineEnding.Crlf; // 変換先 CRLF ≠ 現状(裸 LF がある)
+            doc.Editor.ReplaceCharRange(6, 0, "\U0001F600"); // 絵文字を貼る=dirty かつ SJIS で表せない
             Assert.True(doc.Editor.Modified);
+            var bufferBefore = doc.Editor.CurrentBuffer; // ConvertEols が走れば別参照へ差し替わる
 
             host.Prompt.OkCancelResult = false; // 警告に「キャンセル」
 
             Assert.False(host.File.Save());
 
-            Assert.Equal("こんにちは", File2.ReadAllText(path, sjis)); // 原本不変=? 置換が起きていない
+            Assert.Equal("あ\r\nい\r\nう", File2.ReadAllText(path, sjis)); // 原本不変=? 置換が起きていない
+            // M-4: ApplyEol / ConvertEols の副作用より前に短絡している(バッファが差し替わっていない)。
+            // Modified の assert より**先**に置く: ConvertEols が走ると保存点も巻き添えで落ちるため、
+            // 順序を逆にすると Modified 側が先に落ちて「何が起きたか」が読み取りにくくなる。
+            Assert.Same(bufferBefore, doc.Editor.CurrentBuffer);
             Assert.True(doc.Editor.Modified); // 保存点を打っていない=未保存であることが SR に伝わる
             Assert.Contains(
                 host.Prompt.Log,
                 e => e.Kind == "OkCancel" && e.Caption == "文字コードの警告"
+            );
+            // I-1: 文言が Ctrl+S 版であること(SaveAs 版へ統合されると SR に嘘の前提が伝わる)。
+            Assert.Contains(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Text.Contains("現在の文字コード")
+            );
+            Assert.DoesNotContain(
+                host.Prompt.Log,
+                e => e.Kind == "OkCancel" && e.Text.Contains("選択した文字コード")
             );
         });
 
