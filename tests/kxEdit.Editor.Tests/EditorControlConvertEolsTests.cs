@@ -295,8 +295,15 @@ public class EditorControlConvertEolsTests
             Assert.False(ctrl.CanUndo);
         });
 
-    // 変換エントリは直前のタイプ操作へ融合しない(ReplaceAllRecordingUndo の前置
-    // BreakCoalescing + insertHasBreak: true を Editor 側から観測する)。
+    // 変換エントリが直前のタイプ操作と別エントリになること(Undo 1 回で変換だけが戻る)の
+    // characterization。
+    // **これは前置 BreakCoalescing / insertHasBreak: true の網ではない**(最終レビュー I-2 の訂正):
+    // fixture は通常形(removed=4 / inserted=5)で、UndoHistory.Record の融合判定は
+    // pureInsert / pureDelete の形でしか通らないため coalescable が構造的に false になる。
+    // どちらのガードを外しても本テストは緑のままである。2 つのガードの担い手は
+    // TextBufferReplaceAllTests の退化形 2 件
+    // (..._PureInsertShape_DoesNotAbsorbFollowingTyping / ..._PureDeleteShape_DoesNotMergeIntoPrecedingDelete)。
+    // 設計書 §10.11 (1) が同じ事実を正確に書いており、ここのコメントだけが訂正前の誤解を残していた。
     [Fact]
     public void ConvertEols_NonFastPath_DoesNotCoalesceWithPrecedingTyping() =>
         Sta.Run(() =>
@@ -331,6 +338,16 @@ public class EditorControlConvertEolsTests
     // AfterEdit() を呼ぶ素直な実装は _wasModified の false→true 遷移で
     // 「保存処理の途中に」SavePointLeft を焚く。main は ReplaceSource:301 の直接代入で
     // 一切焚かないため、それが退行にならないことをここで固定する。
+    //
+    // **位置づけ(最終レビュー I-5)**: 以下は clean / dirty x 単体 / 成功パス / 失敗パス の
+    // マトリクスを埋めた **characterization(main との対照群)**であり、6 件のうち
+    // **弁別力を持つのは ..._OnSavedDocument_FiresNoSavePointEvents だけ**である
+    // (AfterEdit() 置換の変異で赤くなるのはこの 1 件。残りは変異下でも緑)。
+    // とくに ..._ThenSetSavePoint_FiresReachedOnce は **ConvertEols の呼び出しを丸ごと削除しても
+    // 緑**になる(SetSavePoint() が SavePointReached を無条件発火するため)。
+    // 名前が ConvertEols_NonFastPath_ で始まるのは過大主張なので、ここに明示しておく。
+    // 残す理由: main と切替後で同じ発火列になることを 1 行ずつ照合した記録(設計書 §10.13 (3) の表)
+    // そのものであり、将来 main と比較し直す人の出発点になる。
 
     [Fact]
     public void ConvertEols_NonFastPath_OnSavedDocument_FiresNoSavePointEvents() =>
@@ -1080,6 +1097,40 @@ public class EditorControlConvertEolsTests
 
             Assert.Equal(40, c.TopLine);
             Assert.Equal(30, c.ScrollX);
+        });
+
+    // 最終レビュー m-2: スクロール系の網はすべて WrapColumns = 0 で、_topSegment が常に 0 =
+    // 「視覚行位置を保つ」契約(§5.2 契約表 #2 の SetTopPosition)に網が無かった。
+    // 折り返し ON の垂直位置は A-5 / A-6 で継続的に事故が出ている領域なので、
+    // **WrapColumns 非 0 かつ TopSegment 非 0** から始めて、変換でも取り消しでも動かないことを見る。
+    // ConvertEols の SetTopPosition(savedTopLine, savedTopSegment) を TopLine セッターへ変える変異
+    // (= 論理行だけ戻してセグメントを 0 に潰す)で撃墜する。
+    [Fact]
+    public void ConvertEolsAndUndo_KeepVisualRowPosition_WhenWrapOn() =>
+        Sta.Run(() =>
+        {
+            using var f = new HostForm();
+            using var c = new EditorControl { WrapColumns = 2 };
+            f.Controls.Add(c);
+            _ = f.Handle;
+            c.ClientSize = new System.Drawing.Size(800, c.LineHeightPx * 3);
+            c.SetSource(TextBuffer.FromString("abcdefghij\nklmnopqrst\nuvwx"));
+
+            c.SetTopPosition(1, 2); // 論理行 1 の 3 番目の視覚行=どちらも非既定
+            Assert.Equal(1, c.TopLine); // 前提: ここが 0 だと以後の assert が空振りする
+            Assert.Equal(2, c.TopSegment);
+
+            bool recorded = c.ConvertEols(LineEnding.Crlf);
+            Assert.True(recorded); // 前提: 非 fast-path を通っている
+
+            Assert.Equal(1, c.TopLine);
+            Assert.Equal(2, c.TopSegment); // ★ TopLine セッターで戻す変異はここで落ちる ★
+
+            c.UndoEolConversion(recorded, anchorBefore: 0, caretBefore: 0);
+
+            Assert.Equal(1, c.TopLine);
+            Assert.Equal(2, c.TopSegment);
+            Assert.Equal("abcdefghij\nklmnopqrst\nuvwx", c.SnapshotText);
         });
 
     // GetCaretPos は EditorControl 内部の NativeMethods が internal のためテスト側で個別に

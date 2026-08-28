@@ -34,6 +34,14 @@ public class FileControllerTests
         public int SaveSettingsCount;
         public int RecentChangedCount;
         public int MetaChangedCount;
+
+        /// <summary>
+        /// 最終レビュー L-V3 (b): WriteToPath の <c>try</c> の内側から任意の例外を投げるための seam。
+        /// 実 catch フィルタは ConvertEols が投げる DocumentTooLargeException を拾うためにあるが、
+        /// その発火には 512MB 級の文書が要り自動テストでは作れない(設計書 §10.14 (4))。
+        /// <c>metaChanged</c> は try の最後にある唯一の注入点なので、フィルタと文言だけをここから固定する。
+        /// </summary>
+        public Action? MetaChangedThrow;
         public List<Document> OpenedFresh { get; } = new();
 
         public Host()
@@ -47,7 +55,11 @@ public class FileControllerTests
                 settings: () => Settings,
                 saveSettings: () => SaveSettingsCount++,
                 recentChanged: () => RecentChangedCount++,
-                metaChanged: () => MetaChangedCount++,
+                metaChanged: () =>
+                {
+                    MetaChangedCount++;
+                    MetaChangedThrow?.Invoke();
+                },
                 openedFresh: d => OpenedFresh.Add(d),
                 prompt: Prompt,
                 fileDialogs: Dialogs,
@@ -3435,6 +3447,15 @@ public class FileControllerTests
             Assert.True(doc.Editor.CanUndo); // 前提: 戻せる編集が 1 つある(空だと網が空振りする)
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             // ★ ロールバックが余分に 1 つ Undo していれば "x" が消えて "a\r\nb\r\nc" になる ★
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
@@ -3464,6 +3485,15 @@ public class FileControllerTests
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 前提
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 変換前へ戻る
             Assert.True(doc.Editor.Modified);
@@ -3496,6 +3526,15 @@ public class FileControllerTests
             doc.State.Path = root;
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             // ConvertEols の Record が元の Redo を捨て(§10.11 (4) で受容済み)、ロールバックの
             // Undo が積み直した「EOL 変換」も UndoEolConversion が捨てる=空のまま。
@@ -3526,6 +3565,15 @@ public class FileControllerTests
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText); // 前提
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             // ★ Undo() を流用すると ReadOnly ガードで戻らず "xa\nb\nc" のまま残る ★
             Assert.Equal("xa\r\nb\r\nc", doc.Editor.SnapshotText);
@@ -3559,6 +3607,15 @@ public class FileControllerTests
             Assert.DoesNotContain("*", doc.Page.Text); // 前提: 「*」なし
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             Assert.Equal("x\ny", doc.Editor.SnapshotText);
             Assert.False(doc.Editor.Modified); // 保存点まで戻っている
@@ -3626,6 +3683,15 @@ public class FileControllerTests
             Assert.True(scrollXBefore > 0, $"ScrollX を非 0 に置けていない(={scrollXBefore})");
 
             Assert.False(host.File.Save());
+            // 最終レビュー I-4: 失敗が**この経路で**起きた証拠を固定する。戻り値だけだと、
+            // 将来 TryInspectSaveTarget 等が前段で弾くようになって失敗点が ConvertEols より
+            // 上流へ移ったとき、以下の「何も変わらないこと」の assert がまとめて空振りする。
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.StartsWith("保存できませんでした", StringComparison.Ordinal)
+            );
 
             Assert.Equal(before, doc.Editor.SnapshotText);
             // ★ 末尾ワープ / 0 潰し / **捕捉を ConvertEols の後へ動かす**(207 へずれる)を kill ★
@@ -3633,6 +3699,46 @@ public class FileControllerTests
             Assert.Equal(anchorBefore, doc.Editor.SelectionAnchor); // ★ 選択も保つ(SetTo だと anchor=caret) ★
             Assert.Equal(topLineBefore, doc.Editor.TopLine); // ★ BringCaretIntoView を kill ★
             Assert.Equal(scrollXBefore, doc.Editor.ScrollX); // ★ UpdateHorizontalScrollbar を kill ★
+        });
+
+    /// <summary>
+    /// 最終レビュー L-V3: <c>WriteToPath</c> の catch フィルタに <c>DocumentTooLargeException</c> が
+    /// 載っていること(落とすと**未処理例外でアプリが落ちる**)と、上限超過だけ文言を分けていることを
+    /// 固定する。実経路は ConvertEols(LF → CRLF で総バイト数が増える)だが、発火には 512MB 級の
+    /// 文書が要り、<c>TextBufferBuilder.MaxTotalBytes</c> は <c>internal init</c> で ConvertEols 内の
+    /// <c>new</c> に注入点が無い(設計書 §10.14 (4))。ここでは try の内側にある唯一の注入点
+    /// (<c>metaChanged</c>)から同じ例外を投げ、**フィルタと文言だけ**を固定する。
+    /// 文言を分ける理由: 文書自体は上限内で、超えるのは変換後である。共通文言のままだと
+    /// 「この文書は一切保存できない」と読め、逃げ道(改行コードを LF にする)に辿り着けない。
+    /// </summary>
+    [Fact]
+    public void Save_DocumentTooLarge_IsCaught_AndSuggestsLfEol() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "a\r\nb";
+            doc.State.Path = tmp.File("a.txt"); // 書き込み自体は成功する
+            host.MetaChangedThrow = () =>
+                throw new DocumentTooLargeException(
+                    600L * 1024 * 1024,
+                    "文書サイズ上限(512 MB)を超えました。"
+                );
+
+            // フィルタから DocumentTooLargeException を落とすと、ここで未処理例外になる。
+            Assert.False(host.File.Save());
+
+            Assert.Contains(
+                host.Prompt.Log,
+                e =>
+                    e.Kind == "Error"
+                    && e.Text.Contains(
+                        "改行コードを変換すると文書サイズ上限",
+                        StringComparison.Ordinal
+                    )
+                    && e.Text.Contains("LF", StringComparison.Ordinal) // 逃げ道の案内
+            );
         });
 
     // ===== CSV-L-5: _prompt.Error/Warn に生 path を載せる導線を SanitizeForDisplay で無害化 =====

@@ -1428,6 +1428,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 変換を取り消した本文に対してそのまま有効である。</item>
     /// </list>
     /// <para>
+    /// 保存点(<see cref="Modified"/>)も一緒に戻る: <c>TextBuffer._savedRoot</c> は誰も触らない設計
+    /// なので、ルートが変換前へ戻れば参照比較で自動的に復す(<c>TextBuffer.ReplaceAllRecordingUndo</c>)。
+    /// </para>
+    /// <para>
     /// <b>fast-path では絶対に取り消してはならない</b>: <see cref="ConvertEols"/> が何も記録して
     /// いないのに <see cref="TextBuffer.Undo"/> を打つと、ユーザーの直前の編集が 1 つ消える
     /// (設計書 §5.3)。判別は経路からの推論ではなく <paramref name="conversionRecorded"/> で行う。
@@ -1441,6 +1445,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 復元済みの <c>_topLine</c> で評価されて <c>_scrollX</c> を落とす(設計書 §10.13 (7))。
     /// 垂直スクロールバーの再計算も不要である(EOL 変換は <c>LineCount</c> を変えないので
     /// 取り消しても行数は同じ)。
+    /// <b>注意(最終レビュー m-1)</b>: <see cref="ConvertEols"/> 側は同じ理由で no-op になった
+    /// <c>SetTopPosition</c> / <c>ScrollX</c> の復元を<b>あえて残している</b>(将来スクロールを
+    /// 動かす副作用が入ったときの防御)。<b>こちらには同等の防御が無い</b> —— 取り消し経路で
+    /// スクロールを動かす副作用を足すときは、ここにも復元を書き足すこと。
     /// </para>
     /// <para>
     /// 通知契約(UIA スナップショット / TextChanged / SelectionChanged / <see cref="UpdateUI"/> /

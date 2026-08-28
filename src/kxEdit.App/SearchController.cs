@@ -26,8 +26,13 @@ public sealed class SearchController
     // あちらはピース木の Root 比較、こちらはスナップショット参照比較(Root は internal で
     // App から見えない)。ゆえに Undo で捕捉時と同一内容へ戻しても「陳腐化」と扱う=安全側。
     // 保持は弱参照にする: 捕捉元が生きていれば必ず現在のスナップショットと同一なので判定は
-    // 変わらず、開き直し・復元・EOL 変換(ReplaceSource)で捨てられた旧バッファのピース木を
-    // ピン留めしない(下の searcher と同じ責任。回収済みなら陳腐化として拒否=安全側)。
+    // 変わらず、開き直し・復元で捨てられた旧バッファのピース木をピン留めしない
+    // (下の searcher と同じ責任。回収済みなら陳腐化として拒否=安全側)。
+    // A-11(2026-08-28)訂正: ここには「EOL 変換(ReplaceSource)で捨てられた」も挙げていたが、
+    // **もう成立しない**。ConvertEols は in-place の 1 Undo 単位になり、変換前のピース木は
+    // Undo 履歴(TextBuffer._history)が強参照で保持する。弱参照にしていても回収されない
+    // = この一文が謳っていた防御は EOL 変換については存在しない(設計書 2026-08-28 §10.15)。
+    // 弱参照そのものは開き直し・復元・タブクローズに対して有効なので維持する。
     private (WeakReference<TextSnapshot> Snap, int Start, int End)? _selectionScope;
 
     // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされ

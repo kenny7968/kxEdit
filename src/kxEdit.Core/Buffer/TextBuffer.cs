@@ -126,6 +126,13 @@ public sealed class TextBuffer
     /// <c>_redo.Clear()</c>。<c>Splice</c> と同じ契約)。
     /// </para>
     /// <para>
+    /// <b>メモリ</b>: 差し替え<b>前</b>の木は Undo エントリ(<c>RootBefore</c>)が保持し続ける。
+    /// <paramref name="rebuilt"/> が別バッファ由来だとバイト列を共有しないため、全文 EOL 変換では
+    /// 文書 1 つぶんのメモリが増える(<c>UndoHistory</c> にエントリ数の上限は無い)。
+    /// 「Undo で戻せる」ことは「戻し先を持っている」ことなので、これは本 API に内在するコストである
+    /// (設計書 2026-08-28 §10.15)。
+    /// </para>
+    /// <para>
     /// 文書上限(<see cref="MaxTotalBytes"/>)はここで再判定しない。取り込む木の上限は
     /// 渡し手が担保する(<see cref="TextBufferBuilder"/> が構築時に判定し
     /// <c>DocumentTooLargeException</c> を投げる)。

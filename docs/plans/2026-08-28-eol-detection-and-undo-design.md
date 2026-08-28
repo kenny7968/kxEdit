@@ -1512,3 +1512,260 @@ caret 209 の手前には CRLF が 2 個あるので、捕捉を後ろへ動か�
    **App 側の 2 本(`..._RestoresCaretAndScroll` / `..._LeavesNothingToRedo`)も取り外さないこと**:
    L2 は API 単体の契約を、L3 は「`WriteToPath` がその契約を正しく使っているか」を守っており、
    守備範囲が違う((11) の捕捉順の網は L3 にしか置けない)。
+
+### 10.15 受容: EOL 変換で常駐メモリが文書 1 つぶん増える(最終レビュー 品質 I-1 / 脆弱性 M-V1・2026-08-29 追記)
+
+**両レビューパスが独立に見つけた唯一の項目。** §4.3 が A-9 側で「`string` を実体化しないので
+512MB 級でもピークメモリは増えない」と丁寧に書いている一方、A-11 側でメモリが倍増することが
+一言も書かれていないのは資料として不均衡なので、ここに記録する。
+
+#### 何が起きるか
+
+`TextBufferBuilder.Add` は `new byte[]` へ**コピー**してから `TextChunk` にする
+(「TextChunk が参照を保持するため必ず自前の配列にコピー」とコード側にも明記されている)。
+したがって `ConvertEols` が組む新しい木は、**変換前の木とバイト列を 1 つも共有しない**。
+
+main は `ReplaceSource` で旧 `TextBuffer` ごと捨てていたので旧木は GC 対象だった。
+現在は `ReplaceAllRecordingUndo` が `rootBefore` を Undo エントリへ格納し、`UndoHistory` は
+`List<Entry>` で**エントリ数の上限を持たない**ため、変換前の木が生き続ける。
+
+- 300MB の LF 文書を CRLF で保存 → 常駐 約 310MB → 約 610MB(レビュアー試算)
+- 本セッションの実測(8.4M 文字 / 全 LF / 40 byte 行・Release・`GC.GetTotalMemory(true)`):
+
+| 時点 | 値 | 差分 |
+|---|---|---|
+| `ConvertEols` 前 | 18,560 KB | — |
+| 1 回目の変換後 | 26,829 KB | **+8,268 KB**(= 文書 1 つぶんの木) |
+| さらに 50 回 `ConvertEols` | 26,829 KB | **+0 KB** |
+
+#### 受容する理由
+
+**「Undo で戻せる」ことは「戻し先の木を持っている」ことなので、これは A-11 の修正に内在する
+コストである。** 旧木を捨てれば Undo できず、A-11 のバグがそのまま残る。
+Undo 履歴に上限を設ける案は本テーマの範囲を超える(通常の編集履歴の設計変更になる)。
+
+**増加は有界**でもある。2 回目以降の保存は本文がすでに目的 EOL なので `IsEolAlreadyUniform` が
+true =fast-path で何も積まない。上表の「50 回追加して +0 KB」がそれを示している。
+エントリが積み上がるのは「EOL 設定を変えながら保存を繰り返す」場合だけで、これは通常の編集で
+履歴が伸びるのと同じ性質である(`EmptyUndoBuffer` = 開き直し・復元で解放される)。
+
+#### コード側の対応
+
+- `TextBuffer.ReplaceAllRecordingUndo` の `<remarks>` に「変換前の木は Undo 履歴が保持する」旨を明記した。
+- **`SearchController.cs` のコメントを訂正した(必須)**。
+  「開き直し・復元・**EOL 変換(ReplaceSource)で捨てられた**旧バッファのピース木をピン留めしない」
+  という記述は、`_selectionScope` を弱参照にする理由として書かれていたが**もう成立しない**
+  (変換前の木は Undo 履歴が強参照で保持するので、弱参照にしていても回収されない)。
+  監査 §9 の V-4 / V-6「コメントが実在しない防御を謳っている」と同型で、次に触る人が誤った前提で
+  判断する。弱参照そのものは開き直し・復元・タブクローズに対しては有効なので維持し、
+  EOL 変換については防御が無いことを明記した。
+
+### 10.16 最終ブランチレビュー(2 パス)の反映記録(2026-08-29 追記)
+
+CLAUDE.md §3-5 の最終ブランチレビューを**コード品質パス / 脆弱性パスの独立した 2 エージェント**で
+実施した。判定は **Critical ゼロ・マージ可**。両パスが独立に見つけた 1 件(メモリ保持)は §10.15。
+本節はそれ以外の反映を記録する。
+
+#### (1) 訂正: §10.7「本ブランチの差分については問題なし」は Task 1 時点の確認だった
+
+§10.7 は XML doc の `cref` について「品質レビュアーが `-p:GenerateDocumentationFile=true` で実ビルドし、
+今回の差分が追加した `cref` はすべて解決することを確認している(警告ゼロ)」と書いている。
+**これは Task 1(A-9)時点の確認**であり、Task 3 / Task 4 が追加した `cref` には当てはまらなかった。
+実測で次の 3 件が CS1574(解決できない `cref`)になっていた:
+
+```
+FileController.cs(817,56): cref 'SetOrReplaceSource'
+FileController.cs(822,20): cref 'UndoEolConversion'
+FileController.cs(830,29): cref 'Undo'
+```
+
+原因は `FileController.cs` に `using kxEdit.Editor;` が無いこと(コードは `doc.Editor.XXX` 経由で
+using を必要としないが、`cref` は名前解決を要求する)。**完全修飾**
+(`kxEdit.Editor.EditorControl.UndoEolConversion` 等)で解決した。`using` の追加は IDE0005 を招くので採らない。
+
+再確認コマンドと結果: 上のビルドで `FileController.cs` の CS1574 は **0 件**。
+残る CS1574(`EditorControl.cs` の `SearchController` / `SelectAll` / `DrawImeOverlay`)は
+`f2258bb` 以前からの既存債務で、§10.7 が挙げた「有効化は 70 件の債務返済とセットの独立テーマ」に含まれる。
+
+**教訓**: `GenerateDocumentationFile` が無効な間、`cref` はビルドで守られない(§10.7 の申し送りそのもの)。
+**ブランチの途中で `cref` を足したら、その都度上のコマンドを回すこと**。1 回確認したという記録は
+その時点までしか意味を持たない。
+
+#### (2) 無効化: §10.8 に残っているテスト件数(CLAUDE.md §5)
+
+§10.8 に「1,272 件すべて緑」「1,271 件すべて緑」という記述がある。**テスト数は文書に書かない**
+(CLAUDE.md §5。fact 追加で必ず陳腐化する)。§10.11 (2) が同じ理由で件数を撤回したのと同じ扱いにする:
+§10.8 の当該 2 箇所の**数値は無効**とし、定性表現「(当該テストプロジェクトの)全件が緑のまま通った=変異は生存」が正である。
+§10.8 は策定済み節なので本文は書き換えない。
+
+#### (3) 訂正: §10.13 (6) の表「スクロールバー同期」の観測手段
+
+表は「リフレクションで `_vscroll` / `_hscroll` を観測するプローブ」と書いているが、
+**出荷された網はそうなっていない**。`"_hscroll"` を含むテストファイルは 0 件で、
+`ConvertEols_NonFastPath_KeepsHorizontalScroll*` は public な `TopLine` / `ScrollX` で観測している。
+
+リフレクションのプローブは**調査中に使い、退行(§10.13 (7))を見つけた道具**であって、出荷物ではない。
+**実装のほうが表より良い**(private フィールドへの結合が無い)。放置すると次の読者が
+「ここは private 結合済みだから増やしてよい」と誤解するので訂正する。
+
+#### (4) 訂正: `ConvertEols_NonFastPath_DoesNotCoalesceWithPrecedingTyping` は 2 つのガードの網ではない
+
+同テストのコメントは「前置 `BreakCoalescing` + `insertHasBreak: true` を Editor 側から観測する」と
+書いていたが、fixture が通常形(`removed=4` / `inserted=5`)なので `UndoHistory.Record` の融合判定
+(`pureInsert` / `pureDelete` の形でしか通らない)に構造的に掛からず、**どちらのガードを外しても緑**である。
+
+皮肉なことに、同じブランチの `TextBufferReplaceAllTests` と §10.11 (1) はこの事実を正確に書いていた
+(担い手は Core の退化形テスト 2 件)。**Editor 側のコメントだけが §10.11 (1) で訂正済みの誤解を持っていた。**
+コメントを「通常形が独立エントリになることの characterization。ガードの担い手は Core の退化形 2 件」へ直した。
+
+#### (5) App の新規テストに「catch 節へ到達した」証拠を足した
+
+Task 4 で足した 6 件は失敗の証拠が `Assert.False(host.File.Save())` だけで、近傍の既存テストが持つ
+`host.Prompt.Log` の assert が無かった。とくに `Save_WriteFailure_OnFastPathEol_DoesNotUndoUserEdit` は
+**全 assert が「何も変わらないこと」**なので、将来 `TryInspectSaveTarget` 等がドライブルートを前段で
+弾くようになって失敗点が `ConvertEols` より上流へ移ると**黙って空振り**する。
+
+`Assert.Contains(host.Prompt.Log, ... "保存できませんでした" ...)` を 6 件すべてに足した。
+**実測**: `WriteToPath` の `TryInspectSaveTarget` の直後に
+「`Path.GetDirectoryName(path)` が null なら return false」という前段ガードを足す変異(=上のシナリオ)を
+当てると、**この 6 件と `Save_ExistingPathIsDriveRoot_...` が撃墜される**。足す前は 6 件すべて緑のまま通った。
+
+#### (6) `DocumentTooLargeException`: 文言を分け、網を 1 件足した(脆弱性 L-V3)
+
+- **文言**: 500MB 級の LF 文書を CRLF で保存すると変換後が上限を超えるが、**文書自体は上限内**である。
+  共通文言「保存できませんでした: 文書サイズ上限(512 MB)を超えました。」だけだと
+  「この文書は一切保存できない」と読め、逃げ道に辿り着けない。上限超過だけ分岐させ、
+  **「改行コードを変換すると…超えます。『名前を付けて保存』で改行コードに LF を指定すると
+  サイズを増やさずに保存できる場合があります」**へ変えた。文言は固定文字列で組むので
+  `SanitizeForDisplay` は不要(外部入力を含まない)。
+- **網**: `Save_DocumentTooLarge_IsCaught_AndSuggestsLfEol`。実経路(`ConvertEols`)の発火には
+  512MB 級の文書が要るため(§10.14 (4))、`try` の内側にある唯一の注入点 `metaChanged` から
+  同じ例外を投げ、**catch フィルタと文言だけ**を固定する。テストホスト側に `MetaChangedThrow` を足した。
+  **実測**: フィルタから `or DocumentTooLargeException` を落とす変異 → 未処理例外で撃墜。
+  専用文言の分岐を落とす変異 → `Assert.Contains` で撃墜。
+- **判明した非対称**: 読み込み側(`LoadInto` の catch)は**以前から** `DocumentTooLargeException` を
+  フィルタに持っていた。書き込み側にだけ無かった=§10.11 (8) が指摘した穴は「読み書きの非対称」だった。
+
+#### (7) SavePoint 系テストの位置づけを明示した(過大主張の是正)
+
+`ConvertEols_NonFastPath_*` の SavePoint 系 6 件のうち、**AfterEdit 変異下で赤くなるのは
+`..._OnSavedDocument_FiresNoSavePointEvents` の 1 件だけ**である。とくに
+`..._ThenSetSavePoint_FiresReachedOnce` は **`ConvertEols` の呼び出しを丸ごと削除しても緑**になる
+(`SetSavePoint()` が `SavePointReached` を無条件発火するため)。名前が `ConvertEols_NonFastPath_` で
+始まるのは過大主張なので、セクションコメントに「characterization(main との対照群)であり
+弁別力は持たない。撃墜の担い手は `..._OnSavedDocument_FiresNoSavePointEvents`」と明示した。
+残す理由は §10.13 (3) の発火列対比表そのものであり、将来 main と比較し直す人の出発点になるため。
+
+#### (8) 同じ設計根拠の二重記述を一本化した(品質 I-3)
+
+`WriteToPath` の `<remarks>` と `UndoEolConversion` の `<remarks>` が**同じ 3 点**
+(fast-path で取り消さない / `Undo` を流用しない / caret を明示復元)を prose で二重に説明していた。
+片方だけ直せばもう片方は黙って陳腐化する —— `ReplaceSource` の remarks が
+「列挙の同期はコードでもテストでも守られていない…現在 4 箇所に散っている」と自己申告しているのと同じ失敗形で、
+**4 箇所目を増やす**ところだった。
+
+**契約の根拠は API 側(`UndoEolConversion`)に一本化**し、`WriteToPath` 側は呼び出し位置固有のこと
+(捕捉が `ConvertEols` より前・`try` の外である理由)+ ポインタだけに絞った。
+
+#### (9) 折り返し ON の垂直位置に網を足した(品質 m-2)
+
+スクロール系の網はすべて `WrapColumns = 0` で `_topSegment` が常に 0 だったため、
+§5.2 契約表 #2 の「`SetTopPosition` で**視覚行位置**を保つ」に実質的な網が無かった。
+折り返し ON の垂直位置は A-5 / A-6 で継続的に事故が出ている領域なので、
+`WrapColumns` 非 0 かつ `TopSegment` 非 0 から始める黒箱テスト
+`ConvertEolsAndUndo_KeepVisualRowPosition_WhenWrapOn` を足した(変換と取り消しの両方を見る)。
+**実測**: `ConvertEols` の `SetTopPosition(savedTopLine, savedTopSegment)` を `TopLine = savedTopLine`
+(= 論理行だけ戻してセグメントを 0 に潰す)へ変える変異で `Expected 2 / Actual 0` で撃墜。
+
+#### (10) 受容(コード変更なし)
+
+- **m-1: `ConvertEols` と `UndoEolConversion` でスクロール復元のルールが正反対**。
+  `ConvertEols` 側の `SetTopPosition` / `ScrollX` 復元は現在**完全な no-op** だが、§10.14 (2) は
+  `UndoEolConversion` について「値が同じで常に早期 return する等価な行が増えるだけ」として足さなかった。
+  **`ConvertEols` 側は残す**(将来スクロールを動かす副作用が入ったときの防御・(9) の網の対象でもある)。
+  非対称を明示するため、`UndoEolConversion` の remarks に「**こちらには同等の防御が無い**」と 1 行足した。
+- **m-9: `UndoEolConversion(bool, int, int)` は誤用可能**。`conversionRecorded` に `true` を渡す /
+  捕捉を後ろに置く、のどちらも型では防げない(トークンを返す `readonly record struct` にすれば防げる)。
+  呼び出し元が 1 本しかなく、網(M1 / M12)と XML doc で守られているため**受容**。
+  呼び出し元が増えるときは型で防ぐ形へ移すこと。
+- **§7.4 の宣言との矛盾(§10.14 (12) 1)と Redo 破棄の承認(同 2)は未決のまま**。PR で扱う。
+- **m-3 / m-7 / m-8**: 多数決 tail の重複・冗長テスト・fixture コストは申し送り。
+- **m-4: テストヘルパの重複**(§10.13 (10) の申し送りへ次を追記):
+  `SendMouseWheel` は **3 バリアントが並存**しており診断品質がファイルごとに違う。
+  `Caret(EditorControl)` は**同一ファイル内で 2 重定義**されている。
+  `tests/kxEdit.Editor.Tests/TestHost.cs` へ集約するときに取りこぼさないこと。
+
+#### (11) 脆弱性パスが確認した既存の窓(悪化なし)
+
+- **L-V1 / L-V4**: main 既存または受容済みで、本ブランチによる悪化は無い。
+- **L-V2: §10.13 (5)-2 の主張が独立検証で成立した**。「caret 復元と `OnSnapshotChanged` の間の窓で
+  RPC スレッドが観測しうる最悪値は**旧文書末尾に縮退した選択範囲**であり、例外も範囲外読みも起きない」
+  という主張について、レビュアーが `TextRangeProviderV2` を生成する経路を**全列挙**し、
+  すべて ctor の `Math.Clamp(start, 0, owner.Host.TextLength)` を通ることを確認した。
+  さらに `IUiaTextHost` のオフセットを受け取る全メンバも個別に clamp していることを確認している。
+  §10.13 (5)-2 が書いた「将来 `TextProviderImplV2.GetSelection` がクランプを通さない経路を足したら
+  本判断は再検証が要る」はそのまま有効。
+- **性能の非対称(申し送り)**: `ConvertEols` / `IsEolAlreadyUniform` の内側ループは 1 バイトずつの
+  `for` のままで、A-9 が `LineEndingDetector.Detect` に入れた `IndexOfAny` の SIMD 化(§10.3)が入っていない。
+  保存 1 回で全文を 2 周する。既存構造であり本ブランチの退行ではないが、**A-9 側の高速化と非対称**なので
+  §10.6 の `EolSegments` seam を回収するときの対象として記録する
+  (§10.6 自身が「`ConvertEols` の 1 バイトずつの `outBuf[outLen++] = b` が span 単位コピーになる」と
+  同じ効果を予告している)。
+
+---
+
+## 11. 現状サマリ・訂正インデックス(2026-08-29 追記)
+
+本書は CLAUDE.md §8 により**策定時スナップショットを書き換えない**方針で運用しており、
+その結果 §10 の中に訂正が入れ子になっている(例: 網の状況を知るには §10.13 (6) → §10.14 (6)
+→ §10.14 (10) を順に読む必要がある)。**将来の読者が「今の正」に辿り着けない**ため、
+どの記述がどこで置き換わったかの一覧をここに置く。**本節だけは常に最新へ更新してよい。**
+
+### 11.1 訂正インデックス(左が古い記述・右が現在の正)
+
+| 旧記述の場所 | 内容 | 現在の正 |
+|---|---|---|
+| §4.3 | 「検出の追加コストは小さい」 | **§10.3**(実測で warm +59〜63% → `IndexOfAny` 化で 4.8〜12.5 倍改善) |
+| §5.1 | `insertHasBreak: true` は「coalescing を必ず切る」/ 括弧内の融合の向き | **§10.11 (1)**(必ずは切らない。担い手は前置 `BreakCoalescing` と 2 本立て) |
+| §5.1 | API は `TextBuffer` を受けて戻り値なし | **§10.11 (3)**(`bool ReplaceAllRecordingUndo(TextSnapshot)`) |
+| §5.2 契約表 | 表は 9 行 | **§10.12 (1)**(+2 行)→ **§10.13 (8)**(さらに `DesiredXpx` が漏れていた=計 13 項目) |
+| §5.2「意図的に変える点」 | 「SR への影響は L5 でのみ判定できる」 | **§10.13 (8) 2**(機構は L2 で固定できる。L5 に残るのは実発声だけ) |
+| §5.3 | Redo の扱いは実装時に決める | **§10.14 (3)**(捨てる。`TextBuffer.DropRedo`) |
+| §7.4 | GUI 側には変異を当てない | **§10.14 (12) 1**(実際には当てた。規範解釈は未決=PR でユーザー判断) |
+| §10.3 / §10.4 | 「生存する変異は空ピースガードだけ」 | **§10.8**(`i = 1;` の変異も生存していた) |
+| §10.4 表 2 行目 | 変異名「持ち越し後に `continue`」 | **§10.9**(`IndexOfAny` 化後は `else` 節に `i = 1;` を足す形) |
+| §10.7 | 「本ブランチの差分が追加した `cref` はすべて解決する」 | **§10.16 (1)**(Task 1 時点の確認。Task 3 / 4 の 3 件が CS1574 だった=完全修飾で修正済み) |
+| §10.8 の件数(2 箇所) | 「1,272 件 / 1,271 件すべて緑」 | **§10.16 (2)**(テスト数は文書に書かない=**数値は無効**。定性表現が正) |
+| §10.10 | Task 2 の変異表・`insertHasBreak` の説明 | **§10.11 (2)(7)**(件数の撤回・シグネチャ変更後に全変異を当て直し) |
+| §10.13 (2) 表 #3 / §10.13 (6) | `Invalidate` / system caret は「観測不能」 | **§10.14 (10)**(どちらも観測できる。`Control.Invalidated` / `GetCaretPos`。`ConvertEols` 側に網を張るのは申し送り) |
+| §10.13 (3) 発火列表の失敗パス | 「ロールバックで `Reached` が 1 回焚かれる(新規挙動)」 | **§10.14 (5)**(焚かない。保存操作の発火列は main と一致。ただし**保存成功後の Ctrl+Z** は新規に `Left` を焚く=意図した挙動変更) |
+| §10.13 (6) 表「スクロールバー同期」 | 「リフレクションで `_vscroll` / `_hscroll` を観測」 | **§10.16 (3)**(それは調査プローブ。出荷した網は public な `TopLine` / `ScrollX`) |
+| §10.13 (7) 初版 | 「main には無い退行」 | 同節内の**訂正**(main も条件次第で同じ挙動=挙動改善でもある) |
+| §10.14 (4) | 「`EolMode` も未変更」 | **§10.14 (4) 内の訂正**(`ApplyEol` が先に代入する。main と同挙動) |
+| §10.14 (6) 未撃墜表 | 「未撃墜 4 項目」 | **§10.14 (10)**(うち 3 項目は過小申告。真の等価変異は `if (_hasFocus)`) |
+| `ConvertEols_NonFastPath_DoesNotCoalesceWithPrecedingTyping` のコメント | 「2 つのガードを Editor 側から観測する」 | **§10.16 (4)**(通常形なのでガードを外しても緑。担い手は Core の退化形 2 件) |
+
+### 11.2 現状サマリ(この 3 点を押さえれば読める)
+
+1. **A-9**: `LineEndingDetector.Detect(TextSnapshot)` が全文を byte 走査する(`IndexOfAny` で SIMD 化)。
+   4,096 文字窓は撤廃。多数決の意味論は `Detect(string)` と同一。
+2. **A-11 Core / Editor**: `ConvertEols` は `TextBuffer.ReplaceAllRecordingUndo(TextSnapshot)` で
+   **in-place の 1 Undo 単位**になった。`_savedRoot` は触らないので変換直後は `Modified` が true。
+   `AfterEdit` は使わず副作用を個別に打つ。水平スクロールバーは再計算しない。
+3. **A-11 App**: `WriteToPath` は `ConvertEols` の**戻り値**でロールバック要否を判定し、
+   `EditorControl.UndoEolConversion(recorded, anchorBefore, caretBefore)` で 1 つだけ取り消す。
+   キャレット / 選択は**変換前に捕捉した値**へ明示復元し、スクロールには触れない。
+
+### 11.3 未決・申し送り(回収先が決まっていないもの)
+
+| 項目 | 記録場所 |
+|---|---|
+| §7.4 の「GUI 側には変異を当てない」宣言と実施の矛盾(規範解釈) | §10.14 (12) 1 |
+| Redo 破棄のユーザー承認 | §10.14 (12) 2 / §10.14 (3) |
+| `EolSegments` seam(EOL トークナイザの共通化 + `ConvertEols` の SIMD 化) | §10.6 / §10.16 (11) |
+| XML doc `GenerateDocumentationFile` の有効化(既存債務 70 件) | §10.7 |
+| `ConvertEols` 側の `Invalidate` / system caret の網 | §10.14 (10) |
+| `UndoEolConversion` の誤用をトークン型で防ぐ | §10.16 (10) m-9 |
+| テストヘルパの集約(`SendMouseWheel` 3 バリアント / `Caret` 2 重定義を含む) | §10.13 (10) / §10.16 (10) m-4 |
+| 書き出し側 EOL 変換案(M-25 も同時に消える) | §10 冒頭 |
+| EOL 混在文書が黙って統一されること(説明書への明記の要否) | §10 冒頭 / §4.4 |

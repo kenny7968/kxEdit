@@ -814,28 +814,27 @@ public sealed class FileController
     /// 静音喪失が残る。
     ///
     /// A-11(2026-08-28): その機構を<b>作り直した</b>。旧機構は「ConvertEols 前の
-    /// <see cref="TextBuffer"/> 参照を握り、失敗時に <see cref="EditorControl.SetOrReplaceSource"/> で
-    /// 参照だけを戻す」もので、<b>ConvertEols がバッファ参照ごと差し替える</b>ことに全面的に
-    /// 依存していた。ConvertEols は in-place の 1 Undo 単位になったので、この前提は崩れている
-    /// (<c>ReferenceEquals</c> が常に true =ロールバックが<b>黙って no-op</b> になる)。
-    /// 現在は「ConvertEols が Undo 履歴へ記録したか」を戻り値で受け取り、記録したときだけ
-    /// <see cref="EditorControl.UndoEolConversion"/> で 1 つだけ取り消す。保存点も一緒に戻る
-    /// (<c>_savedRoot</c> は触らない設計なのでルートが変換前へ戻れば参照比較で復す)。
+    /// <see cref="TextBuffer"/> 参照を握り、失敗時に
+    /// <see cref="kxEdit.Editor.EditorControl.SetOrReplaceSource"/> で参照だけを戻す」もので、
+    /// <b>ConvertEols がバッファ参照ごと差し替える</b>ことに全面的に依存していた。ConvertEols は
+    /// in-place の 1 Undo 単位になったので、この前提は崩れている(<c>ReferenceEquals</c> が
+    /// 常に true =ロールバックが<b>黙って no-op</b> になる)。現在は「ConvertEols が Undo 履歴へ
+    /// 記録したか」を戻り値で受け取り、記録したときだけ
+    /// <see cref="kxEdit.Editor.EditorControl.UndoEolConversion"/> で 1 つだけ取り消す。
     /// <para>
-    /// 設計上の要点が 3 つある:
-    /// <list type="bullet">
-    /// <item><b>fast-path では絶対に取り消さない</b>。ConvertEols が何も記録していないのに 1 つ戻すと
-    /// <b>ユーザーの直前の編集が消える</b>(設計書 2026-08-28 §5.3)。判別は経路からの推論ではなく
-    /// <c>ConvertEols</c> の戻り値で行う。</item>
-    /// <item><b><see cref="EditorControl.Undo"/> を流用しない</b>。<c>Undo</c> は <c>ReadOnly</c> で
-    /// 早期 return する。ここは ConvertEols の前後でだけ ReadOnly を外し、catch 節に来る時点では
-    /// 復元済みなので、CSV グリッドモード(<c>CsvController.Editor.ReadOnly = true</c>)では
-    /// ロールバックが黙って no-op になってしまう。</item>
-    /// <item><b>キャレット / 選択は変換前の位置を捕捉して明示的に戻す</b>。<c>Undo</c> 経路の
-    /// キャレット(=文書末尾)も旧機構の <c>ReplaceSource</c>(=0 へ潰す)も、ユーザーが Undo を
-    /// 要求していないこの場面では劣悪だから(§10.12 (2))。捕捉は ConvertEols を呼ぶ前に行う
-    /// =変換前のオフセットは、変換を取り消した本文に対してそのまま有効。</item>
-    /// </list>
+    /// <b>取り消し側の契約(fast-path で取り消さない理由・<c>Undo</c> を流用しない理由・
+    /// キャレットを明示復元する理由)は
+    /// <see cref="kxEdit.Editor.EditorControl.UndoEolConversion"/> の remarks に一本化してある。</b>
+    /// ここに写すと片方だけ直したときに黙って陳腐化する
+    /// (<c>EditorControl.ReplaceSource</c> の remarks が自己申告しているのと同じ失敗形。
+    /// 最終レビュー I-3)。本メソッド固有の事情だけを書く:
+    /// </para>
+    /// <para>
+    /// <b>捕捉の位置が load-bearing</b>。復元に使うキャレット / 選択は <c>ConvertEols</c> を呼ぶ
+    /// <b>前</b>に、しかも <c>try</c> の<b>外</b>で捕捉する。前でなければならないのは、変換で
+    /// char オフセットが動くから(変換を取り消した本文に対して正しいのは変換前の値だけ。§10.12 (2))。
+    /// <c>try</c> の外なのは、<c>ConvertEols</c> 自身が投げる経路
+    /// (<see cref="DocumentTooLargeException"/>)でも catch 節から参照するため。
     /// </para>
     /// </remarks>
     private bool WriteToPath(Document doc, string path)
@@ -911,6 +910,20 @@ public sealed class FileController
             // A-11: ConvertEols が記録したときだけ 1 つ取り消す(fast-path は no-op)。キャレット /
             // 選択は変換前へ明示復元し、スクロール位置は触らない(= ロールバックが動かさない)。
             doc.Editor.UndoEolConversion(eolConverted, anchorBefore, caretBefore);
+            // 最終レビュー L-V3: 上限超過だけ文言を分ける。ここへ来る実経路は「文書自体は上限内だが
+            // 改行コードを変換すると超える」であり(唯一の投げ手が ConvertEols)、共通文言の
+            // 「文書サイズ上限を超えました」だけでは「この文書は一切保存できない」と読める。
+            // 逃げ道(改行コードを LF にすればサイズが増えない)を案内する。
+            // 文言は固定文字列で組む=外部入力を含まないので SanitizeForDisplay は要らない。
+            if (ex is DocumentTooLargeException)
+            {
+                _prompt.Error(
+                    "保存できませんでした: 改行コードを変換すると文書サイズ上限(512 MB)を超えます。"
+                        + "「名前を付けて保存」で改行コードに LF を指定すると、サイズを増やさずに保存できる場合があります。",
+                    "エラー"
+                );
+                return false;
+            }
             // CSV-L-5: ex.Message にファイル名 (path) が混入し得るため、SanitizeForDisplay で無害化。
             _prompt.Error(
                 $"保存できませんでした: {SanitizeForDisplay.OneLine(ex.Message, 200)}",
