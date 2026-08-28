@@ -585,3 +585,82 @@ fixture は境界 CRLF の後ろに `"x\n"` を置いて `crlf=1 / lf=1` の同�
 |---|---|---|
 | 持ち越しの `i = 1;` を落とす(LF を二重計上) | kill(本節で追加) | `..._does_not_double_count_boundary_crlf` |
 | 空ピースガードを落とす | 生存(到達不能) | — §10.3 |
+
+### 10.10 Task 2(A-11 Core)実装時の検証と逸脱記録(2026-08-28 追記)
+
+**Step 0(§5.1 の受け入れ条件)の検証結果**: 「`TextBufferBuilder` が作った別チャンク由来の
+root を既存 `TextBuffer` へ取り込んでよい」は成立する。
+
+- `TextBuffer._append`(`AppendBuffer`)の参照は宣言と `Splice` 内の `_append.Append(insert)` の
+  2 箇所だけで、新規挿入テキストの置き場にしか使われていない。差し替え後もそのまま使い続けてよい。
+- `AppendBuffer.Append` 自身が 32KB(`LargeInsertBytes`)超の挿入で専用 `TextChunk` を作る。
+  「木の中に追記バッファ由来でない chunk が混ざる」状態は既に日常的に起きており、
+  外部で構築した root の取り込みは新しい事態ではない。
+- 差し替え後も `_append` は書きかけの 64KB ブロックを保持し、そのブロックを包む `TextChunk` は
+  Undo 履歴から到達可能な旧 root のピースに参照されたまま残る。ただし旧ピースが指すのは
+  `[0, _pos)` で以後の書き込みは `_pos` 以降へ進むため、`AppendBuffer` の
+  「公開済み範囲は以後不変」不変条件がそのまま効く。新しい危険は生じない。
+
+**`MaxTotalBytes` を二重判定しない判断の裏取り**: `TextBuffer` の internal ctor の呼び出し元は
+`TextBufferBuilder.Build()` の 1 箇所だけ(`grep -rn "new TextBuffer(" src/ tests/`)。
+よって引数のバッファは必ずビルダーの上限判定(`AddChunk` の `DocumentTooLargeException`)を
+通っており、既定値が同一(512 MB)な実運用では二重判定は不要。
+**ただし** 両者の `MaxTotalBytes` は独立した internal のテスト注入点なので、注入値を食い違わせた
+場合に限り本 API は自バッファの上限を超える木を取り込みうる。この残余は XML doc に明記した。
+
+**実装計画 Task 2 の記載からの逸脱**:
+
+- **`_history.Record` の前に `_history.BreakCoalescing()` を足した**。計画は
+  「`insertHasBreak: true` で coalescing を必ず切る」としていたが、**これは事実と違う**。
+  `UndoHistory.Record` の融合判定は `pureInsert` / `pureDelete` の形でしか通らないため、
+  通常形(`removed > 0` かつ `inserted > 0`)では `insertHasBreak` はそもそも参照されない。
+  効くのは退化形だけで、しかも 2 つの退化形で担い手が違う:
+  - 空文書 → 1〜2 文字(純挿入形)= **直後**のタイプが差し替えエントリへ融合しうる。
+    ここは `insertHasBreak: true` が止める。
+  - 全文 → 空(純削除形)= **直前**の 1〜2 文字削除へ逆方向融合(Backspace 継続扱い)しうる。
+    `pureDelete` 側の判定は `insertHasBreak` を見ないので、**前置の `BreakCoalescing()` が要る**。
+  どちらも実測で撃墜を確認した(下表 M7 / M8)。両方あって初めて「全文差し替え= 1 Undo 単位」が
+  形を問わず成立する。
+- **早期 return は `ReferenceEquals` のまま維持**(内容が同じでも別 root なら記録する)。
+  全文の内容比較は O(n) で、512 MB 文書では現実的でない。`Splice` の早期 return も同じく
+  参照・長さベースで、契約が揃う。呼び出し側(`ConvertEols` の `IsEolAlreadyUniform` fast-path)が
+  変換不要を先に判定するため、実運用で無変化の木を渡す経路は無い。
+- **`BreakCoalescing()` は早期 return の後に置いた**。前に置くと無変化パスでも `_open` を倒し、
+  「履歴を汚さない」契約が崩れる。
+- **計画のテスト `ReplaceAllRecordingUndo_BreaksCoalescing` を書き直した**。計画はコメントで
+  「履歴を 1 つ積んだ状態から始める」と書きながらコードは既定状態(履歴空)から始めており、
+  直前方向の融合を検証できていなかった。差し替えをタイプ 2 回で挟み、Undo 3 回でちょうど
+  3 段戻る形(`..._IsSingleUndoUnit_BetweenTypedEdits`)に変更した。
+- **退化形 2 件・キャレット 1 件・null ガード 1 件のテストを追加**(下表参照)。
+- **`using Xunit;` は追加不要**(テスト csproj が `<Using Include="Xunit" />` を持つ)。
+  計画のコードをそのまま貼ると冗長 using になる。
+
+**ミューテーション検証の実測**(CLAUDE.md §4-A「UNDO/REDO の履歴管理アルゴリズム」該当)。
+使い捨て worktree で `ReplaceAllRecordingUndo` にのみ変異を当て、
+`kxEdit.Core.Tests` 全件で判定した(ビルド可否は exit code で判定・
+`-p:TreatWarningsAsErrors=false`)。
+
+| 変異 | 結果 | 撃墜したテスト |
+|---|---|---|
+| M1 `_history.Record(...)` を削除 | kill | 8 件(早期 return と null ガードの fact 以外すべて) |
+| M2 `pos: 0` → `1` | 初回 **生存** → 網追加後 kill | `..._UndoRedoCaretPos_IsEndOfDocument` |
+| M3 `removedLen` と `insertedLen` を入替 | 初回 **生存** → 網追加後 kill | `..._UndoRedoCaretPos_IsEndOfDocument` |
+| M4 早期 return を削除 | kill | `..._SameRoot_DoesNotRecord` |
+| M5 `_savedRoot = newRoot` を足す | kill | `..._ModifiedTogglesWithSavePoint` |
+| M6 `_current` 代入と `Record` の順序を入替 | **生存(等価変異)** | — |
+| M7 `insertHasBreak: true` → `false` | kill | `..._PureInsertShape_DoesNotAbsorbFollowingTyping` |
+| M8 前置の `BreakCoalescing()` を削除 | kill | `..._PureDeleteShape_DoesNotMergeIntoPrecedingDelete` |
+| M9 `ArgumentNullException.ThrowIfNull` を削除 | 初回 **生存** → 網追加後 kill | `..._Null_Throws` |
+
+- **M2 / M3 が初回生存した理由**: `pos` / `removedLen` / `insertedLen` は木の内容に一切効かず、
+  `Undo()` / `Redo()` の戻り値 `UndoResult.CaretPos` にしか現れない。初回のテスト群は
+  本文と `Modified` しか見ていなかった。キャレット位置を固定する fact を足して両方撃墜した。
+- **ハーネスの罠(実測で踏んだ)**: `insertHasBreak: true` を `false` にする置換が、
+  同じ文字列を含む**直上の説明コメント**にヒットして「生存」と出た(ファイルは変わるので
+  適用失敗としても検出できない)。変異ごとに `diff` を出して**コード行が変わったこと**を
+  目視してから判定し直したところ撃墜だった。上表は差分確認後の値である。
+- **M6 を等価変異と判断した根拠**: `UndoHistory.Record` は引数と `_undo` / `_redo` / `_open` しか
+  触らず `_current` を読まない。`_current` 代入側も `_history` を読まない。渡す 4 値
+  (`rootBefore` / `newRoot` / `removed` / `inserted`)は代入より前に確定したローカルなので、
+  2 文の順序は観測可能な差を生まない。**当てた変異はこの 9 件だけであり、
+  「網が完全」という主張はしない**(§10.8 の教訓)。
