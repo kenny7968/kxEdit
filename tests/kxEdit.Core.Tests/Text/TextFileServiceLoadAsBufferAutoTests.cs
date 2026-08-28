@@ -10,6 +10,13 @@ public class TextFileServiceLoadAsBufferAutoTests
     private const string JpCrlf = "一行目\r\n二行目\r\n三行目\r\n";
     private const string JpLf = "一行目\n二行目\n三行目\n";
 
+    /// <summary>
+    /// A-9 の旧判定窓=先頭 4,096 code unit(UTF-16)
+    /// (<see cref="TextFileService.LoadAsBufferAuto"/> の旧実装 <c>Math.Min(4096, CharLength)</c>)。
+    /// 撤廃済みで src 側にはもう存在しないため、fixture の前提はテスト側で固定するしかない。
+    /// </summary>
+    private const int OldProbeWindowChars = 4096;
+
     [Fact]
     public void LoadAuto_Utf8_NoBom_DetectsUtf8_AndReturnsBufferText()
     {
@@ -178,16 +185,10 @@ public class TextFileServiceLoadAsBufferAutoTests
         }
     }
 
-    /// <summary>
-    /// A-9 の 4,096 文字窓(<see cref="TextFileService.LoadAsBufferAuto"/> の旧実装)。
-    /// 撤廃済みで src 側にはもう存在しないため、fixture の前提はテスト側で固定するしかない。
-    /// </summary>
-    private const int OldProbeWindowChars = 4096;
-
-    // A-9(監査 2026-08-22): 改行判定が先頭 4,096 文字窓だったため、1 行目が窓より長い
+    // A-9(監査 2026-08-22): 改行判定が先頭 4,096 code unit 窓だったため、1 行目が窓より長い
     // LF ファイル(ミニファイ JSON・長いヘッダ行の CSV)が CRLF と誤判定され、
     // Ctrl+S で全行 CRLF 化されていた(Modified も立たず警告も出ない)。
-    // fixture の要件: 先頭 4,096 文字に改行を 1 つも含まないこと=旧実装が必ず落ちる形。
+    // fixture の要件: 旧窓の中に改行を 1 つも含まないこと=旧実装が必ず落ちる形。
     [Fact]
     public void LoadAuto_LfFile_FirstLineLongerThanOldProbeWindow_DetectsLf()
     {
@@ -195,7 +196,10 @@ public class TextFileServiceLoadAsBufferAutoTests
         try
         {
             string body = new string('a', 5000) + "\n" + new string('b', 10) + "\n";
-            Assert.True(body.IndexOf('\n') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
+            Assert.True(
+                body.IndexOf('\n') >= OldProbeWindowChars,
+                $"fixture 前提が壊れています: 最初の改行が {body.IndexOf('\n')} code unit 目=旧窓 {OldProbeWindowChars} の内側"
+            );
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Lf, loaded.LineEnding);
@@ -214,7 +218,10 @@ public class TextFileServiceLoadAsBufferAutoTests
         try
         {
             string body = new string('a', 5000) + "\r" + new string('b', 10) + "\r";
-            Assert.True(body.IndexOf('\r') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
+            Assert.True(
+                body.IndexOf('\r') >= OldProbeWindowChars,
+                $"fixture 前提が壊れています: 最初の改行が {body.IndexOf('\r')} code unit 目=旧窓 {OldProbeWindowChars} の内側"
+            );
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Cr, loaded.LineEnding);
@@ -235,7 +242,10 @@ public class TextFileServiceLoadAsBufferAutoTests
         try
         {
             string body = new string('a', 5000) + "\r\n" + new string('b', 10) + "\r\n";
-            Assert.True(body.IndexOf('\r') >= OldProbeWindowChars); // fixture 前提: 旧窓に改行なし
+            Assert.True(
+                body.IndexOf('\r') >= OldProbeWindowChars,
+                $"fixture 前提が壊れています: 最初の改行が {body.IndexOf('\r')} code unit 目=旧窓 {OldProbeWindowChars} の内側"
+            );
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(body));
             var loaded = TextFileService.LoadAsBufferAuto(path);
             Assert.Equal(LineEnding.Crlf, loaded.LineEnding);
@@ -246,7 +256,7 @@ public class TextFileServiceLoadAsBufferAutoTests
         }
     }
 
-    // A-9: 窓の外にある多数派が判定に効くこと。先頭 4,096 文字には CRLF が 1 つだけあり、
+    // A-9: 窓の外にある多数派が判定に効くこと。旧窓の中には CRLF が 1 つだけあり、
     // 窓の外に LF が多数ある = 旧実装は CRLF、新実装は LF を返す。
     // (「窓を撤廃した」ことの証拠であって、「改行 0 件のときだけ延長した」では緑にならない)
     // filler は 4,094 文字。これで CRLF がちょうど窓の末尾 2 文字に収まり、窓内は crlf=1 / lf=0

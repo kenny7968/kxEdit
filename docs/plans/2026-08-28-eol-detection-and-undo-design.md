@@ -413,3 +413,126 @@ caret 復元後の 1 回になる)。CLAUDE.md §5 の「SR 経路に触れる�
   assertion で固定した。filler を 4,000 に戻すと `Expected: 4094 / Actual: 4000` で落ちることを実測済み。
   LF 版 / CR 版にも同形の「旧窓に改行が無い」前提 assertion を入れて扱いを揃えた。
 - **逸脱が文書に記録されていなかった**(CLAUDE.md §2)。本節 §10.1 として追記した。
+
+### 10.3 §4.3 の性能記述は事実と食い違っていた(コード品質レビュー I-1)
+
+§4.3 は「読み込み済みバッファに対する 1 パスが増えるだけなので、相対コストは小さい」と書いた。
+**事実と違う。** レビュアーの実測(255MB / LF / 40 byte 行・Release)では、
+`LoadAsBuffer`(検出を含まない)が cold 1,397 ms / warm 473〜515 ms に対し、
+`LineEndingDetector.Detect` 単体が cold 289 ms / warm 298〜303 ms
+= **cold で +21%・warm で +59〜63%** の増分だった。読込 CPU 時間の約 4 割を検出が占めている。
+
+§4.3 は策定時スナップショットなので書き換えず(CLAUDE.md §8)、ここに実測を記録する。
+先例は `2026-08-28-save-encoding-loss-warning-design.md` §8.6。
+
+**対応**: 改行の探索を 1 バイトずつの比較ループから
+`ReadOnlySpan<byte>.IndexOfAny(0x0D, 0x0A)`(SIMD 化済み)へ移した。
+多数決の規則・`pendingCr` の持ち越し・末尾 drain の意味論はすべて不変。
+
+本セッションでの実測(255MB・Release・ServerGC・同一マシン。cold は 1 回目、warm は 3 回の範囲):
+
+| ケース | before(スカラー) | after(IndexOfAny) | 倍率 |
+|---|---|---|---|
+| 255MB / LF / 40 byte 行 | cold 282.4 / warm 276.1〜280.1 ms | cold 45.2 / warm 42.2〜42.5 ms | **約 6.5 倍** |
+| 255MB / CRLF / 40 byte 行 | cold 233.6 / warm 231.9〜235.4 ms | cold 48.8 / warm 47.8〜48.8 ms | **約 4.8 倍** |
+| 255MB / 改行なし巨大 1 行 | cold 236.9 / warm 237.0〜238.8 ms | cold 20.7 / warm 18.1〜19.9 ms | **約 12.5 倍** |
+
+これで検出の増分は `LoadAsBuffer` warm 473〜515 ms に対し約 8〜10% になる。
+
+**等価性の確認**: 改行を高密度に含むランダム文字列 30 万件で `Detect(string)` と
+`Detect(TextSnapshot)` の全一致を確認した(各ケースについて、先頭を削って
+`ByteStart != 0` / 複数ピースにした版でも一致することを併せて確認)。不一致 0 件。
+
+**副次の設計変更(M-1)**: 持ち越し `pendingCr` が立つのは「ピース末尾の CR」だけなので、
+その処理を内側ループの外(ピース先頭の 1 回)へ出した。「carry はピース先頭バイトにしか
+効かない」という不変条件がコードから読める形になる。
+これに伴い**空ピースガードが必須になった**(持ち越し処理が `span[0]` を見るため)。
+`PieceTree.Split` は空ピースを作らず `TextBufferBuilder.AddChunk` も空を積まないので
+現行の公開経路では到達不能=テストで覚えられない(変異を当てても生存する)。
+ガードを消す変異が生存することは既知の等価変異として記録し、理由をコード側にも書いた。
+
+### 10.4 Task 1 コード品質レビュー後の変異実測(2026-08-28 追記)
+
+`IndexOfAny` 化で走査の形が変わったため、変異実測をやり直した
+(`LineEndingDetectorTests` 全体に対して 1 変異ずつ適用し、`-warnaserror` ビルドの
+成否を exit code で確認してから実行する)。
+
+| 変異 | 結果 | 撃墜したテスト |
+|---|---|---|
+| 持ち越しの `cr++` を落とす | kill | `..._counts_carried_cr_before_non_lf_byte` |
+| 持ち越し後に `continue`(現バイトを捨てる) | kill | `..._counts_carried_cr_before_crlf` |
+| 末尾 drain を落とす | kill | `..._counts_trailing_lone_cr` / `..._matches_string_overload("a\r")` |
+| `pendingCr = true` を `cr++` に(持ち越しを一切しない) | kill | `..._counts_crlf_spanning_chunk_boundary_as_one` |
+| `Slice(ByteStart, ByteLen)` → `Slice(0, Chunk.ByteLength)` | kill | `..._scans_only_the_piece_range_after_edit` |
+| 同上を `Slice(0, ByteStart + ByteLen)` と書いた版 | kill | 同上 |
+| `crlf >= lf` → `crlf > lf` | kill | `..._matches_string_overload("a\r\nb\nc")` |
+| `crlf >= cr` → `crlf > cr` | kill | `..._matches_string_overload("a\r\nb\rc")` ほか |
+| `lf >= cr` → `lf > cr` | kill | `..._matches_string_overload("a\nb\rc")` |
+| 空ピースガードを落とす | **生存(等価変異)** | — §10.3 のとおり到達不能 |
+
+**ハーネスの罠**: 最初の実測は `dotnet build` の失敗を `grep -c "error CS"` で判定しており、
+Sonar の `error S108` / `error S3267` を見落として**古い DLL に対してテストを走らせていた**。
+撃墜したテスト名が理屈と合わないことで気付いた。変異ハーネスはビルドの exit code で
+判定すること(変異がアナライザに引っかかってビルドできないケースは実在する)。
+
+### 10.5 却下: `PieceStats.Breaks` による早期終了(コード品質レビュー Q2)
+
+`snapshot.LineCount - 1` で総改行数 `T` を O(1) で得て `2 * crlf >= T` 等で打ち切る案。
+**数学的には正しい**(レビュアーが反例なしを確認)が却下する。
+
+1. 効果が最良でも 2 倍止まり。§10.3 の `IndexOfAny` 化は同じ実装量で 4.8〜12.5 倍で、
+   しかも早期終了と両立する。まず取るべきはそちら。
+2. `LineEndingDetector` が `PieceStats.Breaks` のセマンティクス(CRLF を 1 と数える monoid 規約)に
+   結合する。将来 `Breaks` の定義が変われば検出器が**黙って**誤った早期終了をする。
+   現設計の「byte 列だけを見る自己完結」が読みやすさの核なので壊さない。
+
+### 10.6 申し送り: `EolSegments` seam(EOL トークナイザの共通化・コード品質レビュー Q1)
+
+`LineEndingDetector.Detect(TextSnapshot)` / `EditorControl.IsEolAlreadyUniform` / `ConvertEols` の
+3 者は、目的は違う(数える / 判定する / 変換する)が
+**`PieceTree.Enumerate` → `Slice(ByteStart, ByteLen)` → `pendingCr` 持ち越し → 末尾 drain**
+という EOL トークナイザを共有している。lexer / consumer の分離であり抽象は歪まない。
+
+**重複はすでにコストを払っている**。§10.2 の「最重要」指摘は、この状態機械の 3 つ目のコピーで
+`pendingCr` fall-through に網が無かったという指摘だった。同じ罠を 3 回踏み直す構造になっている。
+
+`kxEdit.Core.csproj` に `<InternalsVisibleTo Include="kxEdit.Editor" />` があるので、
+Core 側に `internal` で置けば `EditorControl` から使える(公開 API を増やさずに済む)。
+`ref struct` に `IEnumerator<Piece>` と `ReadOnlySpan<byte>` を抱えた duck-typed enumerator の案:
+
+```csharp
+namespace kxEdit.Core.Buffers;
+internal enum EolKind { Text, Crlf, Lf, Cr }
+internal readonly ref struct EolSegment { public EolKind Kind { get; } public ReadOnlySpan<byte> Bytes { get; } }
+internal ref struct EolSegments { public EolSegments(PieceTree.Node? root) { ... } }
+```
+
+副次効果: `IsEolAlreadyUniform` の
+`targetBytes.Length == 2 && targetBytes[0] == 0x0D && targetBytes[1] == 0x0A` という 4 回反復する
+比較が `kind != EolKind.Crlf` の 1 行になり、`ConvertEols` の 1 バイトずつの
+`outBuf[outLen++] = b` が span 単位コピーになる(§10.3 と同種の性能改善も同時に取れる)。
+
+**本ブランチでは行わない。** 理由: (1) A-11(Task 2 以降)が `ConvertEols` 本体を書き換えるので、
+同じホットメソッドで 2 系統の変更を混ぜると挙動不変の証明が両方とも弱くなる。
+(2) CLAUDE.md §2「リファクタは挙動不変が原則」— A-9 の scope 外のリファクタを混載すると
+PR の焦点が散る。**A-11 マージ後の独立テーマとして回収する。**
+
+### 10.7 申し送り: XML doc の `cref` は CI で守られていない
+
+`GenerateDocumentationFile` がどのプロジェクトでも有効でないため、通常ビルドで XML doc が
+コンパイルされず CS1574(解決できない `cref`)が原理的に出ない。
+
+**本ブランチの差分については問題なし**。品質レビュアーが `-p:GenerateDocumentationFile=true` で
+実ビルドし、今回の差分が追加した `cref` はすべて解決することを確認している(警告ゼロ)。
+
+一方で既存債務は実測 70 件(CS1574 ×13 / CS0419 ×9 / CS1570 ×14 / CS1573 ×33 / CS1734 ×1)。
+`kxEdit.Core` 分は `TextFileService.cs:26, 128, 361` の CS1574 ×3 と
+`TextSnapshot.cs:57` / `TextFileService.cs:358` の CS0419 ×2。
+`SafeLinkExtension.cs:125-129` は URL を含む summary が XML として壊れている。
+
+有効化は **70 件の債務返済とセットの独立テーマ**とする(§3 の工程を踏まない大域変更になるため、
+A-9 の PR には載せない)。再現コマンド(非破壊):
+
+```
+dotnet build kxEdit.sln -c Release -p:GenerateDocumentationFile=true -p:TreatWarningsAsErrors=false -p:NoWarn="CS1591" --no-incremental
+```

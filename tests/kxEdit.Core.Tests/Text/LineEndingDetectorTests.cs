@@ -51,7 +51,7 @@ public class LineEndingDetectorTests
     {
         string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r\n";
         var snapshot = TextBuffer.FromString(body).Current;
-        AssertTwoPiecesSplitBetween(snapshot, 0x0D, 0x0A); // CR で切れ LF で始まる=境界を跨いでいる
+        AssertTwoPiecesSplitBetween(snapshot, lastOfFirst: 0x0D, firstOfSecond: 0x0A); // CR で切れ LF で始まる=境界を跨いでいる
         Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(snapshot));
     }
 
@@ -62,7 +62,7 @@ public class LineEndingDetectorTests
     {
         string body = new string('a', TextBufferBuilder.TargetChunkBytes) + "\r";
         var snapshot = TextBuffer.FromString(body).Current;
-        AssertTwoPiecesSplitBetween(snapshot, 0x61, 0x0D); // 'a' で切れ CR だけの最終ピース
+        AssertTwoPiecesSplitBetween(snapshot, lastOfFirst: (byte)'a', firstOfSecond: 0x0D); // 'a' で切れ CR だけの最終ピース
         Assert.Equal(LineEnding.Cr, LineEndingDetector.Detect(snapshot));
     }
 
@@ -78,7 +78,7 @@ public class LineEndingDetectorTests
     {
         string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r" + "x";
         var snapshot = TextBuffer.FromString(body).Current;
-        AssertTwoPiecesSplitBetween(snapshot, 0x0D, 0x78); // CR で切れ 'x' で始まる
+        AssertTwoPiecesSplitBetween(snapshot, lastOfFirst: 0x0D, firstOfSecond: (byte)'x'); // CR で切れ 'x' で始まる
         Assert.Equal(LineEnding.Cr, LineEndingDetector.Detect(snapshot));
     }
 
@@ -90,8 +90,43 @@ public class LineEndingDetectorTests
     {
         string body = new string('a', TextBufferBuilder.TargetChunkBytes - 1) + "\r" + "\r\nx";
         var snapshot = TextBuffer.FromString(body).Current;
-        AssertTwoPiecesSplitBetween(snapshot, 0x0D, 0x0D); // CR で切れ CR で始まる
+        AssertTwoPiecesSplitBetween(snapshot, lastOfFirst: 0x0D, firstOfSecond: 0x0D); // CR で切れ CR で始まる
         Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(snapshot));
+    }
+
+    // A-9(I-2): 編集で ByteStart != 0 になったピースでも、チャンク全体ではなく
+    // ピースの担当範囲だけを走査すること。PieceTree は削除してもチャンクのバイトを
+    // 捨てず、ピースの範囲を狭めるだけなので、Slice(ByteStart, ByteLen) を
+    // Slice(0, Chunk.ByteLength) にすると削除済みの CRLF 3 件を数え直して Crlf を返す。
+    //
+    // Detect(TextSnapshot) は public API で、現状の唯一の呼び出し元(LoadAsBufferAuto)は
+    // 新規バッファしか渡さないので ByteStart は常に 0。将来「貼り付け後に EOL を再判定する」
+    // 等の呼び出しが増えた瞬間に誤判定になるため、ここで固定しておく。
+    [Fact]
+    public void Snapshot_overload_scans_only_the_piece_range_after_edit()
+    {
+        var buffer = TextBuffer.FromString("\r\n\r\n\r\nx\ny"); // crlf=3 / lf=1 → Crlf
+        Assert.Equal(LineEnding.Crlf, LineEndingDetector.Detect(buffer.Current));
+        buffer.Delete(0, 6); // 先頭 CRLF ×3 を削除 → 本文は "x\ny" で lf=1 のみ
+        AssertSinglePieceAt(buffer.Current, byteStart: 6, byteLen: 3);
+        Assert.Equal(LineEnding.Lf, LineEndingDetector.Detect(buffer.Current));
+    }
+
+    /// <summary>
+    /// fixture の前提検証。スナップショットがちょうど 1 ピースで、その担当範囲が
+    /// チャンクの途中(<paramref name="byteStart"/> != 0)から始まり、チャンクには
+    /// 削除済みバイトが残っていることを確かめる。ここが 0 に戻ると
+    /// 「チャンク全体を走査する」変異を撃墜できなくなる。
+    /// </summary>
+    private static void AssertSinglePieceAt(TextSnapshot snapshot, int byteStart, int byteLen)
+    {
+        var piece = Assert.Single(PieceTree.Enumerate(snapshot.Root).ToList());
+        Assert.Equal(byteStart, piece.ByteStart);
+        Assert.Equal(byteLen, piece.ByteLen);
+        Assert.True(
+            piece.ByteLen < piece.Chunk.ByteLength,
+            $"チャンクに削除済みバイトが残っていません(ByteLen={piece.ByteLen} / ChunkLen={piece.Chunk.ByteLength})"
+        );
     }
 
     /// <summary>
