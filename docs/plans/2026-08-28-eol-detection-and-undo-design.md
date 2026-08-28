@@ -895,3 +895,147 @@ Core 側の変更は不要。
 この不可観測性の論証は `UndoHistory.Record` の融合条件
 (`UndoHistory.cs:46-50, 57` — 特に `pureInsert && prev.RemovedLen == 0` で弾かれること)に依存する。
 融合条件を変更する将来のタスクは、`ReplaceAllRecordingUndo` のコメントを再検証すること。
+### 10.13 Task 3(`ConvertEols` の in-place 化)実装時の検証と逸脱記録(2026-08-28 追記)
+
+#### (1) 赤の確認(Step 3)と main ベースラインの実測
+
+新規テストを先に置き、**src を main のまま**(`git checkout -- src/kxEdit.Editor/EditorControl.cs`)
+走らせて赤/緑を実測した(戻り値テスト 4 件は `void` シグネチャでコンパイルできないため
+この実測では除外)。結果は **7 件 FAIL / 23 件 PASS**。
+
+FAIL(= in-place 化で初めて緑になるもの):
+
+| FAIL したテスト | main でのメッセージ |
+|---|---|
+| `ConvertEols_NonFastPath_IsUndoable` | `Assert.True() Failure`(`CanUndo` が false) |
+| `ConvertEols_NonFastPath_PreservesEarlierUndoHistory` | `Expected: "a\nX\nY" / Actual: "a\r\nX\r\nY"`(Undo が no-op) |
+| `ConvertEols_NonFastPath_RecordsExactlyOneUndoEntry` | `Expected: "a\nb\ncd" / Actual: "a\r\nb\r\ncd"` |
+| `ConvertEols_NonFastPath_DoesNotCoalesceWithPrecedingTyping` | Undo が no-op で変換後本文のまま |
+| `ConvertEols_NonFastPath_ThenUndo_RestoresSavePoint` | `Assert.True() Failure`(変換後 `Modified` が false) |
+| `ConvertEols_NonFastPath_OnDirtyDocument_ThenUndo_FiresNoSavePointEvents` | `Expected: "a\nb\ncd" / Actual: "a\r\nb\r\ncd"` |
+| `ConvertEols_NonFastPath_KeepsMouseDragging` | `Assert.True() Failure`(`ReplaceSource` が false へ潰す) |
+
+PASS 23 件のうち **10 件が新規テスト**で、これが「in-place 化が挙動不変であること」の
+**対照群**である(既存 13 件と合わせて、切替後も全件緑であることを確認した):
+
+- `ConvertEols_FastPath_RecordsNothingInHistory`
+- `ConvertEols_NonFastPath_OnSavedDocument_FiresNoSavePointEvents`
+- `ConvertEols_NonFastPath_OnDirtyDocument_FiresNoSavePointEvents`
+- `ConvertEols_NonFastPath_ThenSetSavePoint_FiresReachedOnce`
+- `ConvertEols_NonFastPath_OnDirtyDocument_ThenSetSavePoint_FiresReachedOnce`
+- `ConvertEols_NonFastPath_UpdatesUiaSnapshot`
+- `ConvertEols_NonFastPath_FiresUpdateUiOnce`
+- `ConvertEols_FastPath_FiresNoUpdateUi`
+- `ConvertEols_NonFastPath_RaisesTextChangedAndSelectionChangedOnce`
+- `ConvertEols_FastPath_RaisesNoUiaEvents`
+
+#### (2) §5.2 契約表 10 行 + §10.12 (1) 2 行の充足状況
+
+| 契約 | 実装 | 網 |
+|------|------|--------|
+| caret / anchor の論理位置復元 | `(m, k)` 分解 → `_caretCtrl.SetSelection` を維持(位置計算は変更なし) | 既存 `ConvertEols_NonFastPath_PreservesCaretLogicalPosition_*` / `_PreservesAnchorForSelection` / `_CaretRequestedMidCrlf...` |
+| `_topLine` / `_topSegment` / `_scrollX` 復元 | `SetTopPosition` + `ScrollX` を維持。ただし in-place 化で値を潰さないため**常に no-op になった** | 直接の網なし(値が動かないことは実装上自明) |
+| system caret 再配置 | `if (_hasFocus) PositionCaret()` を維持。上記のとおり `SetTopPosition` / `ScrollX` が no-op 化したため、**この 1 行が system caret 更新の唯一の経路になった**(コメントに明記) | 自動テスト不可(Win32 `SetCaretPos`)。L5 で確認 |
+| UIA スナップショット更新 | `_uia.OnSnapshotChanged(_buffer.Current)` を明示的に呼ぶ。**caret 復元の後**に置いた(下記 (4)-2) | `ConvertEols_NonFastPath_UpdatesUiaSnapshot`(`IUiaTextHost.TextLength` / `GetTextRange`) |
+| UIA `TextChanged` 発火 | `_uia.RaiseTextChanged()` を明示的に呼ぶ | `ConvertEols_NonFastPath_RaisesTextChangedAndSelectionChangedOnce`(回数 1・main でも 1) |
+| `UpdateUI` 発火 | `UpdateUI?.Invoke(this, EventArgs.Empty)` を明示的に呼ぶ | `ConvertEols_NonFastPath_FiresUpdateUiOnce` / `ConvertEols_FastPath_FiresNoUpdateUi` |
+| スクロールバー同期 / `Invalidate` | `UpdateVerticalScrollbar()` / `UpdateHorizontalScrollbar()` を差し替え直後(=`ReplaceSource` 内と同じ相対位置・`ScrollX` 復元より前)に、`Invalidate()` を caret 復元後に呼ぶ | **網なし**(`_vscroll` / `_hscroll` / 再描画要求を観測する seam が無い) |
+| `_cellHighlight` 無効化 | `_cellHighlight = null;` を維持(`ClearHighlight()` ではなく直接代入=`ReplaceSource` と同形。`Invalidate` は後段で 1 回打つ) | **網なし**(private で getter も test hook も無い。hook 新設は本タスクの範囲外と判断) |
+| IME 未確定の確定キャンセル | `if (IsComposing) CancelCompositionAndDefault();` を差し替え直前に維持 | **網なし**(既存 IME テストに `ConvertEols` の項目は無い) |
+| **`_wasModified` の同期** | `_wasModified = _buffer.Modified;` を代入(`ReplaceSource:301` と同じ位置=`OnSnapshotChanged` と `RaiseTextChanged` の間)。`AfterEdit` は呼ばない | `ConvertEols_NonFastPath_OnSavedDocument_FiresNoSavePointEvents` ほか SavePoint 系 5 件 |
+| **`MouseDragging` / `_wheelAccum` リセット** | **書かない**(意図的に落とす) | `MouseDragging` は `ConvertEols_NonFastPath_KeepsMouseDragging` で固定。`_wheelAccum` は**網なし**(private・観測 seam 無し) |
+
+**表に無い 1 行を追加で決定した**: `_caretCtrl.DesiredXpx`。`ReplaceSource` が `-1` へ潰すが
+§5.2 の表にも §10.12 (1) にも無い。EOL 変換は行本文(改行を除く)を変えないので目標 X は
+論理的にはまだ有効だが、**挙動不変を優先して `-1` 代入を維持**した
+(`EditorControl` から観測できないため網は張れない)。
+
+#### (3) `SavePointLeft` / `SavePointReached` の発火列(§10.12 (1) の要求)
+
+非 fast-path の `ConvertEols` を含む経路の発火列。`(clean)` は直前に `SetSavePoint` 済み、
+`(dirty)` は保存点以後に編集済みの文書。○ の行は**同一のテストが main でも切替後でも緑**
+であることで実測した((1) の対照群)。
+
+| 経路 | main | 切替後 | 一致 |
+|------|------|--------|------|
+| `ConvertEols` 単体 (clean) | (なし) | (なし) | ○ |
+| `ConvertEols` 単体 (dirty) | (なし) | (なし) | ○ |
+| **成功パス**: `ConvertEols` → `SetSavePoint` (clean) | `Reached` | `Reached` | ○ |
+| **成功パス**: `ConvertEols` → `SetSavePoint` (dirty) | `Reached` | `Reached` | ○ |
+| **失敗パス(main の機構)**: `ConvertEols` → `SetOrReplaceSource(snapshotBefore)` | (なし) | — (Task 4 で撤去) | — |
+| **失敗パス(新機構)**: `ConvertEols` → `Undo` (clean) | 該当なし(main は Undo 不能) | `Reached` | ✕(新規) |
+| **失敗パス(新機構)**: `ConvertEols` → `Undo` (dirty) | 該当なし(main は Undo 不能) | (なし) | ✕(新規) |
+
+- `AfterEdit()` を呼ばず `_wasModified` を代入で揃えたことにより、**保存処理の途中で
+  `SavePointLeft` が焚かれる新規挙動は発生しない**(§10.12 (1) の要求を満たす)。
+- 失敗パスの `Reached` 1 件は Task 4 が持ち込む**新規挙動**である。clean 文書の保存に失敗して
+  `Undo` で保存点のルートへ戻ると `Modified` が true→false へ遷移し `SavePointReached` が
+  1 回焚かれる。main は `ReplaceSource` の直接代入でイベントを焚かなかったが、
+  **タブラベルの最終状態は両者とも「未変更」で一致する**(main は clean のまま動かない /
+  新機構は一度も dirty 表示にせず `Reached` を打つ)。dirty 文書では `Undo` 後も
+  `Modified` が true のままなので遷移が無く、発火もしない(main と同じ)。
+- なお `ConvertEols` 直後の `Modified` の**値**は main と異なる(main=false / 切替後=true)。
+  §5.1 の「`_savedRoot` を触らない」決定の直接の帰結である。**イベントは焚かない**ので
+  App 層の表示はこの瞬間には変わらない。値の差が観測されるのは Task 4 のロールバック判定と、
+  `WriteToPath` が例外で抜けた後に `doc.Editor.Modified` を読む経路だけである(下記 (5))。
+
+#### (4) 計画案から変えた点
+
+1. **戻り値は `ReplaceAllRecordingUndo` の結果をそのまま返す**(計画は「末尾 `return true;`」も
+   選択肢として提示していた)。理由: Task 2 が「呼び出し側は経路から推論せず戻り値で判定する」
+   契約を明示しており、`IsEolAlreadyUniform` にバグがあって無変化の文書が非 fast-path へ
+   落ちた場合でも `false` を返せば Task 4 が余分な `Undo` を打たない(=ユーザーの直前の編集を
+   消さない)。危険な向きへ倒れない側を選んだ。なお現行コードで空文書・改行なし文書は
+   いずれも `IsEolAlreadyUniform` が true を返すため、この分岐が実際に false になる経路は無い
+   (`ConvertEols_NoLineBreaks_ReturnsFalse` が fast-path 側で固定している)。
+2. **`_uia.OnSnapshotChanged` を caret 復元の後に置いた**。`ReplaceSource` は
+   `_caretCtrl.SetTo(0, ...)` を先に打つので「新スナップショット + 範囲内の caret」しか
+   RPC スレッドに見せない。in-place 化で caret を潰さない以上、スナップショット差し替えを
+   先に置くと**新本文と旧 caret オフセット(新本文では範囲外になりうる)が同時に見える窓**が
+   できる。復元後に置くことでこの窓を作らない(a11y 鉄則)。
+3. **`builder.Build()` を IME 取消より前に評価する**。旧 `ReplaceSource(builder.Build())` は
+   引数評価が先=`Build()` が例外(上限超過・carry の不正 UTF-8)で抜けるとき IME 未確定は
+   取り消されないまま throw していた。順序を保つため `var rebuilt = builder.Build().Current;`
+   を先に置いた。
+4. **`ConvertEols_NonFastPath_KeepsMouseDragging` を追加した**。§10.12 (1) の
+   「`MouseDragging` は意図的に落とす」という決定はコード上「何も書かない」なので、網が無いと
+   将来の読者が「書き忘れ」と読んで復活させうる。決定をテストで固定した。
+5. **UIA イベント発火回数のテストを別クラス `EditorControlConvertEolsUiaEventTests` に置いた**。
+   `TestHook_ForceUiaListen` が static のため、既存の `EditorControlUiaEventsTests` と同じ
+   `[Collection("UiaEventHook")]` に入れる必要がある(ファイルは
+   `EditorControlConvertEolsTests.cs` のまま)。
+6. **`Modified` / SavePoint 系のテストを計画外に足した**。計画のテスト案 3 件は Undo 履歴だけを
+   見ており、§10.12 (1) が要求する発火列の固定が無かった。
+
+#### (5) Task 4 への申し送り
+
+1. **`Save_ExistingPathIsDriveRoot_ReportsError_AndRollsBackModified` は今、何も守っていない**。
+   本タスクの切替後もこのテストは**緑のまま**だが、それは
+   「`ReferenceEquals` が常に true → ロールバックが no-op → しかし `_savedRoot` を触らないので
+   `Modified` は true のまま」という理由で `Assert.True(doc.Editor.Modified)` が
+   **空振りで通っている**からである。本文は EOL 変換後のまま残る(サイレント喪失)。
+   Task 4 はこのテストに**本文の内容 assert を足す**か、
+   `Save_WriteFailure_RollsBackContentEol_And_KeepsModifiedFlag` と同じ観測に寄せること。
+2. Task 3 の時点で実際に赤くなった App テストは次の 2 件(いずれも本文のロールバックを見ている)。
+   Task 4 の完了条件はこの 2 件が緑に戻ることである。
+   - `FileControllerTests.Save_WriteFailure_RollsBackContentEol_And_KeepsModifiedFlag`
+     — `Expected: "x\ny" / Actual: "x\r\ny"`
+   - `FileControllerTests.SaveAs_WriteFailure_RollsBackContentEol`
+     — `Expected: "a\r\nb" / Actual: "a\nb"`
+3. `WriteToPath` の XML doc(`FileController.cs:812-819` 付近)は「`ConvertEols`(非 fast-path)は
+   `ReplaceSource(builder.Build())` で新規 TextBuffer に差し替える」と書いており、
+   **本タスクで事実と食い違った**。Task 4 で書き換えること(§5.3 が既に指示しているが、
+   旧説明が残ると次の読者を誤導するため再掲する)。
+4. `ConvertEols` の戻り値を捨てている呼び出しが `FileController.cs:843` にある。Task 4 は
+   `bool converted = doc.Editor.ConvertEols(doc.Editor.EolMode);` として catch 節へ渡すこと。
+   **`converted` が false のときに `Undo()` を打ってはならない**(fast-path では変換エントリが
+   積まれていないので、ユーザーの直前の編集が消える)。
+
+#### (6) 網が無い箇所(嘘の安全宣言を作らないための明示)
+
+(2) の表のとおり、次の 6 つは**実装したが自動テストで守られていない**:
+`_cellHighlight` の無効化 / IME 未確定の取消 / スクロールバー再計算 / `Invalidate` /
+`_wheelAccum` / `DesiredXpx`。いずれも `EditorControl` の private 状態で、観測するには
+新しい test hook が要る。`_cellHighlight` は CSV グリッドモードのセル強調に効くため、
+L5(または CSV モードの手動スモーク)で「保存後にセル強調が古い位置に残らないか」を
+見ておくのが安い。
