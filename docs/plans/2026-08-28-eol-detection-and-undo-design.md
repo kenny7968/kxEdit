@@ -797,3 +797,101 @@ I-1 / I-2 でシグネチャが変わったため**全変異を当て直した**
 (`IOException or UnauthorizedAccessException or SecurityException or NotSupportedException or ArgumentException`)
 に一致せず、未処理で抜ける。**main 既存の穴**であり Task 2 の commit が作ったものではないが、
 Task 4 が catch 節を書き換えるので、そのタイミングで拾うか申し送るかを決める。
+
+### 10.12 Task 3 / Task 4 への申し送り(Task 2 再レビューで判明・2026-08-28 追記)
+
+Task 2 の前倒しコード品質レビュー(再レビュー)は Core API を承認したうえで、
+**Core の外**に 2 件の課題を残した。いずれも §5.2 / §5.3 の記述漏れであり、
+Task 3 / Task 4 の着手時に回収する。§5.2 / §5.3 本体は策定時スナップショットとして
+書き換えず、本節を追加分として扱う(CLAUDE.md §8)。
+
+#### (1) §5.2 の契約表に `_wasModified` が無い — 素直な実装は保存中に spurious `SavePointLeft` を焚く
+
+§5.2 の契約表が「`ReplaceSource` 内でやっていて in-place 化後は明示的に呼ぶ必要があるもの」
+として挙げた 5 項目(UIA スナップショット更新 / `TextChanged` / `UpdateUI` /
+スクロールバー同期 / `Invalidate`)は、**`AfterEdit()` の本体そのもの**である。
+したがって Task 3 の自然な実装は「`AfterEdit()` を呼ぶ」になる。
+
+ところが `AfterEdit()`(`EditorControl.cs:1260-1263`)は表に無い副作用を持つ:
+
+```csharp
+bool nowModified = Modified;
+bool shouldFireLeft = !_wasModified && nowModified;   // ← EOL 変換で false→true
+_wasModified = nowModified;
+if (shouldFireLeft) SavePointLeft?.Invoke(this, EventArgs.Empty);
+```
+
+`ReplaceAllRecordingUndo` は `_savedRoot` を触らないので **`Modified` が false→true へ遷移**する。
+`AfterEdit()` を呼ぶと**保存処理の途中で `SavePointLeft` が発火**し、
+`DocumentManager.cs:82` の `OnDirtyChanged(doc)` へ流れる。
+現行 main は `ReplaceSource:301` が `_wasModified = buffer.Modified`(新バッファ=false)を
+**直接代入**しイベントを一切焚かないため、これは**新規の挙動**になる。
+
+**決定**: 挙動不変を優先し、`AfterEdit()` をそのまま呼ばない。UIA / `UpdateUI` /
+スクロールバー同期 / `Invalidate` は個別に呼び、`_wasModified` は
+`ReplaceSource` と同じく**代入で揃える**(保存中に `SavePointLeft` を焚かない)。
+
+Task 3 の実装者は、**成功パスと失敗パスの両方**について
+`SavePointLeft` / `SavePointReached` の発火列を列挙し、main と一致することを示すこと。
+
+なお §5.2 の契約表には次の 2 行も欠けていた。Task 3 で決定として記録する:
+
+| 契約 | 現状の担い手 | 切替後の決定 |
+|------|------------|------------|
+| `_wasModified` の同期 | `ReplaceSource:301` が直接代入(イベント無し) | **代入で揃える**(上記) |
+| `MouseDragging` / `_wheelAccum` リセット | `ReplaceSource:287-289` | **意図的に落とす**(in-place 編集でドラッグ選択やホイール蓄積を破棄する理由が無い)。決定として記録する |
+
+#### (2) Task 4 のロールバックは `UndoResult.CaretPos`(= 文書末尾)を使ってはならない
+
+§10.11 (5) で受容したキャレット末尾ワープは、**ユーザーが Ctrl+Z を押したとき**の話である。
+Task 4 のロールバックは**ユーザーが Undo を要求していない**のに同じ経路を通ると、
+保存失敗ダイアログの裏でキャレットが黙って末尾へ飛ぶ。
+
+現行 main も良くない: ロールバックの `SetOrReplaceSource` → `ReplaceSource` は
+`_caretCtrl.SetTo(0, ...)` / `_topLine = 0` / `_scrollX = 0` で**キャレットもスクロールも 0 へ潰す**。
+新設計は「0 へ潰す」が「末尾へ飛ぶ」に変わるだけで、どちらも劣悪である。
+
+**新しい seam はこれを改善できる**。`TextBuffer.Undo()` は `UndoResult?` を返すだけで、
+キャレット設定は Editor 側の責務である(`EditorControl.cs:1295-1300`)。
+したがって `EditorControl` は戻り値を**無視して**保存前の位置へ復元できる。
+Core 側の変更は不要。
+
+**決定**: Task 4 のロールバックは、キャレットとスクロール位置を
+**保存失敗前の位置へ明示復元する**。位置は `ConvertEols` を呼ぶ前に呼び出し元が捕捉する
+(EOL 変換前のオフセットは、変換を取り消した本文に対してそのまま有効)。
+結果として main(0 へ潰す)より良くなる。
+
+#### (3) L5 チェックリスト作成時に §10.11 (5) を回収すること
+
+§8 は「チェックリストは実装完了時に
+`docs/plans/2026-08-28-eol-detection-and-undo-l5-checklist.md` へ作る」と書いているが、
+項目 2 に足すべき内容は §10.11 (5) にある。チェックリストを作る人が §10.11 まで
+読む保証がないため、ここに導線を置く。
+
+§10.11 (5) の項目文は「キャレットがどこへ移動するかを確認する」という**観測指示**で、
+期待値が無いためチェックを付けても何も記録されない。挙動は受容済みなので期待値を書ける:
+
+> 5,000 行目付近にキャレットを置いて Ctrl+S(EOL 変換が起きる条件で)→ Ctrl+Z。
+> **期待**: 本文が変換前へ戻り、キャレットと表示が**文書末尾**へ移動する(受容済み挙動)。
+> **判定**: NVDA がその移動を読み上げるか / ユーザーが現在位置を見失わないか。
+> 見失うなら Task 3 で `(m, k)` 復元位置へ戻す案を申し送りとして回収する。
+
+#### (4) 変異ハーネスのアンカー注意(再レビューで レビュアー自身も踏んだ)
+
+`insertHasBreak: true` を素朴な文字列置換で変異させると、fixup で追加された**説明コメント**
+
+```
+//  ・insertHasBreak: true = 空文書→1〜2文字(純挿入形)の直後のタイプがこのエントリへ
+```
+
+にヒットし、`Record` の引数が無変化のまま「生存」と出る。§10.4 / §10.8 が記録した罠と同型で、
+コメントが増えたぶん発生確率が上がっている。**12 スペースインデントの引数行**
+(`            insertHasBreak: true\n        );\n`)をアンカーに取ること。
+
+#### (5) 純削除退化形の不可観測性は `UndoHistory.Record` の融合条件に依存する
+
+§10.11 (6) で後置 `BreakCoalescing()` を却下した結果、「差し替えエントリは後方向へも閉じている」
+はコードではなく**コメント**(`TextBuffer.cs:147-150`)が担保する形になった。
+この不可観測性の論証は `UndoHistory.Record` の融合条件
+(`UndoHistory.cs:46-50, 57` — 特に `pureInsert && prev.RemovedLen == 0` で弾かれること)に依存する。
+融合条件を変更する将来のタスクは、`ReplaceAllRecordingUndo` のコメントを再検証すること。
