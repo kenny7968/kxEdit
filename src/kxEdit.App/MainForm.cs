@@ -629,6 +629,37 @@ public sealed partial class MainForm : Form
             ? "クリップボードにコピーできません。他のアプリが使用中の可能性があります"
             : "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります";
 
+    /// <summary>
+    /// M-1(設計 2026-08-29 §5): 未処理例外からの退避。
+    /// </summary>
+    /// <returns>true = 「次回起動で復元できる」と言い切れるときだけ。</returns>
+    /// <remarks>
+    /// <see cref="BackupCoordinator.FinalFlushForRestore"/> と
+    /// <see cref="BackupCoordinator.WaitForFinalFlush"/> は<b>必ず対でこの順に</b>呼ぶ
+    /// (<c>WaitForFinalFlush</c> の remarks を参照)。
+    /// <b>UI スレッドから呼ぶこと</b>(<see cref="BackupCoordinator"/> は <c>_map</c> を
+    /// 非スレッドセーフな Dictionary で持つ UI スレッド専有クラス)。
+    /// <para>
+    /// 前提ゲート(<c>RestoreOpenFilesOnStartup</c> / <c>BackupEnabled</c> /
+    /// 32M 超 dirty なし)は hot exit の silent path と同じものを使う。
+    /// これを省くと、内容の定期退避が無効な環境で <c>WaitForFinalFlush</c> が
+    /// 「書くものが無い=失敗も無い」の true を返し、
+    /// <b>何も退避していないのに「復元できます」と表示する</b>嘘の安全宣言になる。
+    /// <c>BackupEnabled</c> を <c>&amp;&amp;</c> の左に置いているのも意図的で、
+    /// <c>WaitForFinalFlush</c> は OFF のとき残留失敗 Id を恒久的に読み続ける契約
+    /// (同 remarks)=前提ゲートを通らない呼び出しを作らない。
+    /// </para>
+    /// </remarks>
+    internal bool FlushBackupsForCrash()
+    {
+        bool canRestore =
+            _settings.RestoreOpenFilesOnStartup
+            && _settings.BackupEnabled
+            && !HasOversizedDirtyDoc();
+        _backup.FinalFlushForRestore();
+        return canRestore && _backup.WaitForFinalFlush();
+    }
+
     /// <summary>テスト専用: 最後に <c>IAnnouncer.Say</c> した文言
     /// (<c>UiaAnnouncer</c> は視覚表示を無条件で行うため通知ラベルの文言と一致する)。</summary>
     internal string LastAnnouncementForTest => _announceLabel.Text;
