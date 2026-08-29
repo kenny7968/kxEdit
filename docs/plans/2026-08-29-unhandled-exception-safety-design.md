@@ -400,6 +400,16 @@ M-1 のハンドラは意図的にクラッシュさせないと確認できな�
   だったため、設計時にはこの差が見えていなかった。
 - **テストは `__TestProcessMessage` の実 WndProc 経路も通す**(§8.2 の指定どおり)。
   `OnKeyPress` をリフレクションで直接叩くだけだと、上の取りこぼしを検出できない。
+  上書きモードの回帰(監査書の「既存 2 文字を潰す」に対する唯一の網)も実経路へ寄せた。
+- **§6.2 が挙げた破棄契機「マウス操作」は実装しない**(意図的な逸脱)。
+  実装は `OnKeyDown`(`VK_PACKET` を除く)/ `OnLostFocus` / `OnKeyPress` の各分岐 / `AfterEdit`。
+  マウスでキャレットを動かしても保留は残るが、実際に踏むには 1 回の `SendInput` が生む
+  2 通の WM_CHAR の**間に**マウス選択を挟む必要があり、現実性が極めて低い。
+  踏んだ場合の被害は「選択範囲がペアで置換される」なので無害ではない点は認識しておく。
+  脆弱性パスの判定は「攻撃者が合成できるのは自分が送った高位と低位の組だけで、
+  WM_CHAR を送り込める主体は最初から任意の文字列をタイプさせられる=能力の増分ゼロ」。
+- **IME 開始時(`DeleteSelectionForImeStart`)への追加はしない**: IME 確定は
+  `InsertConfirmedText` → `AfterEdit` を通るので事後条件側で覆われる。
 - **保留の破棄契機**: `OnKeyDown`(`VK_PACKET` を除く)と `EditorControl.OnLostFocus`
   (実在した override に 1 行追加)に
   加えて、**`AfterEdit` にも事後条件として置いた**。§6.2 が「列挙は原理的に漏れる。事後条件側に
@@ -444,14 +454,41 @@ M-1 のハンドラは意図的にクラッシュさせないと確認できな�
   marshal・タイムアウト・文面選択という「`CrashHandler` では検証できないロジック」が
   ここに残るため、`ICrashUiHost` 越しにテスト可能にした(レビュー Major-2)。
 - 例外の中身は `Trace` へ落とすだけで `MessageBox` には出さない(パス等が画面に出る面を増やさない)。
+- **`PreviewUserDataSweeper`(起動時 sweep)を本ブランチに含めた**(計画外の追加・最終レビュー M-V1)。
+  `Environment.Exit` はフォームの `Dispose` を走らせないため、プレビューを開いたまま
+  クラッシュすると `%LOCALAPPDATA%\kxEdit\WebView2\preview-{guid}` が**単調増加し回収されない**。
+  そこには WebView2 のプロファイル(Code Cache / Local Storage 等)が入り、プレビューは
+  文書のディレクトリを base URI に持つ(A-2)ので、相対参照で取得した外部リソースの
+  キャッシュも入りうる=単なるディスク消費ではない。
+  「終了直前に消す」は成立しない(WebView2 プロセスがまだプロファイルを掴んでいる)ため、
+  `PreviewUserDataFolder` の doc が「v0.12 以降候補」としていた起動時 sweep を前倒しした。
+  **並行インスタンス対策が要**: 素朴に消すと別プロセスのプロファイルを、ロックに当たる前に
+  一部だけ消して壊しうる。「自分以外の kxEdit プロセスが居ないときだけ実行する」で回避した。
+- **`CrashHandler` / `ICrashSink` は `internal`**。App は実行可能アセンブリで外部から
+  使われないため、public にする理由がない(`ICrashUiHost` と揃う)。
+  Editor 層の `IClipboard` が public なのは、コントロールライブラリとしての先例
+  (`IImeContext`)に合わせたもので、こちらは意図的に非対称。
 
 ## 11. 申し送り(実装時・レビュー時に追記する)
 
-- **`Environment.Exit(1)` はフォームの `Dispose` を走らせない**ため、マークダウンプレビューを
-  開いた状態でクラッシュすると `%LOCALAPPDATA%\kxEdit\WebView2\preview-{guid}` が残る
-  (`MarkdownPreviewForm.Dispose` が消す責務を持っている)。起動時 sweep は
-  `PreviewUserDataFolder` の doc が「v0.12 以降候補」として未実装。データ喪失ではないが、
-  `Environment.Exit` の採用でリーク経路が 1 本増えたのは事実なので、sweep の優先度を上げる材料。
+- **`session-state.json` の `.tmp` 残骸は sweep 対象外**(最終レビュー L-V3)。
+  `AtomicFile.Write` の temp は原本を壊さないが、`Environment.Exit` でワーカーが書込中に
+  死ぬと `%APPDATA%\kxEdit\session-state.json.<rand>.tmp` が残る。
+  `BackupStore.SweepTempFiles` は `backups` 配下しか見ないので親ディレクトリは回収されない。
+  到達経路は「前提ゲート不通過 → `WaitForFinalFlush` を待たずに false を返す」ときだけ。実害は残骸のみ。
+- **`ClipboardFailed` の購読側が投げるとプロセス終了に化ける**(最終レビュー L-V4)。
+  catch 節の中から発火するので、ハンドラの例外は `Copy` / `Paste` を貫通し `CrashHandler` が受ける。
+  本番の唯一の購読者 `UiaAnnouncer.Say` は内部で全例外を握るので現状は安全。
+  `try/catch` で構造的に閉じる案は**採らない**: 発声経路のバグを黙って飲むほうが、
+  SR ユーザーにとって危険(サイレントな発声失敗はこのプロジェクトが最も嫌う失敗)。
+  XML doc に警告を置いて受容する。データ喪失には繋がらない(`Copy` が throw すると
+  `Cut` は `_buffer.Replace` に到達しない=安全側)。
+- **M-3 / M-21(OOM)の「受け皿」は楽観的**(最終レビュー L-V5)。`FlushBackupsForCrash` →
+  `ReconcileContent` は dirty 文書ごとに `SnapshotText`(全文 string 化)を走らせるので、
+  OOM 直後は二度目の OOM で失敗しうる。ただし失敗しても `CrashHandler` が拾って
+  `flushed = false` の悲観文言になる=**嘘の安全宣言にはならず正しく degrade する**。
+- **`Notify` のモーダル中に起きた例外は再入ガードで無音になる**(最終レビュー L-V6)。
+  WinForms 既定ダイアログでも同種の問題は起きる(=退行ではない)ので受容。
 - **`CrashHandler` の再入ガードは 2 本目の帰り先まで面倒を見ない**。2 本目が
   `AppDomain.UnhandledException(IsTerminating=true)` の場合、return すると CLR がそのまま
   プロセスを落とすため、先着が退避の途中(最大 5 秒)なら退避を殺して WER へ落ちる。

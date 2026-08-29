@@ -128,11 +128,19 @@ public sealed partial class EditorControl
     /// (次の非低サロゲート char が来た時点で必ず破棄されるため)。
     /// 現在の破棄契機は次の 2 系統:
     /// <list type="bullet">
-    /// <item>列挙: <see cref="OnKeyDown"/> / <see cref="EditorControl.OnLostFocus"/> /
+    /// <item>列挙: <see cref="OnKeyDown"/>(<b><see cref="Keys.Packet"/> は除く</b>=
+    /// KEYEVENTF_UNICODE が WM_CHAR を運ぶために前置する合成キーなので、
+    /// ここで破棄すると A-20 の現実の発現源でだけペアが結合しない) /
+    /// <see cref="EditorControl.OnLostFocus"/> /
     /// <see cref="OnKeyPress"/> の制御文字・BMP 文字分岐</item>
     /// <item>事後条件: <see cref="EditorControl.AfterEdit"/>(本文が変わった=保留は対にならない。
-    /// 列挙漏れの最後の砦)</item>
+    /// 列挙漏れの最後の砦。メニュー経由の貼り付けなど <see cref="OnKeyDown"/> を伴わない
+    /// 編集経路はここだけが担当する)</item>
     /// </list>
+    /// <b>設計 §6.2 が挙げた「マウス操作」は列挙していない</b>(意図的な逸脱・設計 §10-A に記録)。
+    /// マウスでキャレットを動かしても保留は残るが、実際に踏むには 1 回の SendInput が生む
+    /// 2 通の WM_CHAR の<b>間に</b>マウス選択を挟む必要があり、現実性が極めて低い。
+    /// 踏んだ場合の被害は「選択範囲がペアで置換される」なので、無害ではない点は認識しておく。
     /// </remarks>
     private void DropPendingHighSurrogate() => _pendingHighSurrogate = NoPendingHighSurrogate;
 

@@ -122,6 +122,12 @@ internal sealed class UiCrashSink : ICrashSink
     /// 呼ばれたスレッドでそのまま出す。代償は、背景スレッド発火時に
     /// オーナー無しのダイアログがメインウィンドウの背後に出る可能性
     /// (<c>AppDomain</c> 経路は現状「誰も投げていない保険」なので実害は小さい)。
+    /// <b>その場合の見え方</b>: <see cref="MainForm.FlushBackupsForCrash"/> が
+    /// <c>_closeInProgress</c> を立てたまま戻らないので、このダイアログを待っている間は
+    /// メインウィンドウを閉じられず、シャットダウンも拒否される。
+    /// オーナー無しダイアログはメインフォームを disable しないため、
+    /// 「背後に見えないダイアログがあり、アプリは操作できるが閉じられない」状態になりうる
+    /// (最終レビュー 脆弱性パス L-V1)。UI スレッド経路ではモーダルなので短時間で終わる。
     /// </para>
     /// </remarks>
     public void Notify(bool flushed, Exception? ex)
@@ -135,9 +141,19 @@ internal sealed class UiCrashSink : ICrashSink
     /// <see cref="Application.Exit()"/> は使わない: この経路の <c>FormClosing</c> は
     /// 結果が読めない(設計 §2.1 = 既定ダイアログの「終了」では保存確認のキャンセルが
     /// 無視された)。退避は済んでいるので終了確認をもう一度出す意味もない。
-    /// <b>申し送り</b>: <c>Environment.Exit</c> はフォームの <c>Dispose</c> を走らせないため、
-    /// プレビューを開いた状態でクラッシュすると <c>PreviewUserDataFolder</c> が残る
-    /// (起動時 sweep は未実装=設計 §11)。
+    /// <para>
+    /// <b>途中で殺される書込について</b>: バックアップ / レイアウト / 通常保存はすべて
+    /// <c>AtomicFile</c>(temp + Replace/Move)なので、ここで殺されても原本は壊れない。
+    /// 唯一の非原子的書込は <c>TextFileService</c> の共有違反フォールバック
+    /// (<c>File.WriteAllBytes</c>)で、そこだけは途中まで書かれた原本が残りうる
+    /// (成立には背景スレッドのクラッシュと保存中が重なる必要があり、
+    /// 現状 <c>AppDomain</c> 経路を投げるコードが無いので到達しない=最終レビュー T-1)。
+    /// </para>
+    /// <para>
+    /// フォームの <c>Dispose</c> が走らないため <c>PreviewUserDataFolder</c> は残る。
+    /// 回収は <see cref="PreviewUserDataSweeper"/> の起動時 sweep が担う
+    /// (ここで消そうとしても WebView2 プロセスがまだプロファイルを掴んでいて失敗する)。
+    /// </para>
     /// </remarks>
     public void Exit() => Environment.Exit(1);
 }
@@ -148,6 +164,15 @@ internal sealed class UiCrashSink : ICrashSink
 /// </summary>
 internal sealed class MainFormCrashHost(MainForm form) : ICrashUiHost
 {
+    /// <summary>
+    /// <b><c>&amp;&amp;</c> であることが要</b>: <c>InvokeRequired</c> は
+    /// <b>Handle 未生成のとき false を返す</b>(このリポジトリが過去に踏んだ罠)。
+    /// ここが <c>||</c> に化けると、ハンドル未生成のまま
+    /// <see cref="ICrashUiHost.InvokeRequired"/> が false → 直接呼び出しへ流れ、
+    /// UI スレッド専有の <see cref="BackupCoordinator"/> を背景スレッドから叩くところまで一直線。
+    /// 順序自体は <c>UiCrashSinkTests.FlushBackups_NoHandle_ReturnsFalse_WithoutTouchingBackup</c>
+    /// が pin している。
+    /// </summary>
     public bool CanMarshal => !form.IsDisposed && form.IsHandleCreated;
 
     public bool InvokeRequired => form.InvokeRequired;

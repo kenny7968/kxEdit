@@ -95,7 +95,7 @@ public class CrashHandlerTests
     public void Handle_PassesExceptionToNotify()
     {
         // 例外は post-mortem のため sink へ渡す(本番実装は Trace へ落とすだけで
-        // MessageBox には出さない=Program.MainFormCrashSink.Notify 参照)。
+        // MessageBox には出さない=UiCrashSink.Notify 参照)。
         var sink = new FakeSink();
         var ex = new InvalidOperationException("boom");
         new CrashHandler(sink).Handle(ex);

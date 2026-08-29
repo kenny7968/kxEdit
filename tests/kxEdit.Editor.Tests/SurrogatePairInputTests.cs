@@ -1,4 +1,5 @@
 using System.Reflection;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -150,6 +151,28 @@ public class SurrogatePairInputTests
         });
 
     [Fact]
+    public void HighThenNonKeyEdit_DropsPending() =>
+        Sta.Run(() =>
+        {
+            // メニュー経由の貼り付け(OnKeyDown を伴わない編集)。**列挙側の契機では捕まらず、
+            // AfterEdit の事後条件だけが保留を落とす経路**=設計 §6.2 が求めた
+            // 「列挙ではなく事後条件で守る」の当のケース。
+            // AfterEdit の DropPendingHighSurrogate() を消すと "aXY😂b" になって赤化する。
+            var (f, c) = MakeControl("ab");
+            var cb = new FakeClipboard { HasText = true, Text = "XY" };
+            c.SetClipboardForTest(cb);
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(1);
+                SendKeyPress(c, Hi);
+                Assert.True(c.Paste()); // AfterEdit を通す(OnKeyDown は伴わない)
+                SendKeyPress(c, Lo);
+                Assert.Equal("aXYb", c.GetText()); // 絵文字が湧かない
+            }
+        });
+
+    [Fact]
     public void HighThenLostFocus_DropsPending() =>
         Sta.Run(() =>
         {
@@ -247,7 +270,9 @@ public class SurrogatePairInputTests
     public void Overtype_PairReplacesExactlyOneCodePoint() =>
         Sta.Run(() =>
         {
-            // 監査書の「上書きモードでは既存 2 文字を潰す」の回帰。
+            // 監査書の「上書きモードでは既存 2 文字を潰す」に対する**唯一の回帰網**。
+            // 分割ペアを実際に生むのは VK_PACKET 経路なので、リフレクション直叩きではなく
+            // 実 WndProc 経路で踏む(§0 の取りこぼしと同じ形にしない)。
             // prefix "a" / suffix "Yb" を置き、潰れるのが X 1 文字だけであることを両端で固定する。
             var (f, c) = MakeControl("aXYb");
             using (f)
@@ -255,8 +280,12 @@ public class SurrogatePairInputTests
             {
                 c.Overtype = true;
                 c.SetCaretCharOffset(1);
-                SendKeyPress(c, Hi);
-                SendKeyPress(c, Lo);
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Hi);
+                SendMessage(c, WM_KEYUP, VK_PACKET);
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Lo);
+                SendMessage(c, WM_KEYUP, VK_PACKET);
                 Assert.Equal("a" + Emoji + "Yb", c.GetText());
             }
         });

@@ -1361,6 +1361,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // <b>事後条件</b>側にも置く。本文が変わった=保留は対にならないので捨てる。
         // 列挙(OnKeyDown / OnLostFocus)だけだと原理的に漏れるため、編集経路の唯一の後処理である
         // ここを最後の砦にする。ペア挿入自身もここを通るが、その時点で保留は既にクリア済み=no-op。
+        // 回帰テスト: SurrogatePairInputTests.HighThenNonKeyEdit_DropsPending
+        // (メニュー経由の貼り付け=OnKeyDown を伴わない編集は、ここだけが破棄を担当する)。
         DropPendingHighSurrogate();
         UpdateVerticalScrollbar();
         UpdateHorizontalScrollbar();
@@ -1584,8 +1586,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     private IClipboard _clipboard = new WinClipboard();
 
     /// <summary>
-    /// テスト専用: クリップボード seam を差し替える(<c>IImeContext</c> の factory 注入と同じ形)。
-    /// 本番経路では呼ばれない。
+    /// テスト専用: クリップボード seam を差し替える。本番経路では呼ばれない。
+    /// <c>IImeContext</c> は <c>ImeController</c> の ctor で <c>Func&lt;IImeContext&gt;</c> を受ける形だが、
+    /// <see cref="EditorControl"/> は WinForms の <c>Control</c> で引数なし ctor が要るため
+    /// setter にしている(同じ趣旨=本番では差し替えない seam・注入の形は違う)。
     /// </summary>
     internal void SetClipboardForTest(IClipboard clipboard) =>
         _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));

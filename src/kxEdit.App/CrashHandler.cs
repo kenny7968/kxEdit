@@ -12,7 +12,7 @@ namespace kxEdit.App;
 /// (<c>CrashHandlerTests</c>)。実装は<b>例外を投げてもよい</b>:
 /// <see cref="CrashHandler.Handle"/> が握って先へ進む契約になっている。
 /// </remarks>
-public interface ICrashSink
+internal interface ICrashSink
 {
     /// <summary>編集中の本文を退避する。</summary>
     /// <returns>true = 退避できた<b>と言い切れる</b>(次回起動で復元できる)。
@@ -38,12 +38,12 @@ public interface ICrashSink
 /// 既定ダイアログを避ける理由は騒がしさではなく実害で、実機では「終了」が保存確認の
 /// キャンセルを無視して落ち、hot exit バックアップが書かれないことがある(設計 §2.1)。
 /// </remarks>
-public sealed class CrashHandler
+internal sealed class CrashHandler
 {
     private readonly ICrashSink _sink;
     private int _entered;
 
-    public CrashHandler(ICrashSink sink) =>
+    internal CrashHandler(ICrashSink sink) =>
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
 
     /// <summary>
@@ -69,7 +69,7 @@ public sealed class CrashHandler
     /// (= ここは網が無いことを認めたうえでの受容。CLAUDE.md §4-B)。
     /// </para>
     /// </remarks>
-    public void Handle(Exception? ex)
+    internal void Handle(Exception? ex)
     {
         if (Interlocked.Exchange(ref _entered, 1) != 0)
             return;

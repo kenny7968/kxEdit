@@ -84,6 +84,10 @@ public class ClipboardFailureTests
                 c.Cut();
                 Assert.Equal("hello", c.GetText()); // 本文が残っていること
                 Assert.Equal((1, 4), c.GetSelectionCharRange()); // 選択も残ること
+                // `Replace(s, en - s, "")` を `Replace(s, 0, "")` に変える変異は本文 assert では
+                // 死なない(本文が変わらない)。「書けていないのに履歴と dirty だけ動く」という
+                // A-13 と同じクラスの事故をここで塞ぐ。fixture は SetSource 直後=既定と区別できる。
+                Assert.False(c.Modified);
             }
         });
 
