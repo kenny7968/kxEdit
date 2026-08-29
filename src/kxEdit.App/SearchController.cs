@@ -18,7 +18,18 @@ public sealed class SearchController
     private readonly IAnnouncer _announcer;
     private readonly Func<FindReplaceCallbacks, IFindReplaceView> _viewFactory;
     private IFindReplaceView? _view;
-    private MatchSpan? _lastHit; // 直前に選択したヒット（ゼロ幅でも前進できるよう歩進に使う）
+
+    // 直前に選択したヒット。3 つ組で持つ理由:
+    //   Hit             = 照合が返した生の UTF-16 範囲。置換はこれを対象にする。
+    //   SelStart/SelEnd = それを SelectCharRange した「結果」を読み戻した値。
+    //   Snap            = 捕捉時のスナップショット(参照同一性で文書の編集を検出する)。
+    // A-14(2026-08-29): 選択は CRLF / サロゲートを 1 論理文字として扱うため
+    // (TextBoundary.SnapToLogicalCharStart)、Hit と実選択は一致しないことがある。
+    // 例: CRLF 文書の \n ヒット (4,1) の実選択は [3,5)、\r ヒット (3,1) の実選択は [3,3) のゼロ幅。
+    // ゆえに「現ヒットが生きているか」を Hit と選択の直接比較で判定してはならない。
+    // 読み戻しにしているのは、スナップ規則を App 層へ複製しないため(規則が変わっても追随する)。
+    // Snap を弱参照にする理由は _selectionScope と同じ(判定は変わらず、旧ピース木をピン留めしない)。
+    private (WeakReference<TextSnapshot> Snap, MatchSpan Hit, int SelStart, int SelEnd)? _lastHit;
 
     // 「選択範囲のみ」ON 時に捕捉した置換対象範囲。捕捉元の TextSnapshot を一緒に持つ:
     // 位置は絶対 char index なので、捕捉後に文書が編集されると同じ数値が別の中身を指す。
@@ -210,20 +221,22 @@ public sealed class SearchController
         var (selStart, selEnd) = ed.GetSelectionCharRange();
         try
         {
+            var live = LiveHit(snap, selStart, selEnd);
             MatchSpan? hit;
             if (forward)
             {
-                int from =
-                    (_lastHit is { } h && selStart == h.Start && selEnd == h.End)
-                        ? h.Start + Math.Max(1, h.Length) // 直前ヒットの次へ（ゼロ幅でも前進）
-                        : selEnd;
+                int from = live is { } h
+                    ? h.Start + Math.Max(1, h.Length) // 直前ヒットの次へ（ゼロ幅でも前進）
+                    : selEnd;
                 hit = searcher.FindNext(snap, from);
             }
             else
             {
-                // 三項簡約: _lastHit 一致条件下で selStart == h.Start が成立するため両分岐同値。
-                // Forward 側の `h.Start + Math.Max(1, h.Length)` はゼロ幅前進の意味があり温存。
-                int before = selStart;
+                // 現ヒットがあればその始端より前を探す。スナップで選択の始端がヒットより
+                // 手前へ寄ることがある(CRLF の LF ヒット)ため、selStart のままだと
+                // [selStart, Hit.Start) 内のヒットを取りこぼす。スナップが起きない
+                // ケースでは h.Start == selStart なので挙動不変。
+                int before = live is { } h2 ? h2.Start : selStart;
                 hit = searcher.FindPrev(snap, before);
             }
 
@@ -234,8 +247,7 @@ public sealed class SearchController
                 return false;
             }
 
-            ed.SelectCharRange(hit.Value.Start, hit.Value.Length);
-            _lastHit = hit;
+            SelectHit(ed, hit.Value);
             var loc = searcher.Locate(snap, hit.Value);
             // 位置不明（Locate 失敗）時は空メッセージ＝ステータスのクリアのみ（発声なし）。
             Announce(loc is { } l ? $"{l.Total} 件中 {l.Ordinal} 件目" : "");
@@ -273,14 +285,38 @@ public sealed class SearchController
             // P6 Task 11: 現在バッファの Snapshot を直接渡す(閾値超は窓/行照合に自動切替)。
             var snap = ed.CurrentBuffer.Current;
             var (selStart, selEnd) = ed.GetSelectionCharRange();
-            var span = new MatchSpan(selStart, selEnd - selStart);
-            string? repl =
-                selEnd > selStart ? searcher.ReplacementAt(snap, span, d.Replacement) : null;
 
-            // G-3 修正: 現ヒット未選択なら次を検索してそのまま即置換する(VSCode 準拠)。
-            // 未ヒットの前進先が見つからない場合は Find と同じ「これ以上見つかりません」で終了。
-            if (repl is null)
+            // A-14: 置換対象はまず「Find が選んだヒット本体」を使う。選択から再導出した
+            // MatchSpan は CRLF / サロゲートのスナップで実ヒットとずれ、ReplacementAt が
+            // 外れて「次の出現」を置換していた。
+            var selSpan = new MatchSpan(selStart, selEnd - selStart);
+            MatchSpan span;
+            string repl;
+            if (
+                LiveHit(snap, selStart, selEnd) is { } hit
+                && searcher.ReplacementAt(snap, hit, d.Replacement) is { } liveRepl
+            )
             {
+                span = hit;
+                repl = liveRepl;
+            }
+            else if (
+                selEnd > selStart
+                && searcher.ReplacementAt(snap, selSpan, d.Replacement) is { } selRepl
+            )
+            {
+                // 現ヒットは死んでいるが選択そのものがヒット=選択を置換する(A-14 修正前の挙動)。
+                // Find を経由せず手で語を選んで「置換」を押す操作を落とさないために要る。
+                // ここを削って FindNext へ落とすと、選択の「次」の出現を置換する
+                // = A-14 と同じ「別の出現が置換される」不具合を作り直すことになる。
+                span = selSpan;
+                repl = selRepl;
+            }
+            else
+            {
+                // 現ヒットも無く選択もヒットでない(まだ検索していない / キャレットだけ動いた)。
+                // G-3: 次を検索してそのまま即置換する(VSCode 準拠)。
+                // 前進先が無い場合は Find と同じ「これ以上見つかりません」で終了。
                 var next0 = searcher.FindNext(snap, selEnd);
                 if (next0 is null)
                 {
@@ -299,19 +335,24 @@ public sealed class SearchController
                 repl = replCand;
             }
 
-            ed.ReplaceCharRange(span.Start, span.Length, repl);
+            // 論理文字の内側を指すヒット(CRLF の LF だけ等)でも巻き込みを復元する(Task 2)。
+            // 戻り値=置換文字列の直後の位置。span.Start + repl.Length で導出してはいけない:
+            // ゼロ幅マッチは挿入点が論理文字の境界まで後退する(ReplaceCharRangeExact は
+            // ゼロ幅を広げない)ので、導出値のほうが後ろにずれて 1 論理文字ぶんを飛ばす。
+            // 非ゼロ幅では両者は恒等(span.Start == s + prefixLen)なので、この違いを突く網は
+            // ゼロ幅マッチが CRLF / サロゲートの内側に立つ場合にしか書けない(未網羅・申し送り)。
+            int afterRepl = ed.ReplaceCharRangeExact(span.Start, span.Length, repl);
             var snap2 = ed.CurrentBuffer.Current;
-            // repl が non-null＝マッチ長>0 が保証されるため Max(1,…) は不要。空置換（削除）
-            // のとき +1 すると置換直後の隣接ヒットを取りこぼすので素の repl.Length（0含む）で前進する。
-            var next = searcher.FindNext(snap2, span.Start + repl.Length);
+            // 空置換（削除）のとき +1 すると置換直後の隣接ヒットを取りこぼすので、
+            // 置換文字列の直後(afterRepl)からそのまま前進する。
+            var next = searcher.FindNext(snap2, afterRepl);
             if (next is null)
             {
                 _lastHit = null;
                 Announce("置換しました。これ以上見つかりません");
                 return;
             }
-            ed.SelectCharRange(next.Value.Start, next.Value.Length);
-            _lastHit = next;
+            SelectHit(ed, next.Value);
             var loc = searcher.Locate(snap2, next.Value);
             Announce(
                 loc is { } l ? $"置換しました。{l.Total} 件中 {l.Ordinal} 件目" : "置換しました"
@@ -420,6 +461,27 @@ public sealed class SearchController
         {
             Announce("検索式が複雑すぎます");
         }
+    }
+
+    /// <summary>直前ヒットを選択して <see cref="_lastHit"/> を更新する。
+    /// 選択の<b>結果</b>を読み戻すことで、CRLF / サロゲートのスナップ規則を App 層に複製しない。</summary>
+    private void SelectHit(EditorControl ed, MatchSpan hit)
+    {
+        ed.SelectCharRange(hit.Start, hit.Length);
+        var (s, e) = ed.GetSelectionCharRange();
+        _lastHit = (Weak(ed.CurrentBuffer.Current), hit, s, e);
+    }
+
+    /// <summary>「いま画面で選ばれているヒット」を返す(無ければ null)。
+    /// 文書が編集されていない(スナップショット参照が同一)かつ ユーザーが選択を動かしていない
+    /// (選択が捕捉時の読み戻し値と一致)ときだけ生きている。</summary>
+    private MatchSpan? LiveHit(TextSnapshot snap, int selStart, int selEnd)
+    {
+        if (_lastHit is not { } h)
+            return null;
+        if (!h.Snap.TryGetTarget(out var captured) || !ReferenceEquals(captured, snap))
+            return null;
+        return selStart == h.SelStart && selEnd == h.SelEnd ? h.Hit : null;
     }
 
     private static WeakReference<TextSnapshot> Weak(TextSnapshot snap) => new(snap);

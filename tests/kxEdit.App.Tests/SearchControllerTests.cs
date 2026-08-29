@@ -566,6 +566,192 @@ public class SearchControllerTests
             Assert.Equal("abc", doc.Editor.Text);
         });
 
+    // ===== A-14: CRLF 文書で現ヒットを取り違えない =====
+
+    [Fact]
+    public void ReplaceOne_RegexLfInCrlfDocument_ReplacesTheSelectedHit() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // 2 行目以降を持たせて「次の出現を置換した」と「その位置を置換した」を弁別する。
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\n";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // 1 つ目の LF(index 4)にヒット=選択は [3,5) にスナップされる
+
+            host.Search.ReplaceOne();
+
+            // 修正前は ReplacementAt が外れて FindNext(5) に落ち、2 つ目の LF を置換して
+            // "abc\r\ndef\rXghi" になっていた。
+            Assert.Equal("abc\rXdef\r\nghi", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_RegexLfInCrlfDocument_MatchesReplaceAllResult() =>
+        Sta.Run(() =>
+        {
+            // 単発を一括に揃える=同じ 1 件だけの文書で両者の結果が一致すること。
+            using var one = new Host();
+            using var all = new Host();
+            var docOne = one.NewDoc("abc\r\ndef");
+            var docAll = all.NewDoc("abc\r\ndef");
+            foreach (var h in new[] { one, all })
+            {
+                h.View.Pattern = @"\n";
+                h.View.Replacement = "X";
+                h.View.UseRegex = true;
+                h.Search.OpenReplace();
+            }
+
+            one.Search.FindNext();
+            one.Search.ReplaceOne();
+            all.Search.ReplaceAll();
+
+            Assert.Equal(docAll.Editor.Text, docOne.Editor.Text);
+            Assert.Equal("abc\rXdef", docOne.Editor.Text);
+        });
+
+    [Fact]
+    public void FindNext_RegexCrInCrlfDocument_AdvancesToNextHit() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\r";
+            host.View.Replacement = "";
+            host.View.UseRegex = true;
+            host.Search.OpenFind();
+
+            Assert.True(host.Search.FindNext()); // 1 つ目の CR(index 3)。選択は [3,3) に潰れる
+            Assert.True(host.Search.FindNext()); // 修正前はここが同じ位置に留まっていた
+
+            // 2 つ目の CR(index 8)へ進んだ = 選択の始端が 8 になっている
+            Assert.Equal(8, doc.Editor.GetSelectionCharRange().Start);
+        });
+
+    [Fact]
+    public void ReplaceOne_RegexCrInCrlfDocument_KeepsTheLf() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef");
+            host.View.Pattern = @"\r";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext();
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abcX\ndef", doc.Editor.Text); // LF を巻き込まない
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterUserMovesSelection_FallsBackToSearchFromCaret() =>
+        Sta.Run(() =>
+        {
+            // 現ヒットが「生きていない」ときは従来経路(次を検索して即置換)のままであること。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3) を選択
+
+            doc.Editor.SetCaretCharOffset(4); // ユーザーが選択を動かした=現ヒットは無効
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // キャレット以降の最初のヒットを置換
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterExternalEdit_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // スナップショット世代が変われば現ヒットは死ぬ(位置は同じ数値でも中身が違う)。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3)
+
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 先頭へ挿入。選択も (4,7) へ動く
+            host.Search.ReplaceOne();
+
+            Assert.Equal("QQQQX abc", doc.Editor.Text); // ずれた (0,3) を使っていない
+        });
+
+    [Fact]
+    public void ReplaceOne_ManuallySelectedMatch_ReplacesTheSelection() =>
+        Sta.Run(() =>
+        {
+            // 挙動不変の網(A-14 修正前から緑)。Find を使わず手で語を選んで「置換」を押す操作。
+            // 現ヒットが無いからといって FindNext(selEnd) へ落とすと、選択の「次」の出現を
+            // 置換してしまう(SR ユーザーには置換位置が見えないので気付けない)。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+
+            doc.Editor.SelectCharRange(0, 3); // 検索を経由せず選択だけ作る
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("X abc", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void FindPrev_FromLfHitOfCrlf_DoesNotSkipTheCrHit() =>
+        Sta.Run(() =>
+        {
+            // 後方検索も選択の始端ではなく現ヒットの始端から遡る。CRLF の LF ヒットは
+            // 選択の始端が CR まで後退するので、選択基準だと [selStart, Hit.Start) に居る
+            // CR ヒットを飛ばす(F3 前進側と同じ取りこぼしの鏡像)。
+            using var host = new Host();
+            host.NewDoc("a\r\nb\r\nc"); // [\r\n] のヒットは index 1 / 2 / 4 / 5 の 4 件
+            host.View.Pattern = @"[\r\n]";
+            host.View.UseRegex = true;
+            host.Search.OpenFind();
+
+            for (int i = 0; i < 4; i++)
+                Assert.True(host.Search.FindNext()); // 4 件目(index 5 の LF)まで進む
+
+            Assert.True(host.Search.FindPrev());
+
+            // 3 件目=index 4 の CR。選択始端基準だと 2 件目(index 2 の LF)へ飛んでしまう。
+            Assert.Equal("4 件中 3 件目", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterEditThatKeepsTheSelection_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // 世代チェックの網。選択の数値だけでは「同じヒットを選んだまま」を判定できない
+            // (末尾を編集しても手前の選択位置はずれない)ので、スナップショット参照で弁別する。
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\n";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // ヒット (4,1)・選択は [3,5) へスナップ
+
+            doc.Editor.ReplaceCharRange(12, 1, "Z"); // 末尾を編集=世代が変わる(手前の位置は不動)
+            doc.Editor.SelectCharRange(3, 2); // 捕捉時と同じ選択へ戻す
+
+            host.Search.ReplaceOne();
+
+            // 現ヒットは死んでいる。選択 [3,5)="\r\n" は \n のヒットではないので従来経路へ落ち、
+            // 2 つ目の LF(index 9)を置換する。世代チェックを外すと 1 つ目を置換して
+            // "abc\rXdef\r\nghZ" になる。
+            Assert.Equal("abc\r\ndef\rXghZ", doc.Editor.Text);
+        });
+
     // ===== ReplaceAll(全文/捕捉済み選択スコープ) =====
 
     [Fact]
