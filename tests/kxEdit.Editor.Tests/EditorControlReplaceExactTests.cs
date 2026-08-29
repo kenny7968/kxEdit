@@ -17,9 +17,11 @@ public class EditorControlReplaceExactTests
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
 
-            ctrl.ReplaceCharRangeExact(4, 1, "X"); // LF だけを置換
+            int next = ctrl.ReplaceCharRangeExact(4, 1, "X"); // LF だけを置換
 
             Assert.Equal("abc\rXdef", ctrl.Text);
+            // 戻り値=置換文字列の直後。s(3) + 復元した接頭辞 "\r"(1) + "X"(1) = 5。
+            Assert.Equal(5, next);
         });
 
     [Fact]
@@ -29,9 +31,11 @@ public class EditorControlReplaceExactTests
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
 
-            ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換
+            int next = ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換
 
             Assert.Equal("abcX\ndef", ctrl.Text);
+            // s(3) + 接頭辞なし(0) + "X"(1) = 4。復元した LF(index 4)は飛び越さない。
+            Assert.Equal(4, next);
         });
 
     [Fact]
@@ -70,17 +74,18 @@ public class EditorControlReplaceExactTests
         {
             // 事後条件の固定。委譲先が "s + text.Length" に置くため、キャレットは
             // 置換文字列の末尾(4)ではなく**広げた範囲の末尾**(5 = 復元した LF の後ろ)に立つ。
-            // 呼び出し側(SearchController.ReplaceOne)は次ヒットの探索起点を
-            // span.Start + repl.Length で自前計算しており、この値には依存していない。
-            // 依存しているのは「接頭辞の復元が長さ保存だから span.Start が動かない」ほう。
+            // 次ヒットの探索起点にキャレットを流用できないことを、戻り値との差で示す。
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
 
-            ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換(LF を復元して書き戻す)
+            int next = ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換(LF を復元して書き戻す)
 
             Assert.Equal("abcX\ndef", ctrl.Text);
-            Assert.Equal(5, ctrl.CaretCharOffset); // 広げた範囲の末尾(置換文字列の直後は 4)
+            Assert.Equal(5, ctrl.CaretCharOffset); // 広げた範囲の末尾
             Assert.Equal((5, 5), ctrl.GetSelectionCharRange()); // 選択は解除される
+            // キャレットは戻り値の代用にならない。復元した suffix("\n")の分だけ先へ行く。
+            Assert.Equal(4, next);
+            Assert.NotEqual(next, ctrl.CaretCharOffset);
             // 接頭辞 [0, start) は長さ保存で復元される=start(3)より前は不変。
             Assert.Equal("abc", ctrl.Text[..3]);
         });
@@ -123,11 +128,14 @@ public class EditorControlReplaceExactTests
             exact.SetSource(TextBuffer.FromString("a\U0001F600b")); // "a😀b"
             plain.SetSource(TextBuffer.FromString("a\U0001F600b"));
 
-            exact.ReplaceCharRangeExact(2, 0, "X"); // 低位サロゲートの手前=ペアの内側へゼロ幅挿入
+            int next = exact.ReplaceCharRangeExact(2, 0, "X"); // 低位サロゲートの手前=ペアの内側へゼロ幅挿入
             plain.ReplaceCharRange(2, 0, "X");
 
             Assert.Equal("aX\U0001F600b", exact.Text); // 絵文字は無傷のまま前へ挿入される
             Assert.Equal(exact.Text, plain.Text); // 新 API = 既存 API(悪化していない)
+            // 挿入点が 2 → 1 へ後退するので直後は 2。start + 1 = 3 は絵文字の中間を指してしまう。
+            Assert.Equal(2, next);
+            Assert.NotEqual(2 + "X".Length, next);
         });
 
     [Fact]
@@ -139,9 +147,15 @@ public class EditorControlReplaceExactTests
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
 
-            ctrl.ReplaceCharRangeExact(4, 0, "X"); // CR と LF の間へゼロ幅挿入
+            int next = ctrl.ReplaceCharRangeExact(4, 0, "X"); // CR と LF の間へゼロ幅挿入
 
             Assert.Equal("abcX\r\ndef", ctrl.Text);
+            // 挿入点が 4 → 3 へ後退するので、置換文字列の直後は 4。
+            Assert.Equal(4, next);
+            // **なぜ戻り値が要るのか**の網: 呼び出し側が start + replacement.Length で
+            // 導出すると 5 になり、挿入した "X" ではなく CR を飛び越した位置を指す。
+            // ゼロ幅では始端自体が動くため、呼び出し側からは正しい値を組めない。
+            Assert.NotEqual(4 + "X".Length, next);
         });
 
     [Fact]
@@ -226,9 +240,12 @@ public class EditorControlReplaceExactTests
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
             ctrl.ReadOnly = true;
 
-            ctrl.ReplaceCharRangeExact(4, 1, "X");
+            int next = ctrl.ReplaceCharRangeExact(4, 1, "X");
 
             Assert.Equal("abc\r\ndef", ctrl.Text);
+            // no-op でもクランプ済み始端(=位置は動いていない)を返す規約。番兵値は返さない
+            // ので、戻り値だけでは置換の有無を判別できない(doc に明記済みの制約)。
+            Assert.Equal(4, next);
         });
 
     [Fact]

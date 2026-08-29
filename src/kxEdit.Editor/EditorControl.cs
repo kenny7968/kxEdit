@@ -1200,6 +1200,24 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// ただしゼロ幅(純挿入)は広げず境界へスナップする。サロゲートを割るヒットでは半身が
     /// U+FFFD になる(いずれも remarks 参照)。
     /// </summary>
+    /// <returns>
+    /// 置換文字列の直後の位置(置換後の文書における char offset)。
+    /// <b>この API は範囲を外側へ広げることがあり、広げ方は呼び出し側から予測できないので、
+    /// 次の位置は必ずこの戻り値を使うこと</b>=<c>start + replacement.Length</c> で計算しては
+    /// ならない(ゼロ幅では始端自体が境界へ後退するため合わない。例: <c>"abc\r\ndef"</c> の
+    /// <c>(4, 0, "X")</c> は挿入点が 3 へ後退して戻り値 4 になるが、<c>start + 1</c> は 5)。
+    /// キャレット(<see cref="CaretCharOffset"/>)の読み戻しでも代用できない。キャレットは
+    /// 「広げた範囲の末尾」に立つので、非ゼロ幅では復元した suffix の分だけ先へ行く
+    /// (<c>(3, 1, "X")</c> は戻り値 4 に対しキャレット 5)。
+    /// <para>
+    /// <see cref="ReadOnly"/> / SetSource 前の no-op では <c>Math.Clamp(start, 0, TextLength)</c>
+    /// (=何も動いていないので始端そのもの)を返す。常に文書内の有効な位置を返す規約にして、
+    /// 戻り値をオフセットとして無条件に使えるようにするため(番兵値 -1 を混ぜると、それを
+    /// オフセットに使う新種のバグを作る)。<b>その代償として戻り値だけでは置換の有無を
+    /// 判別できない</b>=読み取り専用文書で「戻り値を次の起点にして進む」ループを書くと
+    /// 同じ位置を回り続ける。置換されたかどうかが要るなら <see cref="ReadOnly"/> を先に見ること。
+    /// </para>
+    /// </returns>
     /// <remarks>
     /// 検索の単発置換(A-14 / 2026-08-29)がこれを使う。正規表現 <c>\n</c> は CRLF 文書で LF
     /// だけにヒットするが、<see cref="ReplaceCharRange"/> は両端をスナップするので CR ごと消える。
@@ -1223,21 +1241,20 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 変異は生存する)。
     /// </para>
     /// <para>
-    /// <b>事後条件(呼び出し側の算術が依存する)。</b>
-    /// 復元する接頭辞は<b>長さ保存</b>で書き戻すため、クランプ後の始端より前
-    /// <c>[0, s0)</c> は内容も長さも変わらない=<paramref name="start"/> が範囲内にあれば
-    /// <b>呼び出し側が持つ <paramref name="start"/> は置換後もそのまま使える</b>。
-    /// 置換文字列の直後は <c>start + replacement.Length</c>。
-    /// 一方キャレットは委譲先の規約(<c>s + text.Length</c>)に従って
-    /// <b>広げた範囲の末尾</b>=<c>start + replacement.Length + 復元した suffix の長さ</c>に立ち、
-    /// 選択は解除される(例: <c>"abc\r\ndef"</c> の <c>(3, 1, "X")</c> は本文 <c>"abcX\ndef"</c> ・
-    /// キャレット 5)。キャレットを置換文字列の直後へ戻す補正は<b>あえて入れていない</b>
-    /// =補正すると UIA イベントが増え、編集の副作用が 1 箇所に留まらなくなるため。
-    /// これを書くのは、呼び出し側(<c>SearchController.ReplaceOne</c>)が次ヒットの探索起点を
-    /// <c>span.Start + repl.Length</c> で計算しており、「接頭辞の復元が長さ保存だから
-    /// <c>span.Start</c> が動かない」という性質に依存しているから。広げ方を変えると
-    /// その算術が静かに壊れる。<b>ゼロ幅は例外</b>=下記のとおり始端自体が境界へ後退しうるので
-    /// <c>start</c> は保存されない。
+    /// <b>事後条件。</b> 次の位置が要るなら<b>戻り値を使うこと</b>(returns 参照)。
+    /// 呼び出し側で <c>start</c> から導出してはならない=「接頭辞の復元は長さ保存だから
+    /// <c>start</c> は動かない」は非ゼロ幅でしか成り立たず、ゼロ幅では始端自体が境界へ
+    /// 後退する。正しい値を組めるのはこのメソッドの内部だけ(<c>s</c> と復元した接頭辞の
+    /// 長さの両方を持っているため)なので、推測させずに返す。
+    /// </para>
+    /// <para>
+    /// <b>キャレットは戻り値とは別の位置に立つ</b>(こちらは独立した性質)。委譲先の規約
+    /// (<c>s + text.Length</c>)に従って<b>広げた範囲の末尾</b>=
+    /// <c>戻り値 + 復元した suffix の長さ</c>に立ち、選択は解除される(例: <c>"abc\r\ndef"</c> の
+    /// <c>(3, 1, "X")</c> は本文 <c>"abcX\ndef"</c> ・戻り値 4 ・キャレット 5)。
+    /// キャレットを置換文字列の直後へ戻す補正は<b>あえて入れていない</b>=補正すると UIA
+    /// イベントが増え、編集の副作用が 1 箇所に留まらなくなるため。
+    /// </para>
     /// </para>
     /// <para>
     /// <b>ゼロ幅(純挿入)は外側へ広げない。</b> 巻き込み復元は「論理文字の内側にある文字を
@@ -1260,12 +1277,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// サロゲート)で始まる / 終わる場合だけは半身が生き残るため、この限りではない。
     /// </para>
     /// </remarks>
-    public void ReplaceCharRangeExact(int start, int length, string replacement)
+    public int ReplaceCharRangeExact(int start, int length, string replacement)
     {
         if (IsComposing)
             CancelCompositionAndDefault();
         if (_buffer is null || ReadOnly)
-            return;
+            return Math.Clamp(start, 0, TextLength); // no-op=位置は動かない(returns 参照)
         ArgumentNullException.ThrowIfNull(replacement);
         var snap = _buffer.Current;
         int s0 = Math.Clamp(start, 0, snap.CharLength);
@@ -1276,16 +1293,21 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // ゼロ幅(純挿入)は外側へ広げない。理由は remarks の「ゼロ幅は広げない」を参照。
         if (s0 == e0)
         {
-            ReplaceCharRange(s0, 0, replacement);
-            return;
+            // 挿入点は境界へ後退しうるので、戻り値はスナップ後の位置から作る
+            // (s0 から作ると論理文字 1 つ分ずれる=呼び出し側が start から導出するのと同じ誤り)。
+            int insertAt = TextBoundary.SnapToLogicalCharStart(snap, s0);
+            ReplaceCharRange(insertAt, 0, replacement);
+            return insertAt + replacement.Length;
         }
         int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
         int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
+        int prefixLen = s0 - s; // 復元する接頭辞。長さ保存で書き戻すので戻り値にも効く
         // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は常に空を返し
         // (TextSnapshot.GetText の length == 0 早期 return)、string 連結は空オペランドを
         // 短絡して残り 1 つの参照をそのまま返すため、分岐しても結果は同じ。
-        string text = snap.GetText(s, s0 - s) + replacement + snap.GetText(e0, e - e0);
+        string text = snap.GetText(s, prefixLen) + replacement + snap.GetText(e0, e - e0);
         ReplaceCharRange(s, e - s, text);
+        return s + prefixLen + replacement.Length;
     }
 
     private int ClampTopLine(int value)
