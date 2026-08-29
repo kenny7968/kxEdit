@@ -19,7 +19,7 @@ public sealed class SearchController
     private readonly Func<FindReplaceCallbacks, IFindReplaceView> _viewFactory;
     private IFindReplaceView? _view;
 
-    // 直前に選択したヒット。3 つ組で持つ理由:
+    // 直前に選択したヒット。4 つ組で持つ理由:
     //   Hit             = 照合が返した生の UTF-16 範囲。置換はこれを対象にする。
     //   SelStart/SelEnd = それを SelectCharRange した「結果」を読み戻した値。
     //   Snap            = 捕捉時のスナップショット(参照同一性で文書の編集を検出する)。
@@ -339,8 +339,11 @@ public sealed class SearchController
             // 戻り値=置換文字列の直後の位置。span.Start + repl.Length で導出してはいけない:
             // ゼロ幅マッチは挿入点が論理文字の境界まで後退する(ReplaceCharRangeExact は
             // ゼロ幅を広げない)ので、導出値のほうが後ろにずれて 1 論理文字ぶんを飛ばす。
-            // 非ゼロ幅では両者は恒等(span.Start == s + prefixLen)なので、この違いを突く網は
-            // ゼロ幅マッチが CRLF / サロゲートの内側に立つ場合にしか書けない(未網羅・申し送り)。
+            // 非ゼロ幅では両者は恒等(span.Start == s + prefixLen)なので、差が出るのは
+            // ゼロ幅マッチが CRLF / サロゲートの内側に立つ場合だけ。そのとき差分窓は
+            // 1 code unit しかなく、置換後の本文も選択も一致してしまう(選択も境界へ
+            // スナップされるため)。弁別できるのは通知の序数=次ヒットが 1 件飛ぶことで、
+            // ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset が固定している。
             int afterRepl = ed.ReplaceCharRangeExact(span.Start, span.Length, repl);
             var snap2 = ed.CurrentBuffer.Current;
             // 空置換（削除）のとき +1 すると置換直後の隣接ヒットを取りこぼすので、

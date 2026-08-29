@@ -671,7 +671,10 @@ public class SearchControllerTests
     public void ReplaceOne_AfterExternalEdit_DoesNotReuseStaleHit() =>
         Sta.Run(() =>
         {
-            // スナップショット世代が変われば現ヒットは死ぬ(位置は同じ数値でも中身が違う)。
+            // 先頭挿入で選択が (4,7) へ動くので、この網が実際に通るのは「選択そのものがヒット」
+            // の中間分岐。見ているのは「捕捉時のずれた (0,3) を使わない」ことだけで、
+            // 世代チェックそのものは検査していない(世代チェックを外しても緑)。
+            // 世代チェックを固定しているのは AfterEditThatKeepsTheSelection のほう。
             using var host = new Host();
             var doc = host.NewDoc("abc abc");
             host.View.Pattern = "abc";
@@ -683,6 +686,33 @@ public class SearchControllerTests
             host.Search.ReplaceOne();
 
             Assert.Equal("QQQQX abc", doc.Editor.Text); // ずれた (0,3) を使っていない
+        });
+
+    [Fact]
+    public void ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset() =>
+        Sta.Run(() =>
+        {
+            // 置換後の前進起点は ReplaceCharRangeExact の戻り値であって span.Start + repl.Length
+            // ではない。ゼロ幅ヒットは挿入点が論理文字の境界まで後退する(CRLF は割らない)ので、
+            // 導出値だと 1 code unit ぶん後ろから探し始め、次のヒットを 1 件飛ばす。
+            // 飛ばしても本文と選択は一致してしまう(選択も境界へスナップされるため)。
+            // 弁別できるのは通知の序数だけなので、そこを固定する。
+            using var host = new Host();
+            var doc = host.NewDoc("a\r\nb");
+            // 前半=CR と LF の間のゼロ幅ヒット。後半=置換で入る X の直後のゼロ幅ヒット
+            // (置換後に「飛ばされる側」の 1 件を作るために要る)。
+            host.View.Pattern = @"(?<=\r)(?=\n)|(?<=X)";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext();
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("aX\r\nb", doc.Editor.Text);
+            Assert.Equal((2, 2), doc.Editor.GetSelectionCharRange());
+            // 本文も選択も変異と同じ。序数だけが違う(変異では「2 件中 2 件目」になる)。
+            Assert.Equal("置換しました。2 件中 1 件目", host.Announcer.Said[^1]);
         });
 
     [Fact]
