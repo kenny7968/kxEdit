@@ -1,5 +1,7 @@
 // CrashHandler.cs
 // M-1(監査 2026-08-22 / 設計 2026-08-29 §5): 未処理例外を「退避 → 通知 → 終了」に一本化する。
+using System.Diagnostics;
+
 namespace kxEdit.App;
 
 /// <summary>
@@ -54,6 +56,18 @@ public sealed class CrashHandler
     /// <see cref="ICrashSink.Exit"/> だけは try で包まない: 包んでも先が無く、
     /// 例外が出れば元の未処理例外経路へ戻るだけ(=既定ダイアログが出る)で、
     /// 「通知まで済ませたのにプロセスが残る」より結果が読める。
+    /// <para>
+    /// <b>再入ガードの射程</b>: 守るのは「先着 1 本だけが退避と終了を行う」ことだけで、
+    /// 2 本目の帰り先までは面倒を見ない。2 本目が <c>Application.ThreadException</c> なら
+    /// メッセージループが続くだけ(先着が Exit するまでの数秒、壊れた状態で走る)。
+    /// 2 本目が <c>AppDomain.UnhandledException(IsTerminating=true)</c> の場合は、
+    /// ここで return すると<b>CLR がそのままプロセスを落とす</b>ため、先着が退避の途中
+    /// (最大 5 秒)なら退避を殺して WER へ落ちる。<c>AppDomain</c> 経路は現状
+    /// 「誰も投げていない保険」(設計 §5.3)なので受容している。
+    /// なお真の同時発火を決定的に検証する網は書けないため、
+    /// <c>Interlocked.Exchange</c> を素の read/write に変える変異はテストで殺せない
+    /// (= ここは網が無いことを認めたうえでの受容。CLAUDE.md §4-B)。
+    /// </para>
     /// </remarks>
     public void Handle(Exception? ex)
     {
@@ -69,7 +83,7 @@ public sealed class CrashHandler
         {
             // 退避で落ちても通知と終了までは必ず到達させる。flushed は false のまま=
             // 「退避できたと言い切れない」側の文面になる。
-            System.Diagnostics.Trace.TraceError($"kxEdit crash flush failed: {flushEx}");
+            Trace.TraceError($"kxEdit crash flush failed: {flushEx}");
         }
 
         try
@@ -79,7 +93,7 @@ public sealed class CrashHandler
         catch (Exception notifyEx)
         {
             // 通知に失敗しても終了は行う(プロセスを残さない)。
-            System.Diagnostics.Trace.TraceError($"kxEdit crash notify failed: {notifyEx}");
+            Trace.TraceError($"kxEdit crash notify failed: {notifyEx}");
         }
 
         _sink.Exit();

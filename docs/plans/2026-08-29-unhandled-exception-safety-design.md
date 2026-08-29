@@ -356,6 +356,20 @@ M-1 のハンドラは意図的にクラッシュさせないと確認できな�
 実機での確認は「A-13 の修正後に例外ダイアログが出ないこと」で間接的に済ませ、
 ハンドラ本体の順序は §8.3 の自動テストで担保する。
 
+### 9.1 実施済みの手動スモーク(2026-08-29・SR なし)
+
+計画 Task 4 Step 5。Release ビルドを起動し、別プロセスで `OpenClipboard(NULL)` を保持した
+状態で操作した。UIA / Win32 で観測(**発声そのものは未検証=L5 の代替にはならない**)。
+
+| # | 操作 | 結果 |
+|---|------|------|
+| 1 | クリップボード保持中に Ctrl+C | **未処理例外ダイアログが出ない**(プロセスの可視トップレベルウィンドウは主フォーム 1 つのみ) |
+| 2 | 同上 | 通知ラベルが「クリップボードにコピーできません。他のアプリが使用中の可能性があります」 |
+| 3 | 同状態で Ctrl+X | 本文が消えない(UIA TextPattern で `SMOKE-A13-TEXT` を確認) |
+| 4 | その後に通常終了 | 保存確認が正常に出て「いいえ」で終了(§2.1 の「キャンセルが効かない」状態から回復) |
+
+§9 の 1〜3 に対応。4〜6(絵文字パネル・IME・上書きモード)と実発声の確認は L5 で行う。
+
 ## 10. 非目標(YAGNI)
 
 - **M-3(512MB 上限の未捕捉)/ M-21(OOM)の個別捕捉**はしない。M-1 のハンドラが受け皿になる。
@@ -366,7 +380,72 @@ M-1 のハンドラは意図的にクラッシュさせないと確認できな�
   その上で失敗したなら、ユーザーに伝えるのが正しい。
 - **`ThreadExceptionDialog` のカスタマイズ**はしない。到達させないのが方針(§3.2)。
 
+## 10-A. 実装時の決定記録(2026-08-29 追記)
+
+本書冒頭は「実施記録は §10 に追記する」と書いているが、§10 は「非目標」で追記先ではない。
+記録はここ(§10-A)と §11 に置く。以下は**計画が「決めて記録せよ」と指定した項目**と、
+設計・計画からの**意図的な逸脱**である(CLAUDE.md §2)。
+
+### A-20(Task 1)
+
+- **保留の破棄契機**: `OnKeyDown` と `EditorControl.OnLostFocus`(実在した override に 1 行追加)に
+  加えて、**`AfterEdit` にも事後条件として置いた**。§6.2 が「列挙は原理的に漏れる。事後条件側に
+  置けないか検討する」と求めていた点への回答で、`AfterEdit` は編集経路の唯一の後処理なので
+  「本文が変わった=保留は対にならない」を 1 か所で担保できる。IME 開始時
+  (`DeleteSelectionForImeStart`)への追加は**しない**: IME 確定は `InsertConfirmedText` →
+  `AfterEdit` を通るため事後条件側で覆われる。
+- `'\0'` の直書きをやめ `NoPendingHighSurrogate` 定数にした(番兵であることを型で示すため)。
+
+### A-13(Task 2 / Task 3)
+
+- **`ClipboardFailureKind` の値は `Copy` / `Paste` ではなく `Write` / `Read`**(§4.3 からの逸脱)。
+  `Cut` の失敗も「書き込み」に含められるため。
+- **`Copy` / `Paste` の戻り値の意味**は「意図した転送が行われたか」で統一した。
+  空クリップボードの `Paste` は **`false`**(計画のコードは `true` を筋としていたが、
+  「挿入したか」で揃えるほうが `Cut` の判定と一貫する)。false は no-op も失敗も含むので、
+  **失敗の判定は必ず `ClipboardFailed` で行う**契約を XML doc に明記した。
+- **App.Tests から Editor の internal を見る**(計画 Task 3 の選択肢 (a) を採用)。
+  `kxEdit.Editor.csproj` に `InternalsVisibleTo kxEdit.App.Tests` を追加。テスト専用 seam を
+  public へ昇格させるより副作用が小さく、Editor.Tests / Editor.Smoke に前例がある。
+- 発声文言は読み書きで分けた(§4.3 は「1 文言へ寄せてよい」としていたが、
+  SR で操作を聞き分けられるほうがよい)。実文言は `MainForm.ClipboardFailureMessage`。
+
+### M-1(Task 4)
+
+- **`Notify` は marshal しない**(計画 Task 4 Step 3 が「決めて記録せよ」と指定した項目)。
+  この時点で退避は済んでおり直後に `Environment.Exit` する。UI スレッドが死んでいる/
+  ブロックされている場合に marshal すると「通知も出ずに固まる」= WinForms 既定より悪くなるため、
+  呼ばれたスレッドでそのまま `MessageBox` を出す。代償は、背景スレッド発火時に
+  オーナー無しのダイアログが背後に出る可能性(`AppDomain` 経路は現状「誰も投げていない保険」)。
+- **`FlushBackupsForCrash` の前提ゲートは hot exit の silent path と意図的に違う**。
+  `BackupEnabled` と「32M 超 dirty なし」だけを見て、**`RestoreOpenFilesOnStartup` は見ない**。
+  OFF でも `OfferBackupRestoreOnStartup` が次回起動で復元を提案できるため、OFF を理由に
+  「退避できなかった可能性があります」と出すと、実際には復元できる構成に嘘の悲観を出すことになる
+  (レビュー Major-3)。計画のコードにはゲート自体が無く、そのままだと BackupOFF 環境で
+  `WaitForFinalFlush` の「書くものが無い=失敗も無い」の true を掴んで
+  「復元できます」と嘘をつくところだった。
+- **同期プリミティブは `TaskCompletionSource<bool>`**(計画は `ManualResetEventSlim` + `using`)。
+  `SerialBackupWriter.WaitForPendingJobs` が同じ問題に対して同じパターンを避ける判断を
+  明文で残しているため、先例に揃えた(レビュー Major-1)。
+- **本番 sink は `Program` の入れ子ではなく `UiCrashSink` として切り出した**。
+  marshal・タイムアウト・文面選択という「`CrashHandler` では検証できないロジック」が
+  ここに残るため、`ICrashUiHost` 越しにテスト可能にした(レビュー Major-2)。
+- 例外の中身は `Trace` へ落とすだけで `MessageBox` には出さない(パス等が画面に出る面を増やさない)。
+
 ## 11. 申し送り(実装時・レビュー時に追記する)
+
+- **`Environment.Exit(1)` はフォームの `Dispose` を走らせない**ため、マークダウンプレビューを
+  開いた状態でクラッシュすると `%LOCALAPPDATA%\kxEdit\WebView2\preview-{guid}` が残る
+  (`MarkdownPreviewForm.Dispose` が消す責務を持っている)。起動時 sweep は
+  `PreviewUserDataFolder` の doc が「v0.12 以降候補」として未実装。データ喪失ではないが、
+  `Environment.Exit` の採用でリーク経路が 1 本増えたのは事実なので、sweep の優先度を上げる材料。
+- **`CrashHandler` の再入ガードは 2 本目の帰り先まで面倒を見ない**。2 本目が
+  `AppDomain.UnhandledException(IsTerminating=true)` の場合、return すると CLR がそのまま
+  プロセスを落とすため、先着が退避の途中(最大 5 秒)なら退避を殺して WER へ落ちる。
+  `AppDomain` 経路は現状「誰も投げていない保険」(§5.3)なので受容。
+- **真の同時発火を決定的に検証する網は書けない**(`Interlocked.Exchange` を素の read/write に
+  変える変異はテストで殺せない)。網が無いことを認めたうえでの受容(CLAUDE.md §4-B)。
+
 
 - §2.1 の「hot exit バックアップが書かれるかどうかが不定」は**原因未特定**。
   M-1 の修正で当該経路(WinForms 既定ダイアログ → `Application.ExitThread`)には

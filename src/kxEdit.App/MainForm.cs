@@ -640,24 +640,38 @@ public sealed partial class MainForm : Form
     /// <b>UI スレッドから呼ぶこと</b>(<see cref="BackupCoordinator"/> は <c>_map</c> を
     /// 非スレッドセーフな Dictionary で持つ UI スレッド専有クラス)。
     /// <para>
-    /// 前提ゲート(<c>RestoreOpenFilesOnStartup</c> / <c>BackupEnabled</c> /
-    /// 32M 超 dirty なし)は hot exit の silent path と同じものを使う。
-    /// これを省くと、内容の定期退避が無効な環境で <c>WaitForFinalFlush</c> が
-    /// 「書くものが無い=失敗も無い」の true を返し、
+    /// <b>前提ゲート</b>は hot exit の silent path と<b>意図的に違う</b>:
+    /// <c>BackupEnabled</c> と「32M 超 dirty なし」だけを見て、
+    /// <c>RestoreOpenFilesOnStartup</c> は<b>見ない</b>。OFF でも
+    /// <see cref="OfferBackupRestoreOnStartup"/> が次回起動でバックアップからの復元を提案するので、
+    /// OFF を理由に「退避できなかった可能性があります」と言うと、実際には復元できる構成に
+    /// 嘘の悲観を出すことになる(Task 4 レビュー Major-3)。
+    /// <c>BackupEnabled</c> は落とせない: OFF では <c>FinalFlushForRestore</c> が本文を書かないのに
+    /// <c>WaitForFinalFlush</c> が「書くものが無い=失敗も無い」の true を返すため、
     /// <b>何も退避していないのに「復元できます」と表示する</b>嘘の安全宣言になる。
-    /// <c>BackupEnabled</c> を <c>&amp;&amp;</c> の左に置いているのも意図的で、
-    /// <c>WaitForFinalFlush</c> は OFF のとき残留失敗 Id を恒久的に読み続ける契約
-    /// (同 remarks)=前提ゲートを通らない呼び出しを作らない。
+    /// 「32M 超 dirty なし」も落とせない: path-only バックアップからは本文が戻らない。
+    /// </para>
+    /// <para>
+    /// ゲートは <c>&amp;&amp;</c> の短絡ではなく<b>構造ガード</b>で書く。
+    /// <c>WaitForFinalFlush</c> は <c>BackupEnabled</c> OFF のとき残留失敗 Id を恒久的に
+    /// 読み続ける契約(同 remarks)なので、<b>ゲートを通らない呼び出しを作らない</b>のが本質であり、
+    /// 「見た目が等価な」リファクタ(先に結果を変数へ受ける)で静かに壊れる形にしない。
     /// </para>
     /// </remarks>
     internal bool FlushBackupsForCrash()
     {
-        bool canRestore =
-            _settings.RestoreOpenFilesOnStartup
-            && _settings.BackupEnabled
-            && !HasOversizedDirtyDoc();
+        // A-8 / H-1(OnFormClosing の再入ガード)と同じ機構をここでも塞ぐ:
+        // WaitForFinalFlush の管理された待機は SENT メッセージを配送するため、待っている間に
+        // WM_CLOSE / WM_QUERYENDSESSION が届くと OnFormClosing が足元で完走し、
+        // BackupCoordinator.Shutdown → Dispose まで進んでしまう。必ず Environment.Exit するので
+        // 立てたら戻さない。
+        _closeInProgress = true;
+
+        bool canRestore = _settings.BackupEnabled && !HasOversizedDirtyDoc();
         _backup.FinalFlushForRestore();
-        return canRestore && _backup.WaitForFinalFlush();
+        if (!canRestore)
+            return false; // BackupEnabled OFF では WaitForFinalFlush を呼ばない(呼び出し規約)
+        return _backup.WaitForFinalFlush();
     }
 
     /// <summary>テスト専用: 最後に <c>IAnnouncer.Say</c> した文言

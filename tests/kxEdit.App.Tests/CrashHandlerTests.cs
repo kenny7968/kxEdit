@@ -147,6 +147,40 @@ public class CrashHandlerTests
     }
 
     [Fact]
+    public void Handle_ReentrantFromNotify_DoesNotLoop()
+    {
+        // remarks が謳う「ハンドラ内で再び例外が出ても無限ループしない」の本体。
+        // 逐次 2 回呼びでは、ガードを Handle 末尾へ移す変異が生き残る(先着が既に完了しているため)。
+        // Notify の中から再帰的に Handle を呼ぶ形なら、そのガードはスタックオーバーフローで死ぬ。
+        var sink = new ReentrantSink();
+        var h = new CrashHandler(sink);
+        sink.Handler = h;
+        h.Handle(new InvalidOperationException("boom"));
+        Assert.Equal(new[] { "flush", "notify", "exit" }, sink.Calls);
+    }
+
+    private sealed class ReentrantSink : ICrashSink
+    {
+        public List<string> Calls { get; } = new();
+        public CrashHandler? Handler { get; set; }
+
+        public bool FlushBackups()
+        {
+            Calls.Add("flush");
+            return true;
+        }
+
+        public void Notify(bool flushed, Exception? ex)
+        {
+            Calls.Add("notify");
+            // ハンドラの中でさらに例外が起きた状況を模す(= 再入)。
+            Handler?.Handle(new InvalidOperationException("secondary"));
+        }
+
+        public void Exit() => Calls.Add("exit");
+    }
+
+    [Fact]
     public void Ctor_NullSink_Throws() =>
         Assert.Throws<ArgumentNullException>(() => new CrashHandler(null!));
 }

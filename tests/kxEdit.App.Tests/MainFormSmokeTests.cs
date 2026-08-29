@@ -1359,6 +1359,93 @@ public class MainFormSmokeTests
         }
     }
 
+    // ===== M-1(2026-08-29): 未処理例外からの退避と前提ゲート =====
+
+    /// <summary>通常構成(BackupON)では実際に退避でき、その本文が実ファイルに載る。
+    /// 戻り値 true は「次回起動で復元できる」と言い切る宣言なので、根拠まで見る。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupOn_Dirty_ReturnsTrue_AndPersistsContent() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+            Assert.True(doc.Editor.Modified);
+
+            Assert.True(form.FlushBackupsForCrash());
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "crash-body");
+        });
+
+    /// <summary>BackupOFF では本文が書かれないのに <c>WaitForFinalFlush</c> は
+    /// 「書くものが無い=失敗も無い」の true を返す。ゲートを外すと
+    /// <b>何も退避していないのに「復元できます」</b>という嘘の安全宣言になる。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupOff_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = false;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+
+            Assert.False(form.FlushBackupsForCrash());
+        });
+
+    /// <summary>
+    /// hot exit OFF(<c>RestoreOpenFilesOnStartup=false</c>)でも BackupON なら
+    /// 次回起動の <c>OfferBackupRestoreOnStartup</c> が復元を提案できる=
+    /// <b>true を返す</b>(Task 4 レビュー Major-3)。ここを false にすると、
+    /// 実際には復元できる支持された構成に嘘の悲観を出すことになる。
+    /// hot exit の silent path のゲートと<b>意図的に違う</b>ことを固定する。
+    /// </summary>
+    [Fact]
+    public void FlushBackupsForCrash_RestoreOff_ButBackupOn_ReturnsTrue() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = false;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+
+            Assert.True(form.FlushBackupsForCrash());
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "crash-body");
+        });
+
+    /// <summary>書込が実際に失敗する構成では false(= 事後条件検査が効いている)。
+    /// 「ゲートさえ通れば true」に丸める変異を kill する。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupWriteFails_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            // backups ディレクトリの位置を「ファイル」で塞ぐ=実 writer の書込が必ず失敗する。
+            File2.WriteAllText(tmp.BackupDir, "occupied");
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+            Assert.False(form.HasOversizedDirtyDocForTest()); // oversized 経路ではない
+
+            Assert.False(form.FlushBackupsForCrash());
+        });
+
     // ===== A-13(2026-08-29): クリップボード失敗の SR 通知 =====
 
     /// <summary>
