@@ -65,6 +65,51 @@ public class EditorControlReplaceExactTests
         });
 
     [Fact]
+    public void ReplaceCharRangeExact_CaretLandsAtEndOfWidenedRange() =>
+        Sta.Run(() =>
+        {
+            // 事後条件の固定。委譲先が "s + text.Length" に置くため、キャレットは
+            // 置換文字列の末尾(4)ではなく**広げた範囲の末尾**(5 = 復元した LF の後ろ)に立つ。
+            // 呼び出し側(SearchController.ReplaceOne)は次ヒットの探索起点を
+            // span.Start + repl.Length で自前計算しており、この値には依存していない。
+            // 依存しているのは「接頭辞の復元が長さ保存だから span.Start が動かない」ほう。
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
+
+            ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換(LF を復元して書き戻す)
+
+            Assert.Equal("abcX\ndef", ctrl.Text);
+            Assert.Equal(5, ctrl.CaretCharOffset); // 広げた範囲の末尾(置換文字列の直後は 4)
+            Assert.Equal((5, 5), ctrl.GetSelectionCharRange()); // 選択は解除される
+            // 接頭辞 [0, start) は長さ保存で復元される=start(3)より前は不変。
+            Assert.Equal("abc", ctrl.Text[..3]);
+        });
+
+    [Fact]
+    public void ReplaceCharRangeExact_NegativeStart_KeepsRemainingWidth() =>
+        Sta.Run(() =>
+        {
+            // 終端は**生の start** から作る(クランプ後の s0 からではない)。[-1, 2) のうち
+            // 文書内に残る幅 [0, 2) が置換対象になる。s0 から作ると [0, 3) になり "Xd" が出る。
+            //
+            // この設計選択そのものは ClampsOutOfRangeArgs も弁別する(実測: (long)s0 への変異で
+            // 両方が赤。(-3, 2) は正しい実装ではゼロ幅だが、変異すると幅 2 の置換になり
+            // "Xabcd" が "Xcd" に変わる)。本テストが足すのは**幅が生き残る**ほうの分岐=
+            // 始端だけが範囲外で終端は文書内、という非ゼロ幅の入口を通す網。
+            // 既存 ReplaceCharRange と同じ流儀であることも対照群で示す。
+            using var exact = new EditorControl();
+            using var plain = new EditorControl();
+            exact.SetSource(TextBuffer.FromString("abcd"));
+            plain.SetSource(TextBuffer.FromString("abcd"));
+
+            exact.ReplaceCharRangeExact(-1, 3, "X");
+            plain.ReplaceCharRange(-1, 3, "X");
+
+            Assert.Equal("Xcd", exact.Text); // "ab" が消えて "cd" が残る
+            Assert.Equal(exact.Text, plain.Text);
+        });
+
+    [Fact]
     public void ReplaceCharRangeExact_ZeroWidthInsideSurrogatePair_DoesNotSplitIt() =>
         Sta.Run(() =>
         {

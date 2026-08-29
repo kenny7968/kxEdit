@@ -1197,12 +1197,15 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <summary>
     /// [start, start+length) だけを厳密に置換する。両端が CRLF / サロゲートペアの内側を指していても、
     /// <see cref="ReplaceCharRange"/> のように外側の文字を巻き込んで捨てず、はみ出し分を復元して書き戻す。
+    /// ただしゼロ幅(純挿入)は広げず境界へスナップする。サロゲートを割るヒットでは半身が
+    /// U+FFFD になる(いずれも remarks 参照)。
     /// </summary>
     /// <remarks>
     /// 検索の単発置換(A-14 / 2026-08-29)がこれを使う。正規表現 <c>\n</c> は CRLF 文書で LF
     /// だけにヒットするが、<see cref="ReplaceCharRange"/> は両端をスナップするので CR ごと消える。
     /// 一括置換(<c>SnapshotSearcher.ReplaceInRange</c> + 範囲丸ごと差し替え)は両端が
-    /// 文書の端に乗るため同じ問題を踏まない。本 API は単発置換の結果を一括置換に揃える。
+    /// <b>論理文字境界</b>(文書端、または「選択範囲のみ」で捕捉したスコープの選択端)に乗るため
+    /// 同じ問題を踏まない。本 API は単発置換の結果を一括置換に揃える。
     /// <para>
     /// 実装は外側へ広げた範囲を <see cref="ReplaceCharRange"/> へ<b>委譲する</b>。委譲先の
     /// 再スナップは <c>s</c> / <c>e</c> が既に論理文字境界にあるため恒等であり、編集の副作用
@@ -1210,8 +1213,31 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// </para>
     /// <para>
     /// <b>IME 未確定の取消はスナップショットを読む前に行うこと。</b>
-    /// <c>CancelCompositionAndDefault</c> はバッファを書き換えるので、順序を入れ替えると
-    /// 取消前のスナップショットで境界を計算して別の位置を置換する。
+    /// <c>CancelCompositionAndDefault</c> 自体はバッファを書かない(未確定文字列は overlay
+    /// <c>ImeCompositionState</c> にあり本文には入っていないため、<see cref="ImeController.Cancel"/> は
+    /// overlay のクリアと再描画だけを行う)。ただし <c>ImmNotifyIME(CPS_CANCEL)</c> が
+    /// <c>WM_IME_COMPOSITION</c>(GCS_RESULTSTR)を同期配送する IME では、再入で本文が動きうる。
+    /// そのためスナップショットは取消の<b>後</b>に読む。
+    /// テスト用の IME コンテキスト(<c>Fakes/FakeImeContext.cs</c>)は再入しないため、
+    /// <b>この順序は網では固定できない</b>(<c>var snap = _buffer.Current;</c> を取消の上へ動かす
+    /// 変異は生存する)。
+    /// </para>
+    /// <para>
+    /// <b>事後条件(呼び出し側の算術が依存する)。</b>
+    /// 復元する接頭辞は<b>長さ保存</b>で書き戻すため、クランプ後の始端より前
+    /// <c>[0, s0)</c> は内容も長さも変わらない=<paramref name="start"/> が範囲内にあれば
+    /// <b>呼び出し側が持つ <paramref name="start"/> は置換後もそのまま使える</b>。
+    /// 置換文字列の直後は <c>start + replacement.Length</c>。
+    /// 一方キャレットは委譲先の規約(<c>s + text.Length</c>)に従って
+    /// <b>広げた範囲の末尾</b>=<c>start + replacement.Length + 復元した suffix の長さ</c>に立ち、
+    /// 選択は解除される(例: <c>"abc\r\ndef"</c> の <c>(3, 1, "X")</c> は本文 <c>"abcX\ndef"</c> ・
+    /// キャレット 5)。キャレットを置換文字列の直後へ戻す補正は<b>あえて入れていない</b>
+    /// =補正すると UIA イベントが増え、編集の副作用が 1 箇所に留まらなくなるため。
+    /// これを書くのは、呼び出し側(<c>SearchController.ReplaceOne</c>)が次ヒットの探索起点を
+    /// <c>span.Start + repl.Length</c> で計算しており、「接頭辞の復元が長さ保存だから
+    /// <c>span.Start</c> が動かない」という性質に依存しているから。広げ方を変えると
+    /// その算術が静かに壊れる。<b>ゼロ幅は例外</b>=下記のとおり始端自体が境界へ後退しうるので
+    /// <c>start</c> は保存されない。
     /// </para>
     /// <para>
     /// <b>ゼロ幅(純挿入)は外側へ広げない。</b> 巻き込み復元は「論理文字の内側にある文字を
@@ -1219,16 +1245,19 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// サロゲートペアを割って書き戻すことになり、孤立サロゲートが U+FFFD へ潰れて
     /// <see cref="ReplaceCharRange"/> なら無傷だった文字を壊す(例: <c>"a😀b"</c> の
     /// <c>(2, 0, "X")</c>)。<b>その結果、ゼロ幅マッチに限り一括置換
-    /// (<c>SnapshotSearcher.ReplaceInRange</c> 経由)と結果が食い違う</b>=一括側は広げた断片を
-    /// 組むので U+FFFD 化する。単発 / 一括の一致より無警告のデータ破壊を消すほうを採った
-    /// 意図的なトレードオフである。
+    /// (<c>SnapshotSearcher.ReplaceInRange</c> 経由)と結果が食い違う</b>。一括側は範囲を広げない
+    /// =範囲全体を materialize して <c>Regex.Replace</c> がペアの内側へ挿入し、その結果を
+    /// 書き戻すときに孤立サロゲートが潰れる(機序は違うが結末は U+FFFD 化で同じ)。
+    /// 単発 / 一括の一致より無警告のデータ破壊を消すほうを採った意図的なトレードオフである。
     /// </para>
     /// <para>
-    /// <b>非ゼロ幅でサロゲートペアを割るヒットは、どの経路を通っても半身を救出できない</b>
+    /// <b>非ゼロ幅でサロゲートペアを割るヒットは、復元した半身が単独で残る限り救出できない</b>
     /// (CRLF を割る場合と非対称)。.NET の正規表現 <c>.</c> は UTF-16 code unit 単位で照合するため
     /// 孤立サロゲートに単独ヒットしうるが、本文はピース木に UTF-8 で入るため、復元しようとした
     /// 孤立サロゲートは <c>AppendBuffer.Append</c> の既定フォールバックで U+FFFD へ潰れる。
     /// これは保存層の制約であり本 API 固有ではない=この場合は一括置換と同じ結果になる。
+    /// <paramref name="replacement"/> が対の相手(復元される半身と繋がって正しいペアになる
+    /// サロゲート)で始まる / 終わる場合だけは半身が生き残るため、この限りではない。
     /// </para>
     /// </remarks>
     public void ReplaceCharRangeExact(int start, int length, string replacement)
@@ -1244,11 +1273,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
         long endLong = (long)start + Math.Max(0, length);
         int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
-        // ゼロ幅(純挿入)は外側へ広げない。巻き込み復元は「論理文字の内側の文字を置換する」
-        // ために要るものであって、挿入には分割すべき文字が無い。広げると CRLF や
-        // サロゲートペアを割って書き戻すことになり、UTF-8 保存で孤立サロゲートが
-        // U+FFFD へ潰れる=既存 ReplaceCharRange なら無傷だった文字を壊す。
-        // 委譲先が境界へスナップして挿入するので論理文字は 1 つも壊れない。
+        // ゼロ幅(純挿入)は外側へ広げない。理由は remarks の「ゼロ幅は広げない」を参照。
         if (s0 == e0)
         {
             ReplaceCharRange(s0, 0, replacement);
@@ -1256,10 +1281,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         }
         int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
         int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
-        string text =
-            s == s0 && e == e0
-                ? replacement
-                : snap.GetText(s, s0 - s) + replacement + snap.GetText(e0, e - e0);
+        // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は常に空を返し
+        // (TextSnapshot.GetText の length == 0 早期 return)、string 連結は空オペランドを
+        // 短絡して残り 1 つの参照をそのまま返すため、分岐しても結果は同じ。
+        string text = snap.GetText(s, s0 - s) + replacement + snap.GetText(e0, e - e0);
         ReplaceCharRange(s, e - s, text);
     }
 
