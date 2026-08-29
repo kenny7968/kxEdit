@@ -1194,6 +1194,54 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         AfterEdit();
     }
 
+    /// <summary>
+    /// [start, start+length) だけを厳密に置換する。両端が CRLF / サロゲートペアの内側を指していても、
+    /// <see cref="ReplaceCharRange"/> のように外側の文字を巻き込んで捨てず、はみ出し分を復元して書き戻す。
+    /// </summary>
+    /// <remarks>
+    /// 検索の単発置換(A-14 / 2026-08-29)がこれを使う。正規表現 <c>\n</c> は CRLF 文書で LF
+    /// だけにヒットするが、<see cref="ReplaceCharRange"/> は両端をスナップするので CR ごと消える。
+    /// 一括置換(<c>SnapshotSearcher.ReplaceInRange</c> + 範囲丸ごと差し替え)は両端が
+    /// 文書の端に乗るため同じ問題を踏まない。本 API は単発置換の結果を一括置換に揃える。
+    /// <para>
+    /// 実装は外側へ広げた範囲を <see cref="ReplaceCharRange"/> へ<b>委譲する</b>。委譲先の
+    /// 再スナップは <c>s</c> / <c>e</c> が既に論理文字境界にあるため恒等であり、編集の副作用
+    /// (<c>AfterEdit</c> / キャレット規約 / Undo 単位 / UIA イベント)は 1 箇所に保たれる。
+    /// </para>
+    /// <para>
+    /// <b>IME 未確定の取消はスナップショットを読む前に行うこと。</b>
+    /// <c>CancelCompositionAndDefault</c> はバッファを書き換えるので、順序を入れ替えると
+    /// 取消前のスナップショットで境界を計算して別の位置を置換する。
+    /// </para>
+    /// <para>
+    /// <b>サロゲートペアを割る置換では半身を救出できない</b>(CRLF を割る場合と非対称)。
+    /// 本文はピース木に UTF-8 で入るため、復元しようとした孤立サロゲートは
+    /// <c>AppendBuffer.Append</c> の既定フォールバックで U+FFFD へ潰れる。これは保存層の
+    /// 性質であり本 API 固有ではない=一括置換も同じ結果になる(揃っている)。
+    /// </para>
+    /// </remarks>
+    public void ReplaceCharRangeExact(int start, int length, string replacement)
+    {
+        if (IsComposing)
+            CancelCompositionAndDefault();
+        if (_buffer is null || ReadOnly)
+            return;
+        ArgumentNullException.ThrowIfNull(replacement);
+        var snap = _buffer.Current;
+        int s0 = Math.Clamp(start, 0, snap.CharLength);
+        // start + length は int 加算だとオーバーフローで負値になり得るため long 経由
+        // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
+        long endLong = (long)start + Math.Max(0, length);
+        int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
+        int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
+        int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
+        string text =
+            s == s0 && e == e0
+                ? replacement
+                : snap.GetText(s, s0 - s) + replacement + snap.GetText(e0, e - e0);
+        ReplaceCharRange(s, e - s, text);
+    }
+
     private int ClampTopLine(int value)
     {
         int max = _buffer is null ? 0 : Math.Max(0, _buffer.Current.LineCount - 1);
