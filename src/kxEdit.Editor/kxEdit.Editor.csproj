@@ -19,5 +19,9 @@
     <InternalsVisibleTo Include="kxEdit.Editor.Smoke" />
     <!-- P3 Task 8: テストから internal 診断 API (GetText) を叩けるようにする -->
     <InternalsVisibleTo Include="kxEdit.Editor.Tests" />
+    <!-- A-13 (2026-08-29 Task 3): App 層の ClipboardFailed 再送/発声を「実 EditorControl +
+         Fake IClipboard で実際に失敗させる」経路で検証するため、SetClipboardForTest を
+         App.Tests からも見えるようにする。テスト専用 seam を public へ昇格させるより副作用が小さい。 -->
+    <InternalsVisibleTo Include="kxEdit.App.Tests" />
   </ItemGroup>
 </Project>

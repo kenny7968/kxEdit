@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
@@ -1356,5 +1357,93 @@ public class MainFormSmokeTests
             Assert.NotNull(field);
             Assert.True(field!.IsInitOnly, $"{name} must be readonly");
         }
+    }
+
+    // ===== A-13(2026-08-29): クリップボード失敗の SR 通知 =====
+
+    /// <summary>
+    /// 実 MainForm + 実 EditorControl + Fake IClipboard で、Ctrl+C 相当が失敗したときに
+    /// SR 向けの通知が実際に出ることを端から端まで固定する
+    /// (Editor の捕捉 → DocumentManager の再送 → MainForm の Announcer 呼び出し)。
+    /// <c>UiaAnnouncer.Say</c> は視覚表示を無条件で行うため、通知ラベルの文言=Say した文言。
+    /// </summary>
+    [Fact]
+    public void CopyFailure_AnnouncesWriteMessage() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetSelectionCharRange(1, 4);
+
+            doc.Editor.Copy();
+
+            Assert.Equal(
+                MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write),
+                form.LastAnnouncementForTest
+            );
+            Assert.Equal("hello", doc.Editor.SnapshotText); // 本文は無傷
+        });
+
+    /// <summary>貼り付け失敗は別文言(操作が聞き分けられること)。
+    /// Write 側の文言をそのまま流用する変異を kill する。</summary>
+    [Fact]
+    public void PasteFailure_AnnouncesReadMessage() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetCaretCharOffset(2);
+
+            doc.Editor.Paste();
+
+            string said = form.LastAnnouncementForTest;
+            Assert.Equal(MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read), said);
+            Assert.NotEqual(MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write), said);
+            Assert.Equal("hello", doc.Editor.SnapshotText); // 本文は無傷
+        });
+
+    /// <summary>Cut は「クリップボードに書けなければ本文を消さない」(A-13 の核心)。
+    /// MainForm 経路でもその不変条件が生きていることを、通知と併せて固定する。</summary>
+    [Fact]
+    public void CutFailure_KeepsTextAndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetSelectionCharRange(1, 4);
+
+            doc.Editor.Cut();
+
+            Assert.Equal("hello", doc.Editor.SnapshotText);
+            Assert.Equal((1, 4), doc.Editor.GetSelectionCharRange());
+            Assert.Equal(
+                MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write),
+                form.LastAnnouncementForTest
+            );
+        });
+
+    /// <summary>文言そのものの契約(SR で聞いて意味が通る短文・読み書きで別文言)。
+    /// <see cref="MainForm.ClipboardFailureMessage"/> は上の 3 テストの期待値の出所でもあるため、
+    /// ここで実文字列を 1 か所だけ固定する(3 テストが同時に無意味化するのを防ぐ)。</summary>
+    [Fact]
+    public void ClipboardFailureMessage_DiffersByKind()
+    {
+        Assert.Equal(
+            "クリップボードにコピーできません。他のアプリが使用中の可能性があります",
+            MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write)
+        );
+        Assert.Equal(
+            "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります",
+            MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read)
+        );
     }
 }

@@ -156,6 +156,10 @@ public sealed partial class MainForm : Form
             UpdateStatus();
         };
         _docs.KeyBasedSwitch += (_, doc) => _announcer.Say(doc.TabLabel);
+        // A-13(設計 2026-08-29 §4.3): クリップボードが他プロセスに保持されていると
+        // Copy/Cut/Paste が失敗する。発生源(EditorControl)で捕捉済み=ここでは通知だけ行う。
+        // 失敗しても本文は無傷(Cut も消さない)なので、伝えるべきは「今の操作が効かなかった」こと。
+        _docs.ClipboardFailed += (_, kind) => _announcer.Say(ClipboardFailureMessage(kind));
         _docs.ActiveDirtyChanged += (_, _) => UpdateTitle();
         _docs.ActiveCaretChanged += (_, _) => UpdateStatus();
         // 設定は OpenSettings で参照が差し替わるため Func で都度解決させる。
@@ -614,6 +618,20 @@ public sealed partial class MainForm : Form
         modified && textLength > BackupCoordinator.MaxBackupChars;
 
     internal bool HasOversizedDirtyDocForTest() => HasOversizedDirtyDoc();
+
+    /// <summary>
+    /// A-13: <see cref="DocumentManager.ClipboardFailed"/> に対する発声文言。
+    /// 原因(他プロセスの保持)は同じだが、ユーザーがやろうとした操作が分かるよう
+    /// 読み書きで文言を分ける(SR で聞き分けられる短文にする)。
+    /// </summary>
+    internal static string ClipboardFailureMessage(ClipboardFailureKind kind) =>
+        kind == ClipboardFailureKind.Write
+            ? "クリップボードにコピーできません。他のアプリが使用中の可能性があります"
+            : "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります";
+
+    /// <summary>テスト専用: 最後に <c>IAnnouncer.Say</c> した文言
+    /// (<c>UiaAnnouncer</c> は視覚表示を無条件で行うため通知ラベルの文言と一致する)。</summary>
+    internal string LastAnnouncementForTest => _announceLabel.Text;
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
