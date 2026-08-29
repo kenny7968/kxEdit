@@ -165,6 +165,82 @@ public class SurrogatePairInputTests
             }
         });
 
+    // ===== 実メッセージ経路(WndProc)=====
+    // 上の群は OnKeyPress をリフレクションで直接叩くので、WndProc → OnKeyDown/OnKeyPress の
+    // 配管を通らない。A-20 の現実の発現源(KEYEVENTF_UNICODE の SendInput)は
+    // WM_CHAR の前に WM_KEYDOWN VK_PACKET を挟むため、その配管ごと検証しないと
+    // 「直したはずの経路でだけ動かない」を取りこぼす(設計 §8.2 が __TestProcessMessage を
+    // 指定していたのはこのため)。
+
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_CHAR = 0x0102;
+    private const int VK_PACKET = 0xE7;
+
+    private static void SendMessage(EditorControl c, int msg, int wparam)
+    {
+        var m = Message.Create(c.Handle, msg, (IntPtr)wparam, (IntPtr)1);
+        c.__TestProcessMessage(ref m);
+    }
+
+    [Fact]
+    public void RawWmChar_HighThenLow_InsertsOneCodePoint() =>
+        Sta.Run(() =>
+        {
+            // PostMessageW(WM_CHAR, 0xD83D) → (WM_CHAR, 0xDE02) 相当(設計 §2.2 の実機再現)。
+            var (f, c) = MakeControl("ab");
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(1);
+                SendMessage(c, WM_CHAR, Hi);
+                SendMessage(c, WM_CHAR, Lo);
+                Assert.Equal("a" + Emoji + "b", c.GetText());
+            }
+        });
+
+    [Fact]
+    public void VkPacket_HighThenLow_InsertsOneCodePoint() =>
+        Sta.Run(() =>
+        {
+            // KEYEVENTF_UNICODE の SendInput が実際に送る並び。A-20 の現実の発現源はこれで、
+            // OnKeyDown で無条件に保留を破棄すると**この経路でだけ**ペアが結合せず、
+            // 絵文字が丸ごと消える(U+FFFD ですらなくなる)。
+            var (f, c) = MakeControl("ab");
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(1);
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Hi);
+                SendMessage(c, WM_KEYUP, VK_PACKET);
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Lo);
+                SendMessage(c, WM_KEYUP, VK_PACKET);
+                Assert.Equal("a" + Emoji + "b", c.GetText());
+            }
+        });
+
+    [Fact]
+    public void VkPacket_HighThenRealKey_DropsPending() =>
+        Sta.Run(() =>
+        {
+            // VK_PACKET を素通しにしたことで「本物のキーでも破棄されなくなる」変異を弁別する。
+            // 矢印キーが挟まったら保留は捨てる(設計 §6.2 の契約は生きている)。
+            var (f, c) = MakeControl("ab");
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(1);
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Hi);
+                SendMessage(c, WM_KEYDOWN, (int)Keys.Right); // 本物のキー入力
+                SendMessage(c, WM_KEYDOWN, VK_PACKET);
+                SendMessage(c, WM_CHAR, Lo);
+                Assert.Equal("ab", c.GetText()); // 何も入らない
+            }
+        });
+
     // ===== 上書きモード =====
 
     [Fact]

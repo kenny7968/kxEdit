@@ -41,7 +41,15 @@ public sealed partial class EditorControl
     {
         base.OnKeyDown(e);
         // A-20: 文字挿入以外の入力が挟まったら、保留中の高サロゲートは対にならない(設計 §6.2)。
-        DropPendingHighSurrogate();
+        // ただし VK_PACKET は「本物のキー入力」ではなく、KEYEVENTF_UNICODE の SendInput が
+        // WM_CHAR を運ぶために前置する合成キーである。A-20 の現実の発現源はまさにその経路
+        // (設計 §2.2)で、実際の到着順は
+        //   WM_KEYDOWN VK_PACKET → WM_CHAR(高) → WM_KEYUP → WM_KEYDOWN VK_PACKET → WM_CHAR(低)
+        // となる。ここで無条件に破棄すると、**直そうとしている経路でだけペアが結合しない**
+        // (絵文字が U+FFFD ではなく丸ごと消える)。回帰テスト:
+        // SurrogatePairInputTests.VkPacket_HighThenLow_InsertsOneCodePoint
+        if (e.KeyCode != Keys.Packet)
+            DropPendingHighSurrogate();
         _input.RouteKey(e);
     }
 

@@ -388,7 +388,20 @@ M-1 のハンドラは意図的にクラッシュさせないと確認できな�
 
 ### A-20(Task 1)
 
-- **保留の破棄契機**: `OnKeyDown` と `EditorControl.OnLostFocus`(実在した override に 1 行追加)に
+- **`VK_PACKET` は破棄契機から除外する**(最終レビューで発見・§6.2 の表への実質的な修正)。
+  §6.2 は破棄契機に「`OnKeyDown`(キー入力が挟まった)」を挙げていたが、
+  A-20 の**現実の発現源**である `KEYEVENTF_UNICODE` の `SendInput` は、WM_CHAR を運ぶために
+  合成キー `VK_PACKET`(0xE7)を前置する。実際の到着順は
+  `WM_KEYDOWN VK_PACKET → WM_CHAR(高) → WM_KEYUP → WM_KEYDOWN VK_PACKET → WM_CHAR(低)`。
+  `OnKeyDown` で無条件に破棄すると、**直そうとしている経路でだけペアが結合しない**
+  (絵文字が U+FFFD ではなく丸ごと消える=修正前より悪い)。
+  `VK_PACKET` は本物のキー入力ではないので破棄しない。
+  §2.2 の実機再現が `PostMessageW(WM_CHAR, ...)` を直接投げる形(= `VK_PACKET` を伴わない)
+  だったため、設計時にはこの差が見えていなかった。
+- **テストは `__TestProcessMessage` の実 WndProc 経路も通す**(§8.2 の指定どおり)。
+  `OnKeyPress` をリフレクションで直接叩くだけだと、上の取りこぼしを検出できない。
+- **保留の破棄契機**: `OnKeyDown`(`VK_PACKET` を除く)と `EditorControl.OnLostFocus`
+  (実在した override に 1 行追加)に
   加えて、**`AfterEdit` にも事後条件として置いた**。§6.2 が「列挙は原理的に漏れる。事後条件側に
   置けないか検討する」と求めていた点への回答で、`AfterEdit` は編集経路の唯一の後処理なので
   「本文が変わった=保留は対にならない」を 1 か所で担保できる。IME 開始時
