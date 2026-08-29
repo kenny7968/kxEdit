@@ -1126,6 +1126,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <see cref="Copy"/> / <see cref="Paste"/> が <c>false</c> を返す理由は「失敗」だけではない
     /// (選択なし・クリップボードが空 等の no-op でも false)ので、
     /// <b>失敗の判定は必ず本イベントで行う</b>こと。
+    /// <b>購読側は例外を投げないこと</b>: 本イベントは <see cref="Copy"/> / <see cref="Paste"/> の
+    /// catch 節の中から発火するため、ハンドラの例外はそのまま呼び出し側へ抜け、
+    /// A-13 が塞いだ「未処理例外」の経路へ戻る(最終的には App 層の <c>CrashHandler</c> が
+    /// 受けて終了する=通知したいだけの場面でアプリが落ちる)。
     /// </remarks>
     public event EventHandler<ClipboardFailureKind>? ClipboardFailed;
 
@@ -1592,9 +1596,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// (Notepad と同挙動)。SetSource 前は no-op。
     /// </summary>
     /// <returns>
-    /// 選択内容をクリップボードへ<b>書けた</b>とき true。false は
+    /// 選択内容をクリップボードへ書けたと<b>確認できた</b>とき true。false は
     /// 「SetSource 前 / 選択なし(=no-op)」と「A-13 の失敗」の両方を含むため、
     /// 失敗の判定には使えない(失敗時は <see cref="ClipboardFailed"/> が必ず発火する)。
+    /// 逆に false は「クリップボードが変わっていない」の保証でもない
+    /// (<see cref="Clipboard.SetText(string, TextDataFormat)"/> は内部で置き換え後の
+    /// flush でも失敗しうる)。安全側=<see cref="Cut"/> が本文を消さない側に倒れる。
     /// <see cref="Cut"/> は本戻り値で「書けていないのに本文を消す」事故を止める。
     /// </returns>
     /// <remarks>

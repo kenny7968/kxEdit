@@ -19,23 +19,41 @@ public sealed class FakeClipboard : IClipboard
     public bool ThrowOnSet { get; set; }
     public bool ThrowOnGet { get; set; }
     public bool ThrowOnContains { get; set; }
+
+    /// <summary><see cref="SetUnicodeText"/> の<b>試行</b>回数(throw する場合も数える)。
+    /// 「クリップボードに触っていない」ことの検証に使う。</summary>
     public int SetCount { get; private set; }
 
-    // reason: 実 Clipboard が他プロセス保持中に投げる型そのものを再現するのが本フェイクの存在意義。
-    // EditorControl 側の catch は ExternalException 限定(設計 §4.1)なので、派生型で代用すると
-    // 「実際に投げられる型を捕捉できるか」を検証したことにならない。テスト専用の fake に限定。
+    /// <summary><see cref="ContainsUnicodeText"/> の呼び出し回数。同上。</summary>
+    public int ContainsCount { get; private set; }
+
+    /// <summary>
+    /// Throw* が立っているときに投げる例外を差し替える。既定(null)は
+    /// <see cref="ExternalException"/>(実 Clipboard が他プロセス保持中に投げる型)。
+    /// <b>用途</b>: 設計 §4.1 の「捕捉は <c>ExternalException</c> 限定で、
+    /// 呼び出し側バグ(<c>ArgumentNullException</c> 等)は握り潰さない」を pin する
+    /// (<c>catch (Exception)</c> へ広げる変異を kill するため)。
+    /// </summary>
+    public Exception? ThrowInstead { get; set; }
+
+    // reason: 実 Clipboard が他プロセス保持中に投げる型そのものを再現するのが本フェイクの存在意義。EditorControl 側の catch は ExternalException 限定(設計 §4.1)なので、派生型で代用すると「実際に投げられる型を捕捉できるか」を検証したことにならない。テスト専用の fake に限定。
 #pragma warning disable CA2201
+    private Exception Failure() => ThrowInstead ?? new ExternalException("clipboard busy");
+
+#pragma warning restore CA2201
+
     public bool ContainsUnicodeText()
     {
+        ContainsCount++;
         if (ThrowOnContains)
-            throw new ExternalException("clipboard busy");
+            throw Failure();
         return HasText;
     }
 
     public string GetUnicodeText()
     {
         if (ThrowOnGet)
-            throw new ExternalException("clipboard busy");
+            throw Failure();
         return Text;
     }
 
@@ -43,9 +61,8 @@ public sealed class FakeClipboard : IClipboard
     {
         SetCount++;
         if (ThrowOnSet)
-            throw new ExternalException("clipboard busy");
+            throw Failure();
         Text = text;
         HasText = true;
     }
-#pragma warning restore CA2201
 }
