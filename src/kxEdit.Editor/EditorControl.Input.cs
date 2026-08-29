@@ -40,6 +40,8 @@ public sealed partial class EditorControl
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
+        // A-20: 文字挿入以外の入力が挟まったら、保留中の高サロゲートは対にならない(設計 §6.2)。
+        DropPendingHighSurrogate();
         _input.RouteKey(e);
     }
 
@@ -55,6 +57,9 @@ public sealed partial class EditorControl
     /// 選択/上書き/サロゲートの分岐と <c>_caretCtrl.DesiredXpx</c>/AfterEdit の後処理は
     /// <see cref="InsertConfirmedText"/> に集約(=1 経路)。<see cref="ReadOnly"/> ON では no-op。
     /// Task 3c: OnKeyPress 経路には分岐ロジックが無い(1 経路のみ)ため Router には載せない。
+    /// A-20(設計 2026-08-29 §6): 分割到着するサロゲートペアの結合だけは本メソッドが担う
+    /// (<see cref="_pendingHighSurrogate"/>)。<see cref="InsertConfirmedText"/> には
+    /// 常に「完結したテキスト」だけを渡す契約を保つため。
     /// </remarks>
     protected override void OnKeyPress(KeyPressEventArgs e)
     {
@@ -64,12 +69,64 @@ public sealed partial class EditorControl
         char ch = e.KeyChar;
 
         // 制御文字(0x00〜0x1F, 0x7F)は無視。編集用途は OnKeyDown 経路で処理する(§0-9 温存)。
+        // サロゲート(U+D800〜U+DFFF)はこの条件に掛からないので、判定順は問わない。
         if (ch < 0x20 || ch == 0x7F)
+        {
+            DropPendingHighSurrogate();
             return;
+        }
 
+        // A-20: 高位は保留して待つ。連続して高位が来たら前の保留は捨てる。
+        if (char.IsHighSurrogate(ch))
+        {
+            _pendingHighSurrogate = ch;
+            e.Handled = true; // WM_CHAR は消費済み(挿入は次の低位到着まで待つ)
+            return;
+        }
+
+        if (char.IsLowSurrogate(ch))
+        {
+            char hi = _pendingHighSurrogate;
+            _pendingHighSurrogate = NoPendingHighSurrogate;
+            // 対になる高位が無い低位は捨てる(U+FFFD を本文に残さない=設計 §3.3)。
+            if (hi != NoPendingHighSurrogate)
+                InsertConfirmedText(new string(new[] { hi, ch }));
+            e.Handled = true;
+            return;
+        }
+
+        DropPendingHighSurrogate(); // BMP 文字が来た=保留は対にならない
         InsertConfirmedText(ch.ToString());
         e.Handled = true;
     }
+
+    /// <summary>「保留なし」を表す番兵。有効な高サロゲートは U+D800〜U+DBFF なので衝突しない。</summary>
+    private const char NoPendingHighSurrogate = '\0';
+
+    /// <summary>
+    /// A-20(設計 2026-08-29 §6): WM_CHAR は UTF-16 単位で届くため、サロゲートペアが
+    /// 高・低の 2 通に分かれて到着する(KEYEVENTF_UNICODE の SendInput / PostMessage 経路)。
+    /// 高位を 1 つだけ保留し、直後に低位が来たときだけペアで挿入する。
+    /// 保留は「直後の WM_CHAR」にだけ効く契約(Scintilla の <c>lastHighSurrogateChar</c> と同じ)。
+    /// </summary>
+    private char _pendingHighSurrogate = NoPendingHighSurrogate;
+
+    /// <summary>
+    /// 保留中の高サロゲートを捨てる。文字挿入以外の入力が挟まったら呼ぶ。
+    /// </summary>
+    /// <remarks>
+    /// 破棄契機の列挙は原理的に漏れる(設計 §6.2)が、漏れても被害は
+    /// 「保留が 1 文字ぶん長生きする」だけで本文は壊れない
+    /// (次の非低サロゲート char が来た時点で必ず破棄されるため)。
+    /// 現在の破棄契機は次の 2 系統:
+    /// <list type="bullet">
+    /// <item>列挙: <see cref="OnKeyDown"/> / <see cref="EditorControl.OnLostFocus"/> /
+    /// <see cref="OnKeyPress"/> の制御文字・BMP 文字分岐</item>
+    /// <item>事後条件: <see cref="EditorControl.AfterEdit"/>(本文が変わった=保留は対にならない。
+    /// 列挙漏れの最後の砦)</item>
+    /// </list>
+    /// </remarks>
+    private void DropPendingHighSurrogate() => _pendingHighSurrogate = NoPendingHighSurrogate;
 
     /// <summary>
     /// マウスホイール(P3 Task 12 で精度改善版に更新)。

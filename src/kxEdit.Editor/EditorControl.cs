@@ -1339,6 +1339,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 挙動不変(private → internal は同一アセンブリでは可視性のみ拡張)。
     internal void AfterEdit()
     {
+        // A-20(設計 2026-08-29 §6.2): 保留中の高サロゲートの破棄は「契機の列挙」ではなく
+        // <b>事後条件</b>側にも置く。本文が変わった=保留は対にならないので捨てる。
+        // 列挙(OnKeyDown / OnLostFocus)だけだと原理的に漏れるため、編集経路の唯一の後処理である
+        // ここを最後の砦にする。ペア挿入自身もここを通るが、その時点で保留は既にクリア済み=no-op。
+        DropPendingHighSurrogate();
         UpdateVerticalScrollbar();
         UpdateHorizontalScrollbar();
         PositionCaret();
@@ -1705,6 +1710,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         base.OnLostFocus(e);
         _hasFocus = false;
         NativeMethods.DestroyCaret();
+        // A-20(設計 2026-08-29 §6.2): フォーカスが移ったら保留中の高サロゲートは対にならない。
+        DropPendingHighSurrogate();
     }
 
     /// <summary>
