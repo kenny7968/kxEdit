@@ -65,6 +65,41 @@ public class EditorControlReplaceExactTests
         });
 
     [Fact]
+    public void ReplaceCharRangeExact_ZeroWidthInsideSurrogatePair_DoesNotSplitIt() =>
+        Sta.Run(() =>
+        {
+            // ゼロ幅(純挿入)を外側へ広げると、断片「高位サロゲート + X + 低位サロゲート」を
+            // 組んで書き戻すことになり、UTF-8 保存で両半身が U+FFFD へ潰れる。
+            // 広げなければ委譲先が境界へスナップして挿入するだけなので絵文字は無傷。
+            // 対照群として既存 ReplaceCharRange を並べる=この入力で新 API が既存 API を
+            // 悪化させないことを固定する(悪化させていた退行の網)。
+            using var exact = new EditorControl();
+            using var plain = new EditorControl();
+            exact.SetSource(TextBuffer.FromString("a\U0001F600b")); // "a😀b"
+            plain.SetSource(TextBuffer.FromString("a\U0001F600b"));
+
+            exact.ReplaceCharRangeExact(2, 0, "X"); // 低位サロゲートの手前=ペアの内側へゼロ幅挿入
+            plain.ReplaceCharRange(2, 0, "X");
+
+            Assert.Equal("aX\U0001F600b", exact.Text); // 絵文字は無傷のまま前へ挿入される
+            Assert.Equal(exact.Text, plain.Text); // 新 API = 既存 API(悪化していない)
+        });
+
+    [Fact]
+    public void ReplaceCharRangeExact_ZeroWidthInsideCrlf_DoesNotSplitIt() =>
+        Sta.Run(() =>
+        {
+            // CRLF の内側へのゼロ幅挿入も同じ規則(広げない=割らない)。CR と LF の間に
+            // 割り込むと 1 行が 2 行になるため、境界へスナップして CR の手前に挿入する。
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
+
+            ctrl.ReplaceCharRangeExact(4, 0, "X"); // CR と LF の間へゼロ幅挿入
+
+            Assert.Equal("abcX\r\ndef", ctrl.Text);
+        });
+
+    [Fact]
     public void ReplaceCharRangeExact_ExistingReplaceCharRange_SwallowsTheWholeCrlf() =>
         Sta.Run(() =>
         {

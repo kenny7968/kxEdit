@@ -1214,10 +1214,21 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 取消前のスナップショットで境界を計算して別の位置を置換する。
     /// </para>
     /// <para>
-    /// <b>サロゲートペアを割る置換では半身を救出できない</b>(CRLF を割る場合と非対称)。
-    /// 本文はピース木に UTF-8 で入るため、復元しようとした孤立サロゲートは
-    /// <c>AppendBuffer.Append</c> の既定フォールバックで U+FFFD へ潰れる。これは保存層の
-    /// 性質であり本 API 固有ではない=一括置換も同じ結果になる(揃っている)。
+    /// <b>ゼロ幅(純挿入)は外側へ広げない。</b> 巻き込み復元は「論理文字の内側にある文字を
+    /// <b>置換する</b>」ために要るものであり、挿入には分割すべき文字が無い。広げると CRLF や
+    /// サロゲートペアを割って書き戻すことになり、孤立サロゲートが U+FFFD へ潰れて
+    /// <see cref="ReplaceCharRange"/> なら無傷だった文字を壊す(例: <c>"a😀b"</c> の
+    /// <c>(2, 0, "X")</c>)。<b>その結果、ゼロ幅マッチに限り一括置換
+    /// (<c>SnapshotSearcher.ReplaceInRange</c> 経由)と結果が食い違う</b>=一括側は広げた断片を
+    /// 組むので U+FFFD 化する。単発 / 一括の一致より無警告のデータ破壊を消すほうを採った
+    /// 意図的なトレードオフである。
+    /// </para>
+    /// <para>
+    /// <b>非ゼロ幅でサロゲートペアを割るヒットは、どの経路を通っても半身を救出できない</b>
+    /// (CRLF を割る場合と非対称)。.NET の正規表現 <c>.</c> は UTF-16 code unit 単位で照合するため
+    /// 孤立サロゲートに単独ヒットしうるが、本文はピース木に UTF-8 で入るため、復元しようとした
+    /// 孤立サロゲートは <c>AppendBuffer.Append</c> の既定フォールバックで U+FFFD へ潰れる。
+    /// これは保存層の制約であり本 API 固有ではない=この場合は一括置換と同じ結果になる。
     /// </para>
     /// </remarks>
     public void ReplaceCharRangeExact(int start, int length, string replacement)
@@ -1233,6 +1244,16 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
         long endLong = (long)start + Math.Max(0, length);
         int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
+        // ゼロ幅(純挿入)は外側へ広げない。巻き込み復元は「論理文字の内側の文字を置換する」
+        // ために要るものであって、挿入には分割すべき文字が無い。広げると CRLF や
+        // サロゲートペアを割って書き戻すことになり、UTF-8 保存で孤立サロゲートが
+        // U+FFFD へ潰れる=既存 ReplaceCharRange なら無傷だった文字を壊す。
+        // 委譲先が境界へスナップして挿入するので論理文字は 1 つも壊れない。
+        if (s0 == e0)
+        {
+            ReplaceCharRange(s0, 0, replacement);
+            return;
+        }
         int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
         int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
         string text =
