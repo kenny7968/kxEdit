@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
@@ -1356,5 +1357,180 @@ public class MainFormSmokeTests
             Assert.NotNull(field);
             Assert.True(field!.IsInitOnly, $"{name} must be readonly");
         }
+    }
+
+    // ===== M-1(2026-08-29): 未処理例外からの退避と前提ゲート =====
+
+    /// <summary>通常構成(BackupON)では実際に退避でき、その本文が実ファイルに載る。
+    /// 戻り値 true は「次回起動で復元できる」と言い切る宣言なので、根拠まで見る。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupOn_Dirty_ReturnsTrue_AndPersistsContent() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+            Assert.True(doc.Editor.Modified);
+
+            Assert.True(form.FlushBackupsForCrash());
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "crash-body");
+        });
+
+    /// <summary>BackupOFF では本文が書かれないのに <c>WaitForFinalFlush</c> は
+    /// 「書くものが無い=失敗も無い」の true を返す。ゲートを外すと
+    /// <b>何も退避していないのに「復元できます」</b>という嘘の安全宣言になる。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupOff_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = false;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+
+            Assert.False(form.FlushBackupsForCrash());
+        });
+
+    /// <summary>
+    /// hot exit OFF(<c>RestoreOpenFilesOnStartup=false</c>)でも BackupON なら
+    /// 次回起動の <c>OfferBackupRestoreOnStartup</c> が復元を提案できる=
+    /// <b>true を返す</b>(Task 4 レビュー Major-3)。ここを false にすると、
+    /// 実際には復元できる支持された構成に嘘の悲観を出すことになる。
+    /// hot exit の silent path のゲートと<b>意図的に違う</b>ことを固定する。
+    /// </summary>
+    [Fact]
+    public void FlushBackupsForCrash_RestoreOff_ButBackupOn_ReturnsTrue() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = false;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+
+            Assert.True(form.FlushBackupsForCrash());
+            Assert.Contains(BackupStore.LoadAll(tmp.BackupDir), r => r.Content == "crash-body");
+        });
+
+    /// <summary>書込が実際に失敗する構成では false(= 事後条件検査が効いている)。
+    /// 「ゲートさえ通れば true」に丸める変異を kill する。</summary>
+    [Fact]
+    public void FlushBackupsForCrash_BackupWriteFails_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            // backups ディレクトリの位置を「ファイル」で塞ぐ=実 writer の書込が必ず失敗する。
+            File2.WriteAllText(tmp.BackupDir, "occupied");
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "crash-body");
+            Assert.False(form.HasOversizedDirtyDocForTest()); // oversized 経路ではない
+
+            Assert.False(form.FlushBackupsForCrash());
+        });
+
+    // ===== A-13(2026-08-29): クリップボード失敗の SR 通知 =====
+
+    /// <summary>
+    /// 実 MainForm + 実 EditorControl + Fake IClipboard で、Ctrl+C 相当が失敗したときに
+    /// SR 向けの通知が実際に出ることを端から端まで固定する
+    /// (Editor の捕捉 → DocumentManager の再送 → MainForm の Announcer 呼び出し)。
+    /// <c>UiaAnnouncer.Say</c> は視覚表示を無条件で行うため、通知ラベルの文言=Say した文言。
+    /// </summary>
+    [Fact]
+    public void CopyFailure_AnnouncesWriteMessage() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetSelectionCharRange(1, 4);
+
+            doc.Editor.Copy();
+
+            Assert.Equal(
+                MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write),
+                form.LastAnnouncementForTest
+            );
+            Assert.Equal("hello", doc.Editor.SnapshotText); // 本文は無傷
+        });
+
+    /// <summary>貼り付け失敗は別文言(操作が聞き分けられること)。
+    /// Write 側の文言をそのまま流用する変異を kill する。</summary>
+    [Fact]
+    public void PasteFailure_AnnouncesReadMessage() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetCaretCharOffset(2);
+
+            doc.Editor.Paste();
+
+            string said = form.LastAnnouncementForTest;
+            Assert.Equal(MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read), said);
+            Assert.NotEqual(MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write), said);
+            Assert.Equal("hello", doc.Editor.SnapshotText); // 本文は無傷
+        });
+
+    /// <summary>Cut は「クリップボードに書けなければ本文を消さない」(A-13 の核心)。
+    /// MainForm 経路でもその不変条件が生きていることを、通知と併せて固定する。</summary>
+    [Fact]
+    public void CutFailure_KeepsTextAndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+            var doc = form.FileForTest.DocsForTest[0];
+            doc.Editor.SetClipboardForTest(new FailingClipboard());
+            doc.Editor.Text = "hello";
+            doc.Editor.SetSelectionCharRange(1, 4);
+
+            doc.Editor.Cut();
+
+            Assert.Equal("hello", doc.Editor.SnapshotText);
+            Assert.Equal((1, 4), doc.Editor.GetSelectionCharRange());
+            Assert.Equal(
+                MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write),
+                form.LastAnnouncementForTest
+            );
+        });
+
+    /// <summary>文言そのものの契約(SR で聞いて意味が通る短文・読み書きで別文言)。
+    /// <see cref="MainForm.ClipboardFailureMessage"/> は上の 3 テストの期待値の出所でもあるため、
+    /// ここで実文字列を 1 か所だけ固定する(3 テストが同時に無意味化するのを防ぐ)。</summary>
+    [Fact]
+    public void ClipboardFailureMessage_DiffersByKind()
+    {
+        Assert.Equal(
+            "クリップボードにコピーできません。他のアプリが使用中の可能性があります",
+            MainForm.ClipboardFailureMessage(ClipboardFailureKind.Write)
+        );
+        Assert.Equal(
+            "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります",
+            MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read)
+        );
     }
 }

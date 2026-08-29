@@ -67,6 +67,14 @@ public sealed class DocumentManager : IDisposable
     /// 即時に知るための通知源(設計 2026-08-22 §3.1・A-1 / M-31)。</summary>
     public event EventHandler<Document>? DocumentDirtyChanged;
 
+    /// <summary>A-13(設計 2026-08-29 §4.3): いずれかの文書でクリップボード操作が失敗した
+    /// (他プロセスがクリップボードを保持中など)。MainForm が Announcer へ流す。
+    /// <see cref="ActiveDirtyChanged"/> と違い<b>アクティブ限定にしない</b>:
+    /// 失敗した操作は必ずユーザーの直前の操作=そのタブがアクティブのはずだが、
+    /// 将来の非アクティブ経路(マクロ・自動化 API 等)でも取りこぼさないため
+    /// <see cref="DocumentDirtyChanged"/> と同じ「全文書から拾う」形にする。</summary>
+    public event EventHandler<ClipboardFailureKind>? ClipboardFailed;
+
     /// <summary>新しい空タブを生成しアクティブ化する。State の中身は呼び出し側が設定する。</summary>
     public Document CreateNew()
     {
@@ -92,6 +100,8 @@ public sealed class DocumentManager : IDisposable
             if (ReferenceEquals(doc, Active))
                 EditorGotFocus?.Invoke(this, doc);
         };
+        // A-13: クリップボード失敗はどのタブからでも上位へ再送する(アクティブ限定にしない)。
+        editor.ClipboardFailed += (_, kind) => ClipboardFailed?.Invoke(this, kind);
 
         _docs.Add(doc);
         _tabs.TabPages.Add(page);

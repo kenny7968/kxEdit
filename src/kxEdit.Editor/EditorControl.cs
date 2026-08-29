@@ -5,6 +5,7 @@ using kxEdit.Core.Editing;
 using kxEdit.Core.Layout;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
+using kxEdit.Editor.Abstractions;
 // System.Windows.Forms.SelectionRange(MonthCalendar 用)と同名のため別名で解決する。
 using SelectionRange = kxEdit.Core.Layout.SelectionRange;
 
@@ -1116,6 +1117,23 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     public event EventHandler? UpdateUI;
 
     /// <summary>
+    /// A-13(設計 2026-08-29 §4.3): クリップボード操作が
+    /// <see cref="ExternalException"/> で失敗した(他プロセスがクリップボードを保持中など)。
+    /// </summary>
+    /// <remarks>
+    /// App 層が SR へ通知するための<b>唯一の通知源</b>。Editor 層は <c>IAnnouncer</c> を
+    /// 参照できない(層の向きが逆になる)ためイベントで上へ渡す。
+    /// <see cref="Copy"/> / <see cref="Paste"/> が <c>false</c> を返す理由は「失敗」だけではない
+    /// (選択なし・クリップボードが空 等の no-op でも false)ので、
+    /// <b>失敗の判定は必ず本イベントで行う</b>こと。
+    /// <b>購読側は例外を投げないこと</b>: 本イベントは <see cref="Copy"/> / <see cref="Paste"/> の
+    /// catch 節の中から発火するため、ハンドラの例外はそのまま呼び出し側へ抜け、
+    /// A-13 が塞いだ「未処理例外」の経路へ戻る(最終的には App 層の <c>CrashHandler</c> が
+    /// 受けて終了する=通知したいだけの場面でアプリが落ちる)。
+    /// </remarks>
+    public event EventHandler<ClipboardFailureKind>? ClipboardFailed;
+
+    /// <summary>
     /// キャレット/選択移動時の UIA TextSelectionChangedEvent を発火するか。
     /// <b>P3 では受け口のみ</b>(値は読み書きできるが挙動は無し)=P5 の UIA 接続で本挙動化する。
     /// P6 の CSV モードでは false にしてシンクへ移る遷移の一瞬に SR が行を読むのを防ぐ。
@@ -1339,6 +1357,13 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 挙動不変(private → internal は同一アセンブリでは可視性のみ拡張)。
     internal void AfterEdit()
     {
+        // A-20(設計 2026-08-29 §6.2): 保留中の高サロゲートの破棄は「契機の列挙」ではなく
+        // <b>事後条件</b>側にも置く。本文が変わった=保留は対にならないので捨てる。
+        // 列挙(OnKeyDown / OnLostFocus)だけだと原理的に漏れるため、編集経路の唯一の後処理である
+        // ここを最後の砦にする。ペア挿入自身もここを通るが、その時点で保留は既にクリア済み=no-op。
+        // 回帰テスト: SurrogatePairInputTests.HighThenNonKeyEdit_DropsPending
+        // (メニュー経由の貼り付け=OnKeyDown を伴わない編集は、ここだけが破棄を担当する)。
+        DropPendingHighSurrogate();
         UpdateVerticalScrollbar();
         UpdateHorizontalScrollbar();
         PositionCaret();
@@ -1556,27 +1581,62 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// </summary>
     public void EmptyUndoBuffer() => _buffer?.ClearUndo();
 
+    // A-13(設計 2026-08-29 §4): 既定は実クリップボード。テストだけが差し替える
+    // (他プロセスがクリップボードを保持している状態=ExternalException の経路を作るため)。
+    private IClipboard _clipboard = new WinClipboard();
+
+    /// <summary>
+    /// テスト専用: クリップボード seam を差し替える。本番経路では呼ばれない。
+    /// <c>IImeContext</c> は <c>ImeController</c> の ctor で <c>Func&lt;IImeContext&gt;</c> を受ける形だが、
+    /// <see cref="EditorControl"/> は WinForms の <c>Control</c> で引数なし ctor が要るため
+    /// setter にしている(同じ趣旨=本番では差し替えない seam・注入の形は違う)。
+    /// </summary>
+    internal void SetClipboardForTest(IClipboard clipboard) =>
+        _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));
+
     /// <summary>
     /// 選択範囲のテキストをクリップボード(<see cref="TextDataFormat.UnicodeText"/> 固定・設計書 §0-10)へ書き込む。
     /// 選択なしのときは no-op(=クリップボード内容は保持)。本文不変=<see cref="ReadOnly"/> でも動く
     /// (Notepad と同挙動)。SetSource 前は no-op。
     /// </summary>
+    /// <returns>
+    /// 選択内容をクリップボードへ書けたと<b>確認できた</b>とき true。false は
+    /// 「SetSource 前 / 選択なし(=no-op)」と「A-13 の失敗」の両方を含むため、
+    /// 失敗の判定には使えない(失敗時は <see cref="ClipboardFailed"/> が必ず発火する)。
+    /// 逆に false は「クリップボードが変わっていない」の保証でもない
+    /// (<see cref="Clipboard.SetText(string, TextDataFormat)"/> は内部で置き換え後の
+    /// flush でも失敗しうる)。安全側=<see cref="Cut"/> が本文を消さない側に倒れる。
+    /// <see cref="Cut"/> は本戻り値で「書けていないのに本文を消す」事故を止める。
+    /// </returns>
     /// <remarks>
     /// P6 の <c>ScintillaHost.Copy</c> と同名(App 層メニュー配線=<c>_docs.Active?.Editor.Copy()</c>
     /// と機械的置換用)。<see cref="Clipboard.SetText(string, TextDataFormat)"/> は STA 必須=
     /// 本コントロールが WinForms UI スレッド専用契約のため常に満たされる。
     /// 「行末改行がない選択のときは 1 行選択と見なして EOL を付ける」等の Scintilla 独自仕様は
     /// v1 では真似ず、素直に選択文字列だけを扱う(設計書 Task 11)。
+    /// A-13(設計 2026-08-29 §4.1): 捕捉するのは <see cref="ExternalException"/> だけ
+    /// (<see cref="COMException"/> はその派生)。<c>catch (Exception)</c> にはしない=
+    /// <see cref="ArgumentNullException"/> 等の呼び出し側バグを握り潰さない。
     /// </remarks>
-    public void Copy()
+    public bool Copy()
     {
         if (_buffer is null)
-            return;
+            return false;
         var (s, en) = GetSelectionCharRange();
         if (s == en)
-            return;
+            return false;
         string text = _buffer.Current.GetText(s, en - s);
-        Clipboard.SetText(text, TextDataFormat.UnicodeText);
+        try
+        {
+            _clipboard.SetUnicodeText(text);
+        }
+        catch (ExternalException)
+        {
+            // A-13: 他プロセスがクリップボードを保持中。本文には触っていないので状態は無傷。
+            ClipboardFailed?.Invoke(this, ClipboardFailureKind.Write);
+            return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -1586,9 +1646,18 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// </summary>
     /// <remarks>
     /// P6 の <c>ScintillaHost.Cut</c> と同名。<see cref="Copy"/> → <see cref="TextBuffer.Replace"/>
-    /// で「クリップボード書き込み → 本文削除」の順に実行する(Copy 失敗時に本文だけ消える事故を
-    /// 防ぐ=<see cref="Clipboard.SetText(string, TextDataFormat)"/> が例外を投げると本メソッドも
-    /// 上に throw して <see cref="AfterEdit"/> へ到達しない)。
+    /// で「クリップボード書き込み → 本文削除」の順に実行する。
+    /// <b>不変条件: クリップボードへ書けなければ本文を消さない。</b>
+    /// A-13(設計 2026-08-29 §4.2)より前はこれを「<c>Clipboard.SetText</c> の例外が本メソッドを
+    /// 貫通して <see cref="AfterEdit"/> へ到達しない」ことで担保していたが、
+    /// 例外を <see cref="Copy"/> 内で捕捉するようにしたため、いまは
+    /// <b><see cref="Copy"/> の戻り値で早期 return すること</b>が唯一の担保である。
+    /// ここを崩すと「クリップボードに入っていないのに本文が消える」= A-13 より重い
+    /// データ喪失に化ける(回帰テスト: <c>ClipboardFailureTests.Cut_ClipboardBusy_DoesNotDeleteText</c>)。
+    /// 失敗の通知は <see cref="Copy"/> が <see cref="ClipboardFailed"/> で既に上げているため
+    /// 本メソッドは何もしない(=二重通知しない)。
+    /// なお <see cref="CancelCompositionAndDefault"/> は失敗しても巻き戻さない(設計 §4.4):
+    /// IME 取消は Ctrl+X を押した時点でユーザーの意図として確定している。
     /// </remarks>
     public void Cut()
     {
@@ -1599,7 +1668,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         var (s, en) = GetSelectionCharRange();
         if (s == en)
             return;
-        Copy();
+        if (!Copy())
+            return;
         _buffer.Replace(s, en - s, "");
         _caretCtrl.SetTo(s, _buffer.Current);
         _caretCtrl.DesiredXpx = -1;
@@ -1611,28 +1681,49 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 選択があるときは置換。挿入後のキャレットは挿入末尾に位置し、選択は解除される。
     /// <see cref="ReadOnly"/> / UnicodeText が無い or 空 / SetSource 前は no-op。
     /// </summary>
+    /// <returns>
+    /// クリップボードの文字列を本文へ<b>挿入した</b>とき true。false は
+    /// 「SetSource 前 / <see cref="ReadOnly"/> / UnicodeText 無し / 空(=no-op)」と
+    /// 「A-13 の失敗」の両方を含むため、失敗の判定には使えない
+    /// (失敗時は <see cref="ClipboardFailed"/> が必ず発火する)。
+    /// <see cref="Copy"/> と戻り値の意味を揃えている(true=意図した転送が行われた)。
+    /// </returns>
     /// <remarks>
     /// P6 の <c>ScintillaHost.Paste</c> と同名。<see cref="Clipboard.ContainsText(TextDataFormat)"/>
     /// で先にチェックしても実装差で空文字列を返すケースが理論上残り得るため、防御的に
     /// <c>string.IsNullOrEmpty</c> でも早期 return する(空文字列 Replace は本文不変だが履歴に
     /// 積む副作用があるため避けたい)。
+    /// A-13(設計 2026-08-29 §4): 読み取りは <c>Contains</c> / <c>Get</c> の 2 呼び出しで、
+    /// どちらが <see cref="ExternalException"/> を投げても同じ 1 つの catch で受ける
+    /// (ユーザーから見た原因は同じ「クリップボードが使えない」)。
+    /// 例外が出るのは本文に触る前だけなので、失敗時の本文は無傷である。
     /// </remarks>
-    public void Paste()
+    public bool Paste()
     {
         if (IsComposing)
             CancelCompositionAndDefault(); // §4-6(Task 13 レビュー I-1)
         if (_buffer is null || ReadOnly)
-            return;
-        if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
-            return;
-        string text = Clipboard.GetText(TextDataFormat.UnicodeText);
+            return false;
+        string text;
+        try
+        {
+            if (!_clipboard.ContainsUnicodeText())
+                return false;
+            text = _clipboard.GetUnicodeText();
+        }
+        catch (ExternalException)
+        {
+            ClipboardFailed?.Invoke(this, ClipboardFailureKind.Read);
+            return false;
+        }
         if (string.IsNullOrEmpty(text))
-            return;
+            return false;
         var (s, en) = GetSelectionCharRange();
         _buffer.Replace(s, en - s, text);
         _caretCtrl.SetTo(s + text.Length, _buffer.Current);
         _caretCtrl.DesiredXpx = -1;
         AfterEdit();
+        return true;
     }
 
     /// <summary>
@@ -1705,6 +1796,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         base.OnLostFocus(e);
         _hasFocus = false;
         NativeMethods.DestroyCaret();
+        // A-20(設計 2026-08-29 §6.2): フォーカスが移ったら保留中の高サロゲートは対にならない。
+        DropPendingHighSurrogate();
     }
 
     /// <summary>

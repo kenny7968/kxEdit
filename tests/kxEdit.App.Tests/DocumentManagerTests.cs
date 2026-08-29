@@ -1,4 +1,5 @@
 using System.Reflection;
+using kxEdit.App.Tests.Fakes;
 
 namespace kxEdit.App.Tests;
 
@@ -590,5 +591,56 @@ public class DocumentManagerTests
 
             Assert.Contains(true, states);
             Assert.Contains(false, states);
+        });
+
+    // ===== A-13: ClipboardFailed の再送(設計 2026-08-29 §4.3) =====
+
+    /// <summary>実 <c>EditorControl</c> を Fake <c>IClipboard</c> で実際に失敗させ、
+    /// <see cref="DocumentManager.ClipboardFailed"/> が再送することを固定する。
+    /// <b>非アクティブタブからも飛ぶ</b>こと(= <c>ActiveDirtyChanged</c> 型のアクティブ限定配線に
+    /// なっていないこと)を、非アクティブな doc1 を起点にすることで弁別する。</summary>
+    [Fact]
+    public void ClipboardFailed_FromNonActiveEditor_IsForwarded() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc1 = host.Docs.CreateNew();
+            var doc2 = host.Docs.CreateNew(); // doc2 がアクティブになる
+            Assert.Same(doc2, host.Docs.Active);
+            doc1.Editor.SetClipboardForTest(new FailingClipboard());
+            doc2.Editor.SetClipboardForTest(new FailingClipboard());
+            // SetSource(=Text セッター)前は Copy/Paste が _buffer null で早期 return するため、
+            // 両方に本文を入れてから失敗経路へ入れる。
+            doc1.Editor.Text = "hello";
+            doc2.Editor.Text = "world";
+
+            var kinds = new List<ClipboardFailureKind>();
+            host.Docs.ClipboardFailed += (_, k) => kinds.Add(k);
+
+            doc1.Editor.SetSelectionCharRange(1, 4); // 非アクティブ側で Copy 失敗
+            doc1.Editor.Copy();
+            doc2.Editor.Paste(); // アクティブ側で Paste 失敗
+
+            Assert.Equal(new[] { ClipboardFailureKind.Write, ClipboardFailureKind.Read }, kinds);
+        });
+
+    /// <summary>成功経路では上がらない(no-change を非既定状態=選択ありから検証する
+    /// = CLAUDE.md §4-B)。既定の <c>WinClipboard</c> ではなく成功する Fake を注入して
+    /// 実クリップボードに触らない。</summary>
+    [Fact]
+    public void ClipboardFailed_NotRaised_OnSuccessfulCopy() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.SetClipboardForTest(new RecordingClipboard());
+            doc.Editor.Text = "hello";
+
+            int raised = 0;
+            host.Docs.ClipboardFailed += (_, _) => raised++;
+
+            doc.Editor.SetSelectionCharRange(1, 4);
+            Assert.True(doc.Editor.Copy());
+            Assert.Equal(0, raised);
         });
 }

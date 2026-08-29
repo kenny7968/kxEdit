@@ -156,6 +156,10 @@ public sealed partial class MainForm : Form
             UpdateStatus();
         };
         _docs.KeyBasedSwitch += (_, doc) => _announcer.Say(doc.TabLabel);
+        // A-13(設計 2026-08-29 §4.3): クリップボードが他プロセスに保持されていると
+        // Copy/Cut/Paste が失敗する。発生源(EditorControl)で捕捉済み=ここでは通知だけ行う。
+        // 失敗しても本文は無傷(Cut も消さない)なので、伝えるべきは「今の操作が効かなかった」こと。
+        _docs.ClipboardFailed += (_, kind) => _announcer.Say(ClipboardFailureMessage(kind));
         _docs.ActiveDirtyChanged += (_, _) => UpdateTitle();
         _docs.ActiveCaretChanged += (_, _) => UpdateStatus();
         // 設定は OpenSettings で参照が差し替わるため Func で都度解決させる。
@@ -614,6 +618,65 @@ public sealed partial class MainForm : Form
         modified && textLength > BackupCoordinator.MaxBackupChars;
 
     internal bool HasOversizedDirtyDocForTest() => HasOversizedDirtyDoc();
+
+    /// <summary>
+    /// A-13: <see cref="DocumentManager.ClipboardFailed"/> に対する発声文言。
+    /// 原因(他プロセスの保持)は同じだが、ユーザーがやろうとした操作が分かるよう
+    /// 読み書きで文言を分ける(SR で聞き分けられる短文にする)。
+    /// </summary>
+    internal static string ClipboardFailureMessage(ClipboardFailureKind kind) =>
+        kind == ClipboardFailureKind.Write
+            ? "クリップボードにコピーできません。他のアプリが使用中の可能性があります"
+            : "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります";
+
+    /// <summary>
+    /// M-1(設計 2026-08-29 §5): 未処理例外からの退避。
+    /// </summary>
+    /// <returns>true = 「次回起動で復元できる」と言い切れるときだけ。</returns>
+    /// <remarks>
+    /// <see cref="BackupCoordinator.FinalFlushForRestore"/> と
+    /// <see cref="BackupCoordinator.WaitForFinalFlush"/> は<b>必ず対でこの順に</b>呼ぶ
+    /// (<c>WaitForFinalFlush</c> の remarks を参照)。
+    /// <b>UI スレッドから呼ぶこと</b>(<see cref="BackupCoordinator"/> は <c>_map</c> を
+    /// 非スレッドセーフな Dictionary で持つ UI スレッド専有クラス)。
+    /// <para>
+    /// <b>前提ゲート</b>は hot exit の silent path と<b>意図的に違う</b>:
+    /// <c>BackupEnabled</c> と「32M 超 dirty なし」だけを見て、
+    /// <c>RestoreOpenFilesOnStartup</c> は<b>見ない</b>。OFF でも
+    /// <see cref="OfferBackupRestoreOnStartup"/> が次回起動でバックアップからの復元を提案するので、
+    /// OFF を理由に「退避できなかった可能性があります」と言うと、実際には復元できる構成に
+    /// 嘘の悲観を出すことになる(Task 4 レビュー Major-3)。
+    /// <c>BackupEnabled</c> は落とせない: OFF では <c>FinalFlushForRestore</c> が本文を書かないのに
+    /// <c>WaitForFinalFlush</c> が「書くものが無い=失敗も無い」の true を返すため、
+    /// <b>何も退避していないのに「復元できます」と表示する</b>嘘の安全宣言になる。
+    /// 「32M 超 dirty なし」も落とせない: path-only バックアップからは本文が戻らない。
+    /// </para>
+    /// <para>
+    /// ゲートは <c>&amp;&amp;</c> の短絡ではなく<b>構造ガード</b>で書く。
+    /// <c>WaitForFinalFlush</c> は <c>BackupEnabled</c> OFF のとき残留失敗 Id を恒久的に
+    /// 読み続ける契約(同 remarks)なので、<b>ゲートを通らない呼び出しを作らない</b>のが本質であり、
+    /// 「見た目が等価な」リファクタ(先に結果を変数へ受ける)で静かに壊れる形にしない。
+    /// </para>
+    /// </remarks>
+    internal bool FlushBackupsForCrash()
+    {
+        // A-8 / H-1(OnFormClosing の再入ガード)と同じ機構をここでも塞ぐ:
+        // WaitForFinalFlush の管理された待機は SENT メッセージを配送するため、待っている間に
+        // WM_CLOSE / WM_QUERYENDSESSION が届くと OnFormClosing が足元で完走し、
+        // BackupCoordinator.Shutdown → Dispose まで進んでしまう。必ず Environment.Exit するので
+        // 立てたら戻さない。
+        _closeInProgress = true;
+
+        bool canRestore = _settings.BackupEnabled && !HasOversizedDirtyDoc();
+        _backup.FinalFlushForRestore();
+        if (!canRestore)
+            return false; // BackupEnabled OFF では WaitForFinalFlush を呼ばない(呼び出し規約)
+        return _backup.WaitForFinalFlush();
+    }
+
+    /// <summary>テスト専用: 最後に <c>IAnnouncer.Say</c> した文言
+    /// (<c>UiaAnnouncer</c> は視覚表示を無条件で行うため通知ラベルの文言と一致する)。</summary>
+    internal string LastAnnouncementForTest => _announceLabel.Text;
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
