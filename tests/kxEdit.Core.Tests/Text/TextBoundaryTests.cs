@@ -309,4 +309,63 @@ public class TextBoundaryTests
         Assert.Equal(0, TextBoundary.SnapToCodePointStart(text, -5));
         Assert.Equal(3, TextBoundary.SnapToCodePointStart(text, 99));
     }
+
+    // ===== SnapToLogicalCharEnd: 論理文字の中間位置を後方(pair 終端)へ寄せる =====
+
+    [Fact]
+    public void SnapToLogicalCharEnd_MidCrlf_SnapsForwardToLf()
+    {
+        // "a\r\nb": 2 は CR と LF の間=論理文字の中間。Start は 1 へ、End は 3 へ寄せる。
+        var s = Snap("a\r\nb");
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharEnd(s, 2));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(s, 2)); // 対であることを同じ fixture で示す
+    }
+
+    [Fact]
+    public void SnapToLogicalCharEnd_MidSurrogatePair_SnapsForwardToLowEnd()
+    {
+        // "a😀b": 2 は low サロゲート位置=論理文字の中間。
+        var s = Snap("a😀b");
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharEnd(s, 2));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(s, 2));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharEnd_OnBoundary_IsIdentity()
+    {
+        // 境界上は動かさない(no-change の検証は非既定位置=文書先頭でも末尾でもない 1 と 3 から始める)
+        var s = Snap("a\r\nb"); // CharLength=4
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharEnd(s, 1)); // CR の前
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharEnd(s, 3)); // LF の後
+    }
+
+    [Fact]
+    public void SnapToLogicalCharEnd_ClampsBothEnds()
+    {
+        var s = Snap("a\r\nb"); // CharLength=4
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharEnd(s, -5));
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharEnd(s, 0));
+        Assert.Equal(4, TextBoundary.SnapToLogicalCharEnd(s, 4));
+        Assert.Equal(4, TextBoundary.SnapToLogicalCharEnd(s, 99));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharEnd_LoneCrAndLoneLf_AreNotPairs()
+    {
+        // 単独 CR / 単独 LF は pair を作らない=どの位置も恒等。
+        // 「直前が CR か」の判定を落として「\n なら常に前進」にする変異をここで殺す。
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharEnd(Snap("a\rb"), 1));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharEnd(Snap("a\nb"), 1));
+        Assert.Equal(2, TextBoundary.SnapToLogicalCharEnd(Snap("a\nb"), 2));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharEnd_LfAtDocumentStart_DoesNotReadBeforeStart()
+    {
+        // 先頭が LF の文書(空行始まり)。pos == 0 は CRLF 判定へ進まず、GetChar(-1) を読まない。
+        // SnapToLogicalCharStart_LfAtDocumentStart_DoesNotReadBeforeStart の鏡像。
+        // ClampsBothEnds の fixture("a\r\nb")は pos == 0 が 'a' で述語が短絡するため、
+        // 早期 return を落とす変異(pos <= 0 → pos < 0)をそちらでは殺せない。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharEnd(Snap("\nabc"), 0));
+    }
 }

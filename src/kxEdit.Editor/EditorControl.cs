@@ -1194,6 +1194,122 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         AfterEdit();
     }
 
+    /// <summary>
+    /// [start, start+length) だけを厳密に置換する。両端が CRLF / サロゲートペアの内側を指していても、
+    /// <see cref="ReplaceCharRange"/> のように外側の文字を巻き込んで捨てず、はみ出し分を復元して書き戻す。
+    /// ただしゼロ幅(純挿入)は広げず境界へスナップする。サロゲートを割るヒットでは半身が
+    /// U+FFFD になる(いずれも remarks 参照)。
+    /// </summary>
+    /// <returns>
+    /// 置換文字列の直後の位置(置換後の文書における char offset)。
+    /// <b>この API は範囲を外側へ広げることがあり、広げ方は呼び出し側から予測できないので、
+    /// 次の位置は必ずこの戻り値を使うこと</b>=<c>start + replacement.Length</c> で計算しては
+    /// ならない(ゼロ幅では始端自体が境界へ後退するため合わない。例: <c>"abc\r\ndef"</c> の
+    /// <c>(4, 0, "X")</c> は挿入点が 3 へ後退して戻り値 4 になるが、<c>start + 1</c> は 5)。
+    /// キャレット(<see cref="CaretCharOffset"/>)の読み戻しでも代用できない。キャレットは
+    /// 「広げた範囲の末尾」に立つので、非ゼロ幅では復元した suffix の分だけ先へ行く
+    /// (<c>(3, 1, "X")</c> は戻り値 4 に対しキャレット 5)。
+    /// <para>
+    /// <see cref="ReadOnly"/> / SetSource 前の no-op では <c>Math.Clamp(start, 0, TextLength)</c>
+    /// (=何も動いていないので始端そのもの)を返す。常に文書内の有効な位置を返す規約にして、
+    /// 戻り値をオフセットとして無条件に使えるようにするため(番兵値 -1 を混ぜると、それを
+    /// オフセットに使う新種のバグを作る)。<b>その代償として戻り値だけでは置換の有無を
+    /// 判別できない</b>=読み取り専用文書で「戻り値を次の起点にして進む」ループを書くと
+    /// 同じ位置を回り続ける。置換されたかどうかが要るなら <see cref="ReadOnly"/> を先に見ること。
+    /// </para>
+    /// </returns>
+    /// <remarks>
+    /// 検索の単発置換(A-14 / 2026-08-29)がこれを使う。正規表現 <c>\n</c> は CRLF 文書で LF
+    /// だけにヒットするが、<see cref="ReplaceCharRange"/> は両端をスナップするので CR ごと消える。
+    /// 一括置換(<c>SnapshotSearcher.ReplaceInRange</c> + 範囲丸ごと差し替え)は両端が
+    /// <b>論理文字境界</b>(文書端、または「選択範囲のみ」で捕捉したスコープの選択端)に乗るため
+    /// 同じ問題を踏まない。本 API は単発置換の結果を一括置換に揃える。
+    /// <para>
+    /// 実装は外側へ広げた範囲を <see cref="ReplaceCharRange"/> へ<b>委譲する</b>。委譲先の
+    /// 再スナップは <c>s</c> / <c>e</c> が既に論理文字境界にあるため恒等であり、編集の副作用
+    /// (<c>AfterEdit</c> / キャレット規約 / Undo 単位 / UIA イベント)は 1 箇所に保たれる。
+    /// </para>
+    /// <para>
+    /// <b>IME 未確定の取消はスナップショットを読む前に行うこと。</b>
+    /// <c>CancelCompositionAndDefault</c> 自体はバッファを書かない(未確定文字列は overlay
+    /// <c>ImeCompositionState</c> にあり本文には入っていないため、<see cref="ImeController.Cancel"/> は
+    /// overlay のクリアと再描画だけを行う)。ただし <c>ImmNotifyIME(CPS_CANCEL)</c> が
+    /// <c>WM_IME_COMPOSITION</c>(GCS_RESULTSTR)を同期配送する IME では、再入で本文が動きうる。
+    /// そのためスナップショットは取消の<b>後</b>に読む。
+    /// テスト用の IME コンテキスト(<c>Fakes/FakeImeContext.cs</c>)は再入しないため、
+    /// <b>この順序は網では固定できない</b>(<c>var snap = _buffer.Current;</c> を取消の上へ動かす
+    /// 変異は生存する)。
+    /// </para>
+    /// <para>
+    /// <b>事後条件。</b> 次の位置が要るなら<b>戻り値を使うこと</b>(returns 参照)。
+    /// 呼び出し側で <c>start</c> から導出してはならない=「接頭辞の復元は長さ保存だから
+    /// <c>start</c> は動かない」は非ゼロ幅でしか成り立たず、ゼロ幅では始端自体が境界へ
+    /// 後退する。正しい値を組めるのはこのメソッドの内部だけ(<c>s</c> と復元した接頭辞の
+    /// 長さの両方を持っているため)なので、推測させずに返す。
+    /// </para>
+    /// <para>
+    /// <b>キャレットは戻り値とは別の位置に立つ</b>(こちらは独立した性質)。委譲先の規約
+    /// (<c>s + text.Length</c>)に従って<b>広げた範囲の末尾</b>=
+    /// <c>戻り値 + 復元した suffix の長さ</c>に立ち、選択は解除される(例: <c>"abc\r\ndef"</c> の
+    /// <c>(3, 1, "X")</c> は本文 <c>"abcX\ndef"</c> ・戻り値 4 ・キャレット 5)。
+    /// キャレットを置換文字列の直後へ戻す補正は<b>あえて入れていない</b>=補正すると UIA
+    /// イベントが増え、編集の副作用が 1 箇所に留まらなくなるため。
+    /// </para>
+    /// <para>
+    /// <b>ゼロ幅(純挿入)は外側へ広げない。</b> 巻き込み復元は「論理文字の内側にある文字を
+    /// <b>置換する</b>」ために要るものであり、挿入には分割すべき文字が無い。広げると CRLF や
+    /// サロゲートペアを割って書き戻すことになり、孤立サロゲートが U+FFFD へ潰れて
+    /// <see cref="ReplaceCharRange"/> なら無傷だった文字を壊す(例: <c>"a😀b"</c> の
+    /// <c>(2, 0, "X")</c>)。<b>その結果、ゼロ幅マッチに限り一括置換
+    /// (<c>SnapshotSearcher.ReplaceInRange</c> 経由)と結果が食い違う</b>。一括側は範囲を広げない
+    /// =範囲全体を materialize して <c>Regex.Replace</c> がペアの内側へ挿入し、その結果を
+    /// 書き戻すときに孤立サロゲートが潰れる(機序は違うが結末は U+FFFD 化で同じ)。
+    /// 単発 / 一括の一致より無警告のデータ破壊を消すほうを採った意図的なトレードオフである。
+    /// </para>
+    /// <para>
+    /// <b>非ゼロ幅でサロゲートペアを割るヒットは、復元した半身が単独で残る限り救出できない</b>
+    /// (CRLF を割る場合と非対称)。.NET の正規表現 <c>.</c> は UTF-16 code unit 単位で照合するため
+    /// 孤立サロゲートに単独ヒットしうるが、本文はピース木に UTF-8 で入るため、復元しようとした
+    /// 孤立サロゲートは <c>AppendBuffer.Append</c> の既定フォールバックで U+FFFD へ潰れる。
+    /// これは保存層の制約であり本 API 固有ではない=この場合は一括置換と同じ結果になる。
+    /// <paramref name="replacement"/> が対の相手(復元される半身と繋がって正しいペアになる
+    /// サロゲート)で始まる / 終わる場合だけは半身が生き残るため、この限りではない。
+    /// </para>
+    /// </remarks>
+    public int ReplaceCharRangeExact(int start, int length, string replacement)
+    {
+        if (IsComposing)
+            CancelCompositionAndDefault();
+        if (_buffer is null || ReadOnly)
+            return Math.Clamp(start, 0, TextLength); // no-op=位置は動かない(returns 参照)
+        ArgumentNullException.ThrowIfNull(replacement);
+        var snap = _buffer.Current;
+        int s0 = Math.Clamp(start, 0, snap.CharLength);
+        // start + length は int 加算だとオーバーフローで負値になり得るため long 経由
+        // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
+        long endLong = (long)start + Math.Max(0, length);
+        int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
+        // ゼロ幅(純挿入)は外側へ広げない。理由は remarks の「ゼロ幅は広げない」を参照。
+        if (s0 == e0)
+        {
+            // 挿入点は境界へ後退しうるので、戻り値はスナップ後の位置から作る
+            // (s0 から作ると論理文字 1 つ分ずれる=呼び出し側が start から導出するのと同じ誤り)。
+            int insertAt = TextBoundary.SnapToLogicalCharStart(snap, s0);
+            ReplaceCharRange(insertAt, 0, replacement);
+            return insertAt + replacement.Length;
+        }
+        int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
+        int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
+        int prefixLen = s0 - s; // 復元する接頭辞。長さ保存で書き戻すので戻り値にも効く
+        // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は空を返し
+        // (TextSnapshot.GetText の length == 0 早期 return。ただし範囲検査はその手前なので
+        // 空が返るのは x ∈ [0, CharLength] のときだけ=s / e0 は常にこの範囲)、string 連結は空オペランドを
+        // 短絡して残り 1 つの参照をそのまま返すため、分岐しても結果は同じ。
+        string text = snap.GetText(s, prefixLen) + replacement + snap.GetText(e0, e - e0);
+        ReplaceCharRange(s, e - s, text);
+        return s + prefixLen + replacement.Length;
+    }
+
     private int ClampTopLine(int value)
     {
         int max = _buffer is null ? 0 : Math.Max(0, _buffer.Current.LineCount - 1);

@@ -566,6 +566,246 @@ public class SearchControllerTests
             Assert.Equal("abc", doc.Editor.Text);
         });
 
+    // ===== A-14: CRLF 文書で現ヒットを取り違えない =====
+
+    [Fact]
+    public void ReplaceOne_RegexLfInCrlfDocument_ReplacesTheSelectedHit() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // 2 行目以降を持たせて「次の出現を置換した」と「その位置を置換した」を弁別する。
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\n";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // 1 つ目の LF(index 4)にヒット=選択は [3,5) にスナップされる
+
+            host.Search.ReplaceOne();
+
+            // 修正前は ReplacementAt が外れて FindNext(5) に落ち、2 つ目の LF を置換して
+            // "abc\r\ndef\rXghi" になっていた。
+            Assert.Equal("abc\rXdef\r\nghi", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_RegexLfInCrlfDocument_MatchesReplaceAllResult() =>
+        Sta.Run(() =>
+        {
+            // 単発を一括に揃える=同じ 1 件だけの文書で両者の結果が一致すること。
+            using var one = new Host();
+            using var all = new Host();
+            var docOne = one.NewDoc("abc\r\ndef");
+            var docAll = all.NewDoc("abc\r\ndef");
+            foreach (var h in new[] { one, all })
+            {
+                h.View.Pattern = @"\n";
+                h.View.Replacement = "X";
+                h.View.UseRegex = true;
+                h.Search.OpenReplace();
+            }
+
+            one.Search.FindNext();
+            one.Search.ReplaceOne();
+            all.Search.ReplaceAll();
+
+            Assert.Equal(docAll.Editor.Text, docOne.Editor.Text);
+            Assert.Equal("abc\rXdef", docOne.Editor.Text);
+        });
+
+    [Fact]
+    public void FindNext_RegexCrInCrlfDocument_AdvancesToNextHit() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\r";
+            host.View.Replacement = "";
+            host.View.UseRegex = true;
+            host.Search.OpenFind();
+
+            Assert.True(host.Search.FindNext()); // 1 つ目の CR(index 3)。選択は [3,3) に潰れる
+            Assert.True(host.Search.FindNext()); // 修正前はここが同じ位置に留まっていた
+
+            // 2 つ目の CR(index 8)へ進んだ = 選択の始端が 8 になっている
+            Assert.Equal(8, doc.Editor.GetSelectionCharRange().Start);
+        });
+
+    [Fact]
+    public void ReplaceOne_RegexCrInCrlfDocument_KeepsTheLf() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef");
+            host.View.Pattern = @"\r";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext();
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abcX\ndef", doc.Editor.Text); // LF を巻き込まない
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterUserMovesSelection_FallsBackToSearchFromCaret() =>
+        Sta.Run(() =>
+        {
+            // 現ヒットが「生きていない」ときは従来経路(次を検索して即置換)のままであること。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3) を選択
+
+            doc.Editor.SetCaretCharOffset(4); // ユーザーが選択を動かした=現ヒットは無効
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // キャレット以降の最初のヒットを置換
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterExternalEdit_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // 先頭挿入で選択が (4,7) へ動くので、この網が実際に通るのは「選択そのものがヒット」
+            // の中間分岐。見ているのは「捕捉時のずれた (0,3) を使わない」ことだけで、
+            // 世代チェックそのものは検査していない(世代チェックを外しても緑)。
+            // 世代チェックを固定しているのは AfterEditThatKeepsTheSelection のほう。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3)
+
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 先頭へ挿入。選択も (4,7) へ動く
+            host.Search.ReplaceOne();
+
+            Assert.Equal("QQQQX abc", doc.Editor.Text); // ずれた (0,3) を使っていない
+        });
+
+    [Fact]
+    public void ReplaceOne_PatternChangedAfterFind_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐の ReplacementAt ガードの網。ResolveSearcher は照合条件が変われば
+            // searcher を作り直すが _lastHit はクリアしない。文書もスナップショットも選択も
+            // 不変なので LiveHit は生きたままで、新しい照合条件に対して現ヒットが
+            // ヒットでなくなったことは ReplacementAt でしか分からない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc def");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3) を選択・_lastHit=(0,3)
+
+            host.View.Pattern = "def"; // 選択も文書もそのまま、照合条件だけ変わる
+
+            host.Search.ReplaceOne();
+
+            // ガードを外すと選択中の "abc" を "X" に潰す(SR ユーザーには置換位置が見えない)。
+            Assert.Equal("abc X", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset() =>
+        Sta.Run(() =>
+        {
+            // 置換後の前進起点は ReplaceCharRangeExact の戻り値であって span.Start + repl.Length
+            // ではない。ゼロ幅ヒットは挿入点が論理文字の境界まで後退する(CRLF は割らない)ので、
+            // 導出値だと 1 code unit ぶん後ろから探し始め、次のヒットを 1 件飛ばす。
+            // 飛ばしても本文と選択は一致してしまう(選択も境界へスナップされるため)。
+            // 弁別できるのは通知だけなので、そこを固定する(この fixture では序数がずれる。
+            // 別の fixture では「これ以上見つかりません」になる=通知の内容は fixture 次第)。
+            using var host = new Host();
+            var doc = host.NewDoc("a\r\nb");
+            // 前半=CR と LF の間のゼロ幅ヒット。後半=置換で入る X の直後のゼロ幅ヒット
+            // (置換後に「飛ばされる側」の 1 件を作るために要る)。
+            host.View.Pattern = @"(?<=\r)(?=\n)|(?<=X)";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext();
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("aX\r\nb", doc.Editor.Text);
+            Assert.Equal((2, 2), doc.Editor.GetSelectionCharRange());
+            // 本文も選択も変異と同じ。序数だけが違う(変異では「2 件中 2 件目」になる)。
+            Assert.Equal("置換しました。2 件中 1 件目", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_ManuallySelectedMatch_ReplacesTheSelection() =>
+        Sta.Run(() =>
+        {
+            // 挙動不変の網(A-14 修正前から緑)。Find を使わず手で語を選んで「置換」を押す操作。
+            // 現ヒットが無いからといって FindNext(selEnd) へ落とすと、選択の「次」の出現を
+            // 置換してしまう(SR ユーザーには置換位置が見えないので気付けない)。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+
+            doc.Editor.SelectCharRange(0, 3); // 検索を経由せず選択だけ作る
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("X abc", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void FindPrev_FromLfHitOfCrlf_DoesNotSkipTheCrHit() =>
+        Sta.Run(() =>
+        {
+            // 後方検索も選択の始端ではなく現ヒットの始端から遡る。CRLF の LF ヒットは
+            // 選択の始端が CR まで後退するので、選択基準だと [selStart, Hit.Start) に居る
+            // CR ヒットを飛ばす(F3 前進側と同じ取りこぼしの鏡像)。
+            using var host = new Host();
+            host.NewDoc("a\r\nb\r\nc"); // [\r\n] のヒットは index 1 / 2 / 4 / 5 の 4 件
+            host.View.Pattern = @"[\r\n]";
+            host.View.UseRegex = true;
+            host.Search.OpenFind();
+
+            for (int i = 0; i < 4; i++)
+                Assert.True(host.Search.FindNext()); // 4 件目(index 5 の LF)まで進む
+
+            Assert.True(host.Search.FindPrev());
+
+            // 3 件目=index 4 の CR。選択始端基準だと 2 件目(index 2 の LF)へ飛んでしまう。
+            Assert.Equal("4 件中 3 件目", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_AfterEditThatKeepsTheSelection_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // 世代チェックの網。選択の数値だけでは「同じヒットを選んだまま」を判定できない
+            // (末尾を編集しても手前の選択位置はずれない)ので、スナップショット参照で弁別する。
+            using var host = new Host();
+            var doc = host.NewDoc("abc\r\ndef\r\nghi");
+            host.View.Pattern = @"\n";
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // ヒット (4,1)・選択は [3,5) へスナップ
+
+            doc.Editor.ReplaceCharRange(12, 1, "Z"); // 末尾を編集=世代が変わる(手前の位置は不動)
+            doc.Editor.SelectCharRange(3, 2); // 捕捉時と同じ選択へ戻す
+
+            host.Search.ReplaceOne();
+
+            // 現ヒットは死んでいる。選択 [3,5)="\r\n" は \n のヒットではないので従来経路へ落ち、
+            // 2 つ目の LF(index 9)を置換する。世代チェックを外すと 1 つ目を置換して
+            // "abc\rXdef\r\nghZ" になる。
+            Assert.Equal("abc\r\ndef\rXghZ", doc.Editor.Text);
+        });
+
     // ===== ReplaceAll(全文/捕捉済み選択スコープ) =====
 
     [Fact]
@@ -817,6 +1057,328 @@ public class SearchControllerTests
 
             Assert.Equal("LONGER Y ccc", doc.Editor.Text); // 範囲外の "ccc" は残る
             Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_ScopeEndInsideCrlf_DoesNotDuplicateCr() =>
+        Sta.Run(() =>
+        {
+            // main 既存バグ(本ブランチの退行ではない)。ReplaceInRange は素の範囲
+            // [start, start+len) で断片を組むのに、書き戻しが非 Exact な ReplaceCharRange だと
+            // 両端をスナップして範囲を「狭める」ため、断片と書込先の長さが食い違う。
+            // スコープ端が CRLF の内側にあると CR が重複して空行が増える。
+            using var host = new Host();
+            var doc = host.NewDoc("a\rXY\nb");
+            host.View.Pattern = "XY";
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(0, 4); // "a\rXY" を捕捉(位置 4 はまだ境界)
+            host.Search.OnInSelectionToggled(true);
+
+            // 単発置換で XY を消すと CR と LF が隣接し、スコープ終端 2 が CRLF の内側になる。
+            host.Search.ReplaceOne();
+            Assert.Equal("a\r\nb", doc.Editor.Text);
+
+            host.View.Pattern = "a";
+            host.View.Replacement = "ZZ";
+            host.Search.ReplaceAll();
+
+            // 修正前は "ZZ\r\r\nb"(CR が重複=空行が 1 行増える)。
+            Assert.Equal("ZZ\r\nb", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_ScopeStartInsideCrlf_DoesNotDeleteOutsideCr() =>
+        Sta.Run(() =>
+        {
+            // 始端側は被害がさらに悪く、選択範囲「外」の文字が黙って消える(発声は成功のまま)。
+            using var host = new Host();
+            var doc = host.NewDoc("a\rXY\nb");
+            host.View.Pattern = "XY";
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(2, 4); // "XY\nb" を捕捉(prefix "a\r" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            // 単発置換で XY を消すと、スコープ始端 2 が CRLF の内側になる。
+            host.Search.ReplaceOne();
+            Assert.Equal("a\r\nb", doc.Editor.Text);
+
+            host.View.Pattern = "b";
+            host.View.Replacement = "Q";
+            host.Search.ReplaceAll();
+
+            // 修正前は "a\nQ"=スコープ外(index 1)の CR が消える。
+            Assert.Equal("a\r\nQ", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    // ===== T-3: 「選択範囲のみ」を単発置換にも効かせる =====
+
+    [Fact]
+    public void ReplaceOne_InSelection_CaretAfterScope_DoesNotReplaceOutsideScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // prefix "abc " と suffix " abc" の両方を除外できる fixture(全選択との区別)。
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央の "abc" だけを捕捉
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SetCaretCharOffset(8); // キャレットをスコープの外(3 件目の先頭)へ
+
+            host.Search.ReplaceOne();
+
+            // 修正前は 3 件目が置換され "abc abc X" + 成功発声になっていた。
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_SelectionOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 2 分岐(選択そのものがヒット)のガードの網。
+            // スコープ捕捉後に手でスコープ外のヒットを選び直しても置換しない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SelectCharRange(8, 3); // 手で 3 件目を選び直す(選択はヒットそのもの)
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_FindMovedOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐(生きている現ヒット)のガードの網。
+            // 「範囲を捕捉 → F3 で範囲外へ移動 → 置換」= 現ヒットが生きたままスコープ外にある。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            Assert.True(host.Search.FindNext()); // 3 件目 (8,11) へ移動(Find は全文のまま)
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ZeroWidthHitOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐のガードだけを弁別する網。上の Find 版は選択もヒットそのものなので
+            // 第 2 分岐のガードでも止まる=第 1 分岐のガードを外しても落ちない。
+            // ゼロ幅ヒットは選択が幅ゼロになり第 2 分岐が `selEnd > selStart` で短絡するため、
+            // 止められるのは第 1 分岐のガードだけになる。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "(?=abc)"; // ゼロ幅=位置 0 / 4 / 8 にヒット
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            Assert.True(host.Search.FindNext()); // 位置 8 のゼロ幅ヒットへ移動(選択は (8,8))
+
+            host.Search.ReplaceOne();
+
+            // 第 1 分岐のガードを外すと "abc abc Xabc" になる(スコープ外へ X を挿入)。
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ReplacesInsideScope() =>
+        Sta.Run(() =>
+        {
+            // 過剰無効化の網。この操作は修正前も動いていた(第 2 分岐を通る)。
+            // _LastHitInScope_AnnouncesNoMore と fixture は同一だが、重複ではなく意図的な対:
+            // こちらは本文、あちらは発声文言という別の観測面を見ており、互いに部分集合ではない
+            // (span.Length を +1 する変異はこちらだけを、スコープ伸縮の符号反転と置換後の
+            //  包含判定除去はあちらだけを落とす)。畳むと弁別が消えるので分けたまま残す。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // 前後の 2 件は残る
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_CaretBeforeScope_SkipsForwardIntoScope() =>
+        Sta.Run(() =>
+        {
+            // 起点をスコープ先頭まで繰り上げる=スコープより前のヒットを置換しない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SetCaretCharOffset(0); // キャレットをスコープより前へ
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // 1 件目ではなく 2 件目が置換される
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_TwiceInARow_SecondIsNotRefused() =>
+        Sta.Run(() =>
+        {
+            // 置換のたびにスコープを伸縮させて捕捉し直さないと 2 回目が「陳腐化」で拒否される。
+            using var host = new Host();
+            var doc = host.NewDoc("zz abc abc zz");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "XY"; // 長さが変わる=伸縮の計算を効かせる
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(3, 7); // "abc abc" を捕捉(選択はヒットそのものではない)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+            host.Search.ReplaceOne();
+
+            Assert.Equal("zz XY XY zz", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_LongerReplacement_GrowsScopeToKeepFollowingHit() =>
+        Sta.Run(() =>
+        {
+            // スコープ伸縮の「伸ばす」向きの網。TwiceInARow は縮む向き(3→2)なので、
+            // 伸縮を丸ごと落とす変異(End 据え置き)では許容側に倒れて生き残る。
+            // 伸ばし忘れ=スコープ内の未置換ヒットを取りこぼす。
+            using var host = new Host();
+            var doc = host.NewDoc("zz abc abc zz");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "XYZW"; // 3 → 4 文字=スコープは 1 文字ぶん伸びる必要がある
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(3, 7); // "abc abc" を捕捉(前後の "zz" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+            host.Search.ReplaceOne();
+
+            // 伸ばし忘れると 2 件目が [3,10) からはみ出し、1 回目で
+            // 「置換しました。これ以上見つかりません」になって "zz XYZW abc zz" で止まる。
+            Assert.Equal("zz XYZW XYZW zz", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ShorterReplacement_ShrinksScopeToProtectOutside() =>
+        Sta.Run(() =>
+        {
+            // スコープ伸縮の「縮める」向きの網。伸ばす向きと違い、こちらを落とすと
+            // 選択範囲外の文字が置換される=T-3 が潰そうとしている不具合クラスそのもの。
+            using var host = new Host();
+            var doc = host.NewDoc("abcdef");
+            host.View.Pattern = "."; // 1 文字ずつ削除していく=1 回の置換で 1 文字ぶん縮む
+            host.View.UseRegex = true;
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(0, 2); // "ab" だけを捕捉(suffix "cdef" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne(); // "a" を削除=スコープは [0,2) → [0,1) へ縮む
+            host.Search.ReplaceOne(); // "b" を削除=スコープは [0,1) → [0,0) へ縮む
+            host.Search.ReplaceOne(); // スコープが空=何も置換しない
+
+            // 縮め忘れるとスコープが [0,2) のまま残り、3 回目で選択外の "c" まで消える。
+            Assert.Equal("cdef", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_LastHitInScope_AnnouncesNoMore() =>
+        Sta.Run(() =>
+        {
+            // 置換後の「次」がスコープ外なら、そこへ飛ばずに終わる。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("置換しました。これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_WithoutCapturedScope_Announces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            host.Search.OnInSelectionToggled(true); // 選択なしで ON=捕捉されない
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("選択範囲がありません", host.Announcer.Said[^1]);
+            Assert.Equal("abc", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_AfterEdit_RefusesStaleScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 後半だけを捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 捕捉位置が別の中身を指すようになる
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("QQQQabc abc", doc.Editor.Text); // 一文字も書き換えない
+            Assert.Equal("選択範囲が変わりました。選択し直してください", host.Announcer.Said[^1]);
         });
 
     [Fact]

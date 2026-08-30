@@ -76,6 +76,7 @@ namespace kxEdit.Core.Text;
 /// <item><term><c>Next*</c></term><description>throw / クランプ(<c>CharLength</c> を返す)</description></item>
 /// <item><term><c>Prev*</c></term><description>クランプ(0 を返す) / throw</description></item>
 /// <item><term><c>SnapToLogicalCharStart</c></term><description>クランプ / クランプ</description></item>
+/// <item><term><c>SnapToLogicalCharEnd</c></term><description>クランプ / クランプ</description></item>
 /// </list>
 /// throw は <see cref="ArgumentOutOfRangeException"/>(<see cref="TextSnapshot.GetChar"/> 由来)。
 /// 実装は必要な位置しか読まないため、読取が発生しない縮退ケースでは範囲外でも throw しない
@@ -239,6 +240,30 @@ public static class TextBoundary
         char c = snap.GetChar(pos);
         if (IsSurrogatePairEndingAt(snap, pos, c) || IsCrlfEndingAt(snap, pos, c))
             return pos - 1;
+        return pos;
+    }
+
+    /// <summary>
+    /// [0, CharLength] にクランプし、論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
+    /// 後方(pair 終端)へスナップする。<see cref="SnapToLogicalCharStart"/> の対。
+    /// </summary>
+    /// <remarks>
+    /// 範囲の<b>終端</b>に使う。終端に <see cref="SnapToLogicalCharStart"/> を掛けると範囲が
+    /// 狭まり、割ってはいけない論理文字ごと範囲から落ちる(例: CRLF の CR にヒットした
+    /// <c>[3,4)</c> が <c>[3,3)</c> のゼロ幅に潰れる)。始端に Start・終端に End を掛けると、
+    /// 元の範囲を必ず含み、かつ論理文字を割らない最小の範囲になる。
+    /// </remarks>
+    public static int SnapToLogicalCharEnd(TextSnapshot snap, int pos)
+    {
+        ArgumentNullException.ThrowIfNull(snap);
+        if (pos <= 0)
+            return 0;
+        if (pos >= snap.CharLength)
+            return snap.CharLength;
+        // pos > 0 は前段の早期 return で保証済み(述語が pos - 1 を読める条件)
+        char c = snap.GetChar(pos);
+        if (IsSurrogatePairEndingAt(snap, pos, c) || IsCrlfEndingAt(snap, pos, c))
+            return pos + 1;
         return pos;
     }
 }
