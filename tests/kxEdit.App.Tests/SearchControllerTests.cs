@@ -1059,6 +1059,63 @@ public class SearchControllerTests
             Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
         });
 
+    [Fact]
+    public void ReplaceAll_InSelection_ScopeEndInsideCrlf_DoesNotDuplicateCr() =>
+        Sta.Run(() =>
+        {
+            // main 既存バグ(本ブランチの退行ではない)。ReplaceInRange は素の範囲
+            // [start, start+len) で断片を組むのに、書き戻しが非 Exact な ReplaceCharRange だと
+            // 両端をスナップして範囲を「狭める」ため、断片と書込先の長さが食い違う。
+            // スコープ端が CRLF の内側にあると CR が重複して空行が増える。
+            using var host = new Host();
+            var doc = host.NewDoc("a\rXY\nb");
+            host.View.Pattern = "XY";
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(0, 4); // "a\rXY" を捕捉(位置 4 はまだ境界)
+            host.Search.OnInSelectionToggled(true);
+
+            // 単発置換で XY を消すと CR と LF が隣接し、スコープ終端 2 が CRLF の内側になる。
+            host.Search.ReplaceOne();
+            Assert.Equal("a\r\nb", doc.Editor.Text);
+
+            host.View.Pattern = "a";
+            host.View.Replacement = "ZZ";
+            host.Search.ReplaceAll();
+
+            // 修正前は "ZZ\r\r\nb"(CR が重複=空行が 1 行増える)。
+            Assert.Equal("ZZ\r\nb", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_ScopeStartInsideCrlf_DoesNotDeleteOutsideCr() =>
+        Sta.Run(() =>
+        {
+            // 始端側は被害がさらに悪く、選択範囲「外」の文字が黙って消える(発声は成功のまま)。
+            using var host = new Host();
+            var doc = host.NewDoc("a\rXY\nb");
+            host.View.Pattern = "XY";
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(2, 4); // "XY\nb" を捕捉(prefix "a\r" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            // 単発置換で XY を消すと、スコープ始端 2 が CRLF の内側になる。
+            host.Search.ReplaceOne();
+            Assert.Equal("a\r\nb", doc.Editor.Text);
+
+            host.View.Pattern = "b";
+            host.View.Replacement = "Q";
+            host.Search.ReplaceAll();
+
+            // 修正前は "a\nQ"=スコープ外(index 1)の CR が消える。
+            Assert.Equal("a\r\nQ", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
     // ===== T-3: 「選択範囲のみ」を単発置換にも効かせる =====
 
     [Fact]

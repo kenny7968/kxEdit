@@ -480,12 +480,24 @@ public sealed class SearchController
                 Announce("見つかりません");
                 return;
             }
-            ed.ReplaceCharRange(rangeStart, rangeLen, fragment);
+            // Exact でなければならない。fragment は素の範囲 [rangeStart, rangeStart+rangeLen) 用に
+            // 組まれている(ReplaceInRange はスナップしない)のに、非 Exact の ReplaceCharRange は
+            // 両端をスナップして範囲を「狭める」ため、端が論理文字の内側にあると断片と書込先の
+            // 長さが食い違う。終端側は CR が重複して空行が増え、始端側はスコープ外の CR が
+            // 黙って消える(どちらも「N 件置換しました」と成功発声する)。
+            // 端が境界に乗っている通常ケースでは s == s0 / e == e0 で prefix / suffix が空になり、
+            // 委譲先は ReplaceCharRange(rangeStart, rangeLen, fragment) そのもの=挙動不変。
+            // 戻り値(置換文字列の直後)は使わない。ReplaceAll には次ヒット探索が無いため。
+            ed.ReplaceCharRangeExact(rangeStart, rangeLen, fragment);
             if (d.InSelection)
                 // 置換後の同じ領域を新世代で捕捉し直す。これが無いと「範囲を選んで語を変えながら
                 // 何度か置換する」ワークフローが 2 回目で拒否される(範囲は fragment の長さぶんに
-                // 伸縮する)。rangeStart は選択由来でサロゲート境界に乗っており、終端は
-                // 差し込んだ fragment の末尾なので、どちらも文字の途中を指さない。
+                // 伸縮する)。
+                // 端が「文字の途中を指さない」とは限らない: スコープは単発置換のたびに伸縮するので、
+                // 置換が端に CRLF を作れば端は論理文字の内側に入りうる(上記 2 バグの再現条件)。
+                // それでも再捕捉の値は正しい。Exact 置換は巻き込んだ prefix / suffix を長さ保存で
+                // 書き戻すので、実書込範囲は [rangeStart, rangeStart + fragment.Length) からずれない
+                // (rangeStart より前の内容は不変・終端は差し込んだ fragment の末尾)。
                 _selectionScope = (
                     Weak(ed.CurrentBuffer.Current),
                     rangeStart,
