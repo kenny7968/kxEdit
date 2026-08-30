@@ -236,6 +236,10 @@ public sealed class SearchController
                 // 手前へ寄ることがある(CRLF の LF ヒット)ため、selStart のままだと
                 // [selStart, Hit.Start) 内のヒットを取りこぼす。スナップが起きない
                 // ケースでは h.Start == selStart なので挙動不変。
+                // 前方と違って Math.Max(1, Length) が要らないのは契約が非対称だから:
+                // FindPrev は「開始位置が before より厳密に前」(SnapshotSearcher /
+                // ISnapshotSearchStrategy の doc)なので before = h.Start で現ヒットは
+                // ゼロ幅でも自動的に外れる。FindNext(from) は from を含むので自力で越える。
                 int before = live is { } h2 ? h2.Start : selStart;
                 hit = searcher.FindPrev(snap, before);
             }
@@ -247,7 +251,7 @@ public sealed class SearchController
                 return false;
             }
 
-            SelectHit(ed, hit.Value);
+            SelectHit(ed, snap, hit.Value);
             var loc = searcher.Locate(snap, hit.Value);
             // 位置不明（Locate 失敗）時は空メッセージ＝ステータスのクリアのみ（発声なし）。
             Announce(loc is { } l ? $"{l.Total} 件中 {l.Ordinal} 件目" : "");
@@ -342,7 +346,8 @@ public sealed class SearchController
             // 非ゼロ幅では両者は恒等(span.Start == s + prefixLen)なので、差が出るのは
             // ゼロ幅マッチが CRLF / サロゲートの内側に立つ場合だけ。そのとき差分窓は
             // 1 code unit しかなく、置換後の本文も選択も一致してしまう(選択も境界へ
-            // スナップされるため)。弁別できるのは通知の序数=次ヒットが 1 件飛ぶことで、
+            // スナップされるため)。弁別できるのは通知=次ヒットを 1 件飛ばすことで、fixture 次第で
+            // 序数がずれる場合と「これ以上見つかりません」になる場合がある。
             // ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset が固定している。
             int afterRepl = ed.ReplaceCharRangeExact(span.Start, span.Length, repl);
             var snap2 = ed.CurrentBuffer.Current;
@@ -355,7 +360,7 @@ public sealed class SearchController
                 Announce("置換しました。これ以上見つかりません");
                 return;
             }
-            SelectHit(ed, next.Value);
+            SelectHit(ed, snap2, next.Value); // next は snap2 上で見つけたヒット
             var loc = searcher.Locate(snap2, next.Value);
             Announce(
                 loc is { } l ? $"置換しました。{l.Total} 件中 {l.Ordinal} 件目" : "置換しました"
@@ -457,6 +462,9 @@ public sealed class SearchController
                     rangeStart,
                     rangeStart + fragment.Length
                 );
+            // 世代チェックとの二重の保険。ここへ来る時点で必ず編集済み(count == 0 は上で
+            // return)なので LiveHit は世代不一致で null になり、現状この行は冗長。
+            // 「編集したら現ヒットは捨てる」を明示に残す(消しても挙動は変わらない)。
             _lastHit = null;
             Announce($"{count} 件置換しました");
         }
@@ -467,12 +475,16 @@ public sealed class SearchController
     }
 
     /// <summary>直前ヒットを選択して <see cref="_lastHit"/> を更新する。
-    /// 選択の<b>結果</b>を読み戻すことで、CRLF / サロゲートのスナップ規則を App 層に複製しない。</summary>
-    private void SelectHit(EditorControl ed, MatchSpan hit)
+    /// 選択の<b>結果</b>を読み戻すことで、CRLF / サロゲートのスナップ規則を App 層に複製しない。
+    /// <para><paramref name="snap"/> は <paramref name="hit"/> を<b>見つけたときの</b>スナップショット。
+    /// ここで <c>ed.CurrentBuffer.Current</c> を読み直さないのは、ヒットとその出所を必ず一組で
+    /// 運ばせるため(呼び出し側は手元の snap を渡すだけ)。読み直しでも選択操作では世代が
+    /// 変わらないので現状は同値だが、置換を挟む経路が増えると取り違えが起きうる。</para></summary>
+    private void SelectHit(EditorControl ed, TextSnapshot snap, MatchSpan hit)
     {
         ed.SelectCharRange(hit.Start, hit.Length);
         var (s, e) = ed.GetSelectionCharRange();
-        _lastHit = (Weak(ed.CurrentBuffer.Current), hit, s, e);
+        _lastHit = (Weak(snap), hit, s, e);
     }
 
     /// <summary>「いま画面で選ばれているヒット」を返す(無ければ null)。

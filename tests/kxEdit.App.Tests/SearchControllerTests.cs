@@ -689,6 +689,29 @@ public class SearchControllerTests
         });
 
     [Fact]
+    public void ReplaceOne_PatternChangedAfterFind_DoesNotReuseStaleHit() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐の ReplacementAt ガードの網。ResolveSearcher は照合条件が変われば
+            // searcher を作り直すが _lastHit はクリアしない。文書もスナップショットも選択も
+            // 不変なので LiveHit は生きたままで、新しい照合条件に対して現ヒットが
+            // ヒットでなくなったことは ReplacementAt でしか分からない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc def");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            host.Search.FindNext(); // (0,3) を選択・_lastHit=(0,3)
+
+            host.View.Pattern = "def"; // 選択も文書もそのまま、照合条件だけ変わる
+
+            host.Search.ReplaceOne();
+
+            // ガードを外すと選択中の "abc" を "X" に潰す(SR ユーザーには置換位置が見えない)。
+            Assert.Equal("abc X", doc.Editor.Text);
+        });
+
+    [Fact]
     public void ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset() =>
         Sta.Run(() =>
         {
@@ -696,7 +719,8 @@ public class SearchControllerTests
             // ではない。ゼロ幅ヒットは挿入点が論理文字の境界まで後退する(CRLF は割らない)ので、
             // 導出値だと 1 code unit ぶん後ろから探し始め、次のヒットを 1 件飛ばす。
             // 飛ばしても本文と選択は一致してしまう(選択も境界へスナップされるため)。
-            // 弁別できるのは通知の序数だけなので、そこを固定する。
+            // 弁別できるのは通知だけなので、そこを固定する(この fixture では序数がずれる。
+            // 別の fixture では「これ以上見つかりません」になる=通知の内容は fixture 次第)。
             using var host = new Host();
             var doc = host.NewDoc("a\r\nb");
             // 前半=CR と LF の間のゼロ幅ヒット。後半=置換で入る X の直後のゼロ幅ヒット
