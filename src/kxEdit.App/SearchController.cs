@@ -290,6 +290,16 @@ public sealed class SearchController
             var snap = ed.CurrentBuffer.Current;
             var (selStart, selEnd) = ed.GetSelectionCharRange();
 
+            // T-3: 「選択範囲のみ」ON なら置換対象をスコープ内に閉じる。
+            // ReplaceAll と同じ判定・同じ文言を使う(片方だけ通る非一貫を作らない)。
+            (int Start, int End)? scope = null;
+            if (d.InSelection)
+            {
+                if (TryResolveScope(snap) is not { } resolved)
+                    return; // 理由は TryResolveScope が発声済み
+                scope = resolved;
+            }
+
             // A-14: 置換対象はまず「Find が選んだヒット本体」を使う。選択から再導出した
             // MatchSpan は CRLF / サロゲートのスナップで実ヒットとずれ、ReplacementAt が
             // 外れて「次の出現」を置換していた。
@@ -298,6 +308,7 @@ public sealed class SearchController
             string repl;
             if (
                 LiveHit(snap, selStart, selEnd) is { } hit
+                && WithinScope(hit, scope) // スコープ外なら照合を試みる必要がない
                 && searcher.ReplacementAt(snap, hit, d.Replacement) is { } liveRepl
             )
             {
@@ -306,6 +317,7 @@ public sealed class SearchController
             }
             else if (
                 selEnd > selStart
+                && WithinScope(selSpan, scope)
                 && searcher.ReplacementAt(snap, selSpan, d.Replacement) is { } selRepl
             )
             {
@@ -321,8 +333,16 @@ public sealed class SearchController
                 // 現ヒットも無く選択もヒットでない(まだ検索していない / キャレットだけ動いた)。
                 // G-3: 次を検索してそのまま即置換する(VSCode 準拠)。
                 // 前進先が無い場合は Find と同じ「これ以上見つかりません」で終了。
-                var next0 = searcher.FindNext(snap, selEnd);
-                if (next0 is null)
+                // 起点: スコープなしは従来どおり選択の終端から前進する(挙動不変)。
+                // スコープありは選択の始端を起点にしてスコープ先頭まで繰り上げる。
+                // 「選択範囲のみ」では選択はスコープを表しているだけで「進んだ位置」ではない。
+                // 終端を使うと、選択がヒットそのものでない場合(例: 段落を選んで中の語を置換)に
+                // スコープ内の未置換ヒットを飛ばす。クランプ後は hit.Start >= scope.Start が
+                // 保証される(FindNext は from 以上の位置しか返さない)ので、下の包含判定で
+                // 実際に効くのは End 側だけ。判定自体は他の分岐と同じ WithinScope に一本化する。
+                int from = scope is { } sc ? Math.Max(selStart, sc.Start) : selEnd;
+                var next0 = searcher.FindNext(snap, from);
+                if (next0 is null || !WithinScope(next0.Value, scope))
                 {
                     Announce("これ以上見つかりません");
                     return;
@@ -351,10 +371,21 @@ public sealed class SearchController
             // ReplaceOne_ZeroWidthHitInsideCrlf_AdvancesFromTheReturnedOffset が固定している。
             int afterRepl = ed.ReplaceCharRangeExact(span.Start, span.Length, repl);
             var snap2 = ed.CurrentBuffer.Current;
+            if (scope is { } prev)
+            {
+                // 置換後のスコープを新世代で捕捉し直す(ReplaceAll の復帰処理と同じ理由)。
+                // これが無いと次の置換が世代不一致=「陳腐化」で拒否される。span はスコープに
+                // 完全に含まれる(WithinScope 済み)ので始端は動かず、終端だけが差分ぶん動く。
+                // 差分が repl.Length - span.Length ちょうどなのは、ReplaceCharRangeExact の
+                // 巻き込み復元が長さ保存(削った prefix / suffix をそのまま書き戻す)だから。
+                var grown = (Start: prev.Start, End: prev.End + repl.Length - span.Length);
+                _selectionScope = (Weak(snap2), grown.Start, grown.End);
+                scope = grown;
+            }
             // 空置換（削除）のとき +1 すると置換直後の隣接ヒットを取りこぼすので、
             // 置換文字列の直後(afterRepl)からそのまま前進する。
             var next = searcher.FindNext(snap2, afterRepl);
-            if (next is null)
+            if (next is null || !WithinScope(next.Value, scope))
             {
                 _lastHit = null;
                 Announce("置換しました。これ以上見つかりません");
@@ -415,22 +446,9 @@ public sealed class SearchController
                 rangeLen;
             if (d.InSelection)
             {
-                if (_selectionScope is not { } scope)
-                {
-                    Announce("選択範囲がありません");
-                    return;
-                }
-                // 捕捉後に文書が編集されると、同じ char 位置が別の中身を指す。そのまま置換すると
-                // ユーザーが選択していない範囲を書き換えたうえ「N 件置換しました」と成功発声する
-                // (SR ユーザーには区別がつかない)。使わずに拒否する。
-                // TextSnapshot は編集のたびに新インスタンスになり、キャレット・選択の移動では
-                // 変わらない=「検索移動でクロバーされない」という捕捉方式の目的は壊れない。
-                if (!scope.Snap.TryGetTarget(out var captured) || !ReferenceEquals(captured, snap))
-                {
-                    _selectionScope = null; // 旧ピース木の参照を即手放す
-                    Announce("選択範囲が変わりました。選択し直してください");
-                    return;
-                }
+                // 判定と文言は TryResolveScope に集約する(ReplaceOne と片方だけ通る非一貫を作らない)。
+                if (TryResolveScope(snap) is not { } scope)
+                    return; // 理由は TryResolveScope が発声済み
                 rangeStart = scope.Start;
                 rangeLen = scope.End - scope.Start;
             }
@@ -498,6 +516,35 @@ public sealed class SearchController
             return null;
         return selStart == h.SelStart && selEnd == h.SelEnd ? h.Hit : null;
     }
+
+    /// <summary>「選択範囲のみ」の捕捉済みスコープを、現世代で使える形に解決する。
+    /// 使えないときは理由を発声して null を返す(呼び出し側は素直に return してよい)。</summary>
+    /// <remarks>
+    /// 捕捉後に文書が編集されると、同じ char 位置が別の中身を指す。そのまま置換すると
+    /// ユーザーが選択していない範囲を書き換えたうえ成功発声する(SR ユーザーには区別がつかない)。
+    /// 世代判定は捕捉元スナップショットとの参照同一性で行う。TextSnapshot は編集のたびに
+    /// 新インスタンスになり、キャレット・選択の移動では変わらない=「検索移動でクロバーされない」
+    /// という捕捉方式の目的は壊れない。Undo で捕捉時と同一内容へ戻しても陳腐化と扱う=安全側。
+    /// </remarks>
+    private (int Start, int End)? TryResolveScope(TextSnapshot snap)
+    {
+        if (_selectionScope is not { } scope)
+        {
+            Announce("選択範囲がありません");
+            return null;
+        }
+        if (!scope.Snap.TryGetTarget(out var captured) || !ReferenceEquals(captured, snap))
+        {
+            _selectionScope = null; // 旧ピース木の参照を即手放す
+            Announce("選択範囲が変わりました。選択し直してください");
+            return null;
+        }
+        return (scope.Start, scope.End);
+    }
+
+    /// <summary>ヒットがスコープに完全に収まるか(スコープなし=全文なら常に true)。</summary>
+    private static bool WithinScope(MatchSpan hit, (int Start, int End)? scope) =>
+        scope is not { } s || (hit.Start >= s.Start && hit.End <= s.End);
 
     private static WeakReference<TextSnapshot> Weak(TextSnapshot snap) => new(snap);
 

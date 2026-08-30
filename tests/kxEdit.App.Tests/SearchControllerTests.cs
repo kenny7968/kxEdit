@@ -1059,6 +1059,219 @@ public class SearchControllerTests
             Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
         });
 
+    // ===== T-3: 「選択範囲のみ」を単発置換にも効かせる =====
+
+    [Fact]
+    public void ReplaceOne_InSelection_CaretAfterScope_DoesNotReplaceOutsideScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // prefix "abc " と suffix " abc" の両方を除外できる fixture(全選択との区別)。
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央の "abc" だけを捕捉
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SetCaretCharOffset(8); // キャレットをスコープの外(3 件目の先頭)へ
+
+            host.Search.ReplaceOne();
+
+            // 修正前は 3 件目が置換され "abc abc X" + 成功発声になっていた。
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_SelectionOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 2 分岐(選択そのものがヒット)のガードの網。
+            // スコープ捕捉後に手でスコープ外のヒットを選び直しても置換しない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SelectCharRange(8, 3); // 手で 3 件目を選び直す(選択はヒットそのもの)
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_FindMovedOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐(生きている現ヒット)のガードの網。
+            // 「範囲を捕捉 → F3 で範囲外へ移動 → 置換」= 現ヒットが生きたままスコープ外にある。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            Assert.True(host.Search.FindNext()); // 3 件目 (8,11) へ移動(Find は全文のまま)
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ZeroWidthHitOutsideScope_IsNotReplaced() =>
+        Sta.Run(() =>
+        {
+            // 第 1 分岐のガードだけを弁別する網。上の Find 版は選択もヒットそのものなので
+            // 第 2 分岐のガードでも止まる=第 1 分岐のガードを外しても落ちない。
+            // ゼロ幅ヒットは選択が幅ゼロになり第 2 分岐が `selEnd > selStart` で短絡するため、
+            // 止められるのは第 1 分岐のガードだけになる。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "(?=abc)"; // ゼロ幅=位置 0 / 4 / 8 にヒット
+            host.View.Replacement = "X";
+            host.View.UseRegex = true;
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央を捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            Assert.True(host.Search.FindNext()); // 位置 8 のゼロ幅ヒットへ移動(選択は (8,8))
+
+            host.Search.ReplaceOne();
+
+            // 第 1 分岐のガードを外すと "abc abc Xabc" になる(スコープ外へ X を挿入)。
+            Assert.Equal("abc abc abc", doc.Editor.Text);
+            Assert.Equal("これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ReplacesInsideScope() =>
+        Sta.Run(() =>
+        {
+            // 過剰無効化の網。この操作は修正前も動いていた(第 2 分岐を通る)。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // 前後の 2 件は残る
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_CaretBeforeScope_SkipsForwardIntoScope() =>
+        Sta.Run(() =>
+        {
+            // 起点をスコープ先頭まで繰り上げる=スコープより前のヒットを置換しない。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+            doc.Editor.SetCaretCharOffset(0); // キャレットをスコープより前へ
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text); // 1 件目ではなく 2 件目が置換される
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_TwiceInARow_SecondIsNotRefused() =>
+        Sta.Run(() =>
+        {
+            // 置換のたびにスコープを伸縮させて捕捉し直さないと 2 回目が「陳腐化」で拒否される。
+            using var host = new Host();
+            var doc = host.NewDoc("zz abc abc zz");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "XY"; // 長さが変わる=伸縮の計算を効かせる
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(3, 7); // "abc abc" を捕捉(選択はヒットそのものではない)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+            host.Search.ReplaceOne();
+
+            Assert.Equal("zz XY XY zz", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_LastHitInScope_AnnouncesNoMore() =>
+        Sta.Run(() =>
+        {
+            // 置換後の「次」がスコープ外なら、そこへ飛ばずに終わる。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("置換しました。これ以上見つかりません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_WithoutCapturedScope_Announces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            host.Search.OnInSelectionToggled(true); // 選択なしで ON=捕捉されない
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("選択範囲がありません", host.Announcer.Said[^1]);
+            Assert.Equal("abc", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_AfterEdit_RefusesStaleScope() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 後半だけを捕捉
+            host.Search.OnInSelectionToggled(true);
+
+            doc.Editor.ReplaceCharRange(0, 0, "QQQQ"); // 捕捉位置が別の中身を指すようになる
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("QQQQabc abc", doc.Editor.Text); // 一文字も書き換えない
+            Assert.Equal("選択範囲が変わりました。選択し直してください", host.Announcer.Said[^1]);
+        });
+
     [Fact]
     public void ReplaceAll_InCsvMode_IsBlocked() =>
         Sta.Run(() =>
