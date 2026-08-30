@@ -1160,6 +1160,10 @@ public class SearchControllerTests
         Sta.Run(() =>
         {
             // 過剰無効化の網。この操作は修正前も動いていた(第 2 分岐を通る)。
+            // _LastHitInScope_AnnouncesNoMore と fixture は同一だが、重複ではなく意図的な対:
+            // こちらは本文、あちらは発声文言という別の観測面を見ており、互いに部分集合ではない
+            // (span.Length を +1 する変異はこちらだけを、スコープ伸縮の符号反転と置換後の
+            //  包含判定除去はあちらだけを落とす)。畳むと弁別が消えるので分けたまま残す。
             using var host = new Host();
             var doc = host.NewDoc("abc abc abc");
             host.View.Pattern = "abc";
@@ -1212,6 +1216,54 @@ public class SearchControllerTests
             host.Search.ReplaceOne();
 
             Assert.Equal("zz XY XY zz", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_LongerReplacement_GrowsScopeToKeepFollowingHit() =>
+        Sta.Run(() =>
+        {
+            // スコープ伸縮の「伸ばす」向きの網。TwiceInARow は縮む向き(3→2)なので、
+            // 伸縮を丸ごと落とす変異(End 据え置き)では許容側に倒れて生き残る。
+            // 伸ばし忘れ=スコープ内の未置換ヒットを取りこぼす。
+            using var host = new Host();
+            var doc = host.NewDoc("zz abc abc zz");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "XYZW"; // 3 → 4 文字=スコープは 1 文字ぶん伸びる必要がある
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(3, 7); // "abc abc" を捕捉(前後の "zz" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+            host.Search.ReplaceOne();
+
+            // 伸ばし忘れると 2 件目が [3,10) からはみ出し、1 回目で
+            // 「置換しました。これ以上見つかりません」になって "zz XYZW abc zz" で止まる。
+            Assert.Equal("zz XYZW XYZW zz", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ShorterReplacement_ShrinksScopeToProtectOutside() =>
+        Sta.Run(() =>
+        {
+            // スコープ伸縮の「縮める」向きの網。伸ばす向きと違い、こちらを落とすと
+            // 選択範囲外の文字が置換される=T-3 が潰そうとしている不具合クラスそのもの。
+            using var host = new Host();
+            var doc = host.NewDoc("abcdef");
+            host.View.Pattern = "."; // 1 文字ずつ削除していく=1 回の置換で 1 文字ぶん縮む
+            host.View.UseRegex = true;
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(0, 2); // "ab" だけを捕捉(suffix "cdef" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne(); // "a" を削除=スコープは [0,2) → [0,1) へ縮む
+            host.Search.ReplaceOne(); // "b" を削除=スコープは [0,1) → [0,0) へ縮む
+            host.Search.ReplaceOne(); // スコープが空=何も置換しない
+
+            // 縮め忘れるとスコープが [0,2) のまま残り、3 回目で選択外の "c" まで消える。
+            Assert.Equal("cdef", doc.Editor.Text);
         });
 
     [Fact]

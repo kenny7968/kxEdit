@@ -374,10 +374,21 @@ public sealed class SearchController
             if (scope is { } prev)
             {
                 // 置換後のスコープを新世代で捕捉し直す(ReplaceAll の復帰処理と同じ理由)。
-                // これが無いと次の置換が世代不一致=「陳腐化」で拒否される。span はスコープに
-                // 完全に含まれる(WithinScope 済み)ので始端は動かず、終端だけが差分ぶん動く。
-                // 差分が repl.Length - span.Length ちょうどなのは、ReplaceCharRangeExact の
+                // これが無いと次の置換が世代不一致=「陳腐化」で拒否される。
+                // 終端の差分が repl.Length - span.Length ちょうどなのは、ReplaceCharRangeExact の
                 // 巻き込み復元が長さ保存(削った prefix / suffix をそのまま書き戻す)だから。
+                // 始端を据え置ける根拠は「非ゼロ幅なら」であって、span ⊆ scope からは導けない:
+                //   非ゼロ幅 = 巻き込みで外側へ広げても接頭辞をそのまま書き戻すので、
+                //              span.Start より前の内容は不変=スコープ始端は動かなくてよい。
+                //   ゼロ幅   = ReplaceCharRangeExact は広げない代わりに挿入点を論理文字の境界まで
+                //              「後退」させる(ReplaceCharRangeExact の remarks 参照)。
+                // ゆえに scope.Start が論理文字の内側に来ていると、挿入がスコープの外へ落ちる
+                // = ユーザーが選択していない位置を書き換えたうえで成功発声する既知の穴。
+                // WithinScope は生の UTF-16 span で判定するのでこれを防げない。再現には
+                // 「スコープ内の置換がスコープ端に CRLF を作る」と「ゼロ幅正規表現」の両方が要る
+                // (例: "X\rYZ" の [2,4) を捕捉 → Y を \n へ置換 → 位置 2 が CRLF の内側になる)。
+                // 塞ぐには置換後の実書込範囲を返す新しい seam が要るため本ブランチでは扱わず、
+                // 設計書の申し送りへ回収する。
                 var grown = (Start: prev.Start, End: prev.End + repl.Length - span.Length);
                 _selectionScope = (Weak(snap2), grown.Start, grown.End);
                 scope = grown;
@@ -507,7 +518,13 @@ public sealed class SearchController
 
     /// <summary>「いま画面で選ばれているヒット」を返す(無ければ null)。
     /// 文書が編集されていない(スナップショット参照が同一)かつ ユーザーが選択を動かしていない
-    /// (選択が捕捉時の読み戻し値と一致)ときだけ生きている。</summary>
+    /// (選択が捕捉時の読み戻し値と一致)ときだけ生きている。
+    /// <para><see cref="TryResolveScope"/> と違い、死んだ現ヒットは<b>黙って捨てて</b>次の分岐へ落とす
+    /// (<c>_lastHit</c> の clear も発声もしない)。これは clear 漏れではなく意図的な非対称:
+    /// スコープの陳腐化は「ユーザーが指定した範囲を使えない」失敗なので伝える必要があるが、
+    /// 現ヒットが死ぬのは検索の歩進状態が切れただけで、ユーザーに見せる失敗ではない
+    /// (次の分岐が選択 / 再検索で回復する)。後始末は次の <see cref="SelectHit"/> か
+    /// 各経路の <c>_lastHit = null</c> 代入が行う。</para></summary>
     private MatchSpan? LiveHit(TextSnapshot snap, int selStart, int selEnd)
     {
         if (_lastHit is not { } h)

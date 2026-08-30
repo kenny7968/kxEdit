@@ -1255,7 +1255,6 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// キャレットを置換文字列の直後へ戻す補正は<b>あえて入れていない</b>=補正すると UIA
     /// イベントが増え、編集の副作用が 1 箇所に留まらなくなるため。
     /// </para>
-    /// </para>
     /// <para>
     /// <b>ゼロ幅(純挿入)は外側へ広げない。</b> 巻き込み復元は「論理文字の内側にある文字を
     /// <b>置換する</b>」ために要るものであり、挿入には分割すべき文字が無い。広げると CRLF や
@@ -1302,8 +1301,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
         int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
         int prefixLen = s0 - s; // 復元する接頭辞。長さ保存で書き戻すので戻り値にも効く
-        // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は常に空を返し
-        // (TextSnapshot.GetText の length == 0 早期 return)、string 連結は空オペランドを
+        // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は空を返し
+        // (TextSnapshot.GetText の length == 0 早期 return。ただし範囲検査はその手前なので
+        // 空が返るのは x ∈ [0, CharLength] のときだけ=s / e0 は常にこの範囲)、string 連結は空オペランドを
         // 短絡して残り 1 つの参照をそのまま返すため、分岐しても結果は同じ。
         string text = snap.GetText(s, prefixLen) + replacement + snap.GetText(e0, e - e0);
         ReplaceCharRange(s, e - s, text);

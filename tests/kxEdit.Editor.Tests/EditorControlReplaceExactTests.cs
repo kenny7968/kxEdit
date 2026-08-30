@@ -25,20 +25,6 @@ public class EditorControlReplaceExactTests
         });
 
     [Fact]
-    public void ReplaceCharRangeExact_CrOfCrlf_KeepsLf() =>
-        Sta.Run(() =>
-        {
-            using var ctrl = new EditorControl();
-            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
-
-            int next = ctrl.ReplaceCharRangeExact(3, 1, "X"); // CR だけを置換
-
-            Assert.Equal("abcX\ndef", ctrl.Text);
-            // s(3) + 接頭辞なし(0) + "X"(1) = 4。復元した LF(index 4)は飛び越さない。
-            Assert.Equal(4, next);
-        });
-
-    [Fact]
     public void ReplaceCharRangeExact_LowSurrogateOnly_HighHalfCollapsesToReplacementChar() =>
         Sta.Run(() =>
         {
@@ -75,6 +61,8 @@ public class EditorControlReplaceExactTests
             // 事後条件の固定。委譲先が "s + text.Length" に置くため、キャレットは
             // 置換文字列の末尾(4)ではなく**広げた範囲の末尾**(5 = 復元した LF の後ろ)に立つ。
             // 次ヒットの探索起点にキャレットを流用できないことを、戻り値との差で示す。
+            // CR 側の巻き込み復元(LF を食わない)と戻り値もここで併せて固定する
+            // = 同一 fixture・同一主張の _CrOfCrlf_KeepsLf は真部分集合だったので畳んだ。
             using var ctrl = new EditorControl();
             ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
 
