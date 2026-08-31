@@ -15,10 +15,18 @@ public enum PathValidation
 /// バイパスを塞ぐ。junction は無権限で作成可能=見た目のパス
 /// (%USERPROFILE%\innocent\hosts) が BlockedRoots に非該当でも parent が
 /// C:\Windows\System32\drivers\etc\ を指せば hosts 上書きに至る。
-/// 対策: (1) fast path = 対象パスとその全親を root まで遡り
-/// FileAttributes.ReparsePoint bit を検査、(2) belt = File.ResolveLinkTarget
-/// で解決先を再度 BlockedRoots に照合。ローカルドライブのみ対象で
-/// UNC の Ok 契約は維持。
+/// 対策: (1) fast path = 対象パスとその全親を root まで遡り、reparse point であれば
+/// そのタグが name surrogate かを <see cref="kxEdit.Core.IO.ReparseTagReader"/> で判定、
+/// (2) belt = File.ResolveLinkTarget で解決先を再度 BlockedRoots に照合。
+/// ローカルドライブのみ対象で UNC の Ok 契約は維持。
+///
+/// A-15: (1) の判定は元は FileAttributes.ReparsePoint bit だけを見ていたが、
+/// 同じビットはクラウドプレースホルダー (OneDrive Files On-Demand) / DEDUP / WOF にも立ち、
+/// **クラウド配下の普通のファイルを無言で無題タブへ降格**させていた。塞ぎたいのは
+/// 「名前を BlockedRoot へ横取りされること」なので、判定を name surrogate ビットに変更した
+/// (junction / symlink / mount point はいずれも surrogate なので拒否は挙動不変)。
+/// 拒否を緩める方向なので、開くのは「横取りしないと**積極的に判明した**」ときだけで、
+/// タグを読めなかった場合は Rejected を維持する。
 ///
 /// Task 4B: BlockedRoots 照合の前段を 2 つ足す。どちらか片方だけでは塞がらない。
 /// (1) 事後条件 = プレフィックス除去後の**形**が「ドライブ文字ルート」か「UNC」の
@@ -73,10 +81,13 @@ public enum PathValidation
 ///   インフラも要らず、%AppData% の backup JSON を書ければ 1 台の中で完結する
 ///   (admin share を開くので管理者権限は必要)。「リモート共有を使う攻撃だから遠い」と
 ///   読まないこと。
-/// - OneDrive Files On-Demand 等 cloud placeholder は IO_REPARSE_TAG_CLOUD 系
-///   reparse tag を持つため BK-M-1 実装で無条件 Rejected になる可能性がある
-///   (false-positive 受容)。tag 別判定(GetFileInformationByHandleEx /
-///   FileAttributeTagInfo)による分離は将来検討。
+/// - reparse point だが**タグを読めない**要素(対象自身に Deny ACE が付いている等。
+///   File.GetAttributes は親の走査権限だけで成功するが CreateFileW は ERROR_ACCESS_DENIED)は
+///   Rejected のままになる。属性ビット時代と同じ結果なので A-15 の緩和で新しく生まれた
+///   受容ではない(フェイルセーフ方向)。
+/// - name surrogate ビットが立たないのに名前を転送しうるタグ (DFS / DFSR / WCI / PROJFS /
+///   NFS) は通る。<see cref="kxEdit.Core.IO.ReparseTagReader"/> のクラス doc に、
+///   これらが実際の横取りに至るには管理者権限が要るという実測の根拠を書いてある。
 /// </summary>
 public static class OriginalPathValidator
 {
@@ -266,8 +277,10 @@ public static class OriginalPathValidator
     }
 
     /// <summary>
-    /// BK-M-1: 対象パスとその全親ディレクトリを root まで遡り、reparse point
-    /// (directory junction / symbolic link) が 1 つでも見つかれば Rejected を返す。
+    /// BK-M-1 / A-15: 対象パスとその全親ディレクトリを root まで遡り、**名前を横取りする種別の**
+    /// reparse point (directory junction / symbolic link / mount point = name surrogate) が
+    /// 1 つでも見つかれば Rejected を返す。横取りしない reparse point
+    /// (クラウドプレースホルダー / DEDUP / WOF) は通す。
     /// 併せて <see cref="File.ResolveLinkTarget"/> でも解決先を BlockedRoots と再照合する
     /// (fast path が例外で見落とした場合の網)。
     ///
@@ -277,10 +290,14 @@ public static class OriginalPathValidator
     /// 「バイパスに使えない=無害」扱いで進める。呼び出し側(<see cref="Check"/>)の
     /// 外側 catch で最終的な例外は Rejected へ丸められるが、想定内の I/O は
     /// ここでハンドリングして誤 Rejected を避ける。
+    ///
+    /// A-15 で足したタグ読みの失敗は**この方針の例外**で、continue ではなく Rejected へ倒す。
+    /// 上の「握って進める」が成り立つのは「そもそも reparse point だと分からなかった要素」
+    /// だからで、「reparse point だと分かっているが種別が読めない」要素はバイパスに使える。
     /// </summary>
     private static PathValidation RejectIfReparsePresent(string localPath)
     {
-        // (1) fast path: 親を root まで遡って ReparsePoint bit を検査。
+        // (1) fast path: 親を root まで遡って reparse point の**タグ**を検査。
         string? cursor = localPath;
         while (!string.IsNullOrEmpty(cursor))
         {
@@ -288,7 +305,22 @@ public static class OriginalPathValidator
             {
                 var attrs = File.GetAttributes(cursor);
                 if ((attrs & FileAttributes.ReparsePoint) != 0)
-                    return PathValidation.Rejected;
+                {
+                    // A-15: 属性ビットは「reparse point である」しか言わない。塞ぎたいのは
+                    // 名前を BlockedRoot へ横取りされることなので、判定は name surrogate かどうかで行う。
+                    // クラウドプレースホルダー / DEDUP / WOF は横取りしないので通す。
+                    //
+                    // ガードが開くのは「reparse point だが横取りしないと**積極的に判明した**」
+                    // ときだけ。タグを読めなかった (null) 場合は従来どおり Rejected へ倒す
+                    // = 「読めなかった」と「安全だと分かった」を混ぜない。
+                    //
+                    // 属性ビットの検査を前に残すのは、タグ読み(CreateFileW)を
+                    // **reparse point に対してだけ**走らせるため。walk は root まで全親を辿るので、
+                    // 通常パスでハンドルを開く回数を増やさない。
+                    uint? tag = kxEdit.Core.IO.ReparseTagReader.TryRead(cursor);
+                    if (tag is null || kxEdit.Core.IO.ReparseTagReader.IsNameSurrogate(tag.Value))
+                        return PathValidation.Rejected;
+                }
             }
             catch (Exception ex)
                 when (ex

@@ -1,4 +1,7 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using kxEdit.Core.Backup;
+using kxEdit.Core.Tests.IO;
 using Xunit;
 
 namespace kxEdit.Core.Tests.Backup;
@@ -521,6 +524,181 @@ public class OriginalPathValidatorTests
             catch
             { /* best effort */
             }
+        }
+    }
+
+    // ---- A-15: reparse point の判定を「属性ビット」から「name surrogate タグ」へ ----
+
+    [Fact]
+    public void Check_ReturnsOk_ForNonSurrogateReparsePoint()
+    {
+        // A-15 本体: クラウドプレースホルダー(Microsoft タグだが name surrogate ではない)と
+        // 同じ形の reparse point は、名前を横取りしないので Ok でなければならない。
+        // 属性ビットだけを見ていた旧実装はここで Rejected を返す。
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var file = Path.Combine(dir, "cloudish.txt");
+            File.WriteAllText(file, "");
+            if (!ReparsePointFixture.TryCreate(file, ReparsePointFixture.NonSurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            // 前提の自己検証: 属性ビットは立っている。ここが false だと「reparse point ですら
+            // ないパスを Ok と言っただけ」になり、この網は何も主張していないことになる。
+            Assert.True((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0);
+
+            Assert.Equal(PathValidation.Ok, OriginalPathValidator.Check(file, out _));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void Check_Rejects_NameSurrogateReparsePoint()
+    {
+        // 対照群: 同じ経路でも name surrogate ビットが立っていれば Rejected(挙動不変)。
+        // この 2 本が対になって初めて「ビットで分けている」ことの証人になる。
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var file = Path.Combine(dir, "surrogate.txt");
+            File.WriteAllText(file, "");
+            if (!ReparsePointFixture.TryCreate(file, ReparsePointFixture.SurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(file, out _));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void Check_ReturnsOk_ForPathUnderNonSurrogateReparseDirectory()
+    {
+        // A-15 の**本命の形**: OneDrive のプレースホルダーはフォルダ単位でも立つので、
+        // walk が Rejected を出す場所は leaf ではなく**親ディレクトリ**になる。
+        // leaf ファイルだけを reparse point にした上の 2 本では、walk の親側の枝を通らない。
+        //
+        // leaf は作れない(reparse ディレクトリ配下には新規エントリを作成できない・実測)。
+        // 作れなくても目的は達する: 不在 leaf は既存の I/O 例外ハンドリングで素通りし、
+        // 判定は親ディレクトリのタグだけで決まる(= まさに観測したい枝)。
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var sub = Directory.CreateDirectory(Path.Combine(dir, "placeholderish")).FullName;
+            if (!ReparsePointFixture.TryCreate(sub, ReparsePointFixture.NonSurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            // 前提の自己検証: 親に属性ビットが立っている = 旧実装ならここで Rejected になる形。
+            Assert.True((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0);
+
+            var leaf = Path.Combine(sub, "memo.txt");
+            Assert.Equal(PathValidation.Ok, OriginalPathValidator.Check(leaf, out _));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void Check_Rejects_PathUnderNameSurrogateReparseDirectory()
+    {
+        // 対照群: 親ディレクトリ側でも surrogate なら Rejected(junction 経由バイパスの一般形)。
+        // 上の Ok 側と対で、walk の親側の枝が**タグで分岐している**ことの証人になる。
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var sub = Directory.CreateDirectory(Path.Combine(dir, "surrogateish")).FullName;
+            if (!ReparsePointFixture.TryCreate(sub, ReparsePointFixture.SurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            var leaf = Path.Combine(sub, "memo.txt");
+            Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(leaf, out _));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void Check_Rejects_ReparsePointWhoseTagCannotBeRead()
+    {
+        // A-15 の緩和で**開いてはいけない**枝の網。判定を「属性ビット」から「タグ」へ移すと、
+        // 「reparse point だと分かっているが種別を読めない」という第 3 の状態が生まれる。
+        // ここは Rejected へ倒す = 「読めなかった」と「安全だと分かった」を混ぜない。
+        // この網が無いと `tag is null ||` を消す変異(= 読めないときに通す)が全緑で生存する:
+        // junction も fixture の reparse point もタグが読めるので、他のどのテストも赤にならない。
+        //
+        // 「読めない」の作り方(実測 2026-08-31): 対象ファイル自身に Deny FullControl を付ける。
+        // File.GetAttributes は GetFileAttributesW 経由で**親の走査権限だけ**で答えるので成功し
+        // (= 属性ビットは見える)、CreateFileW は ERROR_ACCESS_DENIED になる
+        // (= TryRead は null)。ReparseTagReader のクラス doc が言う非対称性そのもの。
+        var dir = ReparsePointFixture.CreateTempDir();
+        var file = Path.Combine(dir, "unreadable.txt");
+        FileSystemAccessRule? denyRule = null;
+        try
+        {
+            File.WriteAllText(file, "");
+            if (!ReparsePointFixture.TryCreate(file, ReparsePointFixture.NonSurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            var self = WindowsIdentity.GetCurrent().User;
+            if (self is null)
+            {
+                ReparsePointFixture.ReportSkip("現在のトークンから user SID を取れない");
+                return;
+            }
+            try
+            {
+                var info = new FileInfo(file);
+                var security = info.GetAccessControl();
+                denyRule = new FileSystemAccessRule(
+                    self,
+                    FileSystemRights.FullControl,
+                    AccessControlType.Deny
+                );
+                security.AddAccessRule(denyRule);
+                info.SetAccessControl(security);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                denyRule = null;
+                ReparsePointFixture.ReportSkip($"Deny ACE を付けられない: {ex.Message}");
+                return;
+            }
+
+            // 前提の自己検証。この 2 つが揃って初めて「タグを読めない reparse point」という
+            // 狙った状態になる。片方でも崩れていれば下の Rejected は別の理由で出ている。
+            Assert.True((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0);
+            Assert.Null(kxEdit.Core.IO.ReparseTagReader.TryRead(file));
+
+            // 非 surrogate タグを付けてある = タグが読めていれば Ok になる形。
+            // それでも Rejected になることが「読めない側へ倒している」ことの証人。
+            Assert.Equal(PathValidation.Rejected, OriginalPathValidator.Check(file, out _));
+        }
+        finally
+        {
+            if (denyRule is not null)
+            {
+                try
+                {
+                    // 所有者は暗黙に WRITE_DAC を持つので Deny FullControl 下でも外せる(実測)。
+                    var info = new FileInfo(file);
+                    var security = info.GetAccessControl();
+                    security.RemoveAccessRule(denyRule);
+                    info.SetAccessControl(security);
+                }
+                catch
+                { /* best effort */
+                }
+            }
+            ReparsePointFixture.DeleteTree(dir);
         }
     }
 }
