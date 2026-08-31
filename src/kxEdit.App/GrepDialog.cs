@@ -132,7 +132,8 @@ public sealed class GrepDialog : Form, IGrepView
     /// <summary>
     /// 参照ダイアログの初期フォルダー。確認できなければ <c>null</c>(= 初期設定しない)。
     /// <para>A-17: 到達不能な UNC への <see cref="Directory.Exists"/> は実測 21,002 ms 返らない
-    /// (測定条件と適用範囲は <see cref="RemoteAwareDirectory"/> の doc)ため、リモートのときだけ
+    /// (445 への SYN が黙って落とされるホストの場合。名前解決自体に失敗するホスト名なら約 1.2 秒。
+    /// 測定条件と適用範囲は <see cref="RemoteAwareDirectory"/> の doc)ため、リモートのときだけ
     /// 5 秒の境界付きプローブへ回す。フェイルセーフは「初期位置を諦める」だけで、
     /// 参照ダイアログ自体は従来どおり開く。</para>
     /// <para><c>BrowseFolder</c> から切り出してあるのは、本体が

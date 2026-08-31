@@ -93,8 +93,9 @@ public sealed class GrepController
             d.RaiseNotification("検索文字列を入力してください");
             return;
         }
-        // A-17: 到達不能な UNC への Directory.Exists は実測 21,002 ms 返らない(RemoteAwareDirectory
-        // の doc に測定条件と適用範囲)。リモートのときだけ 5 秒の境界付きプローブへ回す
+        // A-17: 到達不能な UNC への Directory.Exists は実測 21,002 ms 返らない(445 への SYN が
+        // 黙って落とされるホストの場合。名前解決自体に失敗するホスト名なら約 1.2 秒。測定条件と
+        // 適用範囲は RemoteAwareDirectory の doc)。リモートのときだけ 5 秒の境界付きプローブへ回す
         // (ローカルは直呼びのまま)。期限内に確定しなければ「見つからない」側=既存の通知と
         // 同じ扱いに倒す(挙動不変)。
         if (!RemoteAwareDirectory.Exists(_probe, d.Folder))

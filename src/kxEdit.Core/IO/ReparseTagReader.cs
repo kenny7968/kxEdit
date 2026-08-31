@@ -27,8 +27,23 @@ namespace kxEdit.Core.IO;
 /// <para><b>実測(2026-08-31・非管理者)</b>:
 /// (1) NTFS 自身が名前を差し替えるのは <c>MOUNT_POINT</c> と <c>SYMLINK</c> のみで、
 /// 両方ともビットを持つ。
-/// (2) 非管理者は <c>MOUNT_POINT</c> / <c>SYMLINK</c> / <c>GLOBAL_REPARSE</c> を
-/// <c>FSCTL_SET_REPARSE_POINT</c> で植えられない。
+/// (2) 非管理者が植えられないのは <c>SYMLINK</c> <b>だけ</b>(<c>mklink /D</c> が
+/// <c>ERROR_PRIVILEGE_NOT_HELD</c> = 1314 で失敗)。<b><c>MOUNT_POINT</c> は有効な
+/// ペイロードなら非管理者でも植わる</b> —— 昇格していないプロセス
+/// (<c>WindowsPrincipal.IsInRole(Administrator)</c> = false)からの <c>mklink /J</c> が
+/// <c>exit=0</c> で成功し、タグ <c>0xA0000003</c>(Microsoft / Name Surrogate / Mount Point)が
+/// 読み戻せ、<c>LinkTarget</c> と <c>ResolveLinkTarget</c> が解決先を返し、配下のファイルも
+/// 読めた(最終レビューで再実測・2026-08-31)。
+/// <b>これは BK-M-1 という脅威の成立条件そのもの</b>であり、
+/// <c>OriginalPathValidator</c> の「junction は無権限で作成可能」という記述および
+/// 緑になっている junction テスト 2 本と整合する。
+/// <c>FSCTL_SET_REPARSE_POINT</c> に<b>全 0 のペイロード</b>を渡した <c>MOUNT_POINT</c> /
+/// <c>SYMLINK</c> / <c>GLOBAL_REPARSE</c> が <c>rc=4392</c>(<c>ERROR_INVALID_REPARSE_DATA</c>)/
+/// <c>4393</c>(<c>ERROR_REPARSE_TAG_INVALID</c>)で失敗するのは<b>権限ではなくペイロード検証</b>に
+/// よるもので、これを「非管理者は植えられない」と読んだのが誤りだった。
+/// <b>結論は変わらない</b>: (1) のとおり MOUNT_POINT も SYMLINK も surrogate ビットを持つので、
+/// 植えられるかどうかに関わらずこの判定で拒否される。(2) は元々「重ねて安全」の belt であって
+/// 判定を支える根拠ではない。
 /// (3) 一方で Microsoft の**非 surrogate** タグ 11 個(<c>DFS</c> / <c>DFSR</c> / <c>NFS</c> /
 /// <c>WOF</c> / <c>WCI</c> / <c>WCI_1</c> / <c>APPEXECLINK</c> / <c>PROJFS</c> /
 /// <c>PROJFS_TOMBSTONE</c> / <c>CLOUD</c> / <c>CLOUD_1</c>)は**非管理者でもすべて植えられる**

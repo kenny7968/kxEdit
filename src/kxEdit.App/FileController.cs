@@ -995,10 +995,23 @@ public sealed class FileController
     /// 明記しており、外すと事後条件が検査した形と BlockedRoots が照合する形が食い違う。
     /// 2 度目の <c>GetFullPath</c> が走るのは 1 本目が<b>期限内に確定したときだけ</b>なので、
     /// 不達共有の約 21 秒はこの経路から消える。
-    /// <b>ただし 2 度目は依然として無境界である</b> —— 「1 本目が通ったなら 2 度目は速い」とは
-    /// 言い切れない(<c>GetLongPathName</c> が失敗して <c>~</c> が残ったまま <c>Ok</c> で返る形が
-    /// ありうる。実測はしていない)。ここを完全に閉じるには <c>Check</c> 側を境界付きにする
-    /// 必要があり、本 Task の範囲外。
+    /// <b>2 度目の呼び出し自体は依然として無境界である</b> —— 「1 本目が通ったなら 2 度目は速い」と
+    /// 論証はできない(<c>GetLongPathName</c> が失敗して <c>~</c> が残ったまま <c>Ok</c> で返る形が
+    /// ありうる。実測はしていない)。<b>ただし露出は doc が示唆するより狭い</b>ので、
+    /// systematic hole として読まないこと(最終ブランチレビューで精密化):
+    /// <list type="bullet">
+    /// <item><see cref="OriginalPathValidator.Check"/> の呼出点は src 全体で<b>この
+    /// <c>CheckRestoreTarget</c> 1 か所だけ</b>で、境界付き正規化を前置しない素通しの経路は無い。</item>
+    /// <item>1 本目が遅ければ <see cref="PathNormalizeStatus.TimedOut"/> で <c>Check</c> に
+    /// <b>到達しない</b>。同じ対象への同じ呼び出しなので、2 度目が遅くなるのは
+    /// <b>1 本目と 2 本目の間でネットワーク状態が変わった場合だけ</b>(TOCTOU 型のレース)。</item>
+    /// <item><c>Check</c> 内部の 2 つ目の <c>GetFullPath</c>(再正規化)はさらに
+    /// <c>prefixStripped &amp;&amp; IsDriveRooted</c> で絞られるので、
+    /// <c>\\?\X:\…~…</c> の綴り<b>かつ</b> <c>X:</c> がネットワーク割当、という三重条件を要する。</item>
+    /// </list>
+    /// つまり<b>「無境界だが、単一呼出点が境界付き正規化を前置しているため、露出は 2 呼出間の
+    /// 状態変化に限られる」</b>。ここを完全に閉じるには <c>Check</c> 側を境界付きにする必要があり、
+    /// 本 Task の範囲外。
     /// </para>
     /// <para>
     /// <b>前置ガード <see cref="System.IO.Path.IsPathFullyQualified(string)"/> は挙動不変のために要る</b>
@@ -1434,7 +1447,7 @@ public sealed class FileController
             // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
             // 本枝だけは seam を 2 回通る(ここ + TryOpenOrActivateCore の中)。確定しなかった
             // 場合はここで打ち切るので、実際に NormalizeTimeout を待つのは高々 1 本
-            // (RestoreSession_NormalizesOncePerReopenedRecord の doc に内訳がある)。
+            // (RestoreSession_NormalizesAtMostTwicePerReopenedRecord の doc に内訳がある)。
             // unreachable は捨てる(理由は RestoreDirtyFromBackup 側の同じ呼出のコメント)。
             if (CheckRestoreTarget(bk.OriginalPath, out var normalized, out _) != PathValidation.Ok)
             {

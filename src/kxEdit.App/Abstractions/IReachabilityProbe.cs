@@ -126,7 +126,17 @@ public interface IReachabilityProbe
     /// <c>\\?\...</c> / 到達不能 UNC / 300 文字 / 40000 文字 / 空 / NUL 混入 ほか<b>計 23 種</b>で
     /// <c>Directory.Exists(x)</c> と <c>Directory.Exists(Path.GetFullPath(x))</c> の不一致は<b>ゼロ</b>。
     /// (<b>「ここで正規化を挟むと A-17 が解決先を変える挙動変更になる」と書いていたのは誤り</b>だった。
-    /// 結論=契約の外に置く、は変わらないが根拠が違う。)</item>
+    /// 結論=契約の外に置く、は変わらないが根拠が違う。)
+    /// <para><b>訂正 2(最終ブランチレビュー I-3。上の誤りを消さずに重ねる)</b>: その 23 種のうち
+    /// <b>空 / NUL 混入 / 40000 文字の 3 つは「一致した」のではなく比較が成立していない</b>。
+    /// <c>Path.GetFullPath</c> はこの 3 つで<b>例外を投げる</b>(実測 net9.0・2026-08-31:
+    /// 空 → <c>ArgumentException</c> / NUL 混入 → <c>ArgumentException</c> /
+    /// 40000 文字 → <c>PathTooLongException</c>。空白のみの入力も同じく <c>ArgumentException</c>)。
+    /// 一方 <c>Directory.Exists</c> は 4 つとも静かに <c>false</c> を返す。
+    /// つまり「両辺を評価して同じだった」ではなく<b>右辺が評価できなかった</b>のであり、
+    /// 「不一致ゼロ」の母数はこの 3 つ(空白のみを数えれば 4 つ)だけ小さい。
+    /// <b>結論はむしろ強くなる</b>: 正規化を前置すると、今日 <c>false</c> が返るだけの入力が
+    /// <b>例外に化ける</b>(= 挙動変更)。契約の外に置く理由が 1 つ増えた。</para></item>
     /// <item>契約に入れると呼出点が <see cref="NormalizePathWithTimeout"/> を前置することになり、
     /// <b>境界付き I/O が 1 操作 2 回</b>になる(UI ブロックは最悪 5 秒 → 10 秒、leak スレッドも 2 本)。
     /// さらに <see cref="PathNormalizeStatus.TimedOut"/> / <see cref="PathNormalizeStatus.Invalid"/> という

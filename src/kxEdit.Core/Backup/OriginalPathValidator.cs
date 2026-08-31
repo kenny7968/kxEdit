@@ -1,3 +1,5 @@
+using kxEdit.Core.IO;
+
 namespace kxEdit.Core.Backup;
 
 public enum PathValidation
@@ -16,8 +18,9 @@ public enum PathValidation
 /// (%USERPROFILE%\innocent\hosts) が BlockedRoots に非該当でも parent が
 /// C:\Windows\System32\drivers\etc\ を指せば hosts 上書きに至る。
 /// 対策: (1) fast path = 対象パスとその全親を root まで遡り、reparse point であれば
-/// そのタグが name surrogate かを <see cref="kxEdit.Core.IO.ReparseTagReader"/> で判定、
-/// (2) belt = File.ResolveLinkTarget で解決先を再度 BlockedRoots に照合。
+/// そのタグが name surrogate かを <see cref="ReparseTagReader"/> で判定、
+/// (2) belt = File.ResolveLinkTarget で解決先を再度 BlockedRoots に照合
+///     (**現在到達不能。詳細は RejectIfReparsePresent の doc**)。
 /// ローカルドライブのみ対象で UNC の Ok 契約は維持。
 ///
 /// A-15: (1) の判定は元は FileAttributes.ReparsePoint bit だけを見ていたが、
@@ -67,7 +70,7 @@ public enum PathValidation
 /// skip されるため、その綴りの clean タブは黙って復元されなくなる(本文は元ファイルに在る)。
 ///
 /// A-16: reparse 検査を skip する条件を「UNC」から「リモート全体」
-/// (<see cref="kxEdit.Core.IO.RemotePathDetector.IsRemote"/> = UNC + マップドネットワーク
+/// (<see cref="RemotePathDetector.IsRemote"/> = UNC + マップドネットワーク
 /// ドライブ)へ広げた。これは**ドライブ文字綴りに効いていた防御を意図的に外す実効的な緩和**で、
 /// 正当化する根拠は次の 2 つだけ。
 /// (1) <b>UNC 綴りとの等価性</b>。同じ資源には UNC 綴りでも到達でき、そちらは元から未検査で Ok。
@@ -127,7 +130,7 @@ public enum PathValidation
 ///   素の Win11 に担当フィルタが attach されているため配下への書き込みまで成功する(実測)。
 ///   実書き込みが BlockedRoot へ届かないことの根拠は、**実測ではなく想定**である
 ///   (有効なペイロードの用意にフィルタ側の管理者権限前提が要る、という理解)。
-///   何が実測で何が想定かの切り分けは <see cref="kxEdit.Core.IO.ReparseTagReader"/> の
+///   何が実測で何が想定かの切り分けは <see cref="ReparseTagReader"/> の
 ///   クラス doc を参照。**「実測で安全と確かめた」と読まないこと。**
 /// </summary>
 public static class OriginalPathValidator
@@ -243,7 +246,7 @@ public static class OriginalPathValidator
             // DriveInfo.DriveType == Network を見る。ここへ到達する forCheck は事後条件により
             // 「X:\... か \\server\share\...」のどちらかなので、UNC 側は元の StartsWith(@"\\") と
             // 完全に一致する(subst は DriveType=Fixed なので walk の対象のまま。実測 2026-08-31)。
-            bool isRemote = kxEdit.Core.IO.RemotePathDetector.IsRemote(forCheck);
+            bool isRemote = RemotePathDetector.IsRemote(forCheck);
             if (!isRemote && RejectIfReparsePresent(forCheck) == PathValidation.Rejected)
                 return PathValidation.Rejected;
 
@@ -379,8 +382,8 @@ public static class OriginalPathValidator
                     // (walk 全体が元から Check → 実書き込みの間で TOCTOU であり、
                     // これはその窓が 1 つ内側にずれるだけ)。矛盾を検出しても使える情報が無い以上、
                     // 「reparse ではない」という新しい方の観測を採る。
-                    uint? tag = kxEdit.Core.IO.ReparseTagReader.TryRead(cursor);
-                    if (tag is null || kxEdit.Core.IO.ReparseTagReader.IsNameSurrogate(tag.Value))
+                    uint? tag = ReparseTagReader.TryRead(cursor);
+                    if (tag is null || ReparseTagReader.IsNameSurrogate(tag.Value))
                         return PathValidation.Rejected;
                 }
             }
@@ -434,8 +437,11 @@ public static class OriginalPathValidator
         //
         // したがって belt を「A-15 で fast path を緩めたことの保険」と読んではいけない。
         // **緩めて通るようになったタグ (CLOUD / WCI / PROJFS 等) に対して belt は null を返す**
-        // = 保険として機能する余地がそもそも無い。撤去の是非は別途判断する(セキュリティ境界の
-        // フェイルセーフを doc 修正のついでに消さない)。
+        // = 保険として機能する余地がそもそも無い。
+        //
+        // 撤去の是非は本ブランチの最終レビューで判断した結果、**本ブランチでは撤去しない**。
+        // セキュリティ境界の変更は専用 commit + 脆弱性レビューを要するので(CLAUDE.md §3-4 /
+        // §9)、doc 修正の fixup に混ぜず次ブランチで単独実施する。
         try
         {
             var linkTarget = File.ResolveLinkTarget(localPath, returnFinalTarget: true);
