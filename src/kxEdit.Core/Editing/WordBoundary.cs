@@ -205,8 +205,8 @@ public static class WordBoundary
     // (V-1 修正で「非正値を明示的に正規化する」を選んだのに、メッセージが「0 以下は未規定」の
     // まま取り残された = 申し送り S-5 / 2026-08-08 設計書 §2)。
     // 戻すと WordBoundaryTests.MaxScan_NonPositive_NeverRemovesScanLimit が Debug 構成で
-    // 4 件赤になる。本ブランチで tools/pre-merge-check.ps1 と ci.yml へ
-    // 「Core.Tests(Debug・Debug.Assert 有効)」ステップを足すので、以後は**ゲートで落ちる**。
+    // 4 件赤になる。2026-09-01 に tools/pre-merge-check.ps1 と ci.yml へ
+    // 「Core.Tests(Debug・Debug.Assert 有効)」ステップを足したので、**ゲートで落ちる**。
 
     /// <summary>次の単語の先頭に進む。EOF に達したら CharLength を返す。</summary>
     /// <remarks>
@@ -328,7 +328,8 @@ public static class WordBoundary
     /// <c>MouseInputTests.DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c> が固定している。
     /// 詳細はクラス <c>&lt;remarks&gt;</c> の「窓についてよくある誤読」(2) を参照。
     ///
-    /// <b>窓が左だけ 1 狭い(<c>[pos - (maxScan - 1), pos]</c>)のを対称化しない理由</b>
+    /// <b>窓が左だけ 1 狭い(<c>[pos - (maxScan - 1), pos]</c>。EOF 経路を除く=
+    /// クラス <c>&lt;remarks&gt;</c> の表)のを対称化しない理由</b>
     /// (2026-08-04 Task 1 品質レビューで次の 2 案とも棄却した。最終レビュー Minor-7 で記録):
     /// <list type="number">
     /// <item>内部で <c>PrevWordStart(snap, pos + 1, maxScan + 1)</c> を渡す案 →
@@ -352,7 +353,7 @@ public static class WordBoundary
     /// </param>
     /// <param name="maxScan">
     /// 走査上限(<b>推奨 <c>&gt;= 1</c></b>・窓はクラス <c>&lt;remarks&gt;</c> の表=<b>左だけ 1 狭い</b>。
-    /// 0 以下の縮退も同 <c>&lt;remarks&gt;</c>)。
+    /// EOF 経路の例外と 0 以下の縮退も同 <c>&lt;remarks&gt;</c>)。
     /// 上限なしは <see cref="NoScanLimit"/>。
     /// </param>
     public static int WordStart(TextSnapshot snap, int pos, int maxScan)

@@ -69,8 +69,11 @@ jobs:
       # 足したのにゲートステップを足し忘れる」= Q-I-4 の失敗モードが再発する。
       #
       # ステップ名は tools/pre-merge-check.ps1 と**完全一致**させる(CLAUDE.md §6: ローカル / CI の
-      # 失敗ログを同じキーワードで探せるようにする)。LocalOnly 除外は上の Release 版と同じものを
-      # 付ける(Core / App は現状該当 0 件だが将来追加時の CI 落ちを防ぐ)。
+      # 失敗ログを同じキーワードで探せるようにする)。LocalOnly 除外は Editor / App では上の
+      # Release 版と同じものを付ける。Core は Release 側にフィルタが無いので Debug 側だけに付く
+      # (Category=LocalOnly の実宣言は Editor.Tests の ClipboardTests のみで、Core / App は現状
+      # 0 件。Core.Tests に足す場合はフィルタ無しの Release ステップが先に落ちるため、
+      # そちらの除外も同時に足すこと)。
       - name: Core.Tests(Debug・Debug.Assert 有効)
         run: dotnet test tests/kxEdit.Core.Tests -c Debug --filter "Category!=LocalOnly"
 

@@ -214,6 +214,12 @@ public class WordBoundaryTests
         // 最初の 1 歩で予算を 1 消費し、pos から左へ実際に走れるのは maxScan - 1 歩
         // = 4000 - 99 = 3901(WordEnd との非対称。クラス <remarks> の窓の表を参照)。
         Assert.Equal(3901, start);
+        // EOF 経路(pos >= CharLength)は PrevWordStart(pos) 委譲=pos + 1 を渡さないため
+        // 最初の 1 歩を予算から使わず、窓は 1 広い maxScan になる
+        // (5000 - 100 = 4900。内部経路の 4000 - 99 = 3901 と対比)。
+        // 2026-09-01 の最終レビュー Important-2: 本番レンジ(DefaultMaxScan = 128)側が
+        // 無網のまま xmldoc だけ訂正されていた(設計書 §12.8)。
+        Assert.Equal(4900, WordBoundary.WordStart(snap, 5000, maxScan: 100));
     }
 
     [Fact]
@@ -308,8 +314,8 @@ public class WordBoundaryTests
     /// 最終レビュー Q-I-4)、<c>Debug.Assert</c> ごと消えていたため誰も踏まなかった(申し送り S-5)。
     /// 表明の側が V-1 修正前の文言のまま取り残されていたので削除し、非正値の縮退は
     /// <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。以後この Theory は
-    /// <b>Debug / Release の両構成で緑</b>であり、<b>本ブランチで Core.Tests の Debug ステップを
-    /// ゲートへ足すので、以後は両方がゲートで走る</b>。
+    /// <b>Debug / Release の両構成で緑</b>であり、<b>2026-09-01 に Core.Tests の Debug ステップを
+    /// ゲートへ足したので、両方がゲートで走る</b>。
     /// </remarks>
     [Theory]
     [InlineData(int.MinValue)] // ← 修正前はここだけが上限を失っていた
