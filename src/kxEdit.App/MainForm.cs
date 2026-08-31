@@ -1056,7 +1056,16 @@ public sealed partial class MainForm : Form
     /// <summary>
     /// grep ジャンプ用: <paramref name="hit"/> のファイルを開き（既存タブがあれば再利用）、
     /// ヒット行を選択してエディタへフォーカスする(<see cref="GrepJumpKind.Stale"/> は選択せず
-    /// 行頭へ寄せる)。選択移動でエディタの UIA が一致行を SR に読ませる。
+    /// 行頭へ寄せる)。
+    /// <para>
+    /// SR への通知は<b>非対称</b>である。選択が実際に動いたときはエディタの UIA
+    /// (<c>RaiseSelectionChanged</c>)が着地行を読ませるが、<b>同じヒットへの再ジャンプ</b>では
+    /// <see cref="EditorControl.SetSelectionCharRange"/> が無変化で早期 return するため
+    /// UIA イベントは飛ばない。一方この経路の末尾の <c>_announcer.Say</c> は<b>常に</b>走るので、
+    /// どちらの場合も SR は着地行を必ず聞ける。無変化のときに途切れるのは<b>視覚的な追従</b>だけで、
+    /// それは本メソッドが明示的に呼ぶ <see cref="EditorControl.BringCaretIntoView"/>
+    /// (設計書 §3.3・A-3 同型)が補う。
+    /// </para>
     /// </summary>
     /// <remarks>
     /// <b>A-18(2026-08-31)</b>: 以前は <c>hit.AbsoluteOffset</c> をそのまま

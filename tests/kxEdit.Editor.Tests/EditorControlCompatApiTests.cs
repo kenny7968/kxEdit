@@ -58,7 +58,11 @@ public class EditorControlCompatApiTests
     // 最終ブランチレビュー(脆弱性パス)L-2: start + length の int 加算が溢れると、
     // 負値になった端が SetSelectionCharRange の Min/Max 正規化で 0 側へ落ち「全文選択」になっていた。
     // 姉妹 API の EnsureVisibleCharRange は同じ加算を long 経由で守っている。
-    // 本 API は grep 結果由来のオフセットを受ける外部入力面(MainForm.OpenAndSelect)。
+    // A-18(2026-08-31): ここには以前「本 API は grep 結果由来のオフセットを受ける外部入力面
+    // (MainForm.OpenAndSelect)」と書いていたが、現 OpenAndSelect が渡すのは GrepJumpResolver 出力
+    // (GetLineStart(line) + MatchStartInLine=バッファ空間・行内に有界)で、そこから int オーバーフロー
+    // に至る経路はもう無い。ガードは他の呼び出し元と将来の外部入力に対する契約として依然有効なので
+    // 本テストも残す(SelectCharRange の remarks と対で読むこと)。
     [Fact]
     public void SelectCharRange_OverflowingLength_ClampsToEnd()
     {
