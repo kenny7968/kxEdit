@@ -957,7 +957,10 @@ PR description(日本語)に必ず書くこと:
 - [ ] `tools/pre-merge-check.ps1` が EXIT 0(Debug ステップ 3 本を含む)
 - [ ] ローカルゲートと CI の Debug ステップ名が 3 種類 × 2 箇所で一致
 - [ ] README / tools/README に「Core.Tests の Debug は含めない」系の記述が 0 件
-- [ ] `WordBoundary.cs` の非コメント差分が assert 4 行 + using 1 行の削除のみ
+- [ ] `WordBoundary.cs` の非コメント差分が **削除 7 行のみ**(`Debug.Assert` 4 行 +
+  `MaxScanContract` const 2 行 + `using System.Diagnostics;` 1 行)。追加コード行ゼロ
+  <br>※当初「assert 4 行 + using 1 行」と書いていたが const 2 行を数え落としていた
+  (最終レビュー M-4)。const の削除は §6 / Task 2 の想定どおりで正しい
 - [ ] Task 7 の変異が作業ツリーに残っていない
 - [ ] 別エージェントによる最終レビュー実施済み・指摘の 3 択を明示
 - [ ] PR 作成済み
