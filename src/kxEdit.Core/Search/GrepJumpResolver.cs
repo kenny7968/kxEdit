@@ -58,6 +58,13 @@ public static class GrepJumpResolver
         ArgumentNullException.ThrowIfNull(snap);
 
         int lineCount = snap.LineCount; // 空文字でも 1
+        // クランプは上下で性格が違う。上限は「到達可能」(grep 後に行が消えたファイル。外すと
+        // GetLineStart が ArgumentOutOfRangeException を投げて UI スレッドで落ちる=設計書 §5.3 の
+        // 変異 #11a が実測で確認)。下限は、現在唯一の生成元である GrepService.CollectLineHits が
+        // lineNumber を ++ してから emit する(=LineNumber >= 1)ため「到達不能」で、別途書いた
+        // belt ではなく Math.Clamp という慣用的な 1 呼び出しに付いてくるものにすぎない
+        // (上限だけにするには Math.Min へ書き換える必要があり、そちらのほうが不自然)。
+        // 到達不能なので網は張らない(Land の「到達不能な belt は書かない」判断と同じ方針)。
         int origin = Math.Clamp(hit.LineNumber - 1, 0, lineCount - 1);
 
         if (LineEquals(snap, origin, hit.LineText))

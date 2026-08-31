@@ -300,6 +300,16 @@ public class MainFormSmokeTests
     /// 設計書 §3.3(A-3 同型): SetSelectionCharRange は Anchor/Caret 無変化で早期 return する
     /// (EditorControl.Caret.cs:209)ため、同じヒットへ再ジャンプするとスクロールが追従しない。
     /// ホイールでのスクロール退避を TopLine の代入で再現する(キャレットは動かない)。
+    /// <para>
+    /// <b>本テストは <c>MainForm.OpenAndSelect</c> の <c>BringCaretIntoView()</c> 明示呼び出し
+    /// (設計書 §3.3 の belt)を守る唯一の網である。</b> ミューテーション検証で実測済み
+    /// (2026-08-31・設計書 §5.3 変異 #15): その 1 行を削除すると赤化するのは本テストだけで、
+    /// 他の <c>OpenAndSelect_*</c> 4 件は緑のまま通る(初回ジャンプは
+    /// <c>SetCaretCharOffset</c> 側の追従だけで可視域に入るため)。
+    /// したがって<b>「同じヒットへ 2 回ジャンプする」という筋書きを崩すリファクタは、
+    /// belt を静かに無網化する</b>。1 回目のジャンプ・<c>TopLine = 0</c> による退避・
+    /// 2 回目の同一ヒットでのジャンプ、の 3 点は本テストの本質なので削らないこと。
+    /// </para>
     /// </summary>
     [Fact]
     public void OpenAndSelect_SameHitTwice_ScrollsBackIntoView() =>

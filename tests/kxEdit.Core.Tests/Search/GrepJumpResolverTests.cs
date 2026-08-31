@@ -373,4 +373,84 @@ public class GrepJumpResolverTests
             }
         }
     }
+
+    /// <summary>
+    /// 行末ゼロ幅ヒット(正規表現 <c>$</c>)。<c>Land</c> の remarks が「行内クランプを置かない」
+    /// 根拠にしている grep 側の不変条件 <c>MatchStartInLine + MatchLength &lt;= LineText.Length</c> の
+    /// <b>等号の端</b>で、その判断が最も張り詰める点。
+    /// 既存の <see cref="Resolve_ZeroWidthMatch_PlacesCaretWithoutSelecting"/> は
+    /// <c>matchStart: 0</c>(<c>^</c> 相当)だけで、この端を 1 件も通していなかった。
+    /// </summary>
+    /// <remarks>
+    /// 手作りの <c>GrepHit</c> ではなく<b>本物の <see cref="GrepService"/> を通す</b>のは、
+    /// 「等号の端が実際に到達可能であること」(=仮想の心配ではないこと)と
+    /// 「resolver がそれを正しく扱うこと」を 1 本で固定するため。手作りだと前者が証明できない。
+    /// 実測(2026-08-31・<c>UseRegex: true</c> の <c>$</c>): 3 行すべてで
+    /// <c>MatchStartInLine == LineText.Length</c> / <c>MatchLength == 0</c> のヒットが作られ、
+    /// <c>AbsoluteOffset</c> は行末(改行の手前)を指した。
+    /// </remarks>
+    [Fact]
+    public void Resolve_ZeroWidthMatchAtEndOfLine_LandsOnLineEndWithoutSelecting()
+    {
+        // 全行とも非空にする: 行末と行頭が必ず別位置になり、「行末に着地した」ことを
+        // 「行頭に着地した」と弁別できる。空行を混ぜると下の NotEqual が静かに無意味化する。
+        string text = "alpha\r\nbeta\r\ngamma";
+
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            "kxedit_jumpeol_" + Guid.NewGuid().ToString("N")
+        );
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(root, "f.txt"), Encoding.UTF8.GetBytes(text));
+
+            var outcome = GrepService.Search(
+                new GrepRequest(
+                    Folder: root,
+                    FilePatterns: "*.txt",
+                    Recursive: false,
+                    Options: new SearchOptions(
+                        "$",
+                        MatchCase: false,
+                        WholeWord: false,
+                        UseRegex: true
+                    )
+                )
+            );
+
+            Assert.Empty(outcome.Errors);
+            Assert.Equal(3, outcome.Hits.Count); // 3 行すべてに行末ゼロ幅ヒットが立つ
+
+            var snap = TextBuffer.FromString(text).Current;
+            foreach (var hit in outcome.Hits)
+            {
+                // 陽性対照: このヒットが本当に「等号の端」であること。ここが崩れると
+                // 以下の assertion は別のケースを検証していることになる(静かな無意味化)。
+                Assert.Equal(hit.LineText.Length, hit.MatchStartInLine);
+                Assert.Equal(0, hit.MatchLength);
+
+                int line = hit.LineNumber - 1;
+                var t = GrepJumpResolver.Resolve(hit, snap);
+
+                Assert.Equal(GrepJumpKind.Exact, t.Kind);
+                Assert.Equal(line, t.Line);
+                // 行末(改行の手前)。リテラル値ではなく式で書くことで「行末」という意図が読める。
+                Assert.Equal(snap.GetLineEnd(line, includeBreak: false), t.BufferOffset);
+                Assert.Equal(0, t.Length); // ゼロ幅=選択せずキャレットを置くだけ
+                // 行頭ではないこと。Land が MatchStartInLine を落とすとここで弁別できる。
+                Assert.NotEqual(snap.GetLineStart(line), t.BufferOffset);
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch
+            { /* 後始末失敗は無害 */
+            }
+        }
+    }
 }
