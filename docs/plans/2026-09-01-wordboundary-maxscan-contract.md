@@ -394,6 +394,13 @@ dotnet test tests/kxEdit.Core.Tests -c Debug --filter "FullyQualifiedName~MaxSca
 期待: **4 件とも赤**になり、`Assert.Equal() Failure: Expected: 5000 / Actual: 4999` が出る。
 赤にならなければ、その assert は何も固定していない。**確認後、必ず 4999 へ戻す。**
 
+**この網が「本当に新しい」ことは検証済み**(Task 2 の再レビューが変異で実測)。
+`WordStart` の EOF 分岐に対する 3 種の変異——(a) EOF 経路も `pos + 1` 委譲にする /
+(b) `pos >= CharLength` を `pos > CharLength` にする / (c) 分岐そのものを削除する——を
+**新しい assert は 3 つとも殺し、既存の 4 assert は 1 つも殺せない**(既存は `pos = 4000` で
+内部経路しか通らないため、3 変異すべてで `4000` を返して素通りする)。
+**この事実を commit message に残すこと。**
+
 **Step 4: 本体の変更が追加 1 本だけであることを確認**
 
 ```bash

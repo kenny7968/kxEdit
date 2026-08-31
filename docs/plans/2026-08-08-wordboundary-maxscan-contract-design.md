@@ -335,9 +335,26 @@ EOF 経路は `PrevWordStart(pos)` を呼ぶため予算が `maxScan - 1 = 127`�
 ### 12.9 申し送り — サロゲート中間の前提記述が実測と食い違う(本ブランチ対象外)
 
 再レビューが発見。クラス `<remarks>` の「前提違反時(caret が `[0, CharLength]` を外れる /
-**サロゲート中間**)は `ArgumentOutOfRangeException` が透過する」のうち、**サロゲート中間は
-実測と一致しない**。例外は飛ばず暗黙にスナップする(`"ab😀cd"` の `pos = 3` で
-`WordStart = 2` / `WordEnd = 4`)。範囲外(`pos = 7`, len 6)は主張どおり例外。
+**サロゲート中間**)は `ArgumentOutOfRangeException` が透過する」は、**両方の前提違反について
+4 API 中 2 本でしか成り立たない**。
+
+実測(`"ab😀cd"` / `CharLength = 6`。`maxScan` 5 値で同結果):
+
+| API | 範囲外 `pos = 7` | サロゲート中間 `pos = 3` |
+|---|---|---|
+| `WordStart` | **例外** | 2(例外なし) |
+| `PrevWordStart` | **例外** | 2(例外なし) |
+| `WordEnd` | **6(例外なし)** | 4(例外なし・`maxScan >= 1` のとき。0 以下では 3) |
+| `NextWordStart` | **6(例外なし)** | 4(同上) |
+
+`WordEnd` / `NextWordStart` は冒頭の `if (pos >= snap.CharLength) return snap.CharLength;` で
+受け止めるため投げない。この非対称そのものは `WordStart` の `<param>` に
+「**`WordEnd` とは非対称**: あちらは `pos >= CharLength` を CharLength で受け止めるので投げない」
+として**既に正しく記録されている**。食い違っているのはクラス `<remarks>` の前提記述の側である。
+
+**当初この節は「範囲外は主張どおり例外」と書いていたが、それも半分偽だった**(再レビュー
+Minor-3 で訂正)。将来の再監査者がその一文を信じると、サロゲート中間だけ直して範囲外側の
+半分を温存する。同じ `<remarks>` 内の 1 文なので**一度に直すこと**。
 
 **本ブランチでは直さない。** 当該 2 行は main から 1 文字も変わっておらず、`maxScan` 契約とも
 無関係で、B1 のスコープ(表明と実装の食い違いの解消)は `maxScan` に限っている。
