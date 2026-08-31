@@ -527,6 +527,70 @@ public class OriginalPathValidatorTests
         }
     }
 
+    // ---- A-16: reparse 検査の skip を「UNC」から「リモート全体」へ ----
+    //
+    // **この変更の挙動差分に L1 の網は 1 本も張れない。**「網が無い」も検証対象なので、
+    // 何を試して駄目だったかを実測付きで残す(次に触る人が同じ探索を繰り返さないため。
+    // また、網の不在を「見落とし」と誤読させないため)。
+    //
+    // 差分の全体: skip 条件が StartsWith(@"\\") から RemotePathDetector.IsRemote へ変わる。
+    // ここへ到達する forCheck は事後条件により「X:\... か \\server\share\...」のどちらかなので、
+    //   ・UNC 側 → IsRemote は UncPathDetector(先頭 \\ の純粋判定)を内包する = 完全に同値
+    //   ・ドライブ文字側 → DriveInfo.DriveType == Network のときだけ true に変わる
+    // つまり**挙動が変わるのは「ネットワーク割当のドライブ文字」だけ**で、それ以外の入力では
+    // 変更前後で 1 ビットも変わらない。
+    //
+    // 網を探した記録(2026-08-31 実測):
+    //  (1) 述語側 = RemotePathDetectorTests が UNC true / C:\ false / 未割当 Q:\ false /
+    //      不正文字 false を固定済み。「ローカルを誤って remote と言わない」側はここで閉じている
+    //      (この 1 本が壊れると walk が全ローカルパスで消えるので、被害の大きい向きは網がある)。
+    //  (2) subst で仮想ドライブを作れば DriveType が Network になるか → **ならない**。
+    //      実測: subst Y: <tempdir> → DriveInfo("Y:\").DriveType = Fixed / DriveFormat = NTFS。
+    //      よって subst では IsRemote を true にできず、L1 から remote 枝へ入れない。
+    //  (3) 実マップドドライブ (net use) は共有側が要り、ループバック (\\localhost\C$) は
+    //      管理者権限が要る = L1 / CI で用意できない。用意できたとしても環境依存 skip になり、
+    //      CI では常に vacuous に緑。
+    //  (4) UNC 側に「skip されていること」の網を張る案は**元から成立しない**。
+    //      実測: skip 条件そのものを潰して walk を UNC でも走らせる変異
+    //      (bool isUnc = false)を入れても、このクラスの全テストが緑のまま生存した。
+    //      \\server\share\... は名前解決に失敗して I/O 例外になり、walk はそれを握って continue
+    //      するので**結果が Ok のまま変わらない**(変わるのは所要時間だけ = 73ms → 2s)。
+    //      したがって「UNC が Ok のまま」を主張する回帰テストを足しても、変更前後・変異前後の
+    //      どれも区別できない = 網ではなく重複(既存 Check_ReturnsOk_ForUncPath と同値)。
+    // 残る担保は (1) の述語固定と、L5(実機のマップドドライブで凍結が消えることの観測)の 2 段。
+    //
+    // 下の 1 本だけは新しく張れる: A-16 で Check は**ドライブ文字パスごとに DriveInfo を引く**
+    // ようになったので、その新経路が誤 Rejected / 例外を出さないことは L1 で固定できる。
+
+    [Fact]
+    public void Check_ReturnsOk_ForUnmappedDriveLetterPath()
+    {
+        // A-16 で新たに走る経路の網。Check は事後条件を通ったドライブ文字パスすべてに対して
+        // RemotePathDetector.IsRemote → DriveInfo(root).DriveType を引くようになった。
+        // 未割当のドライブ文字は hot exit 復元で**現実に起こる**(保存時は Z: があったが
+        // 復元時にはマップが外れている)。ここで DriveInfo が投げると Check の外側 catch が
+        // Rejected へ丸め、本文が黙って無題タブへ降格する = サイレントな体験劣化になる。
+        //
+        // 変更前は DriveInfo を一切引かなかったので、この網は A-16 でしか意味を持たない。
+        // 期待値は Ok(未割当ドライブは DriveType=NoRootDirectory → 非リモート → walk が走り、
+        // walk は I/O 例外を握って通す)。
+        var drives = DriveInfo
+            .GetDrives()
+            .Select(d => char.ToUpperInvariant(d.Name[0]))
+            .ToHashSet();
+        var free = "ZYXWVQ".FirstOrDefault(c => !drives.Contains(c));
+        if (free == '\0')
+            return; // 環境依存 skip: 空きドライブ文字が無い
+
+        var path = free + @":\kxedit_no_such_dir_" + Guid.NewGuid().ToString("N") + @"\a.txt";
+        // 前提の自己検証: 狙いどおり「未割当ドライブ文字」であること。ここが崩れると
+        // (例: 実マップドドライブを引いてしまった)下の Ok は別の理由で出ている。
+        Assert.Equal(DriveType.NoRootDirectory, new DriveInfo(free + @":\").DriveType);
+
+        Assert.Equal(PathValidation.Ok, OriginalPathValidator.Check(path, out var normalized));
+        Assert.Equal(Path.GetFullPath(path), normalized);
+    }
+
     // ---- A-15: reparse point の判定を「属性ビット」から「name surrogate タグ」へ ----
 
     [Fact]

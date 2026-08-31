@@ -66,12 +66,29 @@ public enum PathValidation
 /// FileController の path-only extras 経路(未変更タブの復元)だけは Rejected でレコードごと
 /// skip されるため、その綴りの clean タブは黙って復元されなくなる(本文は元ファイルに在る)。
 ///
+/// A-16: reparse 検査を skip する条件を「UNC」から「リモート全体」
+/// (<see cref="kxEdit.Core.IO.RemotePathDetector.IsRemote"/> = UNC + マップドネットワーク
+/// ドライブ)へ広げた。walk の契約は元から「ローカルドライブのみ対象」で、その根拠
+/// (実体がサーバ側 NTFS でクライアントから検査不能)はマップドドライブ (Z:\) にも
+/// そのまま当てはまる。つまり**契約の食い違いの是正**であって性能上の回避ではない。
+/// 副次的に、不達共有で walk が同期 I/O を leaf から root まで直列に積む
+/// (1 要素あたり SMB タイムアウト)経路が消える。
+///
 /// 現状の許容(次リリース以降で再検討):
 /// - subst / ネットワークドライブ割当は「ドライブ文字の許可リスト」では原理的に閉じない。
 ///   subst Y: C:\Windows した状態の Y:\System32\drivers\etc\hosts は Ok になる
 ///   (Task 4B 以前も同じ = 差分外)。%AppData% に書ける攻撃者は
 ///   HKCU\...\Explorer\DOS Devices にも書けるので脅威モデル内。根治は
 ///   「ハンドルを開いて最終パスを解決してから照合」だが本ブランチでは扱わない。
+///   A-16 で**ネットワーク割当の側だけ**が reparse 検査の対象からも外れた
+///   (subst は DriveType=Fixed のままなので walk は続く。実測 2026-08-31)。
+///   代償はマップドドライブ上の junction が Rejected にならなくなること。ただし
+///   **これで新しく到達できる先は 1 つも増えない**: Z: の実体 \\server\share は UNC 綴りでも
+///   書けて、そちらは元から未検査で Ok(上の V-m-3 = \\localhost\C$ 経由で BlockedRoot 配下へ
+///   実際に書けた、がその実例)。境界が「ドライブ文字か否か」から「リモートか否か」へ
+///   移るだけで、受容範囲の**形**も**広さ**も変わらない。
+///   <b>将来 UNC 側を閉じるときは、同じフィルタをマップドドライブにも当てること</b>
+///   (\\host\&lt;drive&gt;$ を UNC 綴りだけで弾いても、同じ共有をドライブ文字で綴った経路が残る)。
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
 ///   (実運用の UNC を潰さない優先)。閉じる場合は BlockedRoots とは別の
 ///   UNC 用フィルタ(\\host\&lt;drive&gt;$\... を拒絶)で判定する。
@@ -190,11 +207,21 @@ public static class OriginalPathValidator
             if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
                 return PathValidation.Rejected;
 
-            // BK-M-1: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
-            // UNC (\\server\share\...) はサーバ側 NTFS でありクライアントから検査不能=
-            // 既存の「UNC は BlockedRoots 非該当で Ok」契約を維持する。
-            bool isUnc = forCheck.StartsWith(@"\\", StringComparison.Ordinal);
-            if (!isUnc && RejectIfReparsePresent(forCheck) == PathValidation.Rejected)
+            // BK-M-1 / A-16: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
+            // 元の skip 条件は UNC (\\server\share\...) だけで、根拠は「実体はサーバ側 NTFS で
+            // クライアントから検査不能=既存の『UNC は BlockedRoots 非該当で Ok』契約を維持する」
+            // だった。マップドネットワークドライブ (Z:\) も実体はサーバ側にあるので、同じ根拠が
+            // そのまま当てはまる。ここを広げるのは性能上の回避ではなく**契約の食い違いの是正**で、
+            // 副次的に不達共有での同期 I/O(GetAttributes を root まで直列 + A-15 のタグ読み
+            // CreateFileW)を消す。
+            //
+            // 述語の差分は「ネットワーク割当のドライブ文字」だけ: RemotePathDetector は
+            // UncPathDetector(先頭 \\ の純粋判定)を内包し、ドライブ文字なら
+            // DriveInfo.DriveType == Network を見る。ここへ到達する forCheck は事後条件により
+            // 「X:\... か \\server\share\...」のどちらかなので、UNC 側は元の StartsWith(@"\\") と
+            // 完全に一致する(subst は DriveType=Fixed なので walk の対象のまま。実測 2026-08-31)。
+            bool isRemote = kxEdit.Core.IO.RemotePathDetector.IsRemote(forCheck);
+            if (!isRemote && RejectIfReparsePresent(forCheck) == PathValidation.Rejected)
                 return PathValidation.Rejected;
 
             if (StartsWithAnyBlockedRoot(forCheck))
