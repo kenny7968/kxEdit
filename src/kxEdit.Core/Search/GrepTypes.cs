@@ -11,6 +11,16 @@ namespace kxEdit.Core.Search;
 /// <b>一致する保証がない</b>(ヒットより後ろだけを編集した場合など、たまたま一致することはある。
 /// エディタと grep で文字コード判定の窓も違う)。ジャンプ先の解決には
 /// <c>GrepJumpResolver.Resolve</c> を使い、<see cref="AbsoluteOffset"/> を選択位置へ流用しないこと。
+/// <para>
+/// <b>producer への要求(load-bearing・belt ではない)</b>:
+/// <see cref="MatchStartInLine"/> / <see cref="MatchLength"/> は <see cref="LineText"/> の内側に
+/// 収まること(<c>MatchStartInLine + MatchLength &lt;= LineText.Length</c>)。
+/// <c>GrepJumpResolver.Land</c> はこれを前提に<b>行内クランプを省いて</b>いるので、破ると選択末尾が
+/// 次行へ食み出し、<c>SetSelectionCharRange</c> が <c>Caret = Max(start, end)</c> にマップする結果
+/// <c>CurrentLine</c> が選択末尾の行を返し、<b>着地行と違う行番号を発声する</b>(= A-18 の再発)。
+/// 設計書 §2.1 / §6 の「grep の入口をバッファ基準にする」案は<b>2 つ目の producer</b> を作る変更に
+/// なるため、そのときはこの制約を満たすこと。
+/// </para>
 /// </remarks>
 public sealed record GrepHit(
     string FilePath, // 絶対パス

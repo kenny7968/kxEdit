@@ -210,14 +210,19 @@ public class MainFormSmokeTests
             Assert.False(doc!.State.CsvMode);
         });
 
-    /// <summary>grep が返すのと同じ形のヒットを組み立てる(A-18 のテスト用)。</summary>
+    /// <summary>
+    /// grep が返すのと同じ形のヒットを組み立てる(A-18 のテスト用)。
+    /// <paramref name="absoluteOffset"/> の既定は L1 の <c>GrepJumpResolverTests.Hit</c> と同じ流儀で
+    /// わざと「ありえない値」にする: ジャンプ経路が <c>AbsoluteOffset</c> を読んでいれば必ず破綻する。
+    /// 実値を渡すのは陽性対照が要るテスト(dirty)だけ。
+    /// </summary>
     private static GrepHit GrepHitFor(
         string path,
         int lineNumber,
         string lineText,
         int matchStart,
         int matchLength,
-        int absoluteOffset
+        int absoluteOffset = int.MaxValue
     ) =>
         new(
             FilePath: path,
@@ -241,7 +246,7 @@ public class MainFormSmokeTests
             // auto ON のまま OpenAndSelect: suppressAutoCsv=true が抜けると AutoEnterCsvMode が発火して赤化する
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: true), tmp);
 
-            form.OpenAndSelect(GrepHitFor(path, 1, "a,b,c", 2, 3, absoluteOffset: 2));
+            form.OpenAndSelect(GrepHitFor(path, 1, "a,b,c", 2, 3));
 
             // OpenAndSelect 後の Active タブを取り戻す: 既に開いているため FileController.TryOpenOrActivate は
             // 既存タブ再利用の fast path(FindByPath ヒット)を通り _openedFresh を呼ばない=
@@ -269,9 +274,7 @@ public class MainFormSmokeTests
             File2.WriteAllText(path, string.Join("\r\n", lines));
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
 
-            // 末尾行(index 199)の先頭オフセット。
-            int offset = string.Join("\r\n", lines.Take(199)).Length + 2; // +2 = 直前の CRLF
-            form.OpenAndSelect(GrepHitFor(path, 200, "line199", 0, 4, absoluteOffset: offset));
+            form.OpenAndSelect(GrepHitFor(path, 200, "line199", 0, 4));
 
             var doc = form.FileForTest.TryOpenOrActivate(path);
             Assert.NotNull(doc);
@@ -283,9 +286,10 @@ public class MainFormSmokeTests
             // 行番号だけでは不足する: 選択が行 199 のどこを指していても CurrentLine==199 は
             // 成立してしまう。選択開始が行頭(桁 0)であることまで見て、ヒットの
             // MatchStartInLine=0 が「行頭からの桁」として尊重されていることを固定する。
-            // A-18(2026-08-31)でこの網の意味は変わった: 移植前は absoluteOffset の
+            // A-18(2026-08-31)でこの網の意味は変わった: 移植前は生オフセットの
             // +2(直前の CRLF 分)落ちを捕まえる網だったが、現 OpenAndSelect は resolver 経由で
-            // AbsoluteOffset を読まないため、その失敗モードは到達不能になっている。
+            // AbsoluteOffset を読まない(=このヒットの AbsoluteOffset は既定の毒値)ため、
+            // その失敗モードは到達不能になっている。毒値を読む退行はこの桁 0 が捕まえる。
             Assert.Equal(199, hitLine);
             Assert.Equal(0, doc.Editor.GetColumn(doc.Editor.GetSelectionCharRange().Start));
             Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
@@ -336,8 +340,9 @@ public class MainFormSmokeTests
             var sel = doc.Editor.GetSelectionCharRange();
             Assert.Equal("needle", snap.GetText(sel.Start, sel.End - sel.Start));
             // 発声も着地行と一致する(A-18 の症状は「誤った行を発声」なので発声側も固定する)。
-            Assert.Contains("6 行目", form.LastAnnouncementForTest);
-            Assert.DoesNotContain("内容が変わっています", form.LastAnnouncementForTest);
+            // Contains ではなく完全一致: "6 行目" は "16 行目" にも含まれるうえ、
+            // 余計な接尾辞(Stale 文言等)の混入も同時に塞ぐ。
+            Assert.Equal($"{doc.State.DisplayName} 6 行目", form.LastAnnouncementForTest);
         });
 
     /// <summary>
@@ -368,8 +373,13 @@ public class MainFormSmokeTests
 
             var doc = form.FileForTest.TryOpenOrActivate(path);
             Assert.NotNull(doc);
-            Assert.Contains("内容が変わっています", form.LastAnnouncementForTest);
-            var sel = doc!.Editor.GetSelectionCharRange();
+            // Stale でも「読み上げる行番号は着地行」であることまで固定する
+            // (A-18 の症状は行番号の嘘なので、Stale 文言の有無だけでは網として不足)。
+            Assert.Equal(
+                $"{doc!.State.DisplayName} 3 行目 内容が変わっています",
+                form.LastAnnouncementForTest
+            );
+            var sel = doc.Editor.GetSelectionCharRange();
             Assert.Equal(sel.Start, sel.End); // 選択しない
             Assert.Equal(2, doc.Editor.CurrentLine); // 行頭へ寄せる
             // 「行頭へ寄せる」の no-change 化を防ぐ: 直前の ReplaceCharRange がキャレットを

@@ -1062,15 +1062,22 @@ public sealed partial class MainForm : Form
     /// <b>A-18(2026-08-31)</b>: 以前は <c>hit.AbsoluteOffset</c> をそのまま
     /// <see cref="EditorControl.SelectCharRange"/> に渡し、doc で「同じ復号経路を通るため
     /// エディタのスナップショットと同一空間に揃う」と<b>無条件の不変条件として宣言していた</b>。
-    /// 実際に揃うのは「タブを新規に開き、かつ復号結果が同一」のときだけで、未保存編集のある
-    /// タブ・文字コード判定窓の割れ・grep 後の外部変更ではずれる。ずれた位置に着地したうえで
-    /// 着地行を「N 行目」と発声するため、<b>SR ユーザーには検出できない嘘</b>になっていた。
+    /// 実際には<b>揃う保証がない</b>(未保存編集のあるタブ・文字コード判定窓の割れ・grep 後の
+    /// 外部変更でずれる。逆に、開いたまま未編集のタブや、ヒットより後ろだけを編集した場合は
+    /// たまたま揃う)。ずれた位置に着地したうえで着地行を「N 行目」と発声するため、
+    /// <b>SR ユーザーには検出できない嘘</b>になっていた。
     /// 現在は <see cref="GrepJumpResolver"/> が行番号+行内容を live バッファへ照合する。
     /// <b><c>AbsoluteOffset</c> をこの経路へ戻さないこと。</b>
     /// <para>
     /// 発声の行番号は <c>t.Line</c> ではなく<b>着地後の</b> <see cref="EditorControl.CurrentLine"/>
     /// から読み戻す。resolver の意図値を読むと <c>SelectCharRange</c> 側のクランプ/スナップの
     /// 不具合が発声に現れなくなる(発声文言は第 2 の観測面)。
+    /// </para>
+    /// <para>
+    /// <c>SearchController.SelectHit</c> が <c>ed.CurrentBuffer.Current</c> を<b>読み直さない</b>のと
+    /// ここが<b>読み直す</b>のは、矛盾ではなく同じ原則(ヒットは、それを解決した空間と対で扱う)の
+    /// 裏表。検索のヒットは手元の snap 上で見つけたのでその snap と対にする。grep のヒットは
+    /// 出所がディスクなので、対にすべき空間は<b>ここで読む live バッファ</b>のほうになる。
     /// </para>
     /// </remarks>
     internal void OpenAndSelect(GrepHit hit)
