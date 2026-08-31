@@ -303,11 +303,13 @@ public class WordBoundaryTests
     /// (既存の上限テスト群が固定している)なので、修正は縮退側だけを変えたことになる。
     ///
     /// 2026-09-01 まで <c>WordBoundary</c> は <c>maxScan &gt;= 1</c> を <c>Debug.Assert</c> で
-    /// 表明しており、本 Theory の 4 ケースは <b>Debug 構成で赤</b>だった。ビルド / CI /
-    /// ローカルゲートが Release 一本で <c>Debug.Assert</c> ごと消えていたため誰も踏まなかった
-    /// (申し送り S-5)。表明の側が V-1 修正前の文言のまま取り残されていたので削除し、
-    /// 非正値の縮退は <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。
-    /// 以後この Theory は <b>Debug / Release の両構成で緑</b>であり、両方がゲートで走る。
+    /// 表明しており、本 Theory の 4 ケースは <b>Debug 構成で赤</b>だった。ゲートに Core.Tests は
+    /// Release でしか載っておらず(Debug で走っていたのは <c>App.Tests</c> だけ=Issue #48 の
+    /// 最終レビュー Q-I-4)、<c>Debug.Assert</c> ごと消えていたため誰も踏まなかった(申し送り S-5)。
+    /// 表明の側が V-1 修正前の文言のまま取り残されていたので削除し、非正値の縮退は
+    /// <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。以後この Theory は
+    /// <b>Debug / Release の両構成で緑</b>であり、<b>本ブランチで Core.Tests の Debug ステップを
+    /// ゲートへ足すので、以後は両方がゲートで走る</b>。
     /// </remarks>
     [Theory]
     [InlineData(int.MinValue)] // ← 修正前はここだけが上限を失っていた
