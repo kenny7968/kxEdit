@@ -45,11 +45,11 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Exact, t.Kind);
         Assert.Equal(1, t.Line);
-        Assert.Equal(snap.GetLineStart(1) + 5, t.Offset);
+        Assert.Equal(snap.GetLineStart(1) + 5, t.BufferOffset);
         Assert.Equal(6, t.Length);
         // 選択が指しているのが本当に "needle" であることまで固定する(オフセットだけだと
         // 行頭計算の誤りと桁の誤りが打ち消し合って「たまたま緑」になりうる)。
-        Assert.Equal("needle", snap.GetText(t.Offset, t.Length));
+        Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
     // ===== Nearby: 行がずれた =====
@@ -65,7 +65,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(4, t.Line);
-        Assert.Equal("needle", snap.GetText(t.Offset, t.Length));
+        Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(2, t.Line);
-        Assert.Equal("needle", snap.GetText(t.Offset, t.Length));
+        Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(6, t.Line);
-        Assert.Equal("line", snap.GetText(t.Offset, t.Length));
+        Assert.Equal("line", snap.GetText(t.BufferOffset, t.Length));
     }
 
     [Fact]
@@ -108,7 +108,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(3, t.Line);
-        Assert.Equal(snap.GetLineStart(3), t.Offset);
+        Assert.Equal(snap.GetLineStart(3), t.BufferOffset);
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(4, t.Line);
-        Assert.Equal("needle", snap.GetText(t.Offset, t.Length));
+        Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
     // ===== 近傍窓の境界(陰性/陽性の対) =====
@@ -143,9 +143,14 @@ public class GrepJumpResolverTests
     public void Resolve_ExactlyAtNearbyWindowEdge_IsStillFound()
     {
         // 距離ちょうど NearbyLineWindow。`d <= NearbyLineWindow` を `<` にする変異を kill する。
-        var snap = WindowFixture(needleIndex: 0, totalLines: 1400);
+        // 行数は定数から導く。ベタ書きだと NearbyLineWindow を上げたとき origin が最終行へ
+        // クランプされ、緑のまま「距離ちょうど窓」を検証しなくなる(静かな無意味化)。
+        var snap = WindowFixture(
+            needleIndex: 0,
+            totalLines: GrepJumpResolver.NearbyLineWindow + 400
+        );
         var hit = Hit(
-            lineNumber: GrepJumpResolver.NearbyLineWindow + 1, // origin index = 1000
+            lineNumber: GrepJumpResolver.NearbyLineWindow + 1, // origin index = NearbyLineWindow
             lineText: "needle here",
             matchStart: 0,
             matchLength: 6
@@ -161,10 +166,14 @@ public class GrepJumpResolverTests
     public void Resolve_JustBeyondNearbyWindow_IsStale()
     {
         // 距離 NearbyLineWindow + 1。上の陽性対照と 1 行しか違わないので、
-        // 「窓が実際に効いている」ことを弁別できる。
-        var snap = WindowFixture(needleIndex: 0, totalLines: 1400);
+        // 「窓が実際に効いている」ことを弁別できる。行数・期待 origin とも定数から導く。
+        var snap = WindowFixture(
+            needleIndex: 0,
+            totalLines: GrepJumpResolver.NearbyLineWindow + 400
+        );
+        int origin = GrepJumpResolver.NearbyLineWindow + 1;
         var hit = Hit(
-            lineNumber: GrepJumpResolver.NearbyLineWindow + 2, // origin index = 1001
+            lineNumber: origin + 1,
             lineText: "needle here",
             matchStart: 0,
             matchLength: 6
@@ -173,8 +182,8 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
-        Assert.Equal(1001, t.Line);
-        Assert.Equal(snap.GetLineStart(1001), t.Offset);
+        Assert.Equal(origin, t.Line);
+        Assert.Equal(snap.GetLineStart(origin), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
 
@@ -225,7 +234,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Exact, t.Kind);
         Assert.Equal(2, t.Line);
-        Assert.Equal(snap.GetLineStart(2), t.Offset);
+        Assert.Equal(snap.GetLineStart(2), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
 
@@ -241,7 +250,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
         Assert.Equal(1, t.Line); // 最終行へクランプ
-        Assert.Equal(snap.GetLineStart(1), t.Offset);
+        Assert.Equal(snap.GetLineStart(1), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
 
@@ -257,7 +266,7 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
         Assert.Equal(0, t.Line);
-        Assert.Equal(0, t.Offset);
+        Assert.Equal(0, t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
 
@@ -271,7 +280,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Exact, t.Kind);
-        Assert.Equal(snap.GetLineStart(1), t.Offset);
+        Assert.Equal(snap.GetLineStart(1), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
 
@@ -294,18 +303,26 @@ public class GrepJumpResolverTests
             .ToArray();
 
         Assert.All(results, r => Assert.Equal(results[0], r));
-        Assert.Equal(snap.GetLineStart(1) + 5, results[0].Offset);
+        Assert.Equal(snap.GetLineStart(1) + 5, results[0].BufferOffset);
     }
 
     // ===== grep 側との相互検証(混在 EOL) =====
 
-    [Fact]
-    public void Resolve_MixedEols_AgreesWithGrepServiceAndReproducesAbsoluteOffset()
+    [Theory]
+    [InlineData("")] // 末尾改行なし
+    [InlineData("\r\n")] // 末尾 CRLF(最も普通のファイル形状)
+    [InlineData("\n")] // 末尾 LF
+    [InlineData("\r")] // 末尾 単独 CR
+    public void Resolve_MixedEols_AgreesWithGrepServiceAndReproducesAbsoluteOffset(
+        string trailingEol
+    )
     {
         // CRLF / LF / 単独 CR を混ぜる。grep(GrepService.CollectLineHits)と
         // エディタ(TextChunk の Breaks="LF + LF が続かない CR")の行勘定が一致していないと、
-        // Kind が Exact にならないか Offset がずれて赤化する。
-        const string Text = "alpha needle\r\nbeta\nneedle two\rgamma needle three\r\ndelta";
+        // Kind が Exact にならないか BufferOffset がずれて赤化する。
+        // 末尾改行の有無は両者が構造的に食い違う唯一の場所なので、両方を通す:
+        // grep は末尾改行で空の最終行を作らない / エディタは breaks + 1 なので幽霊の空最終行を持つ。
+        string text = "alpha needle\r\nbeta\nneedle two\rgamma needle three\r\ndelta" + trailingEol;
 
         string root = Path.Combine(
             Path.GetTempPath(),
@@ -314,7 +331,7 @@ public class GrepJumpResolverTests
         Directory.CreateDirectory(root);
         try
         {
-            File.WriteAllBytes(Path.Combine(root, "f.txt"), Encoding.UTF8.GetBytes(Text));
+            File.WriteAllBytes(Path.Combine(root, "f.txt"), Encoding.UTF8.GetBytes(text));
 
             var outcome = GrepService.Search(
                 new GrepRequest(
@@ -331,12 +348,17 @@ public class GrepJumpResolverTests
 
             // ディスクとバッファの内容が同一なら、resolver は AbsoluteOffset を
             // 「読まずに」再現できるはず。これが両者の空間が揃っていることの証明。
-            var snap = TextBuffer.FromString(Text).Current;
+            var snap = TextBuffer.FromString(text).Current;
             foreach (var hit in outcome.Hits)
             {
+                // Land が行内クランプを置かない根拠(remarks)＝grep 側の不変条件。
+                // GrepService が将来 LineText を加工(タブ展開・長大行の切り詰め・トリム)すると
+                // resolver は静かに行外オフセットを吐き、SelectCharRange がクランプするので
+                // 例外も赤も出ずに別の場所へ着地して「N 行目」と発声する(A-18 と同じ形)。
+                Assert.True(hit.MatchStartInLine + hit.MatchLength <= hit.LineText.Length);
                 var t = GrepJumpResolver.Resolve(hit, snap);
                 Assert.Equal(GrepJumpKind.Exact, t.Kind);
-                Assert.Equal(hit.AbsoluteOffset, t.Offset);
+                Assert.Equal(hit.AbsoluteOffset, t.BufferOffset);
                 Assert.Equal(hit.LineNumber - 1, t.Line);
             }
         }

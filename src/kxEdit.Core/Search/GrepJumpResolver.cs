@@ -15,8 +15,17 @@ public enum GrepJumpKind
     Stale,
 }
 
-/// <summary>grep ジャンプの着地点。<paramref name="Line"/> は 0-based。</summary>
-public sealed record GrepJumpTarget(GrepJumpKind Kind, int Line, int Offset, int Length);
+/// <summary>grep ジャンプの着地点。</summary>
+/// <param name="Kind">解決の種別。</param>
+/// <param name="Line">
+/// 着地行(0-based)。<b>診断・テスト用</b>。<b>発声の行番号にこれを使わないこと</b>
+/// (着地後の <c>EditorControl.CurrentLine</c> から読み戻す=設計書 §3.2。
+/// resolver の意図値を発声すると SelectCharRange 側のクランプ/スナップの不具合が
+/// 発声に現れなくなる)。
+/// </param>
+/// <param name="BufferOffset">選択開始位置。<b>バッファ空間</b>の UTF-16 オフセット。</param>
+/// <param name="Length">選択長。Stale では 0(選択しない)。</param>
+public sealed record GrepJumpTarget(GrepJumpKind Kind, int Line, int BufferOffset, int Length);
 
 /// <summary>
 /// grep ヒットを、その時点のバッファ内容へ照合して着地点を決める(A-18・設計書 §3.1)。
@@ -95,7 +104,11 @@ public static class GrepJumpResolver
 
     /// <summary>
     /// <paramref name="line"/> の行内容(改行を含まない)が <paramref name="text"/> と序数一致するか。
-    /// 文字列を実体化する前に長さで篩う(近傍走査でピース木の走査を最大 2×窓回まわすため)。
+    /// 長さで篩ってから文字列を実体化する。近傍走査は最大 2×窓回まわるので、不一致行の
+    /// string 実体化とアロケーションを避けるのが目的。
+    /// <b>ピース木の降下自体は削れない</b>: <c>GetLineStart</c> / <c>GetLineEnd</c> は
+    /// 長さ比較より前に無条件で走る(CRLF 行では <c>GetLineEnd</c> が内部で <c>GetChar</c> を
+    /// 2 回呼ぶ)。実測でも前フィルタが削るのは全体の 3〜4 割程度(設計書 §6 の実施記録)。
     /// </summary>
     private static bool LineEquals(TextSnapshot snap, int line, string text)
     {
