@@ -972,13 +972,22 @@ public sealed class FileController
     /// 「<see cref="PathValidation.Rejected"/> をどう見せるか」だけにする。
     /// </para>
     /// <para>
-    /// <b><see cref="PathNormalizeStatus.Invalid"/> と <see cref="PathNormalizeStatus.TimedOut"/> を
-    /// 区別しない</b>: どちらも <c>Rejected</c> へ丸め、呼出側の<b>既存の</b>拒否経路
-    /// (無題降格 / レコード skip)へそのまま合流させる = 新しい分岐を増やさない。
-    /// 代償は <see cref="RestoreFromBackup"/> のダイアログ経路で、不達ネットワークでも
-    /// 「元パスが<b>無効</b>なため」という文言になること。<c>TryOpenOrActivateCore</c> /
-    /// <c>SaveAsDocument</c> は 2 文言に分けているので<b>ここだけ揃っていない</b>が、
-    /// 起きることは同じ(無題降格・本文は保持)なので本 Task では分けない。
+    /// <b>制御フローは <see cref="PathNormalizeStatus.Invalid"/> と
+    /// <see cref="PathNormalizeStatus.TimedOut"/> を区別しない</b>: どちらも
+    /// <see cref="PathValidation.Rejected"/> へ丸め、呼出側の<b>既存の</b>拒否経路
+    /// (無題降格 / レコード skip)へそのまま合流させる = 分岐を増やさない。
+    /// </para>
+    /// <para>
+    /// <b>ただし <paramref name="unreachable"/> だけは別に返す</b>(唯一の例外)。
+    /// <see cref="RestoreFromBackup"/> のダイアログ経路で文言を出し分けるためで、根拠は
+    /// 「ユーザーに見える文言であり SR で読み上げられる」こと: 不達の共有を「パスが無効」と
+    /// 説明すると「バックアップが壊れた」と誤解させるが、実際はネットワークが届かないだけで、
+    /// 共有が復帰すれば元パスは有効。<c>TryOpenOrActivateCore</c> / <c>SaveAsDocument</c> が
+    /// 既に同じ理由で 2 文言に分けており、ここを揃えないと A-16 で直したはずの症状が
+    /// <b>文言として残る</b>。
+    /// <b>出し分けはダイアログ経路だけ</b>で、silent な 2 呼出点は <c>out _</c> で捨てて
+    /// trace の粒度を変えない(trace は開発者向けで、キーワードを増やす価値が出し分けの
+    /// 情報量に見合わない)。
     /// </para>
     /// <para>
     /// <b><c>Check</c> 自身の正規化は残す</b>(消さないこと)。
@@ -997,15 +1006,30 @@ public sealed class FileController
     /// 副次的に、相対入力では seam を 1 本も使わずに済む。
     /// </para>
     /// </summary>
-    private PathValidation CheckRestoreTarget(string path, out string normalized)
+    private PathValidation CheckRestoreTarget(
+        string path,
+        out string normalized,
+        out bool unreachable
+    )
     {
         normalized = string.Empty;
+        // unreachable は各 return で必ず書く(先頭で false を置かない)。先頭に既定値を置くと
+        // 将来 return を 1 本足したときに「書き忘れても通る」形になり、文言が黙って
+        // 「無効」側へ倒れる —— TryOpenOrActivateCore が out bool を避けて組を返している
+        // のと同じ理由(当該メソッドの doc の m-3)。
         if (!System.IO.Path.IsPathFullyQualified(path))
+        {
+            unreachable = false; // 相対 / 打ち間違い = 到達性の話ではない
             return PathValidation.Rejected;
+        }
         var norm = _reachabilityProbe.NormalizePathWithTimeout(path, NormalizeTimeout);
-        return norm.Status == PathNormalizeStatus.Ok
-            ? OriginalPathValidator.Check(norm.Full, out normalized)
-            : PathValidation.Rejected;
+        if (norm.Status != PathNormalizeStatus.Ok)
+        {
+            unreachable = norm.Status == PathNormalizeStatus.TimedOut;
+            return PathValidation.Rejected;
+        }
+        unreachable = false; // 正規化は確定した = 以降の Rejected は検証の結論
+        return OriginalPathValidator.Check(norm.Full, out normalized);
     }
 
     /// <summary>バックアップ記録を新タブへ復元する。本文・メタを載せ、保存点を破棄して dirty にする。
@@ -1022,7 +1046,11 @@ public sealed class FileController
         if (!useUntitled)
         {
             // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
-            var status = CheckRestoreTarget(rec.OriginalPath!, out var normalized);
+            var status = CheckRestoreTarget(
+                rec.OriginalPath!,
+                out var normalized,
+                out bool unreachable
+            );
             if (status == PathValidation.Ok)
             {
                 safePath = normalized;
@@ -1031,15 +1059,32 @@ public sealed class FileController
             else
             {
                 useUntitled = true;
-                // CSV-L-5: OriginalPath は攻撃者 JSON 由来 (RLO/改行 で拡張子偽装や複数行注入)。
-                // path 部分のみ OneLine で無害化し、案内文と "\n\n元パス:" の改行区切りは保持する。
                 // 統合復元 Task 5: silent 経路(WithLoadErrorPromptSuppressed 実行中=RestoreSession の
                 // extras 等)ではダイアログを出さない。ダイアログ経路(OfferRestoreOnStartup からの
-                // 呼出)は非抑止スコープ=挙動不変。
+                // 呼出)は非抑止スコープ=挙動不変。**文言の出し分けはこのガードの内側だけ**で、
+                // silent 経路(RestoreDirtyFromBackup / path-only extras の trace)は
+                // 既存の粒度のまま = 出し分けはユーザーに見える面に限る。
                 if (!_suppressLoadErrorPrompt)
                 {
+                    // A-16 (ii) fixup: 到達不能(TimedOut)と打ち間違い / 検証 NG(Invalid・
+                    // Rejected)で文言を分ける。**本 Task で唯一「分岐を増やさない」規律の
+                    // 例外にした箇所**で、根拠は「ユーザーに見える文言であり SR で読み上げられる」
+                    // こと: 不達の共有を「パスが無効」と説明すると「バックアップが壊れた」と
+                    // 誤解させるが、実際はネットワークが届かないだけで共有が復帰すれば元パスは
+                    // 有効。本ブランチのテーマがまさに「無言のパス喪失」なので、ここを揃えないと
+                    // 直したはずの症状が文言として残る。
+                    // 言い回しは TryOpenOrActivateCore / SaveAsDocument の既存文言に合わせ、
+                    // 主語だけをこの画面のものにする(新しい表現を作らない)。
+                    // 「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
+                    // CSV-L-5: OriginalPath は攻撃者 JSON 由来 (RLO/改行 で拡張子偽装や複数行注入)。
+                    // path 部分のみ OneLine で無害化し、案内文と "\n\n元パス:" の改行区切りは保持する。
+                    // 無害化と改行区切りを持つ**末尾は 1 本のまま**にして、分岐で二重管理しない。
                     _prompt.Warn(
-                        $"バックアップの元パスが無効なため、無題タブとして復元します。"
+                        (
+                            unreachable
+                                ? $"バックアップの元パスに到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください。無題タブとして復元します。"
+                                : "バックアップの元パスが無効なため、無題タブとして復元します。"
+                        )
                             + $"必要に応じて「名前を付けて保存」してください。\n\n元パス: {SanitizeForDisplay.OneLine(rec.OriginalPath, 200)}",
                         "警告"
                     );
@@ -1293,7 +1338,9 @@ public sealed class FileController
     {
         var doc = _docs.CreateNew();
         // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
-        var status = CheckRestoreTarget(rec.Path!, out var normalized);
+        // unreachable は捨てる: ここは silent 経路で trace しか出さないので、到達不能と
+        // 検証 NG を出し分ける相手がいない(文言の出し分けはダイアログ経路だけ)。
+        var status = CheckRestoreTarget(rec.Path!, out var normalized, out _);
         if (status == PathValidation.Ok)
         {
             doc.State.Path = normalized;
@@ -1384,7 +1431,8 @@ public sealed class FileController
             // 本枝だけは seam を 2 回通る(ここ + TryOpenOrActivateCore の中)。確定しなかった
             // 場合はここで打ち切るので、実際に NormalizeTimeout を待つのは高々 1 本
             // (RestoreSession_NormalizesOncePerReopenedRecord の doc に内訳がある)。
-            if (CheckRestoreTarget(bk.OriginalPath, out var normalized) != PathValidation.Ok)
+            // unreachable は捨てる(理由は RestoreDirtyFromBackup 側の同じ呼出のコメント)。
+            if (CheckRestoreTarget(bk.OriginalPath, out var normalized, out _) != PathValidation.Ok)
             {
                 System.Diagnostics.Trace.TraceWarning(
                     "kxEdit: extra-path-only-invalid-path-skipped: {0}",

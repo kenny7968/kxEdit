@@ -2990,15 +2990,32 @@ public class FileControllerTests
     /// <c>Check</c> が Ok を返すパスを載せ、<c>Status</c> の検査を唯一の門番にする。
     /// </para>
     /// <para>
-    /// 併せて<b>既存の Rejected 経路へ合流していること</b>(同じ Warn 文言・本文は保持・
-    /// 未検証パスへ I/O しない)を固定する = 新しい分岐を増やしていない。
+    /// 併せて<b>既存の Rejected 経路へ合流していること</b>(制御フローは同じ・本文は保持・
+    /// 未検証パスへ I/O しない)を固定する = 制御フローの分岐は増えていない。
+    /// </para>
+    /// <para>
+    /// <b>文言だけは出し分ける</b>(A-16 (ii) fixup・本 Task 唯一の例外)。不達の共有を
+    /// 「パスが無効」と説明するとバックアップ破損と誤解させ、しかもこの文言は SR で
+    /// 読み上げられるため。<c>expected</c> / <c>unexpected</c> を対で渡して
+    /// 「両方の枝が同じ文言になる」変異も落とす(片側だけ Contains すると、両方を
+    /// 到達不能側の文言にする変異が生存する)。
     /// </para>
     /// </summary>
     [Theory]
-    [InlineData(PathNormalizeStatus.TimedOut)]
-    [InlineData(PathNormalizeStatus.Invalid)]
+    [InlineData(
+        PathNormalizeStatus.TimedOut,
+        "バックアップの元パスに到達できませんでした(5 秒)。ネットワーク接続を確認してください。",
+        "バックアップの元パスが無効なため"
+    )]
+    [InlineData(
+        PathNormalizeStatus.Invalid,
+        "バックアップの元パスが無効なため",
+        "到達できませんでした"
+    )]
     public void RestoreFromBackup_NormalizeNotResolved_FallsBackToUntitled(
-        PathNormalizeStatus status
+        PathNormalizeStatus status,
+        string expectedWarn,
+        string unexpectedWarn
     ) =>
         Sta.Run(() =>
         {
@@ -3015,7 +3032,11 @@ public class FileControllerTests
             Assert.True(doc.State.UntitledNumber > 0);
             Assert.Equal("backup content", doc.Editor.Text); // 本文は失わない=SaveAs で救出できる
             var warn = Assert.Single(host.Prompt.Log, e => e.Kind == "Warn");
-            Assert.Contains("バックアップの元パスが無効なため", warn.Text); // 既存 Rejected と同じ文言
+            Assert.Contains(expectedWarn, warn.Text);
+            Assert.DoesNotContain(unexpectedWarn, warn.Text);
+            // 分岐しても末尾(救出導線 + 無害化した元パス)は 1 本のまま
+            Assert.Contains("必要に応じて「名前を付けて保存」してください。", warn.Text);
+            Assert.Contains($"\n\n元パス: {safePath}", warn.Text);
             Assert.Empty(host.Timestamps.Queries); // 検証していないパスへは触らない(HIGH-2 の思想)
         });
 
