@@ -338,3 +338,21 @@ belt の単一網である旨の明記・クランプ非対称の明記)。
 - **`GrepJumpTarget.Offset` は実装時に `BufferOffset` へ改名した**(Task 1 コード品質レビュー
   I-3)。§3.2 の擬似コード中の `t.Offset` は `t.BufferOffset` と読み替えること。
   `hit.AbsoluteOffset`(ディスク空間)と並べたときに空間の違いが目に入るようにするための改名。
+
+- **CSV モードのタブへ grep ジャンプすると `CsvRow` / `CsvCol` がキャレットと desync する**
+  (Task 3 統合レビュー S-3)。**本ブランチ以前からの挙動**で、A-18 の修正が作ったものではない。
+  `OpenAndSelect` の `suppressAutoCsv: true` は**新規オープン時の自動 CSV 遷移を抑えるだけ**で、
+  既に CSV モードになっているタブへ飛ぶ経路は塞いでいない。飛んだ先で `SelectCharRange` が
+  キャレットを動かしても `CsvController` のセル状態は追従しないため、以後のセル移動が
+  ずれた位置から始まる。回収するなら「CSV モードのタブへのジャンプはセル座標へ翻訳する」か
+  「CSV モードを抜ける」かの設計判断が要る。
+
+- **`GrepJumpResolver.Resolve` は Core の public API だが、`GrepHit` の producer 契約
+  (`MatchStartInLine + MatchLength <= LineText.Length`)を型では強制していない**
+  (Task 2 コード品質レビュー I-1・Task 3 統合レビュー M-3)。契約は `GrepTypes.cs` の
+  remarks に書いて回収したが、破ると `Land` の `GetLineStart(line) + MatchStartInLine` が
+  **int 同士の加算で溢れうる**(`SelectCharRange` の long ガードが見る前に負値が確定する)。
+  現在の唯一の生成元 `GrepService` は構造的にこれを守るため production 到達不能。
+  record の primary constructor に検証を足すのは Core のホットパスに条件分岐を入れることに
+  なるため見送った。§2.1 の「grep の入口をバッファ基準にする案」に着手するときは、
+  2 つ目の producer がこの契約を守ることを必ず確認すること。
