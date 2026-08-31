@@ -67,6 +67,15 @@ internal static class ReparsePointFixture
     /// (<c>ERROR_DIR_NOT_EMPTY</c> = 145)。また非 surrogate タグを付けたディレクトリの
     /// 配下には新規エントリを作れない(<c>IOException</c>)。したがって
     /// 「reparse ディレクトリの配下に leaf がある」形は**この経路では作れない**。</para>
+    ///
+    /// <para><b>後半の適用範囲を明記する(最終レビュー M-6)</b>: 「配下に新規エントリを作れない」は
+    /// <b>この fixture が植えるタグ(<see cref="NonSurrogateTag"/> /
+    /// <see cref="SurrogateTag"/> = 担当フィルタドライバが存在しない非 Microsoft タグ)に限った
+    /// 性質</b>であり、非 surrogate タグ一般の性質ではない。担当フィルタが無いタグの配下は
+    /// I/O が <c>ERROR_CANT_ACCESS_FILE</c> で弾かれるためこうなるのであって、
+    /// <c>CLOUD</c> / <c>WCI</c> / <c>PROJFS</c> は素の Win11 に cldflt / wcifs / PrjFlt が
+    /// attach 済みなので<b>配下へ書ける</b>(実測)。<c>ReparseTagReader</c> のクラス doc (5) と
+    /// 同じ切り分け。ここを「非 surrogate なら配下に届かない」と一般化して読まないこと。</para>
     /// </summary>
     internal static bool TryCreate(string path, uint tag)
     {

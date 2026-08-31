@@ -811,7 +811,7 @@ public class FileControllerTests
     // ここまでのタスクの網は「無境界の正規化が境界付き seam を通ること」を固定してきた。
     // 以下の 3 本は**打つ回数そのもの**を固定する。S-15 の実害は 1 回 21 秒なので、
     // 回数は待ち時間に直接掛かる(復元経路の姉妹は
-    // RestoreSession_NormalizesOncePerReopenedRecord)。
+    // RestoreSession_NormalizesAtMostTwicePerReopenedRecord)。
     //
     // 3 本は役割が分かれていて、どれも他の 2 本では代替できない:
     //   (a) DoesNotNormalizeAtAll        — Ctrl+S が seam を 0 回しか打たない(絶対値)
@@ -4709,7 +4709,7 @@ public class FileControllerTests
     /// </para>
     /// </summary>
     [Fact]
-    public void RestoreSession_NormalizesOncePerReopenedRecord() =>
+    public void RestoreSession_NormalizesAtMostTwicePerReopenedRecord() =>
         Sta.Run(() =>
         {
             using var host = new Host();
@@ -4849,7 +4849,7 @@ public class FileControllerTests
     /// 2 回呼ぶが、<b>確定しなかった場合は 1 本目で打ち切られて 2 本目に到達しない</b>。
     /// 不達共有で実際に <c>NormalizeTimeout</c> を待つのはこの経路だけなので、
     /// 「1 レコードあたりのタイムアウト待ちは高々 1 本」という
-    /// <see cref="RestoreSession_NormalizesOncePerReopenedRecord"/> の実質的な主張は保たれる。
+    /// <see cref="RestoreSession_NormalizesAtMostTwicePerReopenedRecord"/> の実質的な主張は保たれる。
     /// </para>
     /// </summary>
     [Theory]

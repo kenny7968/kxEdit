@@ -212,10 +212,18 @@ public class GrepControllerTests
         Sta.Run(() =>
         {
             using var host = new Host();
+            const string absent = "Z:/no/such/folder/definitely/absent";
+            // 陽性対照: この fixture は A-17 で**意味が変わった**。Z: がネットワーク割当の
+            // マシンでは IsRemote が true になり、プローブ経路(Fake の既定 DirectoryResult=true)
+            // で本体へ進んでしまうので、この網は「フォルダが見つかりません」を検証しているつもりの
+            // まま落ちる。実際このマシンには不達ホストへマップ済みのドライブが在り、綴り次第で
+            // 同型の事故が起きる。前提が崩れたことを assertion で見えるようにする。
+            Assert.False(kxEdit.Core.IO.RemotePathDetector.IsRemote(absent));
+
             host.NewDoc("body");
             host.Grep.Open();
             host.View.Pattern = "abc";
-            host.View.Folder = "Z:/no/such/folder/definitely/absent";
+            host.View.Folder = absent;
 
             host.Grep.RunAsync().GetAwaiter().GetResult();
 
