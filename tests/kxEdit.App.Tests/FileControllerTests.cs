@@ -811,7 +811,7 @@ public class FileControllerTests
     // ここまでのタスクの網は「無境界の正規化が境界付き seam を通ること」を固定してきた。
     // 以下の 3 本は**打つ回数そのもの**を固定する。S-15 の実害は 1 回 21 秒なので、
     // 回数は待ち時間に直接掛かる(復元経路の姉妹は
-    // RestoreSession_NormalizesOncePerReopenedRecord)。
+    // RestoreSession_NormalizesAtMostTwicePerReopenedRecord)。
     //
     // 3 本は役割が分かれていて、どれも他の 2 本では代替できない:
     //   (a) DoesNotNormalizeAtAll        — Ctrl+S が seam を 0 回しか打たない(絶対値)
@@ -2931,6 +2931,153 @@ public class FileControllerTests
             Assert.True(doc.Editor.Modified); // dirty=ユーザーが保存点を打てる
         });
 
+    // ===== A-16 (ii): 復元経路の正規化を境界付きにする(Issue #48 / S-15 の残り) =====
+    //
+    // OriginalPathValidator.Check 入口の Path.GetFullPath は、正規化後のパスに `~` が含まれると
+    // GetLongPathName を呼び、不達共有で約 21 秒 UI を止める。復元の 3 呼出点
+    // (RestoreFromBackup / RestoreDirtyFromBackup / path-only extras)は境界付き正規化
+    // (IReachabilityProbe.NormalizePathWithTimeout)を先に通し、その出力を Check へ渡す。
+    // 確定しなかった場合(TimedOut / Invalid)は Check を呼ばず、各呼出点の**既存の Rejected
+    // 経路**へ合流する(新しい分岐を増やさない)。
+    //
+    // 3 呼出点とも網は同じ 3 経路: TimedOut / Invalid / Ok。Ok の網は「seam の答を実入力と
+    // 食い違わせる」形にして、正規化を素通りして生パスを Check へ渡す変異を落とす。
+
+    /// <summary>
+    /// 生の OriginalPath が System32 配下(<c>Check</c> なら Rejected)でも、seam が安全なパスを
+    /// 返せばそのパスで復元される = <c>Check</c> へ渡っているのが<b>正規化後</b>であることの網。
+    /// 正規化を素通りする実装は無題降格になって落ちる。
+    /// <para>
+    /// seam の答をわざと <c>/</c> 区切りにしてあるので、<c>Check</c> の出力ではなく
+    /// <c>norm.Full</c> をそのまま <c>State.Path</c> に載せる実装も落ちる
+    /// (<c>Check</c> 自身の正規化を消す変異が生き残らない)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void RestoreFromBackup_NormalizeOk_ChecksNormalizedPath_NotRaw() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var redirected = SafeRestorePath("kxEdit-a16-redirected.txt");
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Ok,
+                redirected.Replace('\\', '/') // Windows は / も受ける=Check の再正規化で戻る
+            );
+
+            var doc = host.File.RestoreFromBackup(StaleRec(BlockedSystemPath(), StaleBase));
+
+            Assert.Equal(redirected, doc.State.Path); // Check の出力(= \ 区切り)を採用
+            Assert.Equal(0, doc.State.UntitledNumber); // path レコード=無題連番は付かない
+            Assert.DoesNotContain(host.Prompt.Log, e => e.Kind == "Warn");
+            Assert.Equal(BlockedSystemPath(), host.Probe.NormalizeLastPath); // 生入力が seam へ届く
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.NormalizeLastTimeout); // 5 秒契約
+        });
+
+    /// <summary>
+    /// 正規化が確定しなければ <c>Check</c> を呼ばずに無題降格へ倒す(無境界の
+    /// <c>GetFullPath</c> を UI スレッドで走らせない)。
+    /// <para>
+    /// <b>非既定の位置から見る</b>: 入力は <c>Check</c> 単体なら Ok を返す<b>安全な</b>パスにする。
+    /// 攻撃パスで書くと、正規化を素通りする実装でも Rejected になって同じ結論へ着地し、
+    /// 網が空振りする。
+    /// </para>
+    /// <para>
+    /// <b><c>Full</c> は空にしない</b>(<see cref="TryOpenOrActivate_NormalizeNotOk_WithNonEmptyFull_DoesNotOpen"/>
+    /// と同じ decoy の機構): 本番の <c>RunNormalizeProbe</c> は失敗時に必ず
+    /// <c>Full = string.Empty</c> を返すので、空で書くと「<c>Check("")</c> が
+    /// <c>IsPathFullyQualified</c> で落ちる」という<b>内側の二重防御</b>が同じ結論へ導いてしまい、
+    /// <c>Status</c> の検査を丸ごと外す変異が全緑で生存する。ここでは <c>Full</c> に
+    /// <c>Check</c> が Ok を返すパスを載せ、<c>Status</c> の検査を唯一の門番にする。
+    /// </para>
+    /// <para>
+    /// 併せて<b>既存の Rejected 経路へ合流していること</b>(制御フローは同じ・本文は保持・
+    /// 未検証パスへ I/O しない)を固定する = 制御フローの分岐は増えていない。
+    /// </para>
+    /// <para>
+    /// <b>文言だけは出し分ける</b>(A-16 (ii) fixup・本 Task 唯一の例外)。不達の共有を
+    /// 「パスが無効」と説明するとバックアップ破損と誤解させ、しかもこの文言は SR で
+    /// 読み上げられるため。
+    /// </para>
+    /// <para>
+    /// <b><c>unexpected</c> を対で渡す理由(訂正)</b>: ここには当初「片側だけ
+    /// <c>Contains</c> すると、両方を到達不能側の文言にする変異が生存する」と書いていた。
+    /// <b>これは偽</b> —— レビューの実測で <c>Assert.DoesNotContain</c> を削っても
+    /// 枝の入れ替え / 片寄せの変異は両方向とも落ちた(g1 → 3 件失敗 / g2 → 1 件失敗)。
+    /// 各行の <c>expectedWarn</c> が相手側の文言の部分文字列になっていないので、
+    /// <c>Assert.Contains</c> だけで十分だったため。
+    /// 対で渡すのが効くのは<b>両方を連結する</b>型の変異
+    /// (三項をやめて 2 文を常に並べる等)で、そのとき <c>Contains</c> は両行とも通る。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(
+        PathNormalizeStatus.TimedOut,
+        "バックアップの元パスに到達できませんでした(5 秒)。ネットワーク接続を確認してください。",
+        "バックアップの元パスが無効なため"
+    )]
+    [InlineData(
+        PathNormalizeStatus.Invalid,
+        "バックアップの元パスが無効なため",
+        "到達できませんでした"
+    )]
+    public void RestoreFromBackup_NormalizeNotResolved_FallsBackToUntitled(
+        PathNormalizeStatus status,
+        string expectedWarn,
+        string unexpectedWarn
+    ) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var safePath = SafeRestorePath("kxEdit-a16-not-resolved.txt");
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                status,
+                SafeRestorePath("kxEdit-a16-decoy.txt") // Check なら Ok=Status だけが門番
+            );
+
+            var doc = host.File.RestoreFromBackup(StaleRec(safePath, StaleBase));
+
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.State.UntitledNumber > 0);
+            Assert.Equal("backup content", doc.Editor.Text); // 本文は失わない=SaveAs で救出できる
+            var warn = Assert.Single(host.Prompt.Log, e => e.Kind == "Warn");
+            Assert.Contains(expectedWarn, warn.Text);
+            Assert.DoesNotContain(unexpectedWarn, warn.Text);
+            // 分岐しても末尾(救出導線 + 無害化した元パス)は 1 本のまま
+            Assert.Contains("必要に応じて「名前を付けて保存」してください。", warn.Text);
+            Assert.Contains($"\n\n元パス: {safePath}", warn.Text);
+            Assert.Empty(host.Timestamps.Queries); // 検証していないパスへは触らない(HIGH-2 の思想)
+        });
+
+    /// <summary>
+    /// <b>挙動不変の網</b>: 相対パスの <c>OriginalPath</c> は A-16 (ii) の後も無題降格のまま。
+    /// <para>
+    /// 前置正規化を素朴に足すと、<c>Check</c> 冒頭の <c>IsPathFullyQualified</c> が見るのが
+    /// 「生の相対パス」から「CWD 基準で解決済みの絶対パス」に変わり、<b>以前は入口で拒否して
+    /// いた入力が検証本体まで進む</b>(= 受理範囲が黙って広がる)。
+    /// <c>CheckRestoreTarget</c> の前置ガードがその窓を閉じていることを固定する。
+    /// </para>
+    /// <para>
+    /// <c>NormalizeCallCount == 0</c> も pin する: ここは結論(無題降格)だけ見ると
+    /// 「正規化してから Check したが Rejected だった」実装とも区別が付かないため、
+    /// <b>seam へ行く前に落ちている</b>ことを別の観測面で押さえる。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("kxEdit-a16-relative.txt")] // ディレクトリー成分なし
+    [InlineData(@"sub\kxEdit-a16-relative.txt")] // ディレクトリー成分あり
+    [InlineData(@"\kxEdit-a16-relative.txt")] // ルート付きだが drive が無い=非 fully-qualified
+    public void RestoreFromBackup_RelativeOriginalPath_StillFallsBackToUntitled(string relative) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+
+            var doc = host.File.RestoreFromBackup(StaleRec(relative, StaleBase));
+
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.State.UntitledNumber > 0);
+            Assert.Equal(0, host.Probe.NormalizeCallCount); // seam へ行く前に落ちる
+        });
+
     // ===== BK-L-1 / BK-L-2: LineEndingId / CodePage フォールバック(2026-07-19) =====
     //
     // 攻撃者 JSON が範囲外の LineEndingId(例 999 / -1)や未サポートの CodePage(99999 / -1)を
@@ -3065,6 +3212,17 @@ public class FileControllerTests
     /// 正規化後のパスで Fake を引くため、キーも GetFullPath を通して合わせる。</summary>
     private static string SafeRestorePath(string name) =>
         System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetTempPath(), name));
+
+    /// <summary>System32 配下 = <c>OriginalPathValidator.Check</c> が Rejected を返す代表例
+    /// (攻撃者が JSON に植えた復元先)。A-16 (ii) の網では「seam が別のパスを返せば
+    /// こちらは Check に届かない」ことを見るための生入力として使う。</summary>
+    private static string BlockedSystemPath() =>
+        System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "drivers",
+            "etc",
+            "hosts"
+        );
 
     private static BackupRecord StaleRec(string? path, DateTime timestampUtc) =>
         new(
@@ -4513,14 +4671,45 @@ public class FileControllerTests
     /// 1 レコードあたりの係数がそのまま「起動できない時間」になる。
     /// </para>
     /// <para>
-    /// <b>この網が言っていないこと</b>: extras の path-only 枝は
-    /// <c>OriginalPathValidator.Check</c> の中で無境界の <c>Path.GetFullPath</c> を
-    /// なお 1 回打つ(監査 A-16・設計書 §6 で明示的に対象外・申し送り S-1)。
-    /// ここで固定するのは<b>seam の呼び出し回数</b>であって「無境界がゼロ」ではない。
+    /// <b>A-16 (ii) による期待値の変更(3 → 4)</b>: 当初この網は「1 レコード 1 回」を
+    /// 3 レコード = 3 回で固定していた。ここに書かれていた「extras の path-only 枝は
+    /// <c>Check</c> の中で無境界の <c>Path.GetFullPath</c> をなお 1 回打つ(申し送り S-1)」を
+    /// A-16 (ii) で解消した結果、その枝だけが seam を 2 回呼ぶ:
+    /// <list type="number">
+    /// <item><c>Check</c> の手前(本 Task で追加。無境界の <c>GetFullPath</c> を UI スレッドから
+    /// 追い出すためで、これが目的そのもの)</item>
+    /// <item><c>TryOpenOrActivateCore</c> の中(既存。「既存タブを再利用したか」は本メソッドしか
+    /// 知り得ないので呼出点で先取りできない — 当該メソッドの doc を参照)</item>
+    /// </list>
+    /// 内訳は レイアウト 2 本 × 1 + extras path-only 1 本 × 2 = 4。レイアウト由来は
+    /// <b>1 回のまま</b>なので、案 1(呼出点で正規化して <c>FindByPath</c> と
+    /// <c>TryOpenOrActivate</c> の両方へ渡す)へ書き換える変異は今も 6 になって落ちる。
+    /// </para>
+    /// <para>
+    /// <b>上段の「実害」の議論は保たれている</b>: 増えた 1 本は既存の 1 本の<b>手前</b>にあり、
+    /// 確定しなかった場合(= 期限切れの <c>NormalizeTimeout</c> を丸ごと待つ唯一のケース)は
+    /// そこで打ち切って 2 本目に到達しない。したがって<b>タイムアウト待ちは高々 1 本</b>。
+    /// 短絡そのものの網は
+    /// <see cref="RestoreSession_ExtrasPathOnly_NormalizeNotResolved_SkipsWithoutReopening"/>
+    /// (<c>NormalizeCallCount == 1</c> を pin)。
+    /// </para>
+    /// <para>
+    /// <b>訂正(レビュー Minor 2)</b>: ここには当初「2 本とも走るのは 1 本目が確定したとき
+    /// <b>= 待ちが発生しないとき</b>だけ」と書いていたが、この等式は成立しない。
+    /// <b>遅いが到達できる</b>共有では 1 本目が 4.9 秒かけて <c>Ok</c> を返しうるので、
+    /// そのとき 2 本目も走り、この枝の境界付き待ちは最悪 5 秒 → 10 秒になる。
+    /// それでも<b>総待ち時間は必ず減る</b>: 変更前は同じ入力で
+    /// 「<c>Check</c> の無境界 <c>GetFullPath</c>(不達で約 21 秒)+ 既存の 1 本」を待っていた。
+    /// 上の結論(タイムアウト待ちは高々 1 本)は正しく、変わったのは<b>その根拠</b>だけ。
+    /// </para>
+    /// <para>
+    /// <b>この網が言っていないこと</b>: <c>Check</c> 自身の <c>Path.GetFullPath</c> は
+    /// 自衛として残っている(再正規化の順序が load-bearing)。ここで固定するのは
+    /// <b>seam の呼び出し回数</b>であって「無境界がゼロ」ではない。
     /// </para>
     /// </summary>
     [Fact]
-    public void RestoreSession_NormalizesOncePerReopenedRecord() =>
+    public void RestoreSession_NormalizesAtMostTwicePerReopenedRecord() =>
         Sta.Run(() =>
         {
             using var host = new Host();
@@ -4543,7 +4732,158 @@ public class FileControllerTests
 
             // 3 レコードとも実際に開けている(開けていなければ回数の assert が空振りする)。
             Assert.Equal(3, host.Docs.Count);
-            Assert.Equal(3, host.Probe.NormalizeCallCount); // ★1 レコード 1 回。案 1 なら 6
+            // レイアウト由来 2 本は 1 レコード 1 回のまま(案 1 なら 4)。extras の path-only 枝だけが
+            // A-16 (ii) で 2 回になる(上の doc の内訳を参照)。
+            Assert.Equal(4, host.Probe.NormalizeCallCount);
+        });
+
+    // ----- A-16 (ii): RestoreDirtyFromBackup / path-only extras の 3 経路 -----
+
+    /// <summary>
+    /// <see cref="RestoreFromBackup_NormalizeOk_ChecksNormalizedPath_NotRaw"/> の
+    /// <c>RestoreDirtyFromBackup</c> 版。検証対象は <c>bk.OriginalPath</c> ではなく
+    /// <b><c>rec.Path</c>(レイアウト側)</b>なので、生入力もそちらへ置く(E12 の契約)。
+    /// </summary>
+    [Fact]
+    public void RestoreSession_DirtyRecord_NormalizeOk_ChecksNormalizedPath_NotRaw() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var redirected = SafeRestorePath("kxEdit-a16-dirty-redirected.txt");
+            var bk = StaleRec(BlockedSystemPath(), StaleBase);
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                PathNormalizeStatus.Ok,
+                redirected.Replace('\\', '/')
+            );
+            var initialEmpty = host.Docs.CreateNew();
+
+            host.File.RestoreSession(
+                Layout(LayoutRec(path: BlockedSystemPath(), backupId: bk.Id, isActive: true)),
+                new[] { bk },
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            var doc = host.Docs.Active!;
+            Assert.Equal(redirected, doc.State.Path); // Check の出力を採用
+            Assert.Equal(0, doc.State.UntitledNumber);
+            Assert.Equal("backup content", doc.Editor.SnapshotText);
+            Assert.Equal(BlockedSystemPath(), host.Probe.NormalizeLastPath); // 生の rec.Path が seam へ
+        });
+
+    /// <summary>
+    /// 正規化が確定しなければ <c>Check</c> を呼ばず、既存の
+    /// <c>restore-invalid-path-fallback-to-untitled</c> 経路(silent・無題降格)へ合流する。
+    /// 入力は <c>Check</c> 単体なら Ok になる安全なパス(非既定の位置から見る)。
+    /// <c>Full</c> に decoy を載せる理由は
+    /// <see cref="RestoreFromBackup_NormalizeNotResolved_FallsBackToUntitled"/> と同じ。
+    /// </summary>
+    [Theory]
+    [InlineData(PathNormalizeStatus.TimedOut)]
+    [InlineData(PathNormalizeStatus.Invalid)]
+    public void RestoreSession_DirtyRecord_NormalizeNotResolved_FallsBackToUntitled(
+        PathNormalizeStatus status
+    ) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var safePath = SafeRestorePath("kxEdit-a16-dirty-not-resolved.txt");
+            var bk = StaleRec(safePath, StaleBase);
+            host.Probe.NormalizeResult = new PathNormalizeResult(
+                status,
+                SafeRestorePath("kxEdit-a16-dirty-decoy.txt")
+            );
+            var initialEmpty = host.Docs.CreateNew();
+
+            host.File.RestoreSession(
+                Layout(LayoutRec(path: safePath, backupId: bk.Id, isActive: true)),
+                new[] { bk },
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            var doc = host.Docs.Active!;
+            Assert.Null(doc.State.Path);
+            Assert.True(doc.State.UntitledNumber > 0);
+            Assert.Equal("backup content", doc.Editor.SnapshotText); // 本文は失わない
+            Assert.Empty(host.Prompt.Log); // silent 経路=既存 Rejected と同じくダイアログなし
+            Assert.Empty(host.Timestamps.Queries); // 検証していないパスへは触らない
+        });
+
+    /// <summary>
+    /// path-only extras の Ok 経路。生の <c>bk.OriginalPath</c> は System32 配下だが、
+    /// seam が実在ファイルを返せばそれが開かれる = <c>Check</c> へ渡っているのが正規化後である
+    /// ことの網(素通り実装は skip されて <c>initialEmpty</c> が残るので落ちる)。
+    /// </summary>
+    [Fact]
+    public void RestoreSession_ExtrasPathOnly_NormalizeOk_ChecksNormalizedPath_NotRaw() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string onDisk = System.IO.Path.GetFullPath(tmp.File("extra-a16-ok.txt"));
+            File2.WriteAllText(onDisk, "on disk");
+            host.Probe.NormalizeResult = new PathNormalizeResult(PathNormalizeStatus.Ok, onDisk);
+            var initialEmpty = host.Docs.CreateNew();
+
+            host.File.RestoreSession(
+                Layout(),
+                new[] { Backup(NewBackupId(), originalPath: BlockedSystemPath(), content: null) },
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            Assert.Equal(1, host.Docs.Count);
+            var doc = host.Docs.Documents[0];
+            Assert.NotSame(initialEmpty, doc); // 実際に再オープンされた(skip されていない)
+            Assert.Equal(onDisk, doc.State.Path);
+            Assert.Equal("on disk", doc.Editor.SnapshotText);
+        });
+
+    /// <summary>
+    /// path-only extras で正規化が確定しなかったとき、既存の
+    /// <c>extra-path-only-invalid-path-skipped</c> 経路(silent・レコード skip)へ合流する。
+    /// <para>
+    /// <b>短絡の網</b>: ここで <c>NormalizeCallCount == 1</c> を pin するのが load-bearing。
+    /// この枝は Check の手前(本 Task で追加)と <c>TryOpenOrActivateCore</c> の中で seam を
+    /// 2 回呼ぶが、<b>確定しなかった場合は 1 本目で打ち切られて 2 本目に到達しない</b>。
+    /// 不達共有で実際に <c>NormalizeTimeout</c> を待つのはこの経路だけなので、
+    /// 「1 レコードあたりのタイムアウト待ちは高々 1 本」という
+    /// <see cref="RestoreSession_NormalizesAtMostTwicePerReopenedRecord"/> の実質的な主張は保たれる。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(PathNormalizeStatus.TimedOut)]
+    [InlineData(PathNormalizeStatus.Invalid)]
+    public void RestoreSession_ExtrasPathOnly_NormalizeNotResolved_SkipsWithoutReopening(
+        PathNormalizeStatus status
+    ) =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string onDisk = tmp.File("extra-a16-not-resolved.txt");
+            File2.WriteAllText(onDisk, "on disk");
+            // decoy = 実在するファイル(Check なら Ok)。Status の検査を外す変異は
+            // Check → TryOpenOrActivateCore まで進んで NormalizeCallCount が 2 になり落ちる。
+            host.Probe.NormalizeResult = new PathNormalizeResult(status, onDisk);
+            var initialEmpty = host.Docs.CreateNew();
+
+            var failed = host.File.RestoreSession(
+                Layout(),
+                new[] { Backup(NewBackupId(), originalPath: onDisk, content: null) },
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            Assert.Equal(1, host.Docs.Count);
+            Assert.Same(initialEmpty, host.Docs.Documents[0]); // 何も開かない=既存 skip と同じ
+            Assert.Empty(host.Prompt.Log);
+            Assert.Equal(1, host.Probe.NormalizeCallCount); // ★短絡: 2 本目へ進まない
+            // 意図的な挙動変更(A-16 (ii)): 変更前はこの入力が TryOpenOrActivateCore まで進んで
+            // null を返し、パスが failedPaths に載って集約通知に出ていた。合流先を既存の
+            // 「検証 NG = skip + trace」に揃えた結果、通知は出なくなる(既存 Rejected と同じ)。
+            Assert.Empty(failed);
         });
 
     [Fact]

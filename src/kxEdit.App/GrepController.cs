@@ -21,6 +21,9 @@ public sealed class GrepController
         CancellationToken,
         Task<GrepOutcome>
     > _searchFn;
+
+    /// <summary>A-17: フォルダー確認を境界付きにするためのプローブ(テストでは Fake)。</summary>
+    private readonly IReachabilityProbe _probe;
     private IGrepView? _view;
     private IGrepResultsView? _resultsView;
     private CancellationTokenSource? _cts;
@@ -36,7 +39,8 @@ public sealed class GrepController
             IProgress<GrepProgress>?,
             CancellationToken,
             Task<GrepOutcome>
-        >? searchFn = null
+        >? searchFn = null,
+        IReachabilityProbe? probe = null
     )
     {
         _docs = docs;
@@ -46,6 +50,8 @@ public sealed class GrepController
         // 既定=現行の `await Task.Run(() => GrepService.Search(...))` と 1:1(await 位置と例外セマンティクス不変)
         _searchFn =
             searchFn ?? ((req, prog, ct) => Task.Run(() => GrepService.Search(req, prog, ct)));
+        // FileMetaProvider / FileTimestampProvider と同型の既定注入(本番は MainForm から何も渡さない)。
+        _probe = probe ?? new FileReachabilityProbe();
     }
 
     /// <summary>ダイアログを開く（既定フォルダ＝アクティブ文書のフォルダ）。</summary>
@@ -87,7 +93,12 @@ public sealed class GrepController
             d.RaiseNotification("検索文字列を入力してください");
             return;
         }
-        if (!Directory.Exists(d.Folder))
+        // A-17: 到達不能な UNC への Directory.Exists は実測 21,002 ms 返らない(445 への SYN が
+        // 黙って落とされるホストの場合。名前解決自体に失敗するホスト名なら約 1.2 秒。測定条件と
+        // 適用範囲は RemoteAwareDirectory の doc)。リモートのときだけ 5 秒の境界付きプローブへ回す
+        // (ローカルは直呼びのまま)。期限内に確定しなければ「見つからない」側=既存の通知と
+        // 同じ扱いに倒す(挙動不変)。
+        if (!RemoteAwareDirectory.Exists(_probe, d.Folder))
         {
             d.RaiseNotification("フォルダが見つかりません");
             return;

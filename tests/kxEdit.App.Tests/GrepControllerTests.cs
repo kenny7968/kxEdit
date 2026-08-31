@@ -38,6 +38,9 @@ public class GrepControllerTests
         public FakeGrepView View { get; } = new();
         public FakeGrepResultsView Results { get; private set; } = null!;
         public FakeGrepSearchFn SearchFn { get; } = new();
+
+        /// <summary>A-17: フォルダー確認の境界付きプローブ(リモートのときだけ通る)。</summary>
+        public FakeReachabilityProbe Probe { get; } = new();
         public GrepController Grep { get; }
         public List<GrepHit> Jumps { get; } = new();
         public int ViewFactoryCalls;
@@ -64,7 +67,8 @@ public class GrepControllerTests
                     );
                     return Results;
                 },
-                searchFn: SearchFn.Invoke
+                searchFn: SearchFn.Invoke,
+                probe: Probe
             );
         }
 
@@ -87,6 +91,13 @@ public class GrepControllerTests
     private static readonly string TempFolder = Path.TrimEndingDirectorySeparator(
         Path.GetTempPath()
     );
+
+    /// <summary>
+    /// A-17 用のリモートフォルダー(UNC = <c>RemotePathDetector.IsRemote</c> が無条件に true)。
+    /// 到達可否は Fake が決めるので、この綴りが実在するかどうかはテストの成否に影響しない
+    /// (=実装が境界付きプローブを通す限り、実 FS / ネットワークには一切触れない)。
+    /// </summary>
+    private const string RemoteFolder = @"\\unreachable-host\share";
 
     // ===== ctor(対応固定=生成時点で view/results/searchFn 呼び出しなし) =====
 
@@ -201,10 +212,18 @@ public class GrepControllerTests
         Sta.Run(() =>
         {
             using var host = new Host();
+            const string absent = "Z:/no/such/folder/definitely/absent";
+            // 陽性対照: この fixture は A-17 で**意味が変わった**。Z: がネットワーク割当の
+            // マシンでは IsRemote が true になり、プローブ経路(Fake の既定 DirectoryResult=true)
+            // で本体へ進んでしまうので、この網は「フォルダが見つかりません」を検証しているつもりの
+            // まま落ちる。実際このマシンには不達ホストへマップ済みのドライブが在り、綴り次第で
+            // 同型の事故が起きる。前提が崩れたことを assertion で見えるようにする。
+            Assert.False(kxEdit.Core.IO.RemotePathDetector.IsRemote(absent));
+
             host.NewDoc("body");
             host.Grep.Open();
             host.View.Pattern = "abc";
-            host.View.Folder = "Z:/no/such/folder/definitely/absent";
+            host.View.Folder = absent;
 
             host.Grep.RunAsync().GetAwaiter().GetResult();
 
@@ -242,6 +261,81 @@ public class GrepControllerTests
             Assert.Equal(0, host.ViewFactoryCalls);
             Assert.Empty(host.SearchFn.Invocations);
             Assert.Empty(host.View.Notifications); // view は生成されていないので Fake も呼ばれない
+        });
+
+    // ===== A-17: フォルダー確認を境界付きにする(リモートのときだけプローブ) =====
+
+    [Fact]
+    public void RunAsync_RemoteUnreachableFolder_Notifies_AndDoesNotInvokeSearchFn() =>
+        Sta.Run(() =>
+        {
+            // A-17: 不達のリモートフォルダーは 5 秒プローブで打ち切り、grep 本体へ進まない
+            // (進むと GrepService が実 I/O に入り UI が SMB タイムアウト約 60 秒まで返らない)。
+            // 通知文言と「searchFn を呼ばない」は既存の未存在フォルダー経路と同一=挙動不変。
+            using var host = new Host();
+            host.NewDoc("body");
+            host.Grep.Open();
+            host.View.Pattern = "abc";
+            host.View.Folder = RemoteFolder;
+            host.Probe.DirectoryResult = false; // 到達不能 or 期限内に確定せず
+
+            host.Grep.RunAsync().GetAwaiter().GetResult();
+
+            Assert.Equal(new[] { "フォルダが見つかりません" }, host.View.Notifications);
+            Assert.Empty(host.SearchFn.Invocations);
+            Assert.Empty(host.View.RunningLog); // SetRunning にも到達しない
+            // プローブへ渡した引数の pin: 素の Directory.Exists へ戻る変異(CallCount=0)と、
+            // タイムアウトを 5 秒から動かす変異の両方をここで殺す。
+            Assert.Equal(1, host.Probe.DirectoryCallCount);
+            Assert.Equal(RemoteFolder, host.Probe.DirectoryLastPath);
+            Assert.Equal(TimeSpan.FromSeconds(5), host.Probe.DirectoryLastTimeout);
+        });
+
+    [Fact]
+    public void RunAsync_RemoteReachableFolder_ProceedsToSearch() =>
+        Sta.Run(() =>
+        {
+            // 対照群: 同じリモートパスでもプローブが「到達できる」と答えれば本体へ進む。
+            // これが無いと「リモートは常に false へ倒す」変異(=正常な共有で grep が
+            // 一切動かなくなる退行)が上のテストだけでは生き残る。
+            using var host = new Host();
+            host.NewDoc("body");
+            host.Grep.Open();
+            host.View.Pattern = "abc";
+            host.View.Folder = RemoteFolder;
+            host.Probe.DirectoryResult = true;
+            host.SearchFn.DefaultOutcome = FakeGrepSearchFn.EmptyOutcome();
+
+            host.Grep.RunAsync().GetAwaiter().GetResult();
+
+            Assert.Equal(1, host.Probe.DirectoryCallCount);
+            Assert.Single(host.SearchFn.Invocations);
+            Assert.Equal(RemoteFolder, host.SearchFn.Invocations[0].Request.Folder);
+            Assert.DoesNotContain("フォルダが見つかりません", host.View.Notifications);
+        });
+
+    [Fact]
+    public void RunAsync_LocalFolder_DoesNotProbe() =>
+        Sta.Run(() =>
+        {
+            // ローカルは挙動不変=プローブを通さない(退避スレッドも作らない)。
+            // kill 対象: RemoteAwareDirectory.Exists の IsRemote 分岐を外して
+            // 無条件にプローブへ回す変異(DirectoryCallCount が 1 になる)。
+            using var host = new Host();
+            // 陽性対照: fixture が本当にローカル。MyDocuments がネットワークドライブへ
+            // リダイレクトされた環境では前提が崩れ、この網は無言で無意味になる。
+            Assert.False(kxEdit.Core.IO.RemotePathDetector.IsRemote(ExistingFolder));
+
+            host.NewDoc("body");
+            host.Grep.Open();
+            host.View.Pattern = "abc";
+            host.View.Folder = ExistingFolder;
+            host.SearchFn.DefaultOutcome = FakeGrepSearchFn.EmptyOutcome();
+
+            host.Grep.RunAsync().GetAwaiter().GetResult();
+
+            Assert.Equal(0, host.Probe.DirectoryCallCount);
+            Assert.Single(host.SearchFn.Invocations); // 実在ローカルは従来どおり本体へ進む
         });
 
     // ===== RunAsync 成功系(検索デリゲート即完了=Task.FromResult パス) =====
@@ -793,6 +887,174 @@ public class GrepControllerTests
             var statusLabel = (Label)statusField!.GetValue(dialog)!;
             Assert.Equal("見つかりません", statusLabel.Text);
         });
+
+    // ===== A-17: 参照ボタンのフォルダー確認(GrepDialog 側の呼出点) =====
+
+    /// <summary>
+    /// 参照ボタンの「初期フォルダーを決める」判断だけを取り出して呼ぶ。
+    /// <c>BrowseFolder</c> 本体は <see cref="FolderBrowserDialog"/> をモーダルで開くため
+    /// 自動テストからは叩けない(<c>ShowDialog</c> が戻らない)。判断そのものは
+    /// <c>InitialBrowsePath</c> に切り出してあるので、そこに網を張る。
+    /// </summary>
+    private static string? InvokeInitialBrowsePath(GrepDialog dialog)
+    {
+        var m = typeof(GrepDialog).GetMethod(
+            "InitialBrowsePath",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+        );
+        Assert.NotNull(m); // 改名で「呼べないから緑」になるのを防ぐ
+        return (string?)m!.Invoke(dialog, null);
+    }
+
+    private static GrepDialog NewGrepDialog(FakeReachabilityProbe probe) =>
+        new(new GrepCallbacks(() => Task.CompletedTask, () => { }), new FakeAnnouncer(), probe);
+
+    [Fact]
+    public void GrepDialog_InitialBrowsePath_RemoteUnreachable_IsNull_AndProbedWith5s() =>
+        Sta.Run(() =>
+        {
+            // A-17: 不達のリモートを 5 秒で打ち切り、SelectedPath を初期設定しないだけに倒す
+            // (ダイアログ自体は開く=フェイルセーフの粒度は「初期位置を諦める」)。
+            var probe = new FakeReachabilityProbe { DirectoryResult = false };
+            using var dialog = NewGrepDialog(probe);
+            dialog.SetFolder(RemoteFolder);
+
+            Assert.Null(InvokeInitialBrowsePath(dialog));
+            Assert.Equal(1, probe.DirectoryCallCount);
+            Assert.Equal(RemoteFolder, probe.DirectoryLastPath);
+            Assert.Equal(TimeSpan.FromSeconds(5), probe.DirectoryLastTimeout);
+        });
+
+    [Fact]
+    public void GrepDialog_InitialBrowsePath_RemoteReachable_ReturnsFolder() =>
+        Sta.Run(() =>
+        {
+            // 対照群: プローブが到達可能と答えれば従来どおり初期フォルダーを渡す
+            //(「リモートは常に諦める」変異を殺す)。
+            var probe = new FakeReachabilityProbe { DirectoryResult = true };
+            using var dialog = NewGrepDialog(probe);
+            dialog.SetFolder(RemoteFolder);
+
+            Assert.Equal(RemoteFolder, InvokeInitialBrowsePath(dialog));
+            Assert.Equal(1, probe.DirectoryCallCount);
+        });
+
+    [Fact]
+    public void GrepDialog_InitialBrowsePath_LocalFolder_DoesNotProbe() =>
+        Sta.Run(() =>
+        {
+            // ローカルは挙動不変=プローブを通さず Directory.Exists 直呼び。
+            Assert.False(kxEdit.Core.IO.RemotePathDetector.IsRemote(ExistingFolder));
+            var probe = new FakeReachabilityProbe { DirectoryResult = false }; // 通れば必ず null になる値
+            using var dialog = NewGrepDialog(probe);
+            dialog.SetFolder(ExistingFolder);
+
+            Assert.Equal(ExistingFolder, InvokeInitialBrowsePath(dialog));
+            Assert.Equal(0, probe.DirectoryCallCount);
+        });
+
+    /// <summary>
+    /// <see cref="GrepController"/> のような <c>async</c> メソッドは、本体が
+    /// コンパイラ生成の状態機械の <c>MoveNext</c> に入っている。元のメソッドを
+    /// <see cref="IlCallees"/> に掛けても状態機械の起動しか見えないので、走査対象を
+    /// <c>MoveNext</c> へ解決する。<c>[AsyncStateMachine]</c> 属性の欠落や改名は
+    /// <c>Assert.NotNull</c> で止める(走査ゼロ件が「呼んでいない」と読める形にしない)。
+    /// </summary>
+    private static System.Reflection.MethodInfo AsyncBodyOf(Type type, string name)
+    {
+        var m = type.GetMethod(
+            name,
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public
+        );
+        Assert.NotNull(m);
+        var attr = (System.Runtime.CompilerServices.AsyncStateMachineAttribute?)
+            System.Attribute.GetCustomAttribute(
+                m!,
+                typeof(System.Runtime.CompilerServices.AsyncStateMachineAttribute)
+            );
+        Assert.NotNull(attr);
+        var move = attr!.StateMachineType.GetMethod(
+            "MoveNext",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+        );
+        Assert.NotNull(move);
+        return move!;
+    }
+
+    private static System.Reflection.MethodInfo GrepDialogMethod(string name)
+    {
+        var m = typeof(GrepDialog).GetMethod(
+            name,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+        );
+        Assert.NotNull(m); // 改名で走査ゼロ件=「呼んでいない」と読めるのを防ぐ
+        return m!;
+    }
+
+    /// <summary>
+    /// A-17 の 2 呼出点が、境界付き seam の<b>外</b>で実 FS / 正規化に触れていないことを
+    /// IL で固定する。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: seam(<c>RemoteAwareDirectory.Exists</c>)は
+    /// 残したまま、その手前へ「念のため」<c>Directory.Exists(folder)</c> を 1 行足す退行は、
+    /// 返り値を捨てても<b>結果が 1 ビットも変わらない</b>(seam のカウンタも動かない)。
+    /// 観測できる差は「不達共有で UI が止まる」ことだけで、それは実 FS / ネットワークが
+    /// 要るためテストでは再現しない=<b>構造でしか検出できない</b>
+    /// (<c>FileControllerTests.PathEntryPoints_DoNotNormalizeOutsideTheSeam</c> と同型の網)。
+    /// <c>RunAsync</c> は 60 秒級の凍結が実際に起きるホットパスなので、
+    /// <c>BrowseFolder</c> 側より優先度が高い。
+    /// </para>
+    /// <para>
+    /// <b>走査対象が 3 つある理由</b>: (1) <c>RunAsync</c>(grep 実行の入口)、
+    /// (2) <c>BrowseFolder</c>(参照ボタンの入口)、(3) <c>InitialBrowsePath</c>
+    /// ((2) が 1 段越しに呼ぶ薄いヘルパ。この走査は<b>直接の</b>呼出しか見ないので、
+    /// ここを対象に入れないと (2) の網を 1 ホップで迂回できる)。
+    /// </para>
+    /// <para>
+    /// <b>不在リストが 2 つある理由</b>: <c>Directory.Exists</c> は A-17 そのものの再導入。
+    /// <c>NormalizePathWithTimeout</c> は Task 4 が「seam の手前に正規化を置かない」と
+    /// 決めた制約(前置すると境界付き I/O が 1 操作 2 回=UI ブロック最悪 5 秒 → 10 秒・
+    /// leak スレッド 2 本になり、凍結を減らす目的に反する)。散文だけでは守れないので
+    /// 引用元と同じ粒度で網にする。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void FolderCheckEntryPoints_DoNotTouchFileSystemOutsideTheSeam()
+    {
+        var runCallees = IlCallees.Of(AsyncBodyOf(typeof(GrepController), "RunAsync"));
+        var browseCallees = IlCallees.Of(GrepDialogMethod("BrowseFolder"));
+        var initialCallees = IlCallees.Of(GrepDialogMethod("InitialBrowsePath"));
+
+        // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の assert は無意味)。
+        static bool IsSeam(System.Reflection.MethodBase m) =>
+            m.DeclaringType == typeof(RemoteAwareDirectory)
+            && m.Name == nameof(RemoteAwareDirectory.Exists);
+
+        Assert.Contains(runCallees, IsSeam);
+        Assert.Contains(initialCallees, IsSeam);
+        Assert.Contains(
+            browseCallees,
+            m => m.DeclaringType == typeof(GrepDialog) && m.Name == "InitialBrowsePath"
+        );
+
+        foreach (var callees in new[] { runCallees, browseCallees, initialCallees })
+        {
+            Assert.DoesNotContain(
+                callees,
+                m =>
+                    m.DeclaringType == typeof(System.IO.Directory)
+                    && m.Name == nameof(System.IO.Directory.Exists)
+            );
+            Assert.DoesNotContain(
+                callees,
+                m =>
+                    m.DeclaringType == typeof(IReachabilityProbe)
+                    && m.Name == nameof(IReachabilityProbe.NormalizePathWithTimeout)
+            );
+        }
+    }
 
     // ===== ShowResults の _resultsView.IsDisposed 分岐被覆(Batch B Task 6) =====
 

@@ -9,10 +9,12 @@ namespace kxEdit.App;
 /// 書き込み側の <see cref="ProbeSaveTargetWithTimeout"/> は File.Exists + 親フォルダーの
 /// <see cref="System.IO.Directory.Exists"/> を、正規化の
 /// <see cref="NormalizePathWithTimeout"/> は <see cref="System.IO.Path.GetFullPath(string)"/> を、
+/// フォルダー版の <see cref="ProbeDirectoryExistsWithTimeout"/>(A-17)は
+/// <see cref="System.IO.Directory.Exists"/> を、
 /// それぞれ <see cref="Task.Run{TResult}(Func{TResult})"/> で
 /// バックグラウンドスレッドに退避し、<see cref="Task.Wait(TimeSpan)"/> の短タイムアウトで
-/// UI スレッドをブロックしない。3 本ともタイムアウト時のフェイルセーフは
-/// <see cref="WaitBounded{T}"/> に集約する(= 「確定しなかった」側に倒す。前 2 本は到達不能、
+/// UI スレッドをブロックしない。4 本ともタイムアウト時のフェイルセーフは
+/// <see cref="WaitBounded{T}"/> に集約する(= 「確定しなかった」側に倒す。プローブ 3 本は到達不能、
 /// 正規化は <see cref="PathNormalizeStatus.TimedOut"/>)。
 /// <see cref="System.IO.Path.GetFullPath(string)"/> は名前解決のみで実 I/O を行わない —
 /// **ただし正規化後のパスに <c>~</c> が含まれる場合だけは例外**で <c>GetLongPathName</c> を
@@ -22,7 +24,13 @@ namespace kxEdit.App;
 /// ときだけで、復元経路のようにパスを次々に処理すると直列に積み上がる。1 件あたり
 /// 「5 秒 UI ブロック + 寿命 21〜60 秒の leak 1 本」なので、同時 leak は 寿命 ÷ 間隔 ≒ 21/5 ≒
 /// 5 本(SMB 60 秒なら ≒ 12 本)。<see cref="ProbeFileExistsWithTimeout"/> の leak も重なるため
-/// 最悪で約 24 本。<c>ThreadPool</c> の最小ワーカー数は <c>Environment.ProcessorCount</c> と
+/// 最悪で約 24 本。フォルダー版 <see cref="ProbeDirectoryExistsWithTimeout"/> の leak も性質は同じで、
+/// <b>単発操作なら 1 本</b>だが積み上がらないわけではない: <c>GrepController.RunAsync</c> には
+/// 連打対策(直前の実行を中止する)がある=連打は想定内の操作で、しかもフォルダー確認は
+/// <b>その手前</b>にあるので押すたびにプローブが走る。切断済み共有では 1 回あたり
+/// 「5 秒 UI ブロック + 寿命 60 秒の leak 1 本」なので、押し続ければ上と同じ 寿命 ÷ 間隔 ≒ 12 本が
+/// そのまま当てはまる(=上限も上の見積りと同程度で、新しい桁は生まない)。
+/// <c>ThreadPool</c> の最小ワーカー数は <c>Environment.ProcessorCount</c> と
 /// 同数(実測した開発機では 16)なので、最悪ケースはこれを超える。枯渇はしない(上限は 32767)が、
 /// 超えた分は投入が絞られるので待たされうる。
 /// それでも受容する: <c>TaskCreationOptions.LongRunning</c> へ替えると、圧倒的多数を占める
@@ -33,7 +41,7 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
 {
     /// <summary>
     /// 境界付き待ちの判断。タイムアウトしたら <paramref name="onTimeout"/> を返す。
-    /// 3 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
+    /// 4 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
     /// (Task 1 コード品質レビュー I-1: タイムアウト値の変異が生存していた)。
     /// <b>fault は元の例外型のまま投げ直す</b>(Issue #48 コード品質レビュー I-6)。
     /// faulted task に対する実測(net9.0.8)は次のとおり:
@@ -52,10 +60,12 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// 移設前(<c>FileController</c> が直接 <c>GetFullPath</c> を呼んでいた頃)と
     /// 同じ姿で診断できる。
     /// <b>投げ直しは本メソッドの契約であって、呼出側の性質ではない</b>(再レビュー m-1):
-    /// <see cref="ProbeFileExistsWithTimeout"/> / <see cref="ProbeSaveTargetWithTimeout"/> の
+    /// <see cref="ProbeFileExistsWithTimeout"/> / <see cref="ProbeSaveTargetWithTimeout"/> /
+    /// <see cref="ProbeDirectoryExistsWithTimeout"/> の
     /// work は素の <c>catch</c> で何も逃がさない=task が fault しないので、
-    /// <b>この 2 つの呼出側については挙動不変</b>。ただし
-    /// <see cref="RunSaveTargetProbe"/> / <see cref="RunFileExistsProbe"/> は internal で
+    /// <b>この 3 つの呼出側については挙動不変</b>。ただし
+    /// <see cref="RunSaveTargetProbe"/> / <see cref="RunFileExistsProbe"/> /
+    /// <see cref="RunDirectoryExistsProbe"/> は internal で
     /// 任意の work を受けるため、throw しうる work を渡せばここが効く。
     /// </summary>
     internal static T WaitBounded<T>(Task<T> task, TimeSpan timeout, T onTimeout)
@@ -100,6 +110,18 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
         WaitBounded(Task.Run(work), timeout, false);
 
     /// <summary>
+    /// フォルダー存在プローブの骨格(A-17)。<paramref name="work"/> をバックグラウンドへ退避し、
+    /// 期限内に終わらなければ「存在を確認できなかった」= false へ倒す。
+    /// フェイルセーフ値をここに置く理由は <see cref="RunFileExistsProbe"/> と同じ:
+    /// <c>WaitBounded(task, timeout, false)</c> と直書きすると定数が 1 トークンの引数でしかなく、
+    /// true へ書き換えてもコンパイルが通り・ハングもせず・全緑になってしまう
+    /// (= タイムアウトを「フォルダは在る」と読み、切断済み共有で grep 本体へ進んで
+    /// UI が 60 秒凍結する A-17 の再導入)。
+    /// </summary>
+    internal static bool RunDirectoryExistsProbe(Func<bool> work, TimeSpan timeout) =>
+        WaitBounded(Task.Run(work), timeout, false);
+
+    /// <summary>
     /// 境界付き正規化の骨格。<paramref name="work"/> をバックグラウンドへ退避し、
     /// 期限内に終わらなければ「確定しなかった」= <see cref="PathNormalizeStatus.TimedOut"/> へ倒す。
     /// フェイルセーフ値をここに置く理由は <see cref="RunFileExistsProbe"/> と同じ:
@@ -131,6 +153,26 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                 {
                     // File.Exists は通常例外を投げないが、UNC 未到達などで
                     // 稀に IOException 系が出る可能性を吸って false 扱いにする。
+                    return false;
+                }
+            },
+            timeout
+        );
+
+    /// <inheritdoc />
+    public bool ProbeDirectoryExistsWithTimeout(string path, TimeSpan timeout) =>
+        RunDirectoryExistsProbe(
+            () =>
+            {
+                try
+                {
+                    return Directory.Exists(path);
+                }
+                catch
+                {
+                    // Directory.Exists は通常例外を投げないが、UNC 未到達などで稀に
+                    // IOException 系が出る可能性を吸って false 扱いにする
+                    // (ProbeFileExistsWithTimeout と同方針)。
                     return false;
                 }
             },

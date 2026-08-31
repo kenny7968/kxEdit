@@ -952,6 +952,103 @@ public sealed class FileController
         };
     }
 
+    /// <summary>
+    /// A-16 (ii): 復元先パスの検証を<b>境界付き正規化の後ろ</b>で行う。復元経路の 3 呼出点
+    /// (<see cref="RestoreFromBackup"/> の <c>rec.OriginalPath</c> /
+    /// <see cref="RestoreDirtyFromBackup"/> の <c>rec.Path</c> / path-only extras の
+    /// <c>bk.OriginalPath</c>)が共有する。
+    /// <para>
+    /// <b>なぜ要るか</b>: <see cref="OriginalPathValidator.Check"/> 冒頭の
+    /// <see cref="System.IO.Path.GetFullPath(string)"/> は名前解決のみで実 I/O を行わない ——
+    /// <b>ただし正規化後のパスに <c>~</c> が含まれる場合だけは <c>GetLongPathName</c> を呼ぶ</b>ため、
+    /// 不達の共有に対して約 21 秒 UI スレッドを止める(Issue #48 / S-15。実測 21,002 ms)。
+    /// 復元は起動時に無人で走り、レコード数は攻撃者制御の JSON で増やせるので、
+    /// 1 レコードあたりの待ちがそのまま「起動できない時間」になる。
+    /// </para>
+    /// <para>
+    /// <b>3 呼出点で 1 つの関数に寄せる理由</b>: 「正規化 → 検証」の順序と
+    /// 「確定しなければ検証しない」は<b>セキュリティ境界の一部</b>で、3 か所へ写経すると
+    /// 片方だけ直す/片方だけ足し忘れる形の劣化が起きる。呼出側に残す判断は
+    /// 「<see cref="PathValidation.Rejected"/> をどう見せるか」だけにする。
+    /// </para>
+    /// <para>
+    /// <b>制御フローは <see cref="PathNormalizeStatus.Invalid"/> と
+    /// <see cref="PathNormalizeStatus.TimedOut"/> を区別しない</b>: どちらも
+    /// <see cref="PathValidation.Rejected"/> へ丸め、呼出側の<b>既存の</b>拒否経路
+    /// (無題降格 / レコード skip)へそのまま合流させる = 分岐を増やさない。
+    /// </para>
+    /// <para>
+    /// <b>ただし <paramref name="unreachable"/> だけは別に返す</b>(唯一の例外)。
+    /// <see cref="RestoreFromBackup"/> のダイアログ経路で文言を出し分けるためで、根拠は
+    /// 「ユーザーに見える文言であり SR で読み上げられる」こと: 不達の共有を「パスが無効」と
+    /// 説明すると「バックアップが壊れた」と誤解させるが、実際はネットワークが届かないだけで、
+    /// 共有が復帰すれば元パスは有効。<c>TryOpenOrActivateCore</c> / <c>SaveAsDocument</c> が
+    /// 既に同じ理由で 2 文言に分けており、ここを揃えないと A-16 で直したはずの症状が
+    /// <b>文言として残る</b>。
+    /// <b>出し分けはダイアログ経路だけ</b>で、silent な 2 呼出点は <c>out _</c> で捨てて
+    /// trace の粒度を変えない(trace は開発者向けで、キーワードを増やす価値が出し分けの
+    /// 情報量に見合わない)。
+    /// </para>
+    /// <para>
+    /// <b><c>Check</c> 自身の正規化は残す</b>(消さないこと)。
+    /// <see cref="OriginalPathValidator"/> のクラス doc が「再正規化の順序が load-bearing」と
+    /// 明記しており、外すと事後条件が検査した形と BlockedRoots が照合する形が食い違う。
+    /// 2 度目の <c>GetFullPath</c> が走るのは 1 本目が<b>期限内に確定したときだけ</b>なので、
+    /// 不達共有の約 21 秒はこの経路から消える。
+    /// <b>2 度目の呼び出し自体は依然として無境界である</b> —— 「1 本目が通ったなら 2 度目は速い」と
+    /// 論証はできない(<c>GetLongPathName</c> が失敗して <c>~</c> が残ったまま <c>Ok</c> で返る形が
+    /// ありうる。実測はしていない)。<b>ただし露出は doc が示唆するより狭い</b>ので、
+    /// systematic hole として読まないこと(最終ブランチレビューで精密化):
+    /// <list type="bullet">
+    /// <item><see cref="OriginalPathValidator.Check"/> の呼出点は src 全体で<b>この
+    /// <c>CheckRestoreTarget</c> 1 か所だけ</b>で、境界付き正規化を前置しない素通しの経路は無い。</item>
+    /// <item>1 本目が遅ければ <see cref="PathNormalizeStatus.TimedOut"/> で <c>Check</c> に
+    /// <b>到達しない</b>。同じ対象への同じ呼び出しなので、2 度目が遅くなるのは
+    /// <b>1 本目と 2 本目の間でネットワーク状態が変わった場合だけ</b>(TOCTOU 型のレース)。</item>
+    /// <item><c>Check</c> 内部の 2 つ目の <c>GetFullPath</c>(再正規化)はさらに
+    /// <c>prefixStripped &amp;&amp; IsDriveRooted</c> で絞られるので、
+    /// <c>\\?\X:\…~…</c> の綴り<b>かつ</b> <c>X:</c> がネットワーク割当、という三重条件を要する。</item>
+    /// </list>
+    /// つまり<b>「無境界だが、単一呼出点が境界付き正規化を前置しているため、露出は 2 呼出間の
+    /// 状態変化に限られる」</b>。ここを完全に閉じるには <c>Check</c> 側を境界付きにする必要があり、
+    /// 本 Task の範囲外。
+    /// </para>
+    /// <para>
+    /// <b>前置ガード <see cref="System.IO.Path.IsPathFullyQualified(string)"/> は挙動不変のために要る</b>
+    /// (<c>Check</c> 冒頭の同じガードとの<b>意図的な重複</b>)。これが無いと、相対パスの
+    /// <c>OriginalPath</c>(バックアップは常に絶対パスで書かれるので、攻撃者 JSON か旧形式でしか
+    /// 現れない)を前置正規化がプロセスの CWD 基準で絶対パスへ解決してしまい、以前は入口で
+    /// <c>Rejected</c> = 無題降格だったものが <c>Check</c> の本体まで進む。本 Task は凍結の解消で
+    /// あって検証の緩和ではないので、その窓は開けない(受理範囲を広げる変更は独立に議論する)。
+    /// 副次的に、相対入力では seam を 1 本も使わずに済む。
+    /// </para>
+    /// </summary>
+    private PathValidation CheckRestoreTarget(
+        string path,
+        out string normalized,
+        out bool unreachable
+    )
+    {
+        normalized = string.Empty;
+        // unreachable は各 return で必ず書く(先頭で false を置かない)。先頭に既定値を置くと
+        // 将来 return を 1 本足したときに「書き忘れても通る」形になり、文言が黙って
+        // 「無効」側へ倒れる —— TryOpenOrActivateCore が out bool を避けて組を返している
+        // のと同じ理由(当該メソッドの doc の m-3)。
+        if (!System.IO.Path.IsPathFullyQualified(path))
+        {
+            unreachable = false; // 相対 / 打ち間違い = 到達性の話ではない
+            return PathValidation.Rejected;
+        }
+        var norm = _reachabilityProbe.NormalizePathWithTimeout(path, NormalizeTimeout);
+        if (norm.Status != PathNormalizeStatus.Ok)
+        {
+            unreachable = norm.Status == PathNormalizeStatus.TimedOut;
+            return PathValidation.Rejected;
+        }
+        unreachable = false; // 正規化は確定した = 以降の Rejected は検証の結論
+        return OriginalPathValidator.Check(norm.Full, out normalized);
+    }
+
     /// <summary>バックアップ記録を新タブへ復元する。本文・メタを載せ、保存点を破棄して dirty にする。
     /// HIGH-2: OriginalPath がシステム系ルート配下(Windows/System32/ProgramFiles 等)なら
     /// 無題タブへフォールバックし、後続の Ctrl+S での任意ファイル上書き導線を遮断する。</summary>
@@ -965,7 +1062,12 @@ public sealed class FileController
         string? safePath = null;
         if (!useUntitled)
         {
-            var status = OriginalPathValidator.Check(rec.OriginalPath!, out var normalized);
+            // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
+            var status = CheckRestoreTarget(
+                rec.OriginalPath!,
+                out var normalized,
+                out bool unreachable
+            );
             if (status == PathValidation.Ok)
             {
                 safePath = normalized;
@@ -974,15 +1076,32 @@ public sealed class FileController
             else
             {
                 useUntitled = true;
-                // CSV-L-5: OriginalPath は攻撃者 JSON 由来 (RLO/改行 で拡張子偽装や複数行注入)。
-                // path 部分のみ OneLine で無害化し、案内文と "\n\n元パス:" の改行区切りは保持する。
                 // 統合復元 Task 5: silent 経路(WithLoadErrorPromptSuppressed 実行中=RestoreSession の
                 // extras 等)ではダイアログを出さない。ダイアログ経路(OfferRestoreOnStartup からの
-                // 呼出)は非抑止スコープ=挙動不変。
+                // 呼出)は非抑止スコープ=挙動不変。**文言の出し分けはこのガードの内側だけ**で、
+                // silent 経路(RestoreDirtyFromBackup / path-only extras の trace)は
+                // 既存の粒度のまま = 出し分けはユーザーに見える面に限る。
                 if (!_suppressLoadErrorPrompt)
                 {
+                    // A-16 (ii) fixup: 到達不能(TimedOut)と打ち間違い / 検証 NG(Invalid・
+                    // Rejected)で文言を分ける。**本 Task で唯一「分岐を増やさない」規律の
+                    // 例外にした箇所**で、根拠は「ユーザーに見える文言であり SR で読み上げられる」
+                    // こと: 不達の共有を「パスが無効」と説明すると「バックアップが壊れた」と
+                    // 誤解させるが、実際はネットワークが届かないだけで共有が復帰すれば元パスは
+                    // 有効。本ブランチのテーマがまさに「無言のパス喪失」なので、ここを揃えないと
+                    // 直したはずの症状が文言として残る。
+                    // 言い回しは TryOpenOrActivateCore / SaveAsDocument の既存文言に合わせ、
+                    // 主語だけをこの画面のものにする(新しい表現を作らない)。
+                    // 「n 秒」は NormalizeTimeout から補間する(二重管理を作らない)。
+                    // CSV-L-5: OriginalPath は攻撃者 JSON 由来 (RLO/改行 で拡張子偽装や複数行注入)。
+                    // path 部分のみ OneLine で無害化し、案内文と "\n\n元パス:" の改行区切りは保持する。
+                    // 無害化と改行区切りを持つ**末尾は 1 本のまま**にして、分岐で二重管理しない。
                     _prompt.Warn(
-                        $"バックアップの元パスが無効なため、無題タブとして復元します。"
+                        (
+                            unreachable
+                                ? $"バックアップの元パスに到達できませんでした({NormalizeTimeout.TotalSeconds:0} 秒)。ネットワーク接続を確認してください。無題タブとして復元します。"
+                                : "バックアップの元パスが無効なため、無題タブとして復元します。"
+                        )
                             + $"必要に応じて「名前を付けて保存」してください。\n\n元パス: {SanitizeForDisplay.OneLine(rec.OriginalPath, 200)}",
                         "警告"
                     );
@@ -1235,7 +1354,10 @@ public sealed class FileController
     )
     {
         var doc = _docs.CreateNew();
-        var status = OriginalPathValidator.Check(rec.Path!, out var normalized);
+        // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
+        // unreachable は捨てる: ここは silent 経路で trace しか出さないので、到達不能と
+        // 検証 NG を出し分ける相手がいない(文言の出し分けはダイアログ経路だけ)。
+        var status = CheckRestoreTarget(rec.Path!, out var normalized, out _);
         if (status == PathValidation.Ok)
         {
             doc.State.Path = normalized;
@@ -1322,10 +1444,12 @@ public sealed class FileController
                 );
                 return null;
             }
-            if (
-                OriginalPathValidator.Check(bk.OriginalPath, out var normalized)
-                != PathValidation.Ok
-            )
+            // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
+            // 本枝だけは seam を 2 回通る(ここ + TryOpenOrActivateCore の中)。確定しなかった
+            // 場合はここで打ち切るので、実際に NormalizeTimeout を待つのは高々 1 本
+            // (RestoreSession_NormalizesAtMostTwicePerReopenedRecord の doc に内訳がある)。
+            // unreachable は捨てる(理由は RestoreDirtyFromBackup 側の同じ呼出のコメント)。
+            if (CheckRestoreTarget(bk.OriginalPath, out var normalized, out _) != PathValidation.Ok)
             {
                 System.Diagnostics.Trace.TraceWarning(
                     "kxEdit: extra-path-only-invalid-path-skipped: {0}",

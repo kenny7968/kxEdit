@@ -93,6 +93,32 @@ public class FileReachabilityProbeTests
         Assert.False(result.FileExists);
     }
 
+    // ===== フォルダー存在プローブ(A-17)=====
+
+    [Fact]
+    public void ProbeDirectoryExists_ReturnsTrue_ForExistingDirectory()
+    {
+        // 実実装の意味論。Directory.Exists を File.Exists へ差し替える変異は
+        // (フォルダーに対して File.Exists は false なので)ここで落ちる。
+        using var tmp = new TempDir();
+
+        Assert.True(new FileReachabilityProbe().ProbeDirectoryExistsWithTimeout(tmp.Root, Timeout));
+    }
+
+    [Fact]
+    public void ProbeDirectoryExists_ReturnsFalse_ForMissingDirectory()
+    {
+        // 対照群。常に true を返す実装(work の結果を無視する変異)を kill する。
+        using var tmp = new TempDir();
+
+        Assert.False(
+            new FileReachabilityProbe().ProbeDirectoryExistsWithTimeout(
+                System.IO.Path.Combine(tmp.Root, "no-such-dir"),
+                Timeout
+            )
+        );
+    }
+
     // ===== 境界付き待ちのフェイルセーフ(I-1 / I-3) =====
     // 実 I/O 経由でタイムアウトを起こすテストはフレーキーなので、待ちの判断だけを
     // WaitBounded / Run*Probe に切り出して決定的に検証する。
@@ -209,6 +235,41 @@ public class FileReachabilityProbeTests
 
         Assert.True(result.Reachable);
         Assert.True(result.FileExists);
+    }
+
+    [Fact]
+    public void RunDirectoryExistsProbe_WorkExceedsTimeout_FailsSafeToNotFound()
+    {
+        // A-17 のフェイルセーフ。false → true の変異は、この 1 本が無いと全緑で生存する
+        // (= タイムアウトを「フォルダは在る」と読み、切断済み共有で grep 本体へ進んで
+        // UI が 60 秒凍結する A-17 の再導入)。組み方は既存 2 本と対称:
+        // work は true を返すので、false が返ったならフェイルセーフ由来と確定する。
+        var gate = new TaskCompletionSource();
+        try
+        {
+            bool result = FileReachabilityProbe.RunDirectoryExistsProbe(
+                () =>
+                {
+                    gate.Task.Wait();
+                    return true;
+                },
+                TimeSpan.FromMilliseconds(50)
+            );
+
+            Assert.False(result);
+        }
+        finally
+        {
+            gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
+        }
+    }
+
+    [Fact]
+    public void RunDirectoryExistsProbe_WorkCompletes_ReturnsWorkResult()
+    {
+        // 対照群。RunDirectoryExistsProbe が常に false を返す実装を kill する
+        // (これが無いと「常にフェイルセーフ」が上のテストだけでは通ってしまう)。
+        Assert.True(FileReachabilityProbe.RunDirectoryExistsProbe(() => true, Timeout));
     }
 
     // ===== 境界付き正規化(Issue #48 / 設計書 §4)=====
@@ -385,6 +446,23 @@ public class FileReachabilityProbeTests
                 new FileReachabilityProbe()
                     .ProbeSaveTargetWithTimeout(tmp.File("not-yet.txt"), TimeSpan.Zero)
                     .Reachable
+            );
+
+        Assert.Contains(false, seen);
+    }
+
+    [Fact]
+    public void ProbeDirectoryExists_ZeroTimeout_FailsSafeToNotFound()
+    {
+        // 既存 3 本と同型(A-17)。存在するフォルダーを渡すので、公開メソッドが timeout を
+        // 素通しで渡していなければ(= Timeout.InfiniteTimeSpan へ替える変異)20 回とも
+        // true が返る。
+        using var tmp = new TempDir();
+
+        var seen = new List<bool>();
+        for (int i = 0; i < ZeroTimeoutAttempts; i++)
+            seen.Add(
+                new FileReachabilityProbe().ProbeDirectoryExistsWithTimeout(tmp.Root, TimeSpan.Zero)
             );
 
         Assert.Contains(false, seen);

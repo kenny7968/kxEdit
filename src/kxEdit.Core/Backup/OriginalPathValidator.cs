@@ -1,3 +1,5 @@
+using kxEdit.Core.IO;
+
 namespace kxEdit.Core.Backup;
 
 public enum PathValidation
@@ -15,10 +17,19 @@ public enum PathValidation
 /// バイパスを塞ぐ。junction は無権限で作成可能=見た目のパス
 /// (%USERPROFILE%\innocent\hosts) が BlockedRoots に非該当でも parent が
 /// C:\Windows\System32\drivers\etc\ を指せば hosts 上書きに至る。
-/// 対策: (1) fast path = 対象パスとその全親を root まで遡り
-/// FileAttributes.ReparsePoint bit を検査、(2) belt = File.ResolveLinkTarget
-/// で解決先を再度 BlockedRoots に照合。ローカルドライブのみ対象で
-/// UNC の Ok 契約は維持。
+/// 対策: (1) fast path = 対象パスとその全親を root まで遡り、reparse point であれば
+/// そのタグが name surrogate かを <see cref="ReparseTagReader"/> で判定、
+/// (2) belt = File.ResolveLinkTarget で解決先を再度 BlockedRoots に照合
+///     (**現在到達不能。詳細は RejectIfReparsePresent の doc**)。
+/// ローカルドライブのみ対象で UNC の Ok 契約は維持。
+///
+/// A-15: (1) の判定は元は FileAttributes.ReparsePoint bit だけを見ていたが、
+/// 同じビットはクラウドプレースホルダー (OneDrive Files On-Demand) / DEDUP / WOF にも立ち、
+/// **クラウド配下の普通のファイルを無言で無題タブへ降格**させていた。塞ぎたいのは
+/// 「名前を BlockedRoot へ横取りされること」なので、判定を name surrogate ビットに変更した
+/// (junction / symlink / mount point はいずれも surrogate なので拒否は挙動不変)。
+/// 拒否を緩める方向なので、開くのは「横取りしないと**積極的に判明した**」ときだけで、
+/// タグを読めなかった場合は Rejected を維持する。
 ///
 /// Task 4B: BlockedRoots 照合の前段を 2 つ足す。どちらか片方だけでは塞がらない。
 /// (1) 事後条件 = プレフィックス除去後の**形**が「ドライブ文字ルート」か「UNC」の
@@ -58,12 +69,49 @@ public enum PathValidation
 /// FileController の path-only extras 経路(未変更タブの復元)だけは Rejected でレコードごと
 /// skip されるため、その綴りの clean タブは黙って復元されなくなる(本文は元ファイルに在る)。
 ///
+/// A-16: reparse 検査を skip する条件を「UNC」から「リモート全体」
+/// (<see cref="RemotePathDetector.IsRemote"/> = UNC + マップドネットワーク
+/// ドライブ)へ広げた。これは**ドライブ文字綴りに効いていた防御を意図的に外す実効的な緩和**で、
+/// 正当化する根拠は次の 2 つだけ。
+/// (1) <b>UNC 綴りとの等価性</b>。同じ資源には UNC 綴りでも到達でき、そちらは元から未検査で Ok。
+///     ドライブ文字綴りだけ閉じても、攻撃者は綴りを変えるだけで迂回できるので閉じる価値が無い。
+/// (2) <b>フリーズ回避</b>。不達共有では walk が File.GetAttributes を leaf から root まで
+///     直列に積み(1 要素あたり SMB タイムアウト)、A-15 のタグ読み CreateFileW も加わる。
+///
+/// <b>「実体はサーバ側 NTFS でクライアントから検査不能だから元から walk の契約外」という
+/// 根拠は偽である。</b>(実装計画に書かれていた前提だが、レビューの実測で否定された。)
+/// loopback SMB (net use Z: \\localhost\C$) での実測:
+/// <code>
+///   綴り                                  変更前     変更後
+///   C:\...\junction\hosts                 Rejected   Rejected
+///   Z:\...\junction\hosts                 Rejected   Ok       ← 緩んだ
+///   \\localhost\C$\...\junction\hosts     Ok         Ok       ← 元から開いていた
+/// </code>
+/// Z: 綴りでも UNC 綴りでも File.GetAttributes は Directory, ReparsePoint を返す
+/// = **クライアントから実際に検査できていた**。変更前の walk は Z: 経由の junction を
+/// 検出して Rejected していた。したがってこれは「契約の食い違いの是正」ではない。
+/// <b>限定</b>: 実測は loopback SMB でのみ行っており、実リモートサーバ(別ホストの SMB /
+/// DFS / WebDAV)では未検証。
+/// <b>将来 UNC 側を閉じる人は「検査不能」という前提を再利用しないこと。</b>
+///
 /// 現状の許容(次リリース以降で再検討):
 /// - subst / ネットワークドライブ割当は「ドライブ文字の許可リスト」では原理的に閉じない。
 ///   subst Y: C:\Windows した状態の Y:\System32\drivers\etc\hosts は Ok になる
 ///   (Task 4B 以前も同じ = 差分外)。%AppData% に書ける攻撃者は
 ///   HKCU\...\Explorer\DOS Devices にも書けるので脅威モデル内。根治は
 ///   「ハンドルを開いて最終パスを解決してから照合」だが本ブランチでは扱わない。
+///   A-16 で**ネットワーク割当の側だけ**が reparse 検査の対象からも外れた
+///   (subst は DriveType=Fixed のままなので walk は続く。実測 2026-08-31)。
+///   代償はマップドドライブ上の junction が Rejected にならなくなること(上の実測表の
+///   2 行目)。ただし**これで新しく到達できる先は 1 つも増えない**: Z: の実体 \\server\share は
+///   UNC 綴りでも書けて、そちらは元から未検査で Ok(上の V-m-3 = \\localhost\C$ 経由で
+///   BlockedRoot 配下へ実際に書けた、がその実例)。**この結論だけは実測で確認済み**
+///   — 同一ファイルが変更前から UNC 綴りで Ok に到達していた。反例候補(共有のサブフォルダを
+///   マップ / 別資格情報でマップ / DFS / WebDAV)も探したが、いずれも対応する UNC 綴りが存在し
+///   IsUncRooted が受理するため見つからなかった。境界が「ドライブ文字か否か」から
+///   「リモートか否か」へ移るだけで、受容範囲の**形**も**広さ**も変わらない。
+///   <b>将来 UNC 側を閉じるときは、同じフィルタをマップドドライブにも当てること</b>
+///   (\\host\&lt;drive&gt;$ を UNC 綴りだけで弾いても、同じ共有をドライブ文字で綴った経路が残る)。
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
 ///   (実運用の UNC を潰さない優先)。閉じる場合は BlockedRoots とは別の
 ///   UNC 用フィルタ(\\host\&lt;drive&gt;$\... を拒絶)で判定する。
@@ -73,10 +121,17 @@ public enum PathValidation
 ///   インフラも要らず、%AppData% の backup JSON を書ければ 1 台の中で完結する
 ///   (admin share を開くので管理者権限は必要)。「リモート共有を使う攻撃だから遠い」と
 ///   読まないこと。
-/// - OneDrive Files On-Demand 等 cloud placeholder は IO_REPARSE_TAG_CLOUD 系
-///   reparse tag を持つため BK-M-1 実装で無条件 Rejected になる可能性がある
-///   (false-positive 受容)。tag 別判定(GetFileInformationByHandleEx /
-///   FileAttributeTagInfo)による分離は将来検討。
+/// - reparse point だが**タグを読めない**要素(対象自身に Deny ACE が付いている等。
+///   File.GetAttributes は親の走査権限だけで成功するが CreateFileW は ERROR_ACCESS_DENIED)は
+///   Rejected のままになる。属性ビット時代と同じ結果なので A-15 の緩和で新しく生まれた
+///   受容ではない(フェイルセーフ方向)。
+/// - name surrogate ビットが立たないのに名前を転送しうるタグ (DFS / DFSR / WCI / PROJFS /
+///   NFS / CLOUD) は通る。これらは**非管理者でも植えられ**、うち CLOUD / WCI / PROJFS は
+///   素の Win11 に担当フィルタが attach されているため配下への書き込みまで成功する(実測)。
+///   実書き込みが BlockedRoot へ届かないことの根拠は、**実測ではなく想定**である
+///   (有効なペイロードの用意にフィルタ側の管理者権限前提が要る、という理解)。
+///   何が実測で何が想定かの切り分けは <see cref="ReparseTagReader"/> の
+///   クラス doc を参照。**「実測で安全と確かめた」と読まないこと。**
 /// </summary>
 public static class OriginalPathValidator
 {
@@ -175,11 +230,24 @@ public static class OriginalPathValidator
             if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
                 return PathValidation.Rejected;
 
-            // BK-M-1: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
-            // UNC (\\server\share\...) はサーバ側 NTFS でありクライアントから検査不能=
-            // 既存の「UNC は BlockedRoots 非該当で Ok」契約を維持する。
-            bool isUnc = forCheck.StartsWith(@"\\", StringComparison.Ordinal);
-            if (!isUnc && RejectIfReparsePresent(forCheck) == PathValidation.Rejected)
+            // BK-M-1 / A-16: reparse point (junction/symlink) 検査は「リモートでないパスのみ」対象。
+            // 元の skip 条件は UNC (\\server\share\...) だけだった。A-16 でマップドネットワーク
+            // ドライブ (Z:\) も skip 側へ移す。
+            //
+            // **これは実効的な緩和である**(「リモートは元から検査不能だから契約外」ではない。
+            // 実測: Z: 綴りでも File.GetAttributes は Directory, ReparsePoint を返し、変更前の
+            // walk は Z: 経由の junction を検出して Rejected していた。クラス doc の実測表を参照)。
+            // 正当化は 2 つだけ: (1) 同じ資源へ UNC 綴りで到達でき、そちらは元から未検査で Ok
+            // = ドライブ文字綴りだけ閉じても綴りを変えれば迂回できる。(2) 不達共有での同期 I/O
+            // (GetAttributes を root まで直列 + A-15 のタグ読み CreateFileW)による UI 凍結を消す。
+            //
+            // 述語の差分は「ネットワーク割当のドライブ文字」だけ: RemotePathDetector は
+            // UncPathDetector(先頭 \\ の純粋判定)を内包し、ドライブ文字なら
+            // DriveInfo.DriveType == Network を見る。ここへ到達する forCheck は事後条件により
+            // 「X:\... か \\server\share\...」のどちらかなので、UNC 側は元の StartsWith(@"\\") と
+            // 完全に一致する(subst は DriveType=Fixed なので walk の対象のまま。実測 2026-08-31)。
+            bool isRemote = RemotePathDetector.IsRemote(forCheck);
+            if (!isRemote && RejectIfReparsePresent(forCheck) == PathValidation.Rejected)
                 return PathValidation.Rejected;
 
             if (StartsWithAnyBlockedRoot(forCheck))
@@ -266,8 +334,10 @@ public static class OriginalPathValidator
     }
 
     /// <summary>
-    /// BK-M-1: 対象パスとその全親ディレクトリを root まで遡り、reparse point
-    /// (directory junction / symbolic link) が 1 つでも見つかれば Rejected を返す。
+    /// BK-M-1 / A-15: 対象パスとその全親ディレクトリを root まで遡り、**名前を横取りする種別の**
+    /// reparse point (directory junction / symbolic link / mount point = name surrogate) が
+    /// 1 つでも見つかれば Rejected を返す。横取りしない reparse point
+    /// (クラウドプレースホルダー / DEDUP / WOF) は通す。
     /// 併せて <see cref="File.ResolveLinkTarget"/> でも解決先を BlockedRoots と再照合する
     /// (fast path が例外で見落とした場合の網)。
     ///
@@ -277,10 +347,14 @@ public static class OriginalPathValidator
     /// 「バイパスに使えない=無害」扱いで進める。呼び出し側(<see cref="Check"/>)の
     /// 外側 catch で最終的な例外は Rejected へ丸められるが、想定内の I/O は
     /// ここでハンドリングして誤 Rejected を避ける。
+    ///
+    /// A-15 で足したタグ読みの失敗は**この方針の例外**で、continue ではなく Rejected へ倒す。
+    /// 上の「握って進める」が成り立つのは「そもそも reparse point だと分からなかった要素」
+    /// だからで、「reparse point だと分かっているが種別が読めない」要素はバイパスに使える。
     /// </summary>
     private static PathValidation RejectIfReparsePresent(string localPath)
     {
-        // (1) fast path: 親を root まで遡って ReparsePoint bit を検査。
+        // (1) fast path: 親を root まで遡って reparse point の**タグ**を検査。
         string? cursor = localPath;
         while (!string.IsNullOrEmpty(cursor))
         {
@@ -288,7 +362,30 @@ public static class OriginalPathValidator
             {
                 var attrs = File.GetAttributes(cursor);
                 if ((attrs & FileAttributes.ReparsePoint) != 0)
-                    return PathValidation.Rejected;
+                {
+                    // A-15: 属性ビットは「reparse point である」しか言わない。塞ぎたいのは
+                    // 名前を BlockedRoot へ横取りされることなので、判定は name surrogate かどうかで行う。
+                    // クラウドプレースホルダー / DEDUP / WOF は横取りしないので通す。
+                    //
+                    // ガードが開くのは「reparse point だが横取りしないと**積極的に判明した**」
+                    // ときだけ。タグを読めなかった (null) 場合は従来どおり Rejected へ倒す
+                    // = 「読めなかった」と「安全だと分かった」を混ぜない。
+                    //
+                    // 属性ビットの検査を前に残すのは、タグ読み(CreateFileW)を
+                    // **reparse point に対してだけ**走らせるため。walk は root まで全親を辿るので、
+                    // 通常パスでハンドルを開く回数を増やさない。
+                    //
+                    // tag == 0(GetAttributes は reparse だと言ったのに TryRead は
+                    // 「reparse ではない」と答えた= 2 つの観測が矛盾している状態)は
+                    // **意図的に Ok へ倒す**。2 回の観測の間に対象が差し替わったことを意味するので、
+                    // ここで Rejected にしても TOCTOU 窓が閉じるわけではない
+                    // (walk 全体が元から Check → 実書き込みの間で TOCTOU であり、
+                    // これはその窓が 1 つ内側にずれるだけ)。矛盾を検出しても使える情報が無い以上、
+                    // 「reparse ではない」という新しい方の観測を採る。
+                    uint? tag = ReparseTagReader.TryRead(cursor);
+                    if (tag is null || ReparseTagReader.IsNameSurrogate(tag.Value))
+                        return PathValidation.Rejected;
+                }
             }
             catch (Exception ex)
                 when (ex
@@ -324,9 +421,27 @@ public static class OriginalPathValidator
         }
 
         // (2) belt-and-suspenders: leaf が symlink/junction のとき解決先を BlockedRoots に再照合。
-        //   ・fast path が既に catch していれば通常はここに到達しない
         //   ・File.ResolveLinkTarget は reparse でないパス / 存在しないパスに対して null を返す
         //     か例外を投げる=どちらも「非該当」扱いで通す
+        //
+        // **この belt には網が 1 本も無く、実測でも到達させられなかった**(2026-08-31)。
+        // 「潰しても全緑」なのは網の不足ではなく、fast path に構造的に先を越されるため:
+        //   ・belt が非 null を返すのは実 SYMLINK / MOUNT_POINT の leaf だけ(実測。
+        //     0x123 / 0x20000123 / WOF / WCI / CLOUD / PROJFS / DEDUP / APPEXECLINK は
+        //     **すべて null**)。その 2 種はどちらも surrogate なので fast path が必ず先に Rejected。
+        //   ・権限で fast path を盲にして belt だけ生かす構成も作れない。要求する権限は
+        //     belt の方が**厳しい**(GetFileAttributesW は親の traverse だけ / ResolveLinkTarget は
+        //     FindFirstFileEx + CreateFile)。実測: 親から ListDirectory+ReadAttributes を Deny すると
+        //     fast path は読めたまま belt が UnauthorizedAccessException で落ち、対象自身に
+        //     Deny FullControl を付けても fast path は tag=null で Rejected・belt は例外。
+        //
+        // したがって belt を「A-15 で fast path を緩めたことの保険」と読んではいけない。
+        // **緩めて通るようになったタグ (CLOUD / WCI / PROJFS 等) に対して belt は null を返す**
+        // = 保険として機能する余地がそもそも無い。
+        //
+        // 撤去の是非は本ブランチの最終レビューで判断した結果、**本ブランチでは撤去しない**。
+        // セキュリティ境界の変更は専用 commit + 脆弱性レビューを要するので(CLAUDE.md §3-4 /
+        // §9)、doc 修正の fixup に混ぜず次ブランチで単独実施する。
         try
         {
             var linkTarget = File.ResolveLinkTarget(localPath, returnFinalTarget: true);

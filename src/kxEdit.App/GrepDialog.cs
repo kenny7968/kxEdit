@@ -45,10 +45,19 @@ public sealed class GrepDialog : Form, IGrepView
     };
     private readonly IAnnouncer _announcer;
 
-    public GrepDialog(GrepCallbacks callbacks, IAnnouncer announcer)
+    /// <summary>A-17: 参照ボタンのフォルダー確認を境界付きにするためのプローブ(テストでは Fake)。</summary>
+    private readonly IReachabilityProbe _probe;
+
+    public GrepDialog(
+        GrepCallbacks callbacks,
+        IAnnouncer announcer,
+        IReachabilityProbe? probe = null
+    )
     {
         _cb = callbacks;
         _announcer = announcer;
+        // FileMetaProvider / FileTimestampProvider と同型の既定注入(本番は MainForm から何も渡さない)。
+        _probe = probe ?? new FileReachabilityProbe();
         Text = "フォルダ検索 (grep)";
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         StartPosition = FormStartPosition.CenterParent;
@@ -120,11 +129,28 @@ public sealed class GrepDialog : Form, IGrepView
         _announcer.Say(message);
     }
 
+    /// <summary>
+    /// 参照ダイアログの初期フォルダー。確認できなければ <c>null</c>(= 初期設定しない)。
+    /// <para>A-17: 到達不能な UNC への <see cref="Directory.Exists"/> は実測 21,002 ms 返らない
+    /// (445 への SYN が黙って落とされるホストの場合。名前解決自体に失敗するホスト名なら約 1.2 秒。
+    /// 測定条件と適用範囲は <see cref="RemoteAwareDirectory"/> の doc)ため、リモートのときだけ
+    /// 5 秒の境界付きプローブへ回す。フェイルセーフは「初期位置を諦める」だけで、
+    /// 参照ダイアログ自体は従来どおり開く。</para>
+    /// <para><c>BrowseFolder</c> から切り出してあるのは、本体が
+    /// <see cref="FolderBrowserDialog"/> をモーダルで開く=自動テストから叩けないため
+    /// (<c>DocumentInfoController</c> が同じ理由で文字列生成を分離しているのと同型)。
+    /// この抽出が買った網は<b>参照ダイアログ側の対応</b>
+    /// (プローブ true → 初期フォルダーを渡す / false → 設定しない)と<b>プローブへ渡す path</b>。
+    /// 5 秒契約そのものは <c>GrepController</c> 側のテストでも殺せるので、ここの固有の価値ではない。</para>
+    /// </summary>
+    private string? InitialBrowsePath() =>
+        RemoteAwareDirectory.Exists(_probe, _folder.Text) ? _folder.Text : null;
+
     private void BrowseFolder()
     {
         using var dlg = new FolderBrowserDialog();
-        if (Directory.Exists(_folder.Text))
-            dlg.SelectedPath = _folder.Text;
+        if (InitialBrowsePath() is string initial)
+            dlg.SelectedPath = initial;
         if (dlg.ShowDialog(this) == DialogResult.OK)
             _folder.Text = dlg.SelectedPath;
     }
