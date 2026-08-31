@@ -20,6 +20,11 @@ public class ReparseTagReaderTests
     [InlineData(0x00000123u, false)] // 非 Microsoft・非 surrogate
     [InlineData(0x20000123u, true)] // 非 Microsoft・surrogate
     [InlineData(0u, false)] // reparse point でない = タグ無し
+    // bit30 = winnt.h の R(Reserved)ビット。directory ビットは bit28(0x10000000)なので
+    // 混同しないこと。これが無いとマスクを 0x60000000 へ広げる誤りが上の全ケースを
+    // 生き残る(隣接ビットとの弁別)。
+    [InlineData(0x40000000u, false)]
+    [InlineData(0x10000000u, false)] // bit28 = directory。surrogate ではない。
     public void IsNameSurrogate_ClassifiesByBit(uint tag, bool expected) =>
         Assert.Equal(expected, ReparseTagReader.IsNameSurrogate(tag));
 
@@ -38,7 +43,7 @@ public class ReparseTagReaderTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            ReparsePointFixture.DeleteTree(dir);
         }
     }
 
@@ -54,7 +59,7 @@ public class ReparseTagReaderTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            ReparsePointFixture.DeleteTree(dir);
         }
     }
 
@@ -69,10 +74,56 @@ public class ReparseTagReaderTests
     }
 
     [Fact]
-    public void TryRead_ReturnsNull_ForMalformedPath()
+    public void TryRead_ReturnsNull_ForPathContainingEmbeddedNul()
     {
-        // CreateFileW に渡せない形(埋め込み NUL)= 判定不能。例外を素通しさせない。
-        Assert.Null(ReparseTagReader.TryRead("C:\\bad\0path.txt"));
+        // 脆弱性レビュー V-1 の回帰ガード。ガードが無いと CreateFileW は NUL 以降を
+        // 切り捨て、**渡したのとは別のパス**のタグを返す(実測: 下の 2 例はどちらも
+        // ガード削除時に 0x00000000 = 実在する前半パスのタグが返る)。
+        // 「安全だ」と答えた対象が入力と違う = confused deputy の原始形なので必ず null。
+        Assert.Null(ReparseTagReader.TryRead("C:\\Windows\0path.txt"));
+
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var file = Path.Combine(dir, "real.txt");
+            File.WriteAllText(file, "x");
+            // 実在ファイル + NUL + junk。切り捨てられれば 0 が返ってしまう。
+            Assert.Null(ReparseTagReader.TryRead(file + "\0zzz"));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void TryRead_ReadsTag_ForPathLongerThanMaxPath()
+    {
+        // 脆弱性レビュー V-3 の回帰ガード。CreateFileW は .NET の API と違い extended 形へ
+        // 自動変換しないため、素のままでは MAX_PATH 超で null になる。属性 walk では
+        // 読めていた長パスがここで null になると、OneDrive の深い階層で誤 Rejected を招く
+        // (A-15 と同じ症状)。
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var deep = dir;
+            while (deep.Length < 300)
+            {
+                deep = Path.Combine(deep, "abcdefghijklmnopqrstuvwxyz01234567890123456789");
+                Directory.CreateDirectory(deep);
+            }
+            var leaf = Path.Combine(deep, "leaf.txt");
+            File.WriteAllText(leaf, "y");
+            Assert.True(leaf.Length > 260, $"fixture が短すぎる: {leaf.Length}");
+
+            // 対照: 属性 API は長パスでも読める。タグ側だけ読めないのは seam の欠陥。
+            Assert.Equal(FileAttributes.Archive, File.GetAttributes(leaf) & FileAttributes.Archive);
+            Assert.Equal(0u, ReparseTagReader.TryRead(leaf));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
+        }
     }
 
     [Fact]
@@ -95,7 +146,33 @@ public class ReparseTagReaderTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            ReparsePointFixture.DeleteTree(dir);
+        }
+    }
+
+    [Fact]
+    public void TryRead_ReturnsTag_ForNonSurrogateReparseDirectory()
+    {
+        // A-15 の本命の形。OneDrive のプレースホルダーは**フォルダ単位**でも立ち、
+        // Task 2 の walk が root まで辿るのは親=ディレクトリなので、
+        // 「ディレクトリ + 非 surrogate タグ」を読めることがこの部品の要件。
+        // (ファイルの reparse point だけでは Task 2 が踏む形を押さえたことにならない。)
+        var dir = ReparsePointFixture.CreateTempDir();
+        try
+        {
+            var target = Path.Combine(dir, "placeholderish");
+            Directory.CreateDirectory(target);
+            // 実測: 空ディレクトリにしか設定できない(非空は ERROR_DIR_NOT_EMPTY = 145)。
+            if (!ReparsePointFixture.TryCreate(target, ReparsePointFixture.NonSurrogateTag))
+                return; // Skip: reparse point を作れない環境(非 NTFS / ポリシー / CI)
+
+            Assert.True((File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0);
+            Assert.Equal(ReparsePointFixture.NonSurrogateTag, ReparseTagReader.TryRead(target));
+            Assert.False(ReparseTagReader.IsNameSurrogate(ReparsePointFixture.NonSurrogateTag));
+        }
+        finally
+        {
+            ReparsePointFixture.DeleteTree(dir);
         }
     }
 
@@ -140,10 +217,14 @@ public class ReparseTagReaderTests
             }
             catch
             {
-                return; // Skip: cmd を起動できない環境
+                ReparsePointFixture.ReportSkip("cmd を起動できない環境");
+                return;
             }
             if (exitCode != 0)
-                return; // Skip: junction 作成不能 (非 NTFS / 権限不足)
+            {
+                ReparsePointFixture.ReportSkip($"mklink /J failed (exit={exitCode})");
+                return;
+            }
             linkCreated = true;
 
             const uint IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003;
@@ -196,7 +277,7 @@ public class ReparseTagReaderTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            ReparsePointFixture.DeleteTree(dir);
         }
     }
 }
