@@ -560,6 +560,10 @@ public class OriginalPathValidatorTests
     {
         // 対照群: 同じ経路でも name surrogate ビットが立っていれば Rejected(挙動不変)。
         // この 2 本が対になって初めて「ビットで分けている」ことの証人になる。
+        //
+        // Ok 側と違い「属性ビットが立っている」の自己検証を置かない理由: Rejected を期待する
+        // 側は fixture が空振りすると Ok が返って**赤になる**(= 自己防衛している)。
+        // 自己検証が要るのは、fixture の空振りが期待値と同じ結果を生む Ok 側だけ。
         var dir = ReparsePointFixture.CreateTempDir();
         try
         {
@@ -583,9 +587,15 @@ public class OriginalPathValidatorTests
         // walk が Rejected を出す場所は leaf ではなく**親ディレクトリ**になる。
         // leaf ファイルだけを reparse point にした上の 2 本では、walk の親側の枝を通らない。
         //
-        // leaf は作れない(reparse ディレクトリ配下には新規エントリを作成できない・実測)。
-        // 作れなくても目的は達する: 不在 leaf は既存の I/O 例外ハンドリングで素通りし、
-        // 判定は親ディレクトリのタグだけで決まる(= まさに観測したい枝)。
+        // leaf は作れない(実測 2026-08-31: このタグを担当するフィルタドライバが無いので、
+        // reparse ディレクトリ配下の作成も属性取得も ERROR_CANT_ACCESS_FILE = IOException)。
+        // 作れなくても目的は達する: その IOException は walk の既存 catch フィルタの
+        // **IOException の腕**で握られて continue し(FileNotFoundException の腕ではない)、
+        // 判定は親ディレクトリのタグだけで決まる = まさに観測したい枝。
+        //
+        // 実 OneDrive との差: 向こうはフィルタが在るので leaf の属性も読める。そちらの形は
+        // Check_ReturnsOk_ForNonSurrogateReparsePoint(leaf 自身が非 surrogate)が押さえており、
+        // 2 本で「leaf 側」「親側」の両方を覆っている。
         var dir = ReparsePointFixture.CreateTempDir();
         try
         {
