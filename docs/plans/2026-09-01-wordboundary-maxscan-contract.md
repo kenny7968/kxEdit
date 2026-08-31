@@ -359,12 +359,24 @@ EOF
 
 ```
     /// 2026-09-01 まで <c>WordBoundary</c> は <c>maxScan &gt;= 1</c> を <c>Debug.Assert</c> で
-    /// 表明しており、本 Theory の 4 ケースは <b>Debug 構成で赤</b>だった。ビルド / CI /
-    /// ローカルゲートが Release 一本で <c>Debug.Assert</c> ごと消えていたため誰も踏まなかった
-    /// (申し送り S-5)。表明の側が V-1 修正前の文言のまま取り残されていたので削除し、
-    /// 非正値の縮退は <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。
-    /// 以後この Theory は <b>Debug / Release の両構成で緑</b>であり、両方がゲートで走る。
+    /// 表明しており、本 Theory の 4 ケースは <b>Debug 構成で赤</b>だった。ゲートに Core.Tests は
+    /// Release でしか載っておらず(Debug で走っていたのは <c>App.Tests</c> だけ=Issue #48 の
+    /// 最終レビュー Q-I-4)、<c>Debug.Assert</c> ごと消えていたため誰も踏まなかった(申し送り S-5)。
+    /// 表明の側が V-1 修正前の文言のまま取り残されていたので削除し、非正値の縮退は
+    /// <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。以後この Theory は
+    /// <b>Debug / Release の両構成で緑</b>であり、<b>本ブランチで Core.Tests の Debug ステップを
+    /// ゲートへ足すので、以後は両方がゲートで走る</b>。
 ```
+
+> **2026-09-01 訂正(仕様レビュー Minor-4)**: この置換後テキストは当初
+> 「ビルド / CI / ローカルゲートが **Release 一本**で〜」「両方がゲートで走る」と書いていた。
+> どちらも偽である。①ゲートは Release 一本ではない —— Issue #48 Q-I-4 由来の
+> `App.Tests(Debug・Debug.Assert 有効)` が両ゲートに既存で、**Core.Tests に無かっただけ**。
+> 「Debug をゼロから足す」と読むと Task 4/5 の趣旨(歯抜けの解消)と食い違う。
+> ②「両方がゲートで走る」は Task 4/5 完了まで偽で、両ゲートには
+> 「Core.Tests の Debug は足さない」という**正反対のコメントが現存**する。
+> **この `<remarks>` が語っている失敗そのもの**(Debug がゲートに載っていないのに
+> 載っていると思っていた)の再生産だった。`plan-code-is-not-ground-truth` の再発例。
 
 **Step 2: EOF 経路の網を 1 本足す**
 
