@@ -74,7 +74,9 @@ internal enum CharClass
 /// <item><term><see cref="PrevWordStart"/>(caret)</term>
 ///   <description><c>[caret - maxScan, caret]</c></description></item>
 /// <item><term><see cref="WordStart"/>(pos)</term>
-///   <description><c>[pos - (maxScan - 1), pos]</c> ← <b>左だけ 1 狭い</b></description></item>
+///   <description><c>[pos - (maxScan - 1), pos]</c> ← <b>左だけ 1 狭い</b>。
+///   <b>EOF 経路(<c>pos &gt;= CharLength</c>)だけは <c>[pos - maxScan, pos]</c></b>=
+///   狭くならない(理由は下の段落)</description></item>
 /// <item><term><see cref="WordEnd"/>(pos)</term>
 ///   <description><c>[pos, pos + maxScan]</c></description></item>
 /// </list>
@@ -84,6 +86,11 @@ internal enum CharClass
 ///
 /// <see cref="WordStart"/> だけ 1 狭いのは <see cref="PrevWordStart"/> へ <c>pos + 1</c> を渡すため=
 /// 最初の 1 歩が pos へ戻るのに消費される。cap の較正時にこの 1 のズレが効く。
+/// <b>ただし EOF 経路(<c>pos &gt;= CharLength</c>)は <c>pos</c> をそのまま渡すのでこのズレが無く、
+/// 窓は <see cref="PrevWordStart"/> と同一の <c>[pos - maxScan, pos]</c> になる</b>
+/// (2026-09-01 の再レビュー Important-2。実測 <c>'a'</c> x 5000:
+/// <c>WordStart(5000, 128) = 4872</c> = 幅 128 に対し <c>WordStart(4000, 128) = 3873</c> = 幅 127。
+/// <c>maxScan</c> = 1 / 2 / 256 でも EOF 側だけ 1 広い)。
 ///
 /// <b>窓についてよくある誤読 2 つは、この節が正本である。</b>
 /// <c>TextRangeProviderV2</c> / <c>IUiaTextHost.WordStart</c> / <c>UiaWordUnitExpandTests</c> /
@@ -102,7 +109,8 @@ internal enum CharClass
 ///
 /// <b>(2)「窓がキャレット中心」なのは「走査」であって、スパンの包含ではない。</b>
 /// <see cref="WordStart"/>(pos) と <see cref="WordEnd"/>(pos) へ<b>同じ pos</b> を渡せば
-/// 走査の窓は <c>[pos - (maxScan - 1), pos + maxScan]</c> とキャレットを中心に据わる。
+/// 走査の窓は <c>[pos - (maxScan - 1), pos + maxScan]</c> とキャレットを中心に据わる
+/// (EOF 経路の例外は上の表の <see cref="WordStart"/> 行)。
 /// だが返るスパンが pos の文字を含むとは限らない: pos が空白 run の上にあると
 /// <see cref="WordStart"/> は左の空白 run を越えて前の単語の頭まで戻り、
 /// <see cref="WordEnd"/> は pos をそのまま返すので、スパン <c>[start, pos)</c> は
