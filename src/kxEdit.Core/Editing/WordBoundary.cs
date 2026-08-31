@@ -262,7 +262,9 @@ public static class WordBoundary
         // maxScan == int.MinValue のとき unchecked で int.MaxValue へ化けて上限が消える
         // (実測: 'a' x 200,000 の caret=100,000 が 0 を返して 964 ms。cap=128 なら 0.5 ms)。
         // 上限の導入自体が DoS 対策なので、特定の入力値でそれが無効化される形は残さない。
-        // maxScan >= 1 では maxScan - 1 と完全に等価・0 以下はすべて「1 歩も走らない」に収束する
+        // maxScan >= 1 では maxScan - 1 と完全に等価・0 以下はすべて budget = 0 へ収束する
+        // (= 下の while が 1 周も回らない。ただし直後の手順 2 の 1 歩は予算外なので、
+        //  メソッドとしては 1 code point 左へ動く = クラス <remarks> の縮退表)
         // (2026-08-04 最終レビュー 脆弱性パス V-1)。
         int budget = maxScan > 0 ? maxScan - 1 : 0;
         int pos = TextBoundary.PrevCodePoint(snap, caret);
