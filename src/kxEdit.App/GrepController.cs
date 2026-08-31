@@ -93,9 +93,10 @@ public sealed class GrepController
             d.RaiseNotification("検索文字列を入力してください");
             return;
         }
-        // A-17: 切断済みリモート共有への Directory.Exists は SMB タイムアウト(約 60 秒)まで
-        // 返らない。リモートのときだけ 5 秒の境界付きプローブへ回す(ローカルは直呼びのまま)。
-        // 期限内に確定しなければ「見つからない」側=既存の通知と同じ扱いに倒す(挙動不変)。
+        // A-17: 到達不能な UNC への Directory.Exists は実測 21,002 ms 返らない(RemoteAwareDirectory
+        // の doc に測定条件と適用範囲)。リモートのときだけ 5 秒の境界付きプローブへ回す
+        // (ローカルは直呼びのまま)。期限内に確定しなければ「見つからない」側=既存の通知と
+        // 同じ扱いに倒す(挙動不変)。
         if (!RemoteAwareDirectory.Exists(_probe, d.Folder))
         {
             d.RaiseNotification("フォルダが見つかりません");

@@ -945,46 +945,107 @@ public class GrepControllerTests
             Assert.Equal(0, probe.DirectoryCallCount);
         });
 
-    [Fact]
-    public void GrepDialog_BrowseFolder_DoesNotCallDirectoryExistsDirectly()
+    /// <summary>
+    /// <see cref="GrepController"/> のような <c>async</c> メソッドは、本体が
+    /// コンパイラ生成の状態機械の <c>MoveNext</c> に入っている。元のメソッドを
+    /// <see cref="IlCallees"/> に掛けても状態機械の起動しか見えないので、走査対象を
+    /// <c>MoveNext</c> へ解決する。<c>[AsyncStateMachine]</c> 属性の欠落や改名は
+    /// <c>Assert.NotNull</c> で止める(走査ゼロ件が「呼んでいない」と読める形にしない)。
+    /// </summary>
+    private static System.Reflection.MethodInfo AsyncBodyOf(Type type, string name)
     {
-        // 上の 3 本は InitialBrowsePath を直接呼ぶので、「BrowseFolder が
-        // InitialBrowsePath を使わず Directory.Exists へ戻る」変異は挙動では観測できない
-        // (モーダルダイアログを開くので叩けない)。構造で塞ぐ=IlCallees の定石。
-        var browse = typeof(GrepDialog).GetMethod(
-            "BrowseFolder",
+        var m = type.GetMethod(
+            name,
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public
+        );
+        Assert.NotNull(m);
+        var attr = (System.Runtime.CompilerServices.AsyncStateMachineAttribute?)
+            System.Attribute.GetCustomAttribute(
+                m!,
+                typeof(System.Runtime.CompilerServices.AsyncStateMachineAttribute)
+            );
+        Assert.NotNull(attr);
+        var move = attr!.StateMachineType.GetMethod(
+            "MoveNext",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
         );
-        var initial = typeof(GrepDialog).GetMethod(
-            "InitialBrowsePath",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-        );
-        Assert.NotNull(browse);
-        Assert.NotNull(initial);
+        Assert.NotNull(move);
+        return move!;
+    }
 
-        var browseCallees = IlCallees.Of(browse!);
-        var initialCallees = IlCallees.Of(initial!);
+    private static System.Reflection.MethodInfo GrepDialogMethod(string name)
+    {
+        var m = typeof(GrepDialog).GetMethod(
+            name,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+        );
+        Assert.NotNull(m); // 改名で走査ゼロ件=「呼んでいない」と読めるのを防ぐ
+        return m!;
+    }
+
+    /// <summary>
+    /// A-17 の 2 呼出点が、境界付き seam の<b>外</b>で実 FS / 正規化に触れていないことを
+    /// IL で固定する。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: seam(<c>RemoteAwareDirectory.Exists</c>)は
+    /// 残したまま、その手前へ「念のため」<c>Directory.Exists(folder)</c> を 1 行足す退行は、
+    /// 返り値を捨てても<b>結果が 1 ビットも変わらない</b>(seam のカウンタも動かない)。
+    /// 観測できる差は「不達共有で UI が止まる」ことだけで、それは実 FS / ネットワークが
+    /// 要るためテストでは再現しない=<b>構造でしか検出できない</b>
+    /// (<c>FileControllerTests.PathEntryPoints_DoNotNormalizeOutsideTheSeam</c> と同型の網)。
+    /// <c>RunAsync</c> は 60 秒級の凍結が実際に起きるホットパスなので、
+    /// <c>BrowseFolder</c> 側より優先度が高い。
+    /// </para>
+    /// <para>
+    /// <b>走査対象が 3 つある理由</b>: (1) <c>RunAsync</c>(grep 実行の入口)、
+    /// (2) <c>BrowseFolder</c>(参照ボタンの入口)、(3) <c>InitialBrowsePath</c>
+    /// ((2) が 1 段越しに呼ぶ薄いヘルパ。この走査は<b>直接の</b>呼出しか見ないので、
+    /// ここを対象に入れないと (2) の網を 1 ホップで迂回できる)。
+    /// </para>
+    /// <para>
+    /// <b>不在リストが 2 つある理由</b>: <c>Directory.Exists</c> は A-17 そのものの再導入。
+    /// <c>NormalizePathWithTimeout</c> は Task 4 が「seam の手前に正規化を置かない」と
+    /// 決めた制約(前置すると境界付き I/O が 1 操作 2 回=UI ブロック最悪 5 秒 → 10 秒・
+    /// leak スレッド 2 本になり、凍結を減らす目的に反する)。散文だけでは守れないので
+    /// 引用元と同じ粒度で網にする。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void FolderCheckEntryPoints_DoNotTouchFileSystemOutsideTheSeam()
+    {
+        var runCallees = IlCallees.Of(AsyncBodyOf(typeof(GrepController), "RunAsync"));
+        var browseCallees = IlCallees.Of(GrepDialogMethod("BrowseFolder"));
+        var initialCallees = IlCallees.Of(GrepDialogMethod("InitialBrowsePath"));
 
         // 陽性対照: 走査が実際に呼出を拾えている(拾えないなら以下の assert は無意味)。
+        static bool IsSeam(System.Reflection.MethodBase m) =>
+            m.DeclaringType == typeof(RemoteAwareDirectory)
+            && m.Name == nameof(RemoteAwareDirectory.Exists);
+
+        Assert.Contains(runCallees, IsSeam);
+        Assert.Contains(initialCallees, IsSeam);
         Assert.Contains(
             browseCallees,
             m => m.DeclaringType == typeof(GrepDialog) && m.Name == "InitialBrowsePath"
         );
-        Assert.Contains(
-            initialCallees,
-            m =>
-                m.DeclaringType == typeof(RemoteAwareDirectory)
-                && m.Name == nameof(RemoteAwareDirectory.Exists)
-        );
 
-        // 1 ホップ迂回も塞ぐため両方を走査する(FileControllerTests の NormalizeSavePath と同型)。
-        foreach (var callees in new[] { browseCallees, initialCallees })
+        foreach (var callees in new[] { runCallees, browseCallees, initialCallees })
+        {
             Assert.DoesNotContain(
                 callees,
                 m =>
                     m.DeclaringType == typeof(System.IO.Directory)
                     && m.Name == nameof(System.IO.Directory.Exists)
             );
+            Assert.DoesNotContain(
+                callees,
+                m =>
+                    m.DeclaringType == typeof(IReachabilityProbe)
+                    && m.Name == nameof(IReachabilityProbe.NormalizePathWithTimeout)
+            );
+        }
     }
 
     // ===== ShowResults の _resultsView.IsDisposed 分岐被覆(Batch B Task 6) =====

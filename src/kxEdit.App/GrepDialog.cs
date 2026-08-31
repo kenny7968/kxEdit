@@ -131,13 +131,16 @@ public sealed class GrepDialog : Form, IGrepView
 
     /// <summary>
     /// 参照ダイアログの初期フォルダー。確認できなければ <c>null</c>(= 初期設定しない)。
-    /// <para>A-17: 切断済みリモート共有への <see cref="Directory.Exists"/> は SMB タイムアウト
-    /// (約 60 秒)まで返らないため、リモートのときだけ 5 秒の境界付きプローブへ回す。
-    /// フェイルセーフは「初期位置を諦める」だけで、参照ダイアログ自体は従来どおり開く。</para>
+    /// <para>A-17: 到達不能な UNC への <see cref="Directory.Exists"/> は実測 21,002 ms 返らない
+    /// (測定条件と適用範囲は <see cref="RemoteAwareDirectory"/> の doc)ため、リモートのときだけ
+    /// 5 秒の境界付きプローブへ回す。フェイルセーフは「初期位置を諦める」だけで、
+    /// 参照ダイアログ自体は従来どおり開く。</para>
     /// <para><c>BrowseFolder</c> から切り出してあるのは、本体が
-    /// <see cref="FolderBrowserDialog"/> をモーダルで開く=自動テストから叩けないため。
-    /// 判断だけをここに置くことで、プローブへ渡す path とタイムアウト(5 秒契約)に
-    /// 網を張れるようにする。</para>
+    /// <see cref="FolderBrowserDialog"/> をモーダルで開く=自動テストから叩けないため
+    /// (<c>DocumentInfoController</c> が同じ理由で文字列生成を分離しているのと同型)。
+    /// この抽出が買った網は<b>参照ダイアログ側の対応</b>
+    /// (プローブ true → 初期フォルダーを渡す / false → 設定しない)と<b>プローブへ渡す path</b>。
+    /// 5 秒契約そのものは <c>GrepController</c> 側のテストでも殺せるので、ここの固有の価値ではない。</para>
     /// </summary>
     private string? InitialBrowsePath() =>
         RemoteAwareDirectory.Exists(_probe, _folder.Text) ? _folder.Text : null;

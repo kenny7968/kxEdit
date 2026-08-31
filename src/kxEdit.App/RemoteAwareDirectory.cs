@@ -5,12 +5,24 @@ namespace kxEdit.App;
 
 /// <summary>
 /// A-17: 「フォルダーが在るか」を UI スレッドから聞くときの唯一の入口。
-/// リモート(UNC / マップドネットワークドライブ)のときだけ境界付きプローブへ回し、
-/// ローカルは <see cref="Directory.Exists"/> 直呼び = <b>挙動不変・退避スレッドも作らない</b>。
+/// <see cref="RemotePathDetector.IsRemote"/> が true(UNC / <c>DriveType=Network</c> のドライブ)の
+/// ときだけ境界付きプローブへ回し、ローカルは <see cref="Directory.Exists"/> 直呼び
+/// = <b>挙動不変・退避スレッドも作らない</b>。
 ///
-/// <para>切断済みの共有に対する <see cref="Directory.Exists"/> は SMB タイムアウト(約 60 秒)まで
-/// 返らない。grep はその答えを<b>実行前のガード</b>として UI スレッドで聞くので、
-/// 素直に呼ぶと「検索を始める前に 60 秒固まる」になる(= A-17)。</para>
+/// <para><b>凍結が実際に起きる条件</b>(Task 5 レビューの実測。値は「約 60 秒」と書いていたが
+/// 実測に置き換えた):
+/// <list type="number">
+/// <item><b>到達不能な UNC の直指定</b> — <c>Directory.Exists(@"\\&lt;不達ホスト&gt;\share\nosuch")</c> は
+/// <b>21,002 ms</b> 返らない(実測)。grep はその答えを<b>実行前のガード</b>として UI スレッドで
+/// 聞くので、素直に呼ぶと「検索を始める前に 21 秒固まる」になる = A-17 の本体。</item>
+/// <item><b><c>DriveType=Network</c> のままサーバーが不達</b> — 同じ凍結が起きるはずだが
+/// <b>未実測</b>(実機の切断済みマッピングを再現する必要があるため L5 送り)。</item>
+/// </list>
+/// 一方 <b>切断済み(reconnect 待ち)のマップドドライブは対象外</b>: 実測で
+/// <c>new DriveInfo(@"W:\").DriveType</c> は <c>Network</c> ではなく <c>NoRootDirectory</c> を返し、
+/// <see cref="RemotePathDetector.IsRemote"/> が false=ローカル分岐へ落ちる。この状態の
+/// <c>Directory.Exists</c> は <b>2 ms</b> で返るので実害はない。つまり「マップドネットワーク
+/// ドライブもプローブ対象」が成り立つのは<b>マッピングが名前空間に生きている間だけ</b>。</para>
 ///
 /// <para>2 呼出点(<c>GrepController.RunAsync</c> / <c>GrepDialog.InitialBrowsePath</c>)で
 /// 同じ判断を繰り返さないために切り出す。タイムアウトの 5 秒は HIGH-6 / CSV-M-1 /
