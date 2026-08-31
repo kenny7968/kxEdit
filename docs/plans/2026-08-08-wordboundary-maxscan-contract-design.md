@@ -239,3 +239,61 @@ Editor 自身の網が今 0 件でも揃える理由: Q-I-4 が踏んだ失敗�
 
 Debug の赤 4 件が `MaxScan_NonPositive_NeverRemovesScanLimit` の 4 InlineData だけである点は
 2026-09-01 に再実行して一致した(§12.3 の表)。**§2〜§8 の分析は有効。**
+
+### 12.7 §4 の表は 1 行が偽だった — 仕様レビュー Important-1(2026-09-01)
+
+Task 2 の仕様レビュー(別エージェント)が実測で掘り当てた。**§4 の表の
+`WordStart(pos)` 行は誤りである。**
+
+`WordStart` は 2 経路ある。
+
+```csharp
+if (pos >= snap.CharLength)
+    return PrevWordStart(snap, pos, maxScan);   // ← pos + 1 を渡さない
+return PrevWordStart(snap, pos + 1, maxScan);
+```
+
+§4 の表が書いた「`pos`(`PrevWordStart(pos + 1)` の 1 歩が `pos` へ戻って終わる)」が
+成り立つのは**下段の経路だけ**。EOF 経路(`pos >= CharLength`)は `pos` をそのまま渡すため、
+`maxScan <= 0` では `PrevWordStart` の縮退がそのまま出て **`pos` の 1 code point 左**になる。
+
+実測(レビュー担当と実装担当が独立に再現。`maxScan ∈ {int.MinValue, -7, -1, 0}` で同値):
+
+| 呼び出し | 実測 | §4 の表の主張 |
+|---|---|---|
+| `WordStart('a'×5000, 5000)` — EOF 経路 | **4999** | 5000 |
+| `WordStart("ab😀", 4)` — EOF 経路・サロゲート | **2** | 4 |
+| `WordStart('a'×5000, 4000)` — `pos + 1` 経路 | 4000 | 4000(一致) |
+
+**「予算を使い切った状態と同じ」という §4 の上位原則そのものは正しい**
+(`maxScan = 1` でも `WordStart(5000)` は 4999 を返す)。偽なのは表の具体値の側だけである。
+
+#### 併せて判明した過大主張
+
+§4 の「**既存テストの 4 assert がこの表そのものを固定している**
+(`WordBoundaryTests.cs:318-323`)」も**過大主張**だった。当該テストは `pos=4000` /
+`CharLength=5000` で `pos + 1` 経路しか通しておらず、**EOF 経路は 1 度も評価されていない**。
+「網がある」と書いた側が実際には無網だった形で、これは
+`net-absence-claims-are-also-verifiable` の裏返し(「網がある」も検証対象)にあたる。
+
+#### 対応
+
+| 面 | 対応 |
+|---|---|
+| xmldoc(正本) | `f184bf7` で EOF 経路込みへ訂正。窓の表が `maxScan >= 1` 前提であることも明示 |
+| §4 本文 | **書き換えない**(CLAUDE.md §8 のスナップショット原則)。訂正は本節が持つ |
+| 網 | **Task 3 で EOF 経路の assert を足す**(表を訂正しただけでは同じ穴が残る) |
+
+この表は `WordBoundary` の 4 本の `<param>` から参照される**唯一の正本**に位置づけられており
+(ファイル自身が「よくある誤読はこの節が正本」と宣言している)、誤りが参照経由で 4 箇所へ
+波及していた。**「表明と実装の食い違いを潰す」ことが目的の commit に、同種の欠陥を
+新しく持ち込みかけた**ことになる。設計書に書かれた表を実装で検算せずに写した結果であり、
+`plan-code-is-not-ground-truth`(計画のコードは正解ではない)の再発である。
+
+#### 受容した 1 点 — 文書端ガードは表に書かない
+
+`pos <= 0` / `caret <= 0` の文書端では `WordStart` も `PrevWordStart` も `0` を返し、
+「1 code point 左」にはならない(左に code point が無いので当然の縮退)。これは表に
+書き足さない。端ガードは各メソッドの `<remarks>` の「動作 1.」が持つのが既存の convention で、
+`WordStart` 行にだけ但し書きを足すと表内で非対称になるため。**両方に足すか両方に足さないかの
+二択と捉え、既存 convention に合わせた。**
