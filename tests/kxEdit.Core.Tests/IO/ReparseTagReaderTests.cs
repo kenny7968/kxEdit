@@ -97,12 +97,32 @@ public class ReparseTagReaderTests
     }
 
     [Fact]
+    public void TryRead_ReturnsNull_ForNullOrEmptyPath()
+    {
+        // null ガードは NUL ガードの前提条件。これを外すと path.Contains('\0') が
+        // NullReferenceException を投げ、TryReadCore の catch フィルタに掛からずに
+        // 呼出側へ抜ける(= 判定不能が例外になる)。空文字は CreateFileW 任せでも
+        // 同じ null だが、同じ枝に畳んでいるので併せて固定する。
+        Assert.Null(ReparseTagReader.TryRead(null!));
+        Assert.Null(ReparseTagReader.TryRead(string.Empty));
+    }
+
+    [Fact]
     public void TryRead_ReadsTag_ForPathLongerThanMaxPath()
     {
         // 脆弱性レビュー V-3 の回帰ガード。CreateFileW は .NET の API と違い extended 形へ
         // 自動変換しないため、素のままでは MAX_PATH 超で null になる。属性 walk では
         // 読めていた長パスがここで null になると、OneDrive の深い階層で誤 Rejected を招く
         // (A-15 と同じ症状)。
+        //
+        // **弁別力の前提**: このテストは「読めること」を assert する形なので、
+        // \\?\ フォールバックを消しても *長パスが素で開ける環境* では緑のままになる。
+        // 弁別できるのは次の 2 条件が成り立つ機械に限られる:
+        //   (1) レジストリ LongPathsEnabled = 0(既定)
+        //   (2) テストホストに longPathAware マニフェストが無い
+        // 策定機はどちらも満たしており、修正前に実測で null が返ることを確認済み。
+        // CI や他機では前提が変わり得るので、緑を「フォールバックが効いた証拠」と
+        // 読む前にこの 2 条件を確認すること。
         var dir = ReparsePointFixture.CreateTempDir();
         try
         {
@@ -182,7 +202,8 @@ public class ReparseTagReaderTests
         // 上の Theory は「そのビットならこう分類する」というビット算術でしかない。
         // 実在の junction が本当に IO_REPARSE_TAG_MOUNT_POINT を持つことは別の事実であり、
         // ここが繋がって初めて「Task 2 で junction が引き続き Rejected になる」と言える。
-        // ついでにディレクトリの reparse point で読めることも押さえる(fixture はファイルのみ)。
+        // こちらは「実在の Microsoft タグ = surrogate」側の対照群。非 surrogate な
+        // ディレクトリは TryRead_ReturnsTag_ForNonSurrogateReparseDirectory が押さえている。
         //
         // junction は無権限で mklink /J で作れる(既存 Check_Rejects_PathThroughJunction と同じ前提)。
         // 作れない環境では early return で skip 相当。
@@ -211,7 +232,8 @@ public class ReparseTagReaderTests
                 if (!proc.WaitForExit(5000))
                 {
                     proc.Kill();
-                    return; // Skip: cmd がハング
+                    ReparsePointFixture.ReportSkip("mklink /J がタイムアウト(cmd ハング)");
+                    return;
                 }
                 exitCode = proc.ExitCode;
             }

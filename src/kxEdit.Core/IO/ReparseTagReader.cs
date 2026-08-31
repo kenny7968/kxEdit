@@ -123,8 +123,13 @@ internal static class ReparseTagReader
 
     /// <summary>
     /// <paramref name="path"/> の reparse タグを返す。reparse point でなければ <c>0</c>、
-    /// **読み取れなかった場合は <c>null</c>**(存在しない / アクセス不能 / API 失敗)。
+    /// **読み取れなかった場合は <c>null</c>**(存在しない / アクセス不能 / API 失敗 /
+    /// <paramref name="path"/> が空・<c>null</c>・埋め込み NUL を含む)。
     /// 呼出側は <c>null</c> を「安全と判明した」と読んではならない。
+    ///
+    /// <para>埋め込み NUL を含むパスは**開かずに <c>null</c> を返す**。CreateFileW は
+    /// NUL 以降を切り捨てるため、素通しすると「渡したのとは別のパス」のタグを
+    /// 返してしまうから(実測 2026-08-31)。</para>
     ///
     /// <para><c>null</c> の**理由**(不在なのか権限なのか)は捨てている。区別が要るなら
     /// <c>Marshal.GetLastWin32Error()</c> を拾う必要がある(実測で不在 = 2 /
@@ -139,6 +144,13 @@ internal static class ReparseTagReader
         // (実測 2026-08-31: TryRead("C:\Windows\0path.txt") → 0x00000000)。
         // 「渡したパスとは別のパスについて安全だと答える」形になるので、
         // 呼出側の正規化に依存せずここで塞ぐ。
+        //
+        // IsNullOrEmpty を前に置くのは NUL ガードの**前提条件**であって飾りではない:
+        // 直後の path.Contains は null に対して NullReferenceException を投げ、
+        // それは TryReadCore の catch フィルタ(DllNotFound / EntryPointNotFound /
+        // Argument)に**掛からず呼出側へ抜ける**。NUL ガードを足したこと自体が
+        // null 経路を例外化したので、対で必要になった。空文字は CreateFileW でも
+        // 同じ null になるが、判定を 1 か所に集めるため同じ枝で畳んでいる。
         if (string.IsNullOrEmpty(path) || path.Contains('\0'))
             return null;
 
