@@ -211,6 +211,77 @@ fixture 設計は CLAUDE.md §4-B に従う。特に #3 は非既定位置(先�
 - `Stale` の `Length` を `MatchLength` にする
 - `LineText` 空ガードの除去
 
+#### 実施記録(2026-08-31)
+
+**総括: 20 変異 / KILLED 16 / SURVIVED 4 / ビルド失敗による無効 0。**
+
+変異は 1 つずつ投入し、都度 `git diff --quiet` の EXIT 0 で復帰を確認した。ビルド成否は
+`dotnet build kxEdit.sln -c Release -warnaserror` の**終了コード**で判定している
+(`grep "error CS"` は Sonar の `error S###` / Roslynator の `error RCS####` を見落として
+古い DLL を叩く罠があるため使わない)。今回は 20 変異すべてがビルドを通り、
+「対の関数を片方へ退化させると S4144 で落ちる」型の無効変異も発生しなかった。
+
+| # | 変異 | 結果 | 失敗数 (Core / App) |
+|---|------|------|------|
+| 1 | `LineNumber - 1` → `LineNumber` | KILLED | 12 / 1 |
+| 2 | `d <= NearbyLineWindow` → `d <` | KILLED | 1 / 0 |
+| 3 | 近傍走査の up / down 探索順を入れ替え | KILLED | 1 / 0 |
+| 4 | `LineText` 空ガードを削除 | KILLED | 1 / 0 |
+| 5 | 空ガードを `Exact` 判定より前へ移動 | KILLED | 1 / 0 |
+| 6 | `Stale` の `Length` を `0` → `MatchLength` | KILLED | 3 / 1 |
+| 7 | `Land` の `+ MatchStartInLine` を削除 | KILLED | 7 / 2 |
+| 8 | `LineEquals` の長さ篩いを無効化 | **SURVIVED(正)** | 0 / 0 |
+| 9 | `Ordinal` → `OrdinalIgnoreCase` | KILLED | 1 / 0 |
+| 10 | `Land` の着地行を 1 行上へずらす | KILLED | 13 / 2 |
+| 11a | クランプ**上限**を撤去(`Math.Max` 化) | KILLED(例外) | 2 / 0 |
+| 11b | クランプ**下限**を撤去(`Math.Min` 化) | SURVIVED | 0 / 0 |
+| 16 | 早期終了条件 `&&` → `\|\|` | KILLED | 3 / 0 |
+| 17 | 早期終了 `break` を削除 | **SURVIVED(正)** | 0 / 0 |
+| 12 | `OpenAndSelect` を A-18 旧実装へ差し戻し | KILLED | 0 / 4 |
+| 13 | 発声を `CurrentLine + 1` → `t.Line + 1` | SURVIVED | 0 / 0 |
+| 14a | `Stale` 条件を反転 | KILLED | 0 / 2 |
+| 14b | `Stale` 条件を常に真 | KILLED | 0 / 1 |
+| 14c | `Stale` 条件を常に偽 | KILLED | 0 / 1 |
+| 15 | `BringCaretIntoView()` を削除 | KILLED | 0 / 1 |
+
+**この修正の中核が網で守られていること**: #12(`SelectCharRange(t.BufferOffset, t.Length)` を
+`SelectCharRange(hit.AbsoluteOffset, hit.MatchLength)` へ戻す=A-18 そのものへの退行)は
+`OpenAndSelect_*` **5 件中 4 件**で赤化する。選択レンジ・着地行・スクロール・発声文言の
+4 面から独立に捕まるので、この退行が静かに戻る余地はない。
+
+**生存 4 件の判断**(いずれも網を足さない):
+
+- **#8(長さ篩いの無効化)= 等価変異。生存が正しい。** `length != text.Length` なら序数比較も
+  必ず false になるので、篩いは純粋な最適化であって意味論ではない。ここが赤化するなら
+  篩いが意味論に漏れているという**実装の欠陥**だったが、実測は緑=漏れていないことの証明。
+  網を張ると最適化を意味論に格上げし、将来の性能改善を不当に縛る。
+- **#17(早期 `break` の削除)= 等価変異。生存が正しい。** 両端に達したあとの反復は原理的に
+  一致しえないので、これも純粋な終了最適化。#8 と同型。
+- **#13(発声を `t.Line + 1` にする)= 構成不能。** `SelectCharRange` が位置を動かすのは
+  (a) `[0, CharLength]` へのクランプ (b) サロゲートペア中間位置の前方スナップ の 2 つだけで、
+  resolver の出力は行内に有界だから (a) は発火せず、(b) も同一行内で最大 1 文字動くだけ。
+  つまり `t.Line != CurrentLine` を作る fixture が存在しない。書けるのは常に緑の無意味な網だけ。
+  §3.2 の「着地後の `CurrentLine` から読み戻す」判断は、将来 `SelectCharRange` が変わったときの
+  保険として維持する(いま検証面を持てるものではない)。
+- **#11b(クランプ下限の撤去)= 到達不能 belt。** 唯一の生成元 `GrepService.CollectLineHits` は
+  `lineNumber` を `++` してから emit するので `LineNumber >= 1` が常に成立する。
+  網で固定することもできたが、`Land` の「到達不能な belt は書かない」判断と食い違うため、
+  テストではなく `Resolve` の doc へ**上限は到達可能 / 下限は到達不能**という非対称を書いた。
+
+**計画の表に無かった変異を追加した**: #10(着地行の取り違え)・#11b(クランプ下限)・
+#16(早期終了 `&&` → `||`)・#17(早期終了の削除)・#14b / #14c(`Stale` 条件の常真 / 常偽)。
+とくに #16 は典型的なタイポでありながら計画に無く、実測で 3 件が赤化した(片側だけ端に
+達した時点で探索を打ち切ってしまい `Nearby` が `Stale` に化ける)。#10 は `origin` が `Land` の
+スコープ外なので、意図(着地行の取り違え)を保ったまま「1 行上へのオフセット」として成立させた。
+
+**App 側の網が Core より薄いのは責務分離として正しい形**: resolver 内部の変異
+(#2〜#5・#9・#16)は App 側では 1 件も赤化しない。これは欠陥ではなく、純関数である Core が
+厚い網を持ち、App 層は「resolver へ正しく配線されているか」(#12・#14・#15)だけを見る
+という設計どおりの姿。App 側で resolver の内部仕様を二重に固定しにいかないこと。
+
+**この検証から拾った申し送り 3 件**は commit `ef68e29` で回収済み(行末ゼロ幅ヒットの網追加・
+belt の単一網である旨の明記・クランプ非対称の明記)。
+
 ### 5.4 L5 — 実機 SR 検証(必須)
 
 発声文言に触れるため CLAUDE.md §5 により**必須**。別途 L5 チェックリストを起こす。
