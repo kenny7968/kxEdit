@@ -164,7 +164,8 @@ public class MainFormSmokeTests
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
-            // 拡張子は大文字 DATA.CSV: MainForm:114 の StringComparison.OrdinalIgnoreCase が
+            // 拡張子は大文字 DATA.CSV: MainForm.AutoEnterCsvMode の拡張子ガード(MainForm.cs:250-257)の
+            // StringComparison.OrdinalIgnoreCase(:254)が
             // Ordinal に変異したら小文字 .csv と不一致=AutoEnterCsvMode を素通り=CsvMode=false で赤化する。
             string path = tmp.File("DATA.CSV");
             File2.WriteAllText(path, "a,b\n1,2");
@@ -188,7 +189,8 @@ public class MainFormSmokeTests
             var doc = form.FileForTest.TryOpenOrActivate(path);
 
             Assert.NotNull(doc);
-            // MainForm:113 の設定 ON ガード(!_settings.CsvAutoModeOnOpen return)を削除する変異を kill:
+            // MainForm.AutoEnterCsvMode の設定 ON ガード
+            // (MainForm.cs:248-249 の !_settings.CsvAutoModeOnOpen return)を削除する変異を kill:
             // 削除されると .csv 判定を通り抜けて CsvMode=true になり本 assertion が赤化する。
             Assert.False(doc!.State.CsvMode);
         });
@@ -205,7 +207,8 @@ public class MainFormSmokeTests
             var doc = form.FileForTest.TryOpenOrActivate(path);
 
             Assert.NotNull(doc);
-            // MainForm:114 の拡張子ガード(.csv 判定 return)を削除する変異を kill:
+            // MainForm.AutoEnterCsvMode の拡張子ガード
+            // (MainForm.cs:250-257 の .csv 判定 return)を削除する変異を kill:
             // 削除されると拡張子に関わらず TryEnterMode を呼び CsvMode=true になり本 assertion が赤化する。
             Assert.False(doc!.State.CsvMode);
         });
@@ -255,11 +258,12 @@ public class MainFormSmokeTests
             var doc = form.FileForTest.TryOpenOrActivate(path);
             Assert.NotNull(doc);
 
-            // MainForm:416 の suppressAutoCsv: true → false 変異を kill:
+            // MainForm.OpenAndSelect(MainForm.cs:1102)の suppressAutoCsv: true → false 変異を kill:
             // false だと _openedFresh 経路で AutoEnterCsvMode を通し CsvMode=true 化=本 assertion が赤化する。
             Assert.False(doc!.State.CsvMode);
             Assert.Equal(path, doc.State.Path);
-            // SelectCharRange(2, 3): start=2 / end=2+3=5(EditorControl:323-324 のエイリアス経由)
+            // SelectCharRange(2, 3): start=2 / end=2+3=5
+            // (EditorControl.SelectCharRange=EditorControl.Caret.cs:32-37 のエイリアス経由)
             Assert.Equal((2, 5), doc.Editor.GetSelectionCharRange());
         });
 

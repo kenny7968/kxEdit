@@ -8,7 +8,9 @@ namespace kxEdit.Core.Tests.Search;
 /// <summary>
 /// A-18: grep ジャンプの着地点解決。grep は<b>ディスク基準</b>の文字列上でヒットを算出し、
 /// エディタは<b>バッファ</b>上の位置を選択するので、両者は未保存編集・文字コード判定窓の違い・
-/// grep 後の外部変更でずれる。resolver は行番号+行内容で錨を打ち直す。
+/// grep 後の外部変更で<b>ずれうる</b>(「必ずずれる」ではない: ヒットより後ろだけの編集・
+/// ASCII 本文での判定割れ・ヒットより後ろの外部変更では、たまたま揃う)。
+/// <b>揃うことを前提にできない</b>のが問題で、resolver は行番号+行内容で錨を打ち直す。
 /// </summary>
 public class GrepJumpResolverTests
 {
@@ -44,7 +46,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Exact, t.Kind);
-        Assert.Equal(1, t.Line);
+        Assert.Equal(1, t.BufferLine);
         Assert.Equal(snap.GetLineStart(1) + 5, t.BufferOffset);
         Assert.Equal(6, t.Length);
         // 選択が指しているのが本当に "needle" であることまで固定する(オフセットだけだと
@@ -64,7 +66,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(4, t.Line);
+        Assert.Equal(4, t.BufferLine);
         Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
@@ -78,7 +80,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(2, t.Line);
+        Assert.Equal(2, t.BufferLine);
         Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
@@ -93,7 +95,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(6, t.Line);
+        Assert.Equal(6, t.BufferLine);
         Assert.Equal("line", snap.GetText(t.BufferOffset, t.Length));
     }
 
@@ -107,7 +109,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(3, t.Line);
+        Assert.Equal(3, t.BufferLine);
         Assert.Equal(snap.GetLineStart(3), t.BufferOffset);
     }
 
@@ -124,7 +126,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(4, t.Line);
+        Assert.Equal(4, t.BufferLine);
         Assert.Equal("needle", snap.GetText(t.BufferOffset, t.Length));
     }
 
@@ -159,7 +161,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(0, t.Line);
+        Assert.Equal(0, t.BufferLine);
     }
 
     [Fact]
@@ -182,7 +184,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
-        Assert.Equal(origin, t.Line);
+        Assert.Equal(origin, t.BufferLine);
         Assert.Equal(snap.GetLineStart(origin), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
@@ -200,7 +202,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
-        Assert.Equal(4, t.Line);
+        Assert.Equal(4, t.BufferLine);
         Assert.Equal(0, t.Length);
     }
 
@@ -215,7 +217,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
-        Assert.Equal(4, t.Line);
+        Assert.Equal(4, t.BufferLine);
     }
 
     [Fact]
@@ -233,7 +235,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Exact, t.Kind);
-        Assert.Equal(2, t.Line);
+        Assert.Equal(2, t.BufferLine);
         Assert.Equal(snap.GetLineStart(2), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
@@ -249,7 +251,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
-        Assert.Equal(1, t.Line); // 最終行へクランプ
+        Assert.Equal(1, t.BufferLine); // 最終行へクランプ
         Assert.Equal(snap.GetLineStart(1), t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
@@ -265,7 +267,7 @@ public class GrepJumpResolverTests
         var t = GrepJumpResolver.Resolve(hit, snap);
 
         Assert.Equal(GrepJumpKind.Stale, t.Kind);
-        Assert.Equal(0, t.Line);
+        Assert.Equal(0, t.BufferLine);
         Assert.Equal(0, t.BufferOffset);
         Assert.Equal(0, t.Length);
     }
@@ -359,7 +361,7 @@ public class GrepJumpResolverTests
                 var t = GrepJumpResolver.Resolve(hit, snap);
                 Assert.Equal(GrepJumpKind.Exact, t.Kind);
                 Assert.Equal(hit.AbsoluteOffset, t.BufferOffset);
-                Assert.Equal(hit.LineNumber - 1, t.Line);
+                Assert.Equal(hit.LineNumber - 1, t.BufferLine);
             }
         }
         finally
@@ -434,7 +436,7 @@ public class GrepJumpResolverTests
                 var t = GrepJumpResolver.Resolve(hit, snap);
 
                 Assert.Equal(GrepJumpKind.Exact, t.Kind);
-                Assert.Equal(line, t.Line);
+                Assert.Equal(line, t.BufferLine);
                 // 行末(改行の手前)。リテラル値ではなく式で書くことで「行末」という意図が読める。
                 Assert.Equal(snap.GetLineEnd(line, includeBreak: false), t.BufferOffset);
                 Assert.Equal(0, t.Length); // ゼロ幅=選択せずキャレットを置くだけ

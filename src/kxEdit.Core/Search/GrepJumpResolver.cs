@@ -17,15 +17,22 @@ public enum GrepJumpKind
 
 /// <summary>grep ジャンプの着地点。</summary>
 /// <param name="Kind">解決の種別。</param>
-/// <param name="Line">
-/// 着地行(0-based)。<b>診断・テスト用</b>。<b>発声の行番号にこれを使わないこと</b>
+/// <param name="BufferLine">
+/// 着地行。<b>バッファ空間</b>の <b>0 始まり</b>行番号(<c>GrepHit.LineNumber</c> は
+/// <b>ディスク空間</b>の <b>1 始まり</b>で、基数も空間も違う)。<b>診断・テスト用</b>。
+/// <b>発声の行番号にこれを使わないこと</b>
 /// (着地後の <c>EditorControl.CurrentLine</c> から読み戻す=設計書 §3.2。
 /// resolver の意図値を発声すると SelectCharRange 側のクランプ/スナップの不具合が
 /// 発声に現れなくなる)。
 /// </param>
 /// <param name="BufferOffset">選択開始位置。<b>バッファ空間</b>の UTF-16 オフセット。</param>
 /// <param name="Length">選択長。Stale では 0(選択しない)。</param>
-public sealed record GrepJumpTarget(GrepJumpKind Kind, int Line, int BufferOffset, int Length);
+public sealed record GrepJumpTarget(
+    GrepJumpKind Kind,
+    int BufferLine,
+    int BufferOffset,
+    int Length
+);
 
 /// <summary>
 /// grep ヒットを、その時点のバッファ内容へ照合して着地点を決める(A-18・設計書 §3.1)。
@@ -34,7 +41,10 @@ public sealed record GrepJumpTarget(GrepJumpKind Kind, int Line, int BufferOffse
 /// <b>この関数は <see cref="GrepHit.AbsoluteOffset"/> を読まない。</b> AbsoluteOffset は
 /// grep がディスク上のバイト列を復号した空間の値であり、
 /// (1) 未保存編集のあるタブ (2) エディタ(先頭 64KB prefix)と grep(全バイト)の文字コード判定の
-/// 割れ (3) grep 実行後のディスク側外部変更 —— のいずれでもバッファ空間とずれる。
+/// 割れ (3) grep 実行後のディスク側外部変更 —— のいずれでもバッファ空間と<b>ずれうる</b>。
+/// <b>「必ずずれる」ではない</b>((1) ヒットより後ろだけの編集ならオフセットは動かない、
+/// (2) 本文が ASCII なら判定が UTF-8 / SJIS で割れても復号結果は同一、(3) 外部変更がヒットより
+/// 後ろなら同じ)。<b>たまたま揃うことがある</b>のが厄介で、揃うことを前提にできないのが問題。
 /// A-18 はこれを選択位置に流用していたことによる「別の行を正しい行として読み上げる」不具合。
 /// <b>AbsoluteOffset をこの経路へ戻さないこと</b>(<c>GrepJumpResolverTests</c> が固定している)。
 /// </remarks>
@@ -115,7 +125,16 @@ public static class GrepJumpResolver
     /// string 実体化とアロケーションを避けるのが目的。
     /// <b>ピース木の降下自体は削れない</b>: <c>GetLineStart</c> / <c>GetLineEnd</c> は
     /// 長さ比較より前に無条件で走る(CRLF 行では <c>GetLineEnd</c> が内部で <c>GetChar</c> を
-    /// 2 回呼ぶ)。実測でも前フィルタが削るのは全体の 3〜4 割程度(設計書 §6 の実施記録)。
+    /// 2 回呼ぶ)。実測でも前フィルタが削るのは全体の <b>4〜5 割</b>程度
+    /// (設計書 §6 の実施記録・「20k 行 CRLF・同一長で不一致」34.5 / 27.2 ms に対して
+    /// 「20k 行 CRLF・長さ違いで不一致」17.4 / 15.4 ms の対)。
+    /// <para>
+    /// <b>篩いを通過した行は「幅ぶん」の実体化が要る</b>(設計書 §6 の脆弱性パス追実測):
+    /// <c>GetText</c> は行全体を string に起こすので、コストは<b>行数</b>ではなく
+    /// <b>窓内で長さ一致した行の幅の総和</b>に比例する。1 呼び出しあたりのアロケーションは
+    /// fixture 次第で <b>0.5 MB 〜 458 MB</b>(約 900 倍)まで振れ、42,500 文字を超える行は
+    /// LOH 行きになる。<b>窓を広げるなら実体化しない比較 seam が要る</b>。
+    /// </para>
     /// </summary>
     private static bool LineEquals(TextSnapshot snap, int line, string text)
     {

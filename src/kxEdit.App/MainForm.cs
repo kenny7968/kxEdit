@@ -1065,8 +1065,11 @@ public sealed partial class MainForm : Form
     /// 直後の <c>FocusTarget.Focus()</c> が <c>EditorControl.OnGotFocus</c> を起こし、そこで
     /// <c>RaiseFocusChanged</c> と <c>RaiseSelectionChanged</c> が<b>別途</b>発火する。
     /// 一方 CSV モードのタブでは <c>RaiseUiaSelectionEvents=false</c>(<c>CsvController</c>)なので
-    /// UIA 経路自体が無い(<c>suppressAutoCsv: true</c> は新規オープン時の自動遷移を抑えるだけで、
-    /// <b>既に CSV モードのタブへ飛ぶ経路は塞いでいない</b>)。
+    /// <b>選択変化の</b> UIA 経路が無い。<b>フォーカス変化のほうは CSV モードでも飛ぶ</b>——
+    /// <c>EditorControl.OnGotFocus</c> の <c>RaiseFocusChanged</c> は<b>無条件</b>で、このフラグが
+    /// 抑えるのは <c>RaiseSelectionChanged</c> だけなので、ここも無条件の前提にはしない。
+    /// (<c>suppressAutoCsv: true</c> は新規オープン時の自動遷移を抑えるだけで、
+    /// <b>既に CSV モードのタブへ飛ぶ経路は塞いでいない</b>。)
     /// <b>いずれの場合も末尾の <c>_announcer.Say</c> は常に走る</b>=SR は着地行を必ず聞ける。
     /// 無変化のときに途切れるのは<b>視覚的な追従</b>だけで、それは本メソッドが明示的に呼ぶ
     /// <see cref="EditorControl.BringCaretIntoView"/>(設計書 §3.3・A-3 同型)が補う。
@@ -1083,7 +1086,7 @@ public sealed partial class MainForm : Form
     /// 現在は <see cref="GrepJumpResolver"/> が行番号+行内容を live バッファへ照合する。
     /// <b><c>AbsoluteOffset</c> をこの経路へ戻さないこと。</b>
     /// <para>
-    /// 発声の行番号は <c>t.Line</c> ではなく<b>着地後の</b> <see cref="EditorControl.CurrentLine"/>
+    /// 発声の行番号は <c>t.BufferLine</c> ではなく<b>着地後の</b> <see cref="EditorControl.CurrentLine"/>
     /// から読み戻す。resolver の意図値を読むと <c>SelectCharRange</c> 側のクランプ/スナップの
     /// 不具合が発声に現れなくなる(発声文言は第 2 の観測面)。
     /// </para>

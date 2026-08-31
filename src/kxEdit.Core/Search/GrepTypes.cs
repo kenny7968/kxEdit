@@ -18,6 +18,13 @@ namespace kxEdit.Core.Search;
 /// <c>GrepJumpResolver.Land</c> はこれを前提に<b>行内クランプを省いて</b>いるので、破ると選択末尾が
 /// 次行へ食み出し、<c>SetSelectionCharRange</c> が <c>Caret = Max(start, end)</c> にマップする結果
 /// <c>CurrentLine</c> が選択末尾の行を返し、<b>着地行と違う行番号を発声する</b>(= A-18 の再発)。
+/// さらに <see cref="LineText"/> は<b>非 null</b> であること。<c>GrepJumpResolver.Resolve</c> の
+/// <c>ArgumentNullException.ThrowIfNull</c> は <c>hit</c> / <c>snap</c> にしか掛かっておらず、
+/// <c>LineEquals</c> は <c>text.Length</c> を無条件に読むので、破ると
+/// <b>UI スレッドの未処理例外(NRE)</b>になる。現在の唯一の生成元 <c>GrepService</c> は
+/// <c>text.Substring</c> の戻り値を渡すため到達不能で、<b>コード側の検証は置いていない</b>
+/// (Core のホットパスに条件分岐を増やさない・<c>GrepJumpResolver.Land</c> の
+/// 「到達不能な belt は書かない」判断と同じ方針)。
 /// 設計書 §2.1 / §6 の「grep の入口をバッファ基準にする」案は<b>2 つ目の producer</b> を作る変更に
 /// なるため、そのときはこの制約を満たすこと。
 /// </para>
