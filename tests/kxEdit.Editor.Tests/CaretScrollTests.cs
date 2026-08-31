@@ -517,6 +517,44 @@ public class CaretScrollTests
             }
         });
 
+    // A-18 Task 3 レビュー S-1(2026-08-31): 上の 3 本と違い SetSelectionCharRange は
+    // 「対象 API」だが、Anchor/Caret 無変化のときだけは早期 return し BringCaretIntoView へ
+    // 到達しない(EditorControl.Caret.cs:209)。これは UIA クライアントが投げる高頻度な無変化
+    // Select() を守るための意図的な受容(SetCaretCharOffset の remarks)であり、代償として
+    // 「キャレットは既にその位置にあるが画面だけ離れている」ケースでは追従しない。
+    //
+    // この契約をここで固定するのは 2 つの理由による:
+    //   1) 陽性対照 — MainFormSmokeTests.OpenAndSelect_SameHitTwice_ScrollsBackIntoView の緑が
+    //      「MainForm.OpenAndSelect が明示的に呼ぶ BringCaretIntoView(belt)由来」であることを
+    //      構造的に保証する。setter が実は追従していたなら本テストが赤になる。
+    //   2) 検知可能化 — 将来この早期 return が撤去されると App 側テストは belt を消しても緑の
+    //      ままになり(=静かに網でなくなる)、誰も気づけない。本テストがその変更を赤で知らせる。
+    [Fact]
+    public void SetSelectionCharRange_NoChange_DoesNotScroll() =>
+        Sta.Run(() =>
+        {
+            var (f, c, text) = MakeTallDocument();
+            using (f)
+            using (c)
+            {
+                // 非既定位置から開始(CLAUDE.md §4-B): 選択を先頭行でも末尾行でもない行 10 に作る。
+                int lineStart = text.IndexOf("line10", StringComparison.Ordinal);
+                Assert.True(lineStart > 0, $"fixture 前提崩れ: lineStart={lineStart}");
+                c.SetSelectionCharRange(lineStart, lineStart + "line10".Length);
+                Assert.Equal(10, c.CurrentLine);
+
+                // ホイールでのスクロール退避を再現: TopLine だけ動きキャレットは不動。
+                // 退避先 20 は既定値(0)でも「追従したときの値(=10)」でもない=どちらとも弁別できる。
+                c.TopLine = 20;
+                Assert.Equal(20, c.TopLine); // fixture 前提: クランプされない
+
+                // 同じ引数で再呼び出し=Anchor/Caret 無変化 → 早期 return。
+                c.SetSelectionCharRange(lineStart, lineStart + "line10".Length);
+
+                Assert.Equal(20, c.TopLine);
+            }
+        });
+
     // M-32(2026-08-22): UIA Select() がキャレットを可視域へスクロールしない。
     // Adapter の IUiaTextHost.SetSelection は BeginInvoke で UI スレッドへ渡した後
     // EditorControl.SetSelectionCharRange を呼ぶため、A-3 の修正で同時に解消する。

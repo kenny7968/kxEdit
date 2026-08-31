@@ -298,7 +298,7 @@ public class MainFormSmokeTests
 
     /// <summary>
     /// 設計書 §3.3(A-3 同型): SetSelectionCharRange は Anchor/Caret 無変化で早期 return する
-    /// (EditorControl.Caret.cs:202)ため、同じヒットへ再ジャンプするとスクロールが追従しない。
+    /// (EditorControl.Caret.cs:209)ため、同じヒットへ再ジャンプするとスクロールが追従しない。
     /// ホイールでのスクロール退避を TopLine の代入で再現する(キャレットは動かない)。
     /// </summary>
     [Fact]

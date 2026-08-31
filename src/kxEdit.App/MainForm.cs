@@ -1058,13 +1058,18 @@ public sealed partial class MainForm : Form
     /// ヒット行を選択してエディタへフォーカスする(<see cref="GrepJumpKind.Stale"/> は選択せず
     /// 行頭へ寄せる)。
     /// <para>
-    /// SR への通知は<b>非対称</b>である。選択が実際に動いたときはエディタの UIA
-    /// (<c>RaiseSelectionChanged</c>)が着地行を読ませるが、<b>同じヒットへの再ジャンプ</b>では
-    /// <see cref="EditorControl.SetSelectionCharRange"/> が無変化で早期 return するため
-    /// UIA イベントは飛ばない。一方この経路の末尾の <c>_announcer.Say</c> は<b>常に</b>走るので、
-    /// どちらの場合も SR は着地行を必ず聞ける。無変化のときに途切れるのは<b>視覚的な追従</b>だけで、
-    /// それは本メソッドが明示的に呼ぶ <see cref="EditorControl.BringCaretIntoView"/>
-    /// (設計書 §3.3・A-3 同型)が補う。
+    /// SR への通知経路は<b>一様ではない</b>ので、どれか 1 つを無条件の前提にしないこと。
+    /// <see cref="EditorControl.SetSelectionCharRange"/> は無変化(=同じヒットへの再ジャンプ)だと
+    /// 早期 return するため<b>setter からの</b> <c>RaiseSelectionChanged</c> は飛ばない。ただし
+    /// 通常の導線ではフォーカスがエディタ<b>外</b>(<c>GrepResultsWindow</c> の一覧)から戻るので、
+    /// 直後の <c>FocusTarget.Focus()</c> が <c>EditorControl.OnGotFocus</c> を起こし、そこで
+    /// <c>RaiseFocusChanged</c> と <c>RaiseSelectionChanged</c> が<b>別途</b>発火する。
+    /// 一方 CSV モードのタブでは <c>RaiseUiaSelectionEvents=false</c>(<c>CsvController</c>)なので
+    /// UIA 経路自体が無い(<c>suppressAutoCsv: true</c> は新規オープン時の自動遷移を抑えるだけで、
+    /// <b>既に CSV モードのタブへ飛ぶ経路は塞いでいない</b>)。
+    /// <b>いずれの場合も末尾の <c>_announcer.Say</c> は常に走る</b>=SR は着地行を必ず聞ける。
+    /// 無変化のときに途切れるのは<b>視覚的な追従</b>だけで、それは本メソッドが明示的に呼ぶ
+    /// <see cref="EditorControl.BringCaretIntoView"/>(設計書 §3.3・A-3 同型)が補う。
     /// </para>
     /// </summary>
     /// <remarks>
