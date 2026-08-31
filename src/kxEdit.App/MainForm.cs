@@ -3,6 +3,7 @@ using kxEdit.App.Speech;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Csv;
 using kxEdit.Core.Reading;
+using kxEdit.Core.Search;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
 using kxEdit.Editor;
@@ -189,12 +190,7 @@ public sealed partial class MainForm : Form
             // Batch D Task 12: GrepDialog は new UiaAnnouncer(_status) の直生成を廃止し
             // 共有 _announcer(SearchController と同型経路)を注入する。
             viewFactory: cb => new GrepDialog(cb, _announcer),
-            resultsFactory: () =>
-                new GrepResultsWindow(
-                    new GrepResultsCallbacks(hit =>
-                        OpenAndSelect(hit.FilePath, hit.AbsoluteOffset, hit.MatchLength)
-                    )
-                )
+            resultsFactory: () => new GrepResultsWindow(new GrepResultsCallbacks(OpenAndSelect))
         );
         _backup = new BackupCoordinator(
             _docs,
@@ -1058,20 +1054,65 @@ public sealed partial class MainForm : Form
     internal FileController FileForTest => _file;
 
     /// <summary>
-    /// grep ジャンプ用: path を開き（既存タブがあれば再利用）、文字オフセット範囲を選択して
-    /// エディタへフォーカスする。選択移動でエディタの UIA が一致行を SR に読ませる。
-    /// offset は grep が算出した UTF-16 文字位置で、同じ復号経路（TextFileService）を通るため
-    /// エディタのスナップショットと同一空間に揃う。
+    /// grep ジャンプ用: <paramref name="hit"/> のファイルを開き（既存タブがあれば再利用）、
+    /// ヒット行を選択してエディタへフォーカスする(<see cref="GrepJumpKind.Stale"/> は選択せず
+    /// 行頭へ寄せる)。
+    /// <para>
+    /// SR への通知経路は<b>一様ではない</b>ので、どれか 1 つを無条件の前提にしないこと。
+    /// <see cref="EditorControl.SetSelectionCharRange"/> は無変化(=同じヒットへの再ジャンプ)だと
+    /// 早期 return するため<b>setter からの</b> <c>RaiseSelectionChanged</c> は飛ばない。ただし
+    /// 通常の導線ではフォーカスがエディタ<b>外</b>(<c>GrepResultsWindow</c> の一覧)から戻るので、
+    /// 直後の <c>FocusTarget.Focus()</c> が <c>EditorControl.OnGotFocus</c> を起こし、そこで
+    /// <c>RaiseFocusChanged</c> と <c>RaiseSelectionChanged</c> が<b>別途</b>発火する。
+    /// 一方 CSV モードのタブでは <c>RaiseUiaSelectionEvents=false</c>(<c>CsvController</c>)なので
+    /// <b>選択変化の</b> UIA 経路が無い。<b>フォーカス変化のほうは CSV モードでも飛ぶ</b>——
+    /// <c>EditorControl.OnGotFocus</c> の <c>RaiseFocusChanged</c> は<b>無条件</b>で、このフラグが
+    /// 抑えるのは <c>RaiseSelectionChanged</c> だけなので、ここも無条件の前提にはしない。
+    /// (<c>suppressAutoCsv: true</c> は新規オープン時の自動遷移を抑えるだけで、
+    /// <b>既に CSV モードのタブへ飛ぶ経路は塞いでいない</b>。)
+    /// <b>いずれの場合も末尾の <c>_announcer.Say</c> は常に走る</b>=SR は着地行を必ず聞ける。
+    /// 無変化のときに途切れるのは<b>視覚的な追従</b>だけで、それは本メソッドが明示的に呼ぶ
+    /// <see cref="EditorControl.BringCaretIntoView"/>(設計書 §3.3・A-3 同型)が補う。
+    /// </para>
     /// </summary>
-    internal void OpenAndSelect(string path, int offset, int length)
+    /// <remarks>
+    /// <b>A-18(2026-08-31)</b>: 以前は <c>hit.AbsoluteOffset</c> をそのまま
+    /// <see cref="EditorControl.SelectCharRange"/> に渡し、doc で「同じ復号経路を通るため
+    /// エディタのスナップショットと同一空間に揃う」と<b>無条件の不変条件として宣言していた</b>。
+    /// 実際には<b>揃う保証がない</b>(未保存編集のあるタブ・文字コード判定窓の割れ・grep 後の
+    /// 外部変更でずれる。逆に、開いたまま未編集のタブや、ヒットより後ろだけを編集した場合は
+    /// たまたま揃う)。ずれた位置に着地したうえで着地行を「N 行目」と発声するため、
+    /// <b>SR ユーザーには検出できない嘘</b>になっていた。
+    /// 現在は <see cref="GrepJumpResolver"/> が行番号+行内容を live バッファへ照合する。
+    /// <b><c>AbsoluteOffset</c> をこの経路へ戻さないこと。</b>
+    /// <para>
+    /// 発声の行番号は <c>t.BufferLine</c> ではなく<b>着地後の</b> <see cref="EditorControl.CurrentLine"/>
+    /// から読み戻す。resolver の意図値を読むと <c>SelectCharRange</c> 側のクランプ/スナップの
+    /// 不具合が発声に現れなくなる(発声文言は第 2 の観測面)。
+    /// </para>
+    /// <para>
+    /// <c>SearchController.SelectHit</c> が <c>ed.CurrentBuffer.Current</c> を<b>読み直さない</b>のと
+    /// ここが<b>読み直す</b>のは、矛盾ではなく同じ原則(ヒットは、それを解決した空間と対で扱う)の
+    /// 裏表。検索のヒットは手元の snap 上で見つけたのでその snap と対にする。grep のヒットは
+    /// 出所がディスクなので、対にすべき空間は<b>ここで読む live バッファ</b>のほうになる。
+    /// </para>
+    /// </remarks>
+    internal void OpenAndSelect(GrepHit hit)
     {
-        var doc = _file.TryOpenOrActivate(path, suppressAutoCsv: true);
+        var doc = _file.TryOpenOrActivate(hit.FilePath, suppressAutoCsv: true);
         if (doc is null)
             return;
-        doc.Editor.SelectCharRange(offset, length);
+        var t = GrepJumpResolver.Resolve(hit, doc.Editor.CurrentBuffer.Current);
+        doc.Editor.SelectCharRange(t.BufferOffset, t.Length);
+        // 設計書 §3.3(A-3 同型): SetSelectionCharRange は Anchor/Caret 無変化で早期 return し
+        // BringCaretIntoView へ到達しない。ジャンプは「移動先を必ず見せる」操作なので、
+        // 同じヒットへ再ジャンプしたとき(ホイールでスクロール退避 → 同じ行を再選択)にも
+        // 追従するよう、ジャンプ導線の側で明示的に呼ぶ。
+        doc.Editor.BringCaretIntoView();
         doc.FocusTarget.Focus();
         // ジャンプ先のファイル名と行を明示通知（選択移動の自動読みに加え、別ファイルへ飛んだ文脈を補う）。
-        _announcer.Say($"{doc.State.DisplayName} {doc.Editor.CurrentLine + 1} 行目");
+        string where = $"{doc.State.DisplayName} {doc.Editor.CurrentLine + 1} 行目";
+        _announcer.Say(t.Kind == GrepJumpKind.Stale ? $"{where} 内容が変わっています" : where);
     }
 
     // ==================== 読み上げ照会（SR 利便・M6） ====================

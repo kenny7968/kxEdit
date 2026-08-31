@@ -19,8 +19,15 @@ public sealed partial class EditorControl
     /// <c>start + length</c> は int 加算オーバーフロー対策で long 経由にする
     /// (<see cref="EnsureVisibleCharRange"/> と同じ流儀)。素の int 加算だと溢れた端が負値になり、
     /// <see cref="SetSelectionCharRange"/> の Min/Max 正規化で 0 側へ落ちて<b>全文選択</b>になる。
-    /// 本 API は grep 結果由来のオフセットを受ける外部入力面(<c>MainForm.OpenAndSelect</c>)なので、
-    /// 範囲外は「全文選択」ではなく契約どおり [0, CharLength] へクランプさせる。
+    /// 本 API は範囲外を「全文選択」ではなく契約どおり [0, CharLength] へクランプさせる。
+    /// <para>
+    /// <b>A-18(2026-08-31)</b>: 以前はこのガードの根拠を「<c>MainForm.OpenAndSelect</c> が
+    /// grep 結果由来の生オフセットを渡す外部入力面だから」と書いていたが、A-18 修正後の
+    /// <c>OpenAndSelect</c> が渡すのは <c>GrepJumpResolver</c> 出力
+    /// (<c>GetLineStart(line) + MatchStartInLine</c>=バッファ空間・行内に有界)で、そこから
+    /// int オーバーフローに至る経路はもう無い。<b>ガードは残す</b>——他の呼び出し元と将来の
+    /// 外部入力に対する契約として依然有効なので、「もう不要」と読んで外さないこと。
+    /// </para>
     /// </remarks>
     public void SelectCharRange(int start, int length)
     {

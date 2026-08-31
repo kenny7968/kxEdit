@@ -99,7 +99,11 @@ public class GrepServiceTests
         var hit = Assert.Single(outcome.Hits);
 
         Assert.Equal(2, hit.LineNumber);
-        // ロード後の本文（エディタが持つ UTF-16 スナップショットと同一）に対し、AbsoluteOffset が正確に一致。
+        // pin しているのは「ディスク上のバイト列を全バイト復号した空間で AbsoluteOffset が一致すること」。
+        // A-18: ここが「エディタのスナップショットと同一空間」だと読まれないこと。TextFileService.Load は
+        // 全バイトを DecodeBytes するが、production のエディタは FileController → LoadAsBufferAuto の
+        // 先頭 64KB prefix 判定を通る(設計書 §1.1 経路 2)。未保存編集・判定の割れ・grep 後の外部変更が
+        // あればバッファ空間とは一致しない=ジャンプ位置には GrepJumpResolver を使う。
         string text = TextFileService.Load(path).Text;
         Assert.Equal("TARGET", text.Substring(hit.AbsoluteOffset, hit.MatchLength));
         // 行内桁: あ,い,う,𠀀(2単位) = 5 単位 → Column=6, MatchStartInLine=5
