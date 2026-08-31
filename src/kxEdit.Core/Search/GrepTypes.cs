@@ -7,8 +7,9 @@ namespace kxEdit.Core.Search;
 /// <remarks>
 /// <b>A-18(2026-08-31)</b>: 旧 doc は「エディタの string index・SelectCharRange と同一空間」と
 /// 書いていたが、これは<b>偽の不変条件</b>だった。<see cref="AbsoluteOffset"/> は
-/// <b>ディスク上のバイト列を復号した空間</b>の値で、未保存編集のあるタブのバッファとは一致しない
-/// (エディタと grep で文字コード判定の窓も違う)。ジャンプ先の解決には
+/// <b>ディスク上のバイト列を復号した空間</b>の値で、未保存編集のあるタブのバッファと
+/// <b>一致する保証がない</b>(ヒットより後ろだけを編集した場合など、たまたま一致することはある。
+/// エディタと grep で文字コード判定の窓も違う)。ジャンプ先の解決には
 /// <c>GrepJumpResolver.Resolve</c> を使い、<see cref="AbsoluteOffset"/> を選択位置へ流用しないこと。
 /// </remarks>
 public sealed record GrepHit(

@@ -280,10 +280,12 @@ public class MainFormSmokeTests
                 doc!.Editor.ClientSize.Height / Math.Max(1, doc.Editor.LineHeightPx)
             );
             int hitLine = doc.Editor.CurrentLine;
-            // オフセットがずれて「たまたま緑」にならないよう、対象行自体を固定する。
-            // 行番号だけでは不足する: +2(直前の CRLF 分)を落とした offset=1679 でも
-            // 選択末尾は行 199 に入るため CurrentLine==199 は成立してしまう。選択開始が
-            // 行頭(桁 0)であることまで見て、行 199 の先頭ちょうどを指していることを固定する。
+            // 行番号だけでは不足する: 選択が行 199 のどこを指していても CurrentLine==199 は
+            // 成立してしまう。選択開始が行頭(桁 0)であることまで見て、ヒットの
+            // MatchStartInLine=0 が「行頭からの桁」として尊重されていることを固定する。
+            // A-18(2026-08-31)でこの網の意味は変わった: 移植前は absoluteOffset の
+            // +2(直前の CRLF 分)落ちを捕まえる網だったが、現 OpenAndSelect は resolver 経由で
+            // AbsoluteOffset を読まないため、その失敗モードは到達不能になっている。
             Assert.Equal(199, hitLine);
             Assert.Equal(0, doc.Editor.GetColumn(doc.Editor.GetSelectionCharRange().Start));
             Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");

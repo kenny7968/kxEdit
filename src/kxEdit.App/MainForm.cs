@@ -1055,7 +1055,8 @@ public sealed partial class MainForm : Form
 
     /// <summary>
     /// grep ジャンプ用: <paramref name="hit"/> のファイルを開き（既存タブがあれば再利用）、
-    /// ヒット行を選択してエディタへフォーカスする。選択移動でエディタの UIA が一致行を SR に読ませる。
+    /// ヒット行を選択してエディタへフォーカスする(<see cref="GrepJumpKind.Stale"/> は選択せず
+    /// 行頭へ寄せる)。選択移動でエディタの UIA が一致行を SR に読ませる。
     /// </summary>
     /// <remarks>
     /// <b>A-18(2026-08-31)</b>: 以前は <c>hit.AbsoluteOffset</c> をそのまま
