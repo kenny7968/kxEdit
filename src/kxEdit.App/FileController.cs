@@ -993,8 +993,12 @@ public sealed class FileController
     /// <b><c>Check</c> 自身の正規化は残す</b>(消さないこと)。
     /// <see cref="OriginalPathValidator"/> のクラス doc が「再正規化の順序が load-bearing」と
     /// 明記しており、外すと事後条件が検査した形と BlockedRoots が照合する形が食い違う。
-    /// 事前に正規化済みのパスに対する 2 度目の <c>GetFullPath</c> は、1 本目が期限内に
-    /// 確定したときにしか走らない = 同じ解決が同じコストで済む。
+    /// 2 度目の <c>GetFullPath</c> が走るのは 1 本目が<b>期限内に確定したときだけ</b>なので、
+    /// 不達共有の約 21 秒はこの経路から消える。
+    /// <b>ただし 2 度目は依然として無境界である</b> —— 「1 本目が通ったなら 2 度目は速い」とは
+    /// 言い切れない(<c>GetLongPathName</c> が失敗して <c>~</c> が残ったまま <c>Ok</c> で返る形が
+    /// ありうる。実測はしていない)。ここを完全に閉じるには <c>Check</c> 側を境界付きにする
+    /// 必要があり、本 Task の範囲外。
     /// </para>
     /// <para>
     /// <b>前置ガード <see cref="System.IO.Path.IsPathFullyQualified(string)"/> は挙動不変のために要る</b>
