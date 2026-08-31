@@ -1,11 +1,13 @@
 namespace kxEdit.App.Tests.Fakes;
 
 /// <summary>
-/// <see cref="IReachabilityProbe"/> のテスト用フェイク。3 メンバーとも、呼び出し回数と
+/// <see cref="IReachabilityProbe"/> のテスト用フェイク。4 メンバーとも、呼び出し回数と
 /// 呼出側が渡したタイムアウト値(5 秒契約)を pin するための観測点を持つ。
 /// <list type="bullet">
 /// <item><c>ProbeFileExistsWithTimeout</c> — 既定 <see cref="Result"/>=true
 /// (ローカル / 正常 UNC は通過)。HIGH-6 の UNC プローブ経路の pin。</item>
+/// <item><c>ProbeDirectoryExistsWithTimeout</c> — 既定 <see cref="DirectoryResult"/>=true
+/// (到達できるフォルダー = grep が本体へ進む形)。A-17 のフォルダープローブ経路の pin。</item>
 /// <item><c>ProbeSaveTargetWithTimeout</c> — 既定は「到達可能・未存在」= 新規保存が通る形(A-4)。</item>
 /// <item><c>NormalizePathWithTimeout</c> — 既定は<b>実装への委譲</b>(素通しではない)。
 /// 理由は <see cref="NormalizeResult"/> のコメント(Issue #48)。</item>
@@ -31,6 +33,29 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
         CallCount++;
         LastTimeout = timeout;
         return Result;
+    }
+
+    /// <summary>
+    /// <c>ProbeDirectoryExistsWithTimeout</c> の応答。既定は true(到達できるフォルダー)。
+    /// <see cref="Result"/> とは**独立**に設定できる必要がある(ファイルは在るがフォルダーは不達、
+    /// の形を作れるように)。
+    /// </summary>
+    public bool DirectoryResult { get; set; } = true;
+
+    public int DirectoryCallCount { get; private set; }
+
+    /// <summary>直近の <c>ProbeDirectoryExistsWithTimeout</c> 呼出で渡された path。</summary>
+    public string? DirectoryLastPath { get; private set; }
+
+    /// <summary>直近の <c>ProbeDirectoryExistsWithTimeout</c> 呼出で渡された timeout(5s 契約の pin)。</summary>
+    public TimeSpan DirectoryLastTimeout { get; private set; }
+
+    public bool ProbeDirectoryExistsWithTimeout(string path, TimeSpan timeout)
+    {
+        DirectoryCallCount++;
+        DirectoryLastPath = path;
+        DirectoryLastTimeout = timeout;
+        return DirectoryResult;
     }
 
     /// <summary>

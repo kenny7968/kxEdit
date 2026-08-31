@@ -76,12 +76,14 @@ public readonly record struct PathNormalizeResult
 /// (Issue #48 / S-15)DI シーム。
 /// 本番は <see cref="FileReachabilityProbe"/> / テストは Fake を差し込む。
 /// UNC ロード時の 60 秒 UI 凍結を 5 秒プローブで回避するために FileController が使う。
-/// <b>プローブ 2 本</b>(<see cref="ProbeFileExistsWithTimeout"/> /
+/// <b>ファイル系プローブ 2 本</b>(<see cref="ProbeFileExistsWithTimeout"/> /
 /// <see cref="ProbeSaveTargetWithTimeout"/>)は、呼出側が**正規化済みの絶対パス**を渡す契約。
-/// <see cref="NormalizePathWithTimeout"/> だけはこの契約の**外**にある(その正規化を作るのが
-/// 仕事なので、生パスを受け取る)。
+/// 残り 2 本はこの契約の**外**にある: <see cref="NormalizePathWithTimeout"/> はその正規化を作るのが
+/// 仕事なので生パスを受け取り、<see cref="ProbeDirectoryExistsWithTimeout"/> は呼出側が
+/// 正規化前のユーザー入力をそのまま渡す既存挙動を保つため(A-17。理由は当該メソッドの doc)。
 /// <b>合成規則</b>: <see cref="NormalizePathWithTimeout"/> の出力(<c>Full</c>)を
-/// プローブ 2 本の入力に渡す。これが 3 本の関係のすべてであり、
+/// ファイル系プローブ 2 本の入力に渡す(<see cref="ProbeDirectoryExistsWithTimeout"/> は
+/// この合成に参加しない)。これがファイル系 3 本の関係のすべてであり、
 /// 「1 操作あたり正規化<b>多くとも</b> 1 本」(設計書 §3 の不変条件)はこの向きにしか成立しない。
 /// 「ちょうど 1 本」ではない: Ctrl+S は <c>State.Path</c> が正規化済みという不変条件により
 /// <b>0 本</b>で済む(<c>SaveDocument_ExistingPath_DoesNotNormalizeAtAll</c> が 0 を pin する)。
@@ -104,6 +106,20 @@ public interface IReachabilityProbe
     /// 「未存在」と「到達不能」を区別しないので保存先の判定には使えない(= A-4 の機構)。
     /// </summary>
     bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout);
+
+    /// <summary>
+    /// フォルダーの存在を境界付きで確認する(A-17)。存在を確認できた = true /
+    /// タイムアウト・到達不可・未存在 = false。
+    /// <see cref="ProbeFileExistsWithTimeout"/> のフォルダー版で、意味論も同じく
+    /// 「未存在」と「到達不能」を区別しない。grep のフォルダー指定は
+    /// 「そこを検索できるか」だけを問うので、この粗さで足りる。
+    /// <b>正規化済み絶対パスの契約からは外してある</b>(型の doc 参照): この 1 本の呼出側は
+    /// grep のフォルダー欄=ユーザーが打った文字列で、A-17 が置き換える対象は
+    /// <c>Directory.Exists(folder)</c> の UI スレッド直呼び。相対パスがプロセスの CWD 基準で
+    /// 解決される罠はファイル系 2 本と同じだが、ここで正規化を挟むと「境界を張るだけ」の
+    /// はずの A-17 が解決先を変える挙動変更になる。
+    /// </summary>
+    bool ProbeDirectoryExistsWithTimeout(string path, TimeSpan timeout);
 
     /// <summary>
     /// 保存先の到達性と既存有無を 1 回の境界付き I/O で得る(A-4 / A-7)。
