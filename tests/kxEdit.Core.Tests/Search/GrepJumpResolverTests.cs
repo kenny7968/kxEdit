@@ -178,7 +178,7 @@ public class GrepJumpResolverTests
         Assert.Equal(0, t.Length);
     }
 
-    // ===== 行内容が空: 近傍走査しない(陽性対照つき) =====
+    // ===== 行内容が空: 近傍走査「だけ」を止める(Exact は止めない・陽性対照つき) =====
 
     [Fact]
     public void Resolve_EmptyLineText_DoesNotScanNearby_EvenWhenBlankLinesAreAdjacent()
@@ -207,6 +207,26 @@ public class GrepJumpResolverTests
 
         Assert.Equal(GrepJumpKind.Nearby, t.Kind);
         Assert.Equal(4, t.Line);
+    }
+
+    [Fact]
+    public void Resolve_EmptyLineText_OnABlankOriginLine_IsExactNotStale()
+    {
+        // 空ガードが止めるのは近傍走査だけで、Exact 判定は止めない。ガードを Exact 判定より
+        // 前へ移すとこのケースが Stale に落ち、「変わっていない行」に対して
+        // 「内容が変わっています」と嘘を発声することになる(A-18 と同種)。
+        // 空 LineText のヒットは実在する: 正規表現 grep の ^ や a* 等のゼロ幅パターンは
+        // Length=0 の MatchSpan を返し(TextSearcher.FindNext)、CollectLineHits は
+        // 空行にも FindNext を掛けるため LineText="" のヒットが作られる。
+        var snap = Crlf("a", "b", "", "d");
+        var hit = Hit(lineNumber: 3, lineText: "", matchStart: 0, matchLength: 0);
+
+        var t = GrepJumpResolver.Resolve(hit, snap);
+
+        Assert.Equal(GrepJumpKind.Exact, t.Kind);
+        Assert.Equal(2, t.Line);
+        Assert.Equal(snap.GetLineStart(2), t.Offset);
+        Assert.Equal(0, t.Length);
     }
 
     // ===== クランプ / ゼロ幅 =====
