@@ -24,9 +24,13 @@ namespace kxEdit.App;
 /// ときだけで、復元経路のようにパスを次々に処理すると直列に積み上がる。1 件あたり
 /// 「5 秒 UI ブロック + 寿命 21〜60 秒の leak 1 本」なので、同時 leak は 寿命 ÷ 間隔 ≒ 21/5 ≒
 /// 5 本(SMB 60 秒なら ≒ 12 本)。<see cref="ProbeFileExistsWithTimeout"/> の leak も重なるため
-/// 最悪で約 24 本。フォルダー版 <see cref="ProbeDirectoryExistsWithTimeout"/> の leak も性質は同じだが、
-/// 積み上がるかは呼出側次第で、A-17 の呼出点(grep 実行 / 参照ボタン)は 1 操作あたり 1 回なので
-/// この算術には積み上がらない。<c>ThreadPool</c> の最小ワーカー数は <c>Environment.ProcessorCount</c> と
+/// 最悪で約 24 本。フォルダー版 <see cref="ProbeDirectoryExistsWithTimeout"/> の leak も性質は同じで、
+/// <b>単発操作なら 1 本</b>だが積み上がらないわけではない: <c>GrepController.RunAsync</c> には
+/// 連打対策(直前の実行を中止する)がある=連打は想定内の操作で、しかもフォルダー確認は
+/// <b>その手前</b>にあるので押すたびにプローブが走る。切断済み共有では 1 回あたり
+/// 「5 秒 UI ブロック + 寿命 60 秒の leak 1 本」なので、押し続ければ上と同じ 寿命 ÷ 間隔 ≒ 12 本が
+/// そのまま当てはまる(=上限も上の見積りと同程度で、新しい桁は生まない)。
+/// <c>ThreadPool</c> の最小ワーカー数は <c>Environment.ProcessorCount</c> と
 /// 同数(実測した開発機では 16)なので、最悪ケースはこれを超える。枯渇はしない(上限は 32767)が、
 /// 超えた分は投入が絞られるので待たされうる。
 /// それでも受容する: <c>TaskCreationOptions.LongRunning</c> へ替えると、圧倒的多数を占める
@@ -37,7 +41,7 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
 {
     /// <summary>
     /// 境界付き待ちの判断。タイムアウトしたら <paramref name="onTimeout"/> を返す。
-    /// 3 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
+    /// 4 つの probe メソッドでフェイルセーフ規律を 1 箇所に集約するために切り出す
     /// (Task 1 コード品質レビュー I-1: タイムアウト値の変異が生存していた)。
     /// <b>fault は元の例外型のまま投げ直す</b>(Issue #48 コード品質レビュー I-6)。
     /// faulted task に対する実測(net9.0.8)は次のとおり:
@@ -56,10 +60,12 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// 移設前(<c>FileController</c> が直接 <c>GetFullPath</c> を呼んでいた頃)と
     /// 同じ姿で診断できる。
     /// <b>投げ直しは本メソッドの契約であって、呼出側の性質ではない</b>(再レビュー m-1):
-    /// <see cref="ProbeFileExistsWithTimeout"/> / <see cref="ProbeSaveTargetWithTimeout"/> の
+    /// <see cref="ProbeFileExistsWithTimeout"/> / <see cref="ProbeSaveTargetWithTimeout"/> /
+    /// <see cref="ProbeDirectoryExistsWithTimeout"/> の
     /// work は素の <c>catch</c> で何も逃がさない=task が fault しないので、
-    /// <b>この 2 つの呼出側については挙動不変</b>。ただし
-    /// <see cref="RunSaveTargetProbe"/> / <see cref="RunFileExistsProbe"/> は internal で
+    /// <b>この 3 つの呼出側については挙動不変</b>。ただし
+    /// <see cref="RunSaveTargetProbe"/> / <see cref="RunFileExistsProbe"/> /
+    /// <see cref="RunDirectoryExistsProbe"/> は internal で
     /// 任意の work を受けるため、throw しうる work を渡せばここが効く。
     /// </summary>
     internal static T WaitBounded<T>(Task<T> task, TimeSpan timeout, T onTimeout)

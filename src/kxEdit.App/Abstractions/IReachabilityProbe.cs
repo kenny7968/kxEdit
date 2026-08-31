@@ -83,7 +83,7 @@ public readonly record struct PathNormalizeResult
 /// 正規化前のユーザー入力をそのまま渡す既存挙動を保つため(A-17。理由は当該メソッドの doc)。
 /// <b>合成規則</b>: <see cref="NormalizePathWithTimeout"/> の出力(<c>Full</c>)を
 /// ファイル系プローブ 2 本の入力に渡す(<see cref="ProbeDirectoryExistsWithTimeout"/> は
-/// この合成に参加しない)。これがファイル系 3 本の関係のすべてであり、
+/// この合成に参加しない)。これが<b>ファイル系 2 本 + 正規化 = 3 本</b>の関係のすべてであり、
 /// 「1 操作あたり正規化<b>多くとも</b> 1 本」(設計書 §3 の不変条件)はこの向きにしか成立しない。
 /// 「ちょうど 1 本」ではない: Ctrl+S は <c>State.Path</c> が正規化済みという不変条件により
 /// <b>0 本</b>で済む(<c>SaveDocument_ExistingPath_DoesNotNormalizeAtAll</c> が 0 を pin する)。
@@ -116,8 +116,22 @@ public interface IReachabilityProbe
     /// <b>正規化済み絶対パスの契約からは外してある</b>(型の doc 参照): この 1 本の呼出側は
     /// grep のフォルダー欄=ユーザーが打った文字列で、A-17 が置き換える対象は
     /// <c>Directory.Exists(folder)</c> の UI スレッド直呼び。相対パスがプロセスの CWD 基準で
-    /// 解決される罠はファイル系 2 本と同じだが、ここで正規化を挟むと「境界を張るだけ」の
-    /// はずの A-17 が解決先を変える挙動変更になる。
+    /// 解決される罠はファイル系 2 本と同じ(CWD を変えると同じ入力で答が変わる。実測)だが、
+    /// <b>契約に入れる利が無い</b>。理由は 2 つとも実測:
+    /// <list type="number">
+    /// <item><c>Directory.Exists</c> は内部で <c>Path.GetFullPath</c> を通してから存在確認するので、
+    /// 明示的な正規化を前置しても<b>解決先は変わらない</b> — 二度手間にしかならない。
+    /// 実測(Task 4 レビュー): <c>sub</c> / <c>sub\</c> / <c>.\sub</c> / <c>..\up</c> / 末尾スペース /
+    /// 末尾ドット / 大小文字 / <c>C:sub</c>(ドライブ相対)/ <c>C:\</c> / <c>CON</c> / <c>NUL</c> /
+    /// <c>\\?\...</c> / 到達不能 UNC / 300 文字 / 40000 文字 / 空 / NUL 混入 ほか<b>計 23 種</b>で
+    /// <c>Directory.Exists(x)</c> と <c>Directory.Exists(Path.GetFullPath(x))</c> の不一致は<b>ゼロ</b>。
+    /// (<b>「ここで正規化を挟むと A-17 が解決先を変える挙動変更になる」と書いていたのは誤り</b>だった。
+    /// 結論=契約の外に置く、は変わらないが根拠が違う。)</item>
+    /// <item>契約に入れると呼出点が <see cref="NormalizePathWithTimeout"/> を前置することになり、
+    /// <b>境界付き I/O が 1 操作 2 回</b>になる(UI ブロックは最悪 5 秒 → 10 秒、leak スレッドも 2 本)。
+    /// さらに <see cref="PathNormalizeStatus.TimedOut"/> / <see cref="PathNormalizeStatus.Invalid"/> という
+    /// 今日は存在しない失敗分岐が増える。凍結を減らすのが A-17 の目的なので本末転倒。</item>
+    /// </list>
     /// </summary>
     bool ProbeDirectoryExistsWithTimeout(string path, TimeSpan timeout);
 
