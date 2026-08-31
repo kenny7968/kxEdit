@@ -17,18 +17,38 @@ namespace kxEdit.Core.IO;
 /// (<c>0x20000000</c>)は Windows 自身が「この reparse point は別の名前付き実体を表す」と
 /// 宣言するためのビット(<c>winnt.h</c> の <c>IsReparseTagNameSurrogate</c> と同一)。</para>
 ///
-/// <para><b>ただし「surrogate ビット = パス解決が追従する」は 1:1 ではない</b>
-/// (脆弱性レビューの実測 2026-08-31)。<c>IO_REPARSE_TAG_DFS</c>(<c>0x8000000A</c>)/
-/// <c>DFSR</c>(<c>0x80000012</c>)/ <c>WCI</c>(<c>0x80000018</c>)/ <c>PROJFS</c>
-/// (<c>0x9000001C</c>)/ <c>NFS</c>(<c>0x80000014</c>)は**ビットが立たないのに名前を
-/// 転送しうる**。それでもこの判定で塞がると言える根拠は、ビットの意味論ではなく次の実測:
+/// <para><b>ただし「surrogate ビット = パス解決が追従する」は 1:1 ではない</b>。
+/// <c>IO_REPARSE_TAG_DFS</c>(<c>0x8000000A</c>)/ <c>DFSR</c>(<c>0x80000012</c>)/
+/// <c>WCI</c>(<c>0x80000018</c>)/ <c>PROJFS</c>(<c>0x9000001C</c>)/
+/// <c>NFS</c>(<c>0x80000014</c>)/ <c>CLOUD</c>(<c>0x9000001A</c>)は
+/// **ビットが立たないのに名前を転送しうる**。それでもこの判定で塞がると言える根拠を、
+/// <b>実測</b>と<b>未実測の想定</b>に分けて書く(混ぜると嘘の安全宣言になる)。</para>
+///
+/// <para><b>実測(2026-08-31・非管理者)</b>:
 /// (1) NTFS 自身が名前を差し替えるのは <c>MOUNT_POINT</c> と <c>SYMLINK</c> のみで、
-/// 両方ともビットを持つ。(2) 担当フィルタが無いタグを非管理者が植えても、その先は
-/// open も書き込みも <c>ERROR_CANT_ACCESS_FILE</c> で失敗する(ゲートが開くだけで到達しない)。
-/// (3) 非管理者は <c>MOUNT_POINT</c> / <c>SYMLINK</c> / <c>GLOBAL_REPARSE</c> を
+/// 両方ともビットを持つ。
+/// (2) 非管理者は <c>MOUNT_POINT</c> / <c>SYMLINK</c> / <c>GLOBAL_REPARSE</c> を
 /// <c>FSCTL_SET_REPARSE_POINT</c> で植えられない。
-/// WCI / ProjFS / DFS が実際に横取りするにはレイヤー結合・仮想化ルート・DFS 名前空間という
-/// **管理者権限が要る前提**が先に必要なので、そこは受容している。</para>
+/// (3) 一方で Microsoft の**非 surrogate** タグ 11 個(<c>DFS</c> / <c>DFSR</c> / <c>NFS</c> /
+/// <c>WOF</c> / <c>WCI</c> / <c>WCI_1</c> / <c>APPEXECLINK</c> / <c>PROJFS</c> /
+/// <c>PROJFS_TOMBSTONE</c> / <c>CLOUD</c> / <c>CLOUD_1</c>)は**非管理者でもすべて植えられる**
+/// (<c>err=0</c>)。植えた対象配下に対する <c>OriginalPathValidator.Check</c> は <c>Ok</c> を返す。
+/// (4) 担当フィルタが**無い**タグ(非 Microsoft タグを含む)の配下は、write も
+/// <c>GetAttributes</c> も <c>EnumerateFiles</c> も <c>ERROR_CANT_ACCESS_FILE</c> で失敗する
+/// = ゲートが開くだけで到達しない。
+/// (5) <b>ただし (4) は <c>CLOUD</c> / <c>CLOUD_1</c> / <c>WCI</c> / <c>WCI_1</c> /
+/// <c>PROJFS</c> の 5 つには適用できない。</b>素の Win11 に <c>cldflt</c> / <c>wcifs</c> /
+/// <c>PrjFlt</c> が attach されているため、配下への書き込みが成功する。
+/// (6) ただし無効ペイロード(全 0)では名前は移動せず、<c>GetFinalPathNameByHandle</c> は
+/// 元の temp 配下を返す。<b>BlockedRoot 配下への実書き込みは再現できていない。</b></para>
+///
+/// <para><b>想定(未実測。ここが最終的な安全性を支えている)</b>: (5) のタグで実際に名前を
+/// 横取りさせるには、WCI ならレイヤー結合、ProjFS なら仮想化ルートの登録、DFS なら
+/// DFS 名前空間という<b>フィルタ側の前提</b>が先に要り、それらは管理者権限を必要とする、と
+/// 想定している。<b>この一文はドキュメント上の理解であって実測ではない。</b>
+/// したがって「非 surrogate タグは安全だと実測で確かめた」とは言えず、正確には
+/// 「(6) の有効ペイロードを非管理者が用意できるかを確かめていない」。この想定を破るなら、
+/// 有効ペイロードで BlockedRoot 配下へ実書き込みできることの再現が反例になる。</para>
 ///
 /// <para><b>なぜ <see cref="FileSystemInfo.LinkTarget"/> を使わないか</b>(P/Invoke を避けられる案):
 /// 策定時の実測(2026-08-31・net9.0)で、<c>LinkTarget</c> は

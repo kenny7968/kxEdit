@@ -86,8 +86,12 @@ public enum PathValidation
 ///   Rejected のままになる。属性ビット時代と同じ結果なので A-15 の緩和で新しく生まれた
 ///   受容ではない(フェイルセーフ方向)。
 /// - name surrogate ビットが立たないのに名前を転送しうるタグ (DFS / DFSR / WCI / PROJFS /
-///   NFS) は通る。<see cref="kxEdit.Core.IO.ReparseTagReader"/> のクラス doc に、
-///   これらが実際の横取りに至るには管理者権限が要るという実測の根拠を書いてある。
+///   NFS / CLOUD) は通る。これらは**非管理者でも植えられ**、うち CLOUD / WCI / PROJFS は
+///   素の Win11 に担当フィルタが attach されているため配下への書き込みまで成功する(実測)。
+///   実書き込みが BlockedRoot へ届かないことの根拠は、**実測ではなく想定**である
+///   (有効なペイロードの用意にフィルタ側の管理者権限前提が要る、という理解)。
+///   何が実測で何が想定かの切り分けは <see cref="kxEdit.Core.IO.ReparseTagReader"/> の
+///   クラス doc を参照。**「実測で安全と確かめた」と読まないこと。**
 /// </summary>
 public static class OriginalPathValidator
 {
@@ -317,6 +321,14 @@ public static class OriginalPathValidator
                     // 属性ビットの検査を前に残すのは、タグ読み(CreateFileW)を
                     // **reparse point に対してだけ**走らせるため。walk は root まで全親を辿るので、
                     // 通常パスでハンドルを開く回数を増やさない。
+                    //
+                    // tag == 0(GetAttributes は reparse だと言ったのに TryRead は
+                    // 「reparse ではない」と答えた= 2 つの観測が矛盾している状態)は
+                    // **意図的に Ok へ倒す**。2 回の観測の間に対象が差し替わったことを意味するので、
+                    // ここで Rejected にしても TOCTOU 窓が閉じるわけではない
+                    // (walk 全体が元から Check → 実書き込みの間で TOCTOU であり、
+                    // これはその窓が 1 つ内側にずれるだけ)。矛盾を検出しても使える情報が無い以上、
+                    // 「reparse ではない」という新しい方の観測を採る。
                     uint? tag = kxEdit.Core.IO.ReparseTagReader.TryRead(cursor);
                     if (tag is null || kxEdit.Core.IO.ReparseTagReader.IsNameSurrogate(tag.Value))
                         return PathValidation.Rejected;
@@ -356,9 +368,24 @@ public static class OriginalPathValidator
         }
 
         // (2) belt-and-suspenders: leaf が symlink/junction のとき解決先を BlockedRoots に再照合。
-        //   ・fast path が既に catch していれば通常はここに到達しない
         //   ・File.ResolveLinkTarget は reparse でないパス / 存在しないパスに対して null を返す
         //     か例外を投げる=どちらも「非該当」扱いで通す
+        //
+        // **この belt には網が 1 本も無く、実測でも到達させられなかった**(2026-08-31)。
+        // 「潰しても全緑」なのは網の不足ではなく、fast path に構造的に先を越されるため:
+        //   ・belt が非 null を返すのは実 SYMLINK / MOUNT_POINT の leaf だけ(実測。
+        //     0x123 / 0x20000123 / WOF / WCI / CLOUD / PROJFS / DEDUP / APPEXECLINK は
+        //     **すべて null**)。その 2 種はどちらも surrogate なので fast path が必ず先に Rejected。
+        //   ・権限で fast path を盲にして belt だけ生かす構成も作れない。要求する権限は
+        //     belt の方が**厳しい**(GetFileAttributesW は親の traverse だけ / ResolveLinkTarget は
+        //     FindFirstFileEx + CreateFile)。実測: 親から ListDirectory+ReadAttributes を Deny すると
+        //     fast path は読めたまま belt が UnauthorizedAccessException で落ち、対象自身に
+        //     Deny FullControl を付けても fast path は tag=null で Rejected・belt は例外。
+        //
+        // したがって belt を「A-15 で fast path を緩めたことの保険」と読んではいけない。
+        // **緩めて通るようになったタグ (CLOUD / WCI / PROJFS 等) に対して belt は null を返す**
+        // = 保険として機能する余地がそもそも無い。撤去の是非は別途判断する(セキュリティ境界の
+        // フェイルセーフを doc 修正のついでに消さない)。
         try
         {
             var linkTarget = File.ResolveLinkTarget(localPath, returnFinalTarget: true);
