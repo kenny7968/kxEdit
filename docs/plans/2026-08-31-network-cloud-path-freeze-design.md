@@ -251,3 +251,86 @@ grep 配線はイベント配線で、いずれも §4-A の禁止側に当た�
   動かしていないことだけ、最終ブランチレビューの脆弱性パスで確認する。
 - 本ブランチが `RejectIfReparsePresent` の意味論を変えるため、**脆弱性レビューを前倒しで実施する**
   (CLAUDE.md §3-4 の「セキュリティ敏感面」該当)。
+
+---
+
+## 10. 実施記録: 策定時の根拠が実測で覆った点(2026-08-31 追記)
+
+本節は CLAUDE.md §8 が認める**実施記録の追記**。§1〜§9 は策定時のまま変更していない。
+**策定時に書いた根拠のうち 2 つが、実装中の実測で偽と判明した。**
+
+### 10.1 §3.2-(i) の「検査不能だから契約の食い違いの是正」は偽
+
+策定時、reparse walk の skip をリモート全体へ広げる根拠を「walk の契約はもともと
+ローカルドライブのみ対象で、その根拠は『UNC はサーバ側 NTFS でクライアントから検査不能』
+だった。マップドドライブも実体はサーバ側なので同じ根拠が当てはまる」と書いた。
+**これは成り立たない。**
+
+Task 3 のレビューが `net use Z: \localhost\C$` + `C:\Windows\System32\drivers\etc` への
+junction で実測した結果:
+
+| 綴り | 変更前 | 変更後 |
+|---|---|---|
+| `C:\...\junction\hosts` | Rejected | Rejected |
+| `Z:\...\junction\hosts` | **Rejected** | **Ok**(緩んだ) |
+| `\localhost\C$\...\junction\hosts` | **Ok** | **Ok**(元から開いていた) |
+
+`Z:` 綴りでも UNC 綴りでも `File.GetAttributes` は `Directory, ReparsePoint` を返し、
+**変更前の walk は `Z:` 経由で junction を実際に検出して Rejected していた**。
+「検査不能」は事実ではない。
+
+**正しい根拠は 2 つ**:
+
+1. **UNC 綴りとの等価性** — マップドドライブ `Z:` の実体は必ず `\server\share` であり、
+   攻撃者は同じ資源を UNC 綴りで backup JSON に書ける。UNC 側は元から未検査で `Ok` を返す
+   (クラス doc の V-m-3 = `\localhost\C$\ProgramData\...` が Ok になり実際に書けたのが実例)。
+   したがってドライブ文字綴りだけ閉じる価値が無い。**反例(サブフォルダマップ / 別資格情報 /
+   DFS / WebDAV)を探したが、いずれも UNC 綴りが存在し `IsUncRooted` が受理するため
+   見つからなかった。** = §6-2 の「新しく到達できる先は増えない」は実測で確認された。
+2. **フリーズ回避** — 策定時は「副次的」と書いたが、実際にはこちらが主たる効果。
+
+限定: **loopback SMB でのみ実測**。実リモートサーバで同じく属性が見えるかは未検証。
+
+### 10.2 §3.1 の「surrogate ビットは追従種別と 1:1」は偽
+
+`ReparseTagReader` の doc として策定時に用意した「name surrogate ビットは
+パス解決が追従する種別と 1:1 で対応する」は誤り。**DFS / WCI / PROJFS / NFS が反例。**
+
+さらに Task 2 のレビューが非管理者で実測した結果:
+
+- Microsoft の非 surrogate タグ 11 個(DFS / DFSR / NFS / WOF / WCI / WCI_1 / APPEXECLINK /
+  PROJFS / PROJFS_TOMBSTONE / CLOUD / CLOUD_1)は**すべて非管理者で植えられ**、
+  `Check(配下)` は `Ok` を返す。
+- 担当フィルタが**無い**タグの配下は write も `GetAttributes` も `EnumerateFiles` も
+  `ERROR_CANT_ACCESS_FILE` で失敗 = 到達しない。
+- **ただし CLOUD / CLOUD_1 / WCI / WCI_1 / PROJFS の 5 つは、素の Win11 に cldflt / wcifs /
+  PrjFlt が attach 済みのため配下への書き込みが成功する。** つまり「フィルタが無いから到達しない」
+  という根拠は、反例として挙げたタグ自身には適用できない。
+- 無効ペイロード(全 0)では名前は移動せず、**BlockedRoot 配下への実書き込みは再現できていない。**
+
+**現在の安全性を支えているのは「有効なリダイレクトペイロードの用意にフィルタ側の管理者権限が
+要る」という未実測の想定**である。この一文が破られる(非管理者が有効な CLOUD / WCI / PROJFS
+ペイロードを用意できる)なら再検討が要る。**「非 surrogate タグは安全だと実測で確かめた」とは
+言えない。**
+
+### 10.3 belt(`ResolveLinkTarget` 再照合)は到達不能
+
+策定時は触れていなかったが、Task 2 の調査で `RejectIfReparsePresent` の belt が
+**到達不能なコード**であることが実測で確定した(潰しても Core 全件が緑)。
+
+- belt が非 null を返すのは実 SYMLINK / MOUNT_POINT の leaf だけで、その 2 種は surrogate
+  なので fast path が必ず先に Rejected を返す。
+- 権限で fast path だけを盲にすることもできない。要求権限は belt の方が厳しい
+  (`GetFileAttributesW` は親の traverse だけ / `ResolveLinkTarget` は `FindFirstFileEx` + `CreateFile`)。
+- **belt は A-15 で新しく通るようになったクラス(CLOUD / WCI / PROJFS 等)に `null` を返す**
+  = fast path を緩めたことの保険として機能する余地が無い。
+
+撤去可否は本ブランチの最終レビューで判断する(§3.2 の変更で fast path の被覆が変わったため)。
+
+### 10.4 §7 の L5 項目に追加すべきもの
+
+- **`DriveInfo.DriveType` が不達のマップドドライブでブロックしないこと**(§6-4 の未実測)。
+  実測できたのは「接続中 0.7 µs / 未割当 3 µs / 記憶済み未接続 65〜90 µs」までで、
+  **`DriveType=Network` が生きたままサーバが不達**という A-16 本来のケースは未確認。
+  公式ドキュメントも `GetDriveTypeW` のブロッキングについて無言。
+  もしここがブロックしていれば、L5 で凍結が残る形で現れる。
