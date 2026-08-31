@@ -550,11 +550,17 @@ public class OriginalPathValidatorTests
     //  (3) 実マップドドライブ (net use) は共有側が要り、ループバック (\\localhost\C$) は
     //      管理者権限が要る = L1 / CI で用意できない。用意できたとしても環境依存 skip になり、
     //      CI では常に vacuous に緑。
+    //      ただし**挙動差分そのものは実在する**: レビュアーが昇格 shell で
+    //      net use Z: \\localhost\C$ を張って実測したところ、Z:\...\junction\hosts は
+    //      変更前 Rejected → 変更後 Ok に緩んだ(同じ資源の \\localhost\C$\... 綴りは
+    //      変更前から Ok)。「検査不能だから元から契約外」ではないことの証拠でもある
+    //      = OriginalPathValidator のクラス doc の実測表を参照。
     //  (4) UNC 側に「skip されていること」の網を張る案は**元から成立しない**。
     //      実測: skip 条件そのものを潰して walk を UNC でも走らせる変異
-    //      (bool isUnc = false)を入れても、このクラスの全テストが緑のまま生存した。
+    //      (bool isUnc = false)を変更前コードに入れても、このクラスの全 37 テストが
+    //      緑のまま生存した(所要 76ms → 2s)。
     //      \\server\share\... は名前解決に失敗して I/O 例外になり、walk はそれを握って continue
-    //      するので**結果が Ok のまま変わらない**(変わるのは所要時間だけ = 73ms → 2s)。
+    //      するので**結果が Ok のまま変わらない**(変わるのは所要時間だけ)。
     //      したがって「UNC が Ok のまま」を主張する回帰テストを足しても、変更前後・変異前後の
     //      どれも区別できない = 網ではなく重複(既存 Check_ReturnsOk_ForUncPath と同値)。
     // 残る担保は (1) の述語固定と、L5(実機のマップドドライブで凍結が消えることの観測)の 2 段。
@@ -571,7 +577,10 @@ public class OriginalPathValidatorTests
         // 復元時にはマップが外れている)。ここで DriveInfo が投げると Check の外側 catch が
         // Rejected へ丸め、本文が黙って無題タブへ降格する = サイレントな体験劣化になる。
         //
-        // 変更前は DriveInfo を一切引かなかったので、この網は A-16 でしか意味を持たない。
+        // **これは「A-16 が効いていること」の網ではなく「A-16 が壊していないこと」の網である**:
+        // src だけ変更前(bbae389)に戻して実行しても緑のまま = 回帰検知用。change-detector と
+        // 読まないこと。固定しているのは「未割当ドライブ文字は Ok のまま(= 復元を許す)」という
+        // 契約で、これを Rejected へ倒す将来の変更をレビュー対象へ引き上げるのが目的。
         // 期待値は Ok(未割当ドライブは DriveType=NoRootDirectory → 非リモート → walk が走り、
         // walk は I/O 例外を握って通す)。
         var drives = DriveInfo

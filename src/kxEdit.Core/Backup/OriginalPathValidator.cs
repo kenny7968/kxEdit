@@ -68,11 +68,28 @@ public enum PathValidation
 ///
 /// A-16: reparse 検査を skip する条件を「UNC」から「リモート全体」
 /// (<see cref="kxEdit.Core.IO.RemotePathDetector.IsRemote"/> = UNC + マップドネットワーク
-/// ドライブ)へ広げた。walk の契約は元から「ローカルドライブのみ対象」で、その根拠
-/// (実体がサーバ側 NTFS でクライアントから検査不能)はマップドドライブ (Z:\) にも
-/// そのまま当てはまる。つまり**契約の食い違いの是正**であって性能上の回避ではない。
-/// 副次的に、不達共有で walk が同期 I/O を leaf から root まで直列に積む
-/// (1 要素あたり SMB タイムアウト)経路が消える。
+/// ドライブ)へ広げた。これは**ドライブ文字綴りに効いていた防御を意図的に外す実効的な緩和**で、
+/// 正当化する根拠は次の 2 つだけ。
+/// (1) <b>UNC 綴りとの等価性</b>。同じ資源には UNC 綴りでも到達でき、そちらは元から未検査で Ok。
+///     ドライブ文字綴りだけ閉じても、攻撃者は綴りを変えるだけで迂回できるので閉じる価値が無い。
+/// (2) <b>フリーズ回避</b>。不達共有では walk が File.GetAttributes を leaf から root まで
+///     直列に積み(1 要素あたり SMB タイムアウト)、A-15 のタグ読み CreateFileW も加わる。
+///
+/// <b>「実体はサーバ側 NTFS でクライアントから検査不能だから元から walk の契約外」という
+/// 根拠は偽である。</b>(実装計画に書かれていた前提だが、レビューの実測で否定された。)
+/// loopback SMB (net use Z: \\localhost\C$) での実測:
+/// <code>
+///   綴り                                  変更前     変更後
+///   C:\...\junction\hosts                 Rejected   Rejected
+///   Z:\...\junction\hosts                 Rejected   Ok       ← 緩んだ
+///   \\localhost\C$\...\junction\hosts     Ok         Ok       ← 元から開いていた
+/// </code>
+/// Z: 綴りでも UNC 綴りでも File.GetAttributes は Directory, ReparsePoint を返す
+/// = **クライアントから実際に検査できていた**。変更前の walk は Z: 経由の junction を
+/// 検出して Rejected していた。したがってこれは「契約の食い違いの是正」ではない。
+/// <b>限定</b>: 実測は loopback SMB でのみ行っており、実リモートサーバ(別ホストの SMB /
+/// DFS / WebDAV)では未検証。
+/// <b>将来 UNC 側を閉じる人は「検査不能」という前提を再利用しないこと。</b>
 ///
 /// 現状の許容(次リリース以降で再検討):
 /// - subst / ネットワークドライブ割当は「ドライブ文字の許可リスト」では原理的に閉じない。
@@ -82,11 +99,14 @@ public enum PathValidation
 ///   「ハンドルを開いて最終パスを解決してから照合」だが本ブランチでは扱わない。
 ///   A-16 で**ネットワーク割当の側だけ**が reparse 検査の対象からも外れた
 ///   (subst は DriveType=Fixed のままなので walk は続く。実測 2026-08-31)。
-///   代償はマップドドライブ上の junction が Rejected にならなくなること。ただし
-///   **これで新しく到達できる先は 1 つも増えない**: Z: の実体 \\server\share は UNC 綴りでも
-///   書けて、そちらは元から未検査で Ok(上の V-m-3 = \\localhost\C$ 経由で BlockedRoot 配下へ
-///   実際に書けた、がその実例)。境界が「ドライブ文字か否か」から「リモートか否か」へ
-///   移るだけで、受容範囲の**形**も**広さ**も変わらない。
+///   代償はマップドドライブ上の junction が Rejected にならなくなること(上の実測表の
+///   2 行目)。ただし**これで新しく到達できる先は 1 つも増えない**: Z: の実体 \\server\share は
+///   UNC 綴りでも書けて、そちらは元から未検査で Ok(上の V-m-3 = \\localhost\C$ 経由で
+///   BlockedRoot 配下へ実際に書けた、がその実例)。**この結論だけは実測で確認済み**
+///   — 同一ファイルが変更前から UNC 綴りで Ok に到達していた。反例候補(共有のサブフォルダを
+///   マップ / 別資格情報でマップ / DFS / WebDAV)も探したが、いずれも対応する UNC 綴りが存在し
+///   IsUncRooted が受理するため見つからなかった。境界が「ドライブ文字か否か」から
+///   「リモートか否か」へ移るだけで、受容範囲の**形**も**広さ**も変わらない。
 ///   <b>将来 UNC 側を閉じるときは、同じフィルタをマップドドライブにも当てること</b>
 ///   (\\host\&lt;drive&gt;$ を UNC 綴りだけで弾いても、同じ共有をドライブ文字で綴った経路が残る)。
 /// - UNC 側の admin share (\\host\C$\Windows\... 等)経由の pivot は許容
@@ -207,13 +227,16 @@ public static class OriginalPathValidator
             if (!IsDriveRooted(forCheck) && !IsUncRooted(forCheck))
                 return PathValidation.Rejected;
 
-            // BK-M-1 / A-16: reparse point (junction/symlink) 検査は「ローカルドライブのみ」対象。
-            // 元の skip 条件は UNC (\\server\share\...) だけで、根拠は「実体はサーバ側 NTFS で
-            // クライアントから検査不能=既存の『UNC は BlockedRoots 非該当で Ok』契約を維持する」
-            // だった。マップドネットワークドライブ (Z:\) も実体はサーバ側にあるので、同じ根拠が
-            // そのまま当てはまる。ここを広げるのは性能上の回避ではなく**契約の食い違いの是正**で、
-            // 副次的に不達共有での同期 I/O(GetAttributes を root まで直列 + A-15 のタグ読み
-            // CreateFileW)を消す。
+            // BK-M-1 / A-16: reparse point (junction/symlink) 検査は「リモートでないパスのみ」対象。
+            // 元の skip 条件は UNC (\\server\share\...) だけだった。A-16 でマップドネットワーク
+            // ドライブ (Z:\) も skip 側へ移す。
+            //
+            // **これは実効的な緩和である**(「リモートは元から検査不能だから契約外」ではない。
+            // 実測: Z: 綴りでも File.GetAttributes は Directory, ReparsePoint を返し、変更前の
+            // walk は Z: 経由の junction を検出して Rejected していた。クラス doc の実測表を参照)。
+            // 正当化は 2 つだけ: (1) 同じ資源へ UNC 綴りで到達でき、そちらは元から未検査で Ok
+            // = ドライブ文字綴りだけ閉じても綴りを変えれば迂回できる。(2) 不達共有での同期 I/O
+            // (GetAttributes を root まで直列 + A-15 のタグ読み CreateFileW)による UI 凍結を消す。
             //
             // 述語の差分は「ネットワーク割当のドライブ文字」だけ: RemotePathDetector は
             // UncPathDetector(先頭 \\ の純粋判定)を内包し、ドライブ文字なら
