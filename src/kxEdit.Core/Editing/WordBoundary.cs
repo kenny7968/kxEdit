@@ -57,9 +57,12 @@ internal enum CharClass
 /// 消費される。<b>推奨は <c>maxScan &gt;= 1</c></b>(新しい呼び出しで 0 以下を渡さないこと)。
 /// ただし 0 以下は未定義動作ではなく<b>「予算を使い切った状態と同じ」</b>へ規定どおり縮退する
 /// = DoS 対策の多重防御(2026-08-08 設計書 §4 / §5)。縮退時の返り値は
-/// <c>NextWordStart</c> = <c>caret</c> / <c>WordEnd</c> = <c>pos</c> / <c>WordStart</c> = <c>pos</c> /
+/// <c>NextWordStart</c> = <c>caret</c> / <c>WordEnd</c> = <c>pos</c> /
 /// <c>PrevWordStart</c> = <c>caret</c> の <b>1 code point 左</b>(手順 2 の 1 歩だけは予算外なので
-/// 「1 歩も走らない」と書くと <c>PrevWordStart</c> で嘘になる)。
+/// 「1 歩も走らない」と書くと <c>PrevWordStart</c> で嘘になる)/
+/// <c>WordStart</c> = <c>pos</c>。ただし <b>EOF 経路(<c>pos &gt;= CharLength</c>)だけは</b>
+/// <see cref="PrevWordStart"/>(<c>pos</c>) 委譲=<c>pos + 1</c> を渡さないため
+/// <c>pos</c> の <b>1 code point 左</b>になる(2026-09-01 の仕様レビュー Important-1)。
 /// 上限なしは <see cref="NoScanLimit"/>。<b>予算を使い切ったらその位置でそのまま返す</b>
 /// (単語の途中でも切る=SR は run の一部だけを読み、キャレットも run の途中で止まる)。
 /// 各 API が触れる窓(<b>単位は code point 数</b>。下の表の <c>maxScan</c> も同じ):
@@ -75,6 +78,9 @@ internal enum CharClass
 /// <item><term><see cref="WordEnd"/>(pos)</term>
 ///   <description><c>[pos, pos + maxScan]</c></description></item>
 /// </list>
+///
+/// <b>この窓の表は <c>maxScan &gt;= 1</c> の場合。</b>0 以下のときは上の縮退の段落を見ること
+/// (窓ではなく固定の返り値になる)。
 ///
 /// <see cref="WordStart"/> だけ 1 狭いのは <see cref="PrevWordStart"/> へ <c>pos + 1</c> を渡すため=
 /// 最初の 1 歩が pos へ戻るのに消費される。cap の較正時にこの 1 のズレが効く。
@@ -191,8 +197,8 @@ public static class WordBoundary
     // (V-1 修正で「非正値を明示的に正規化する」を選んだのに、メッセージが「0 以下は未規定」の
     // まま取り残された = 申し送り S-5 / 2026-08-08 設計書 §2)。
     // 戻すと WordBoundaryTests.MaxScan_NonPositive_NeverRemovesScanLimit が Debug 構成で
-    // 4 件赤になる。2026-09-01 以降は tools/pre-merge-check.ps1 と ci.yml の
-    // 「Core.Tests(Debug・Debug.Assert 有効)」ステップが同じ赤を再現するので**ゲートで落ちる**。
+    // 4 件赤になる。本ブランチで tools/pre-merge-check.ps1 と ci.yml へ
+    // 「Core.Tests(Debug・Debug.Assert 有効)」ステップを足すので、以後は**ゲートで落ちる**。
 
     /// <summary>次の単語の先頭に進む。EOF に達したら CharLength を返す。</summary>
     /// <remarks>
