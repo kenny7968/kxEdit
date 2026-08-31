@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
+using kxEdit.Core.Search;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using Directory = System.IO.Directory;
@@ -209,6 +210,25 @@ public class MainFormSmokeTests
             Assert.False(doc!.State.CsvMode);
         });
 
+    /// <summary>grep が返すのと同じ形のヒットを組み立てる(A-18 のテスト用)。</summary>
+    private static GrepHit GrepHitFor(
+        string path,
+        int lineNumber,
+        string lineText,
+        int matchStart,
+        int matchLength,
+        int absoluteOffset
+    ) =>
+        new(
+            FilePath: path,
+            LineNumber: lineNumber,
+            Column: matchStart + 1,
+            LineText: lineText,
+            MatchStartInLine: matchStart,
+            MatchLength: matchLength,
+            AbsoluteOffset: absoluteOffset
+        );
+
     // ===== OpenAndSelect: suppressAutoCsv 配線+選択レンジ =====
 
     [Fact]
@@ -221,7 +241,7 @@ public class MainFormSmokeTests
             // auto ON のまま OpenAndSelect: suppressAutoCsv=true が抜けると AutoEnterCsvMode が発火して赤化する
             using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: true), tmp);
 
-            form.OpenAndSelect(path, offset: 2, length: 3);
+            form.OpenAndSelect(GrepHitFor(path, 1, "a,b,c", 2, 3, absoluteOffset: 2));
 
             // OpenAndSelect 後の Active タブを取り戻す: 既に開いているため FileController.TryOpenOrActivate は
             // 既存タブ再利用の fast path(FindByPath ヒット)を通り _openedFresh を呼ばない=
@@ -251,7 +271,7 @@ public class MainFormSmokeTests
 
             // 末尾行(index 199)の先頭オフセット。
             int offset = string.Join("\r\n", lines.Take(199)).Length + 2; // +2 = 直前の CRLF
-            form.OpenAndSelect(path, offset, length: 4);
+            form.OpenAndSelect(GrepHitFor(path, 200, "line199", 0, 4, absoluteOffset: offset));
 
             var doc = form.FileForTest.TryOpenOrActivate(path);
             Assert.NotNull(doc);
@@ -268,6 +288,92 @@ public class MainFormSmokeTests
             Assert.Equal(0, doc.Editor.GetColumn(doc.Editor.GetSelectionCharRange().Start));
             Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
             Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
+        });
+
+    // ===== A-18: 未保存編集のあるタブへのジャンプ =====
+
+    /// <summary>
+    /// grep のヒットはディスク基準。既に開いているタブに未保存の編集があると、
+    /// AbsoluteOffset をそのまま使えば別の行に着地して「その行」を発声してしまう。
+    /// 行番号+行内容で解決していれば、編集後の正しい行に着地し発声も一致する。
+    /// </summary>
+    [Fact]
+    public void OpenAndSelect_DirtyTab_ResolvesByLineContentNotDiskOffset() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string path = tmp.File("doc.txt");
+            var lines = new[] { "alpha", "beta", "gamma needle delta", "epsilon" };
+            File2.WriteAllText(path, string.Join("\r\n", lines));
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            // ディスク基準のヒット(grep が返すのと同じ値)。
+            int diskOffset = "alpha\r\nbeta\r\n".Length + 6; // "gamma " の直後
+            var hit = GrepHitFor(path, 3, "gamma needle delta", 6, 6, absoluteOffset: diskOffset);
+
+            // タブを開いてから、ヒット行より前に 3 行挿入して未保存にする。
+            var opened = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(opened);
+            opened!.Editor.ReplaceCharRange(0, 0, "ins1\r\nins2\r\nins3\r\n");
+            Assert.True(opened.Editor.Modified);
+
+            form.OpenAndSelect(hit);
+
+            var doc = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(doc);
+            var snap = doc!.Editor.CurrentBuffer.Current;
+
+            // 陽性対照: 旧実装(AbsoluteOffset 直渡し)なら別の行に着地する fixture であること。
+            // これが無いと「たまたま同じ行」でも緑になる。
+            // 実測(2026-08-31): diskOffset=19 は編集後バッファでは行 index 3("alpha" の内側)を指す。
+            // 旧実装を実際に復元して確認済み(選択が [19,25) になり CurrentLine は 4 で赤化した)。
+            Assert.NotEqual(5, snap.GetLineIndexOfChar(diskOffset));
+
+            // 正しい着地: 挿入 3 行ぶん下がった index 5(=6 行目)。
+            Assert.Equal(5, doc.Editor.CurrentLine);
+            var sel = doc.Editor.GetSelectionCharRange();
+            Assert.Equal("needle", snap.GetText(sel.Start, sel.End - sel.Start));
+            // 発声も着地行と一致する(A-18 の症状は「誤った行を発声」なので発声側も固定する)。
+            Assert.Contains("6 行目", form.LastAnnouncementForTest);
+            Assert.DoesNotContain("内容が変わっています", form.LastAnnouncementForTest);
+        });
+
+    /// <summary>
+    /// ヒット行の内容が変わっていれば、黙って別の行へ飛ばず「内容が変わっています」と伝え、
+    /// 選択もしない(キャレットを置くだけ)。
+    /// </summary>
+    [Fact]
+    public void OpenAndSelect_StaleHit_AnnouncesContentChangedAndSelectsNothing() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string path = tmp.File("doc.txt");
+            var lines = new[] { "alpha", "beta", "gamma needle delta", "epsilon" };
+            File2.WriteAllText(path, string.Join("\r\n", lines));
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var opened = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(opened);
+            // ヒット行(index 2)を丸ごと別内容に差し替える=近傍にも一致行が無くなる。
+            var snap0 = opened!.Editor.CurrentBuffer.Current;
+            int start = snap0.GetLineStart(2);
+            int len = snap0.GetLineEnd(2, includeBreak: false) - start;
+            opened.Editor.ReplaceCharRange(start, len, "totally different");
+
+            form.OpenAndSelect(
+                GrepHitFor(path, 3, "gamma needle delta", 6, 6, absoluteOffset: start + 6)
+            );
+
+            var doc = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(doc);
+            Assert.Contains("内容が変わっています", form.LastAnnouncementForTest);
+            var sel = doc!.Editor.GetSelectionCharRange();
+            Assert.Equal(sel.Start, sel.End); // 選択しない
+            Assert.Equal(2, doc.Editor.CurrentLine); // 行頭へ寄せる
+            // 「行頭へ寄せる」の no-change 化を防ぐ: 直前の ReplaceCharRange がキャレットを
+            // 置換末尾(行 2 の桁 17)へ置いているので、桁まで見ないと「何もしなかった」でも
+            // CurrentLine==2 / 選択ゼロ幅が成立してしまう(CLAUDE.md §4-B)。
+            Assert.Equal(0, doc.Editor.GetColumn(sel.Start));
         });
 
     // ===== hot exit 統合: OnShown の silent 統合復元(設計 §3.3/§8) =====

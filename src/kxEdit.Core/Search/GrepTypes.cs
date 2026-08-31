@@ -2,17 +2,24 @@ namespace kxEdit.Core.Search;
 
 /// <summary>
 /// grep の 1 ヒット（＝1 マッチ行）。1 行に複数マッチがあっても行頭の最初のマッチを 1 件として持つ。
-/// オフセットは UTF-16 文字位置（エディタの string index・SelectCharRange と同一空間）。
+/// オフセットはいずれも UTF-16 文字位置。
 /// </summary>
+/// <remarks>
+/// <b>A-18(2026-08-31)</b>: 旧 doc は「エディタの string index・SelectCharRange と同一空間」と
+/// 書いていたが、これは<b>偽の不変条件</b>だった。<see cref="AbsoluteOffset"/> は
+/// <b>ディスク上のバイト列を復号した空間</b>の値で、未保存編集のあるタブのバッファとは一致しない
+/// (エディタと grep で文字コード判定の窓も違う)。ジャンプ先の解決には
+/// <c>GrepJumpResolver.Resolve</c> を使い、<see cref="AbsoluteOffset"/> を選択位置へ流用しないこと。
+/// </remarks>
 public sealed record GrepHit(
     string FilePath, // 絶対パス
     int LineNumber, // 1 始まり
     int Column, // 1 始まり（行内 UTF-16 桁・最初のマッチ）
-    string LineText, // 行内容（EOL 除外・表示用）
+    string LineText, // 行内容（EOL 除外・表示用 / A-18 の照合キー）
     int MatchStartInLine, // 行内 UTF-16 オフセット（0 始まり）
     int MatchLength, // マッチ長（UTF-16）
     int AbsoluteOffset
-); // ファイル先頭からの UTF-16 オフセット（ジャンプ用）
+); // ファイル先頭からの UTF-16 オフセット（ディスク基準・ジャンプには使わない=A-18）
 
 /// <summary>grep の要求。FilePatterns は ";"/"," 区切りの glob（空＝全ファイル）。</summary>
 public sealed record GrepRequest(
