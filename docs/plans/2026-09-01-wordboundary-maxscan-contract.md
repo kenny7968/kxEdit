@@ -328,10 +328,20 @@ EOF
 
 ---
 
-## Task 3: 陳腐化したテスト `<remarks>` を実態へ書き換える
+## Task 3: 陳腐化したテスト `<remarks>` を実態へ書き換え、EOF 経路の網を足す
+
+> **2026-09-01 改訂(Task 2 の仕様レビュー Important-1 / 再レビュー Important-3 を受けて)**
+> 当初この Task は「assert / InlineData / fixture は一切変更しない」を条件にしていた。
+> しかし Task 2 のレビューで **`WordStart` の EOF 経路(`pos >= CharLength`)× `maxScan <= 0`
+> はリポジトリ全体で無網**であることが判明し(既存 Theory は `pos=4000` / `CharLength=5000` で
+> `pos + 1` 経路しか通していない)、設計書 §12.7 が「網は Task 3 で足す」と記録した。
+> **その約束と本 Task の禁止条項が矛盾していた**ため、`Assert.` 行の追加を
+> **EOF ケース 1 本に限って許可**する。これを緩めないと、穴が空いたまま
+> 「塞いだ」と記録が残る=このリポジトリが繰り返し戒めている嘘の安全宣言になる。
+> **既存の assert / InlineData / fixture の変更・削除は引き続き禁止。**
 
 **Files:**
-- Modify: `tests/kxEdit.Core.Tests/Editing/WordBoundaryTests.cs`(305-306 行目付近)
+- Modify: `tests/kxEdit.Core.Tests/Editing/WordBoundaryTests.cs`(305-306 行目付近 + 既存 Theory 本体)
 
 この 2 行は「ビルド / CI / ローカルゲートはすべて Release 構成なので発火しない」と書いており、
 **Debug 構成で 4 件赤だった事実そのものを見落としている**。残すと同じ勘違いを再生産する。
@@ -356,41 +366,82 @@ EOF
     /// 以後この Theory は <b>Debug / Release の両構成で緑</b>であり、両方がゲートで走る。
 ```
 
-**Step 2: 本体が 1 文字も変わっていないことを確認**
+**Step 2: EOF 経路の網を 1 本足す**
+
+既存 Theory `MaxScan_NonPositive_NeverRemovesScanLimit` の**末尾に assert を 1 本追加**する
+(fixture `'a' × 5000` をそのまま使うので `CharLength = 5000`)。
+
+```csharp
+        // EOF 経路(pos >= CharLength)は PrevWordStart(pos) 委譲=pos + 1 を渡さないため、
+        // 内部経路と違って pos ではなく pos の 1 code point 左になる。
+        // 2026-09-01 の Task 2 仕様レビュー Important-1 で、この経路が無網のまま
+        // xmldoc に「WordStart = pos」と書かれていたことが判明した(設計書 §12.7)。
+        Assert.Equal(4999, WordBoundary.WordStart(snap, 5000, maxScan));
+```
+
+**既存の 4 assert・`[InlineData]` 4 本・`var snap = S(new string('a', 5000));` は
+1 文字も変更しないこと。** 追加はこの 1 行(+ コメント)だけ。
+
+**Step 3: 追加した網が本当に網として働くことを確かめる**
+
+期待値を書いただけでは「網がある」と言えない。**わざと落ちることを 1 度見てから**進める。
+
+```bash
+# 期待値を 5000(訂正前の xmldoc が主張していた値)に一時的に変えて実行
+dotnet test tests/kxEdit.Core.Tests -c Debug --filter "FullyQualifiedName~MaxScan_NonPositive"
+```
+
+期待: **4 件とも赤**になり、`Assert.Equal() Failure: Expected: 5000 / Actual: 4999` が出る。
+赤にならなければ、その assert は何も固定していない。**確認後、必ず 4999 へ戻す。**
+
+**Step 4: 本体の変更が追加 1 本だけであることを確認**
 
 ```bash
 git diff -- tests/kxEdit.Core.Tests/Editing/WordBoundaryTests.cs
 ```
 
-期待: 差分は `///` で始まる行**だけ**。`Assert.` / `[InlineData` / `var snap =` を含む行が
-差分に現れたら**戻す**(fixture と assert は不変が本タスクの条件)。
+期待: 差分は `///` で始まる行と、**Step 2 で追加した assert 1 行 + そのコメント**だけ。
+既存の `Assert.` / `[InlineData` / `var snap =` の行が **`-` 側に現れたら戻す**
+(既存 fixture と既存 assert は不変が本タスクの条件)。
 
-**Step 3: フォーマット検証とテスト**
+**Step 5: フォーマット検証とテスト**
 
 ```bash
 dotnet csharpier check .
 dotnet test tests/kxEdit.Core.Tests -c Debug
+dotnet test tests/kxEdit.Core.Tests -c Release
 ```
 
-期待: csharpier が無出力で終了。テストは 失敗 0 / 合格 1340。
+期待: csharpier が無出力で終了。テストは**両構成とも 失敗 0 / 合格 1340 / 合計 1340**。
+**合計は 1340 のまま変わらない**(既存 Theory のメソッド内に assert を足したので
+テスト件数は増えない)。1341 以上になっていたら新しい `[Fact]` / `[Theory]` を
+足してしまっている。
 
-**Step 4: commit**
+**Step 6: commit**
 
-```bash
-git add tests/kxEdit.Core.Tests/Editing/WordBoundaryTests.cs
-git commit -m "$(cat <<'EOF'
-docs(test): MaxScan_NonPositive の remarks を実態へ書き換える
+コミットメッセージはヒアドキュメントが壊れることがあるので、
+スクラッチパッドにファイルとして書いて `git commit -F <file>` を使うこと
+(CLAUDE.md 環境ノート)。
 
-「ビルド / CI / ローカルゲートはすべて Release 構成なので発火しない」という
-記述は、この Theory が Debug 構成で 4 件赤だった事実そのものを見落としていた。
-そのまま残すと同じ勘違いを再生産するので、S-5 の経緯と「以後は両構成で緑・
-両方がゲートで走る」へ書き換える。
+```
+test(core): MaxScan_NonPositive に EOF 経路の網を足し、remarks を実態へ書き換える
 
-assert / InlineData / fixture は 1 文字も変更していない。
+remarks の「ビルド / CI / ローカルゲートはすべて Release 構成なので発火しない」は、
+この Theory が Debug 構成で 4 件赤だった事実そのものを見落としていた。そのまま
+残すと同じ勘違いを再生産するので、S-5 の経緯と「以後は両構成で緑・両方が
+ゲートで走る」へ書き換える。
+
+あわせて WordStart の EOF 経路(pos >= CharLength)の assert を 1 本足す。
+Task 2 の仕様レビュー Important-1 で、この経路は pos + 1 を渡さないため
+maxScan <= 0 のとき pos ではなく pos の 1 code point 左を返すこと、そして
+リポジトリ全体で無網だったことが判明した(既存 Theory は pos=4000 /
+CharLength=5000 で内部経路しか通していない)。xmldoc だけ直して網を足さないと
+同じ穴が残る(設計書 §12.7)。
+
+期待値を 5000 に変えると 4 件とも赤になることを確認済み(網として働いている)。
+既存の 4 assert・InlineData 4 本・fixture は 1 文字も変更していない。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-EOF
-)"
 ```
 
 ---
