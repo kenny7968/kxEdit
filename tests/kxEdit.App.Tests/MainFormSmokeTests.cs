@@ -296,6 +296,58 @@ public class MainFormSmokeTests
             Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
         });
 
+    /// <summary>
+    /// 設計書 §3.3(A-3 同型): SetSelectionCharRange は Anchor/Caret 無変化で早期 return する
+    /// (EditorControl.Caret.cs:202)ため、同じヒットへ再ジャンプするとスクロールが追従しない。
+    /// ホイールでのスクロール退避を TopLine の代入で再現する(キャレットは動かない)。
+    /// </summary>
+    [Fact]
+    public void OpenAndSelect_SameHitTwice_ScrollsBackIntoView() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string path = tmp.File("many-lines.txt");
+            var lines = Enumerable.Range(0, 200).Select(i => $"line{i}").ToArray();
+            File2.WriteAllText(path, string.Join("\r\n", lines));
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var hit = GrepHitFor(
+                path,
+                lineNumber: 200,
+                lineText: "line199",
+                matchStart: 0,
+                matchLength: 4
+            );
+
+            form.OpenAndSelect(hit);
+            var doc = form.FileForTest.TryOpenOrActivate(path);
+            Assert.NotNull(doc);
+            Assert.True(doc!.Editor.TopLine > 0, "1 回目のジャンプで既にスクロールしている前提");
+
+            // ホイールでのスクロール退避を再現: TopLine だけ動きキャレットは不動。
+            doc.Editor.TopLine = 0;
+            var selBefore = doc.Editor.GetSelectionCharRange();
+
+            form.OpenAndSelect(hit); // 同じヒットへ再ジャンプ
+
+            // 選択は無変化(=SetSelectionCharRange は早期 return する経路に入っている)。
+            Assert.Equal(selBefore, doc.Editor.GetSelectionCharRange());
+            // それでもスクロールは追従する。
+            int visibleRows = Math.Max(
+                1,
+                doc.Editor.ClientSize.Height / Math.Max(1, doc.Editor.LineHeightPx)
+            );
+            Assert.True(
+                doc.Editor.TopLine > 0,
+                $"expected TopLine > 0 after re-jump, got {doc.Editor.TopLine}"
+            );
+            Assert.InRange(
+                doc.Editor.CurrentLine,
+                doc.Editor.TopLine,
+                doc.Editor.TopLine + visibleRows - 1
+            );
+        });
+
     // ===== A-18: 未保存編集のあるタブへのジャンプ =====
 
     /// <summary>

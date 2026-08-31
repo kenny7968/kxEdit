@@ -1087,6 +1087,11 @@ public sealed partial class MainForm : Form
             return;
         var t = GrepJumpResolver.Resolve(hit, doc.Editor.CurrentBuffer.Current);
         doc.Editor.SelectCharRange(t.BufferOffset, t.Length);
+        // 設計書 §3.3(A-3 同型): SetSelectionCharRange は Anchor/Caret 無変化で早期 return し
+        // BringCaretIntoView へ到達しない。ジャンプは「移動先を必ず見せる」操作なので、
+        // 同じヒットへ再ジャンプしたとき(ホイールでスクロール退避 → 同じ行を再選択)にも
+        // 追従するよう、ジャンプ導線の側で明示的に呼ぶ。
+        doc.Editor.BringCaretIntoView();
         doc.FocusTarget.Focus();
         // ジャンプ先のファイル名と行を明示通知（選択移動の自動読みに加え、別ファイルへ飛んだ文脈を補う）。
         string where = $"{doc.State.DisplayName} {doc.Editor.CurrentLine + 1} 行目";
