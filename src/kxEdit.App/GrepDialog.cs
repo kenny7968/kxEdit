@@ -45,10 +45,19 @@ public sealed class GrepDialog : Form, IGrepView
     };
     private readonly IAnnouncer _announcer;
 
-    public GrepDialog(GrepCallbacks callbacks, IAnnouncer announcer)
+    /// <summary>A-17: 参照ボタンのフォルダー確認を境界付きにするためのプローブ(テストでは Fake)。</summary>
+    private readonly IReachabilityProbe _probe;
+
+    public GrepDialog(
+        GrepCallbacks callbacks,
+        IAnnouncer announcer,
+        IReachabilityProbe? probe = null
+    )
     {
         _cb = callbacks;
         _announcer = announcer;
+        // FileMetaProvider / FileTimestampProvider と同型の既定注入(本番は MainForm から何も渡さない)。
+        _probe = probe ?? new FileReachabilityProbe();
         Text = "フォルダ検索 (grep)";
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         StartPosition = FormStartPosition.CenterParent;
@@ -120,11 +129,24 @@ public sealed class GrepDialog : Form, IGrepView
         _announcer.Say(message);
     }
 
+    /// <summary>
+    /// 参照ダイアログの初期フォルダー。確認できなければ <c>null</c>(= 初期設定しない)。
+    /// <para>A-17: 切断済みリモート共有への <see cref="Directory.Exists"/> は SMB タイムアウト
+    /// (約 60 秒)まで返らないため、リモートのときだけ 5 秒の境界付きプローブへ回す。
+    /// フェイルセーフは「初期位置を諦める」だけで、参照ダイアログ自体は従来どおり開く。</para>
+    /// <para><c>BrowseFolder</c> から切り出してあるのは、本体が
+    /// <see cref="FolderBrowserDialog"/> をモーダルで開く=自動テストから叩けないため。
+    /// 判断だけをここに置くことで、プローブへ渡す path とタイムアウト(5 秒契約)に
+    /// 網を張れるようにする。</para>
+    /// </summary>
+    private string? InitialBrowsePath() =>
+        RemoteAwareDirectory.Exists(_probe, _folder.Text) ? _folder.Text : null;
+
     private void BrowseFolder()
     {
         using var dlg = new FolderBrowserDialog();
-        if (Directory.Exists(_folder.Text))
-            dlg.SelectedPath = _folder.Text;
+        if (InitialBrowsePath() is string initial)
+            dlg.SelectedPath = initial;
         if (dlg.ShowDialog(this) == DialogResult.OK)
             _folder.Text = dlg.SelectedPath;
     }
