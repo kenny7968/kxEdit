@@ -218,6 +218,79 @@ public class TextSearcherTests
         Assert.Equal(expectedCount, count);
     }
 
+    // ----- M-29: スコープ内での再照合(2026-09-01 B2 Task 2) -----
+
+    [Fact]
+    public void ReplaceInRange_ReMatchesInsideRange_WhenWholeTextHitEatsRangeStart()
+    {
+        // M-29: 文書全体の照合では [0,2) の "aa" しか出ず m.Index < 1 で捨てられ 0 件だった。
+        // 範囲始端へ再アンカーすれば [1,3) の "aa" が見つかる。
+        // 単発置換(FindNext)は Match(text, from) なので元から当たっており、両者が食い違っていた。
+        var (fragment, count) = Make("aa").ReplaceInRange("aaa", 1, 2, "X");
+        Assert.Equal("X", fragment);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ReAnchorDoesNotCutInputContext()
+    {
+        // Match(text, startat) は入力を切らないので \b は全文文脈で評価される
+        // = 位置 1 は語中なので \b は成立しない。
+        // 範囲を substring("aa") へ切って照合する実装なら 1 件になる
+        // = この fixture が「再アンカー」と「substring 化」を弁別する唯一の形。
+        var (fragment, count) = Make(@"\baa", useRegex: true).ReplaceInRange("aaa", 1, 2, "X");
+        Assert.Equal("aa", fragment);
+        Assert.Equal(0, count);
+    }
+
+    // ----- ゼロ幅マッチの挿入点を論理文字境界へ後退させる(2026-09-01 B2 Task 2) -----
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthInsideCrlf_RetreatsToBoundary()
+    {
+        // 修正前は "a\rX\nb"=CRLF が 2 個の改行へ分裂した。
+        // 単発置換(ReplaceCharRangeExact)は挿入点を 1 へ後退させるので、そちらへ揃える。
+        var (fragment, count) = Make(@"(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 0, 4, "X");
+        Assert.Equal("aX\r\nb", fragment);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthInsideSurrogatePair_RetreatsToBoundary()
+    {
+        // 修正前はペアの内側へ挿入し、書き戻し時に孤立サロゲート 2 個が U+FFFD へ潰れた
+        // = 無警告のデータ破壊。"a😀b" = a(0) high(1) low(2) b(3)。
+        var (fragment, count) = Make(@"(?<=\ud83d)", useRegex: true)
+            .ReplaceInRange("a\U0001F600b", 0, 4, "X");
+        Assert.Equal("aX\U0001F600b", fragment);
+        Assert.Equal(1, count);
+        Assert.DoesNotContain('�', fragment);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthRetreatingBeforeRangeStart_IsSkippedAndNotCounted()
+    {
+        // 範囲 [2,4) の始端 2 は CRLF の内側。(?<=\r) はそこにヒットするが挿入点は 1 へ
+        // 後退する=範囲外。断片は範囲の中身だけを返す契約なので書かずにスキップし、
+        // 件数にも数えない("N 件置換しました" を嘘にしない)。
+        var (fragment, count) = Make(@"(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 2, 2, "X");
+        Assert.Equal("\nb", fragment);
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthRetreatingBeforeEmittedPosition_IsSkipped()
+    {
+        // "\r" を消費した直後、同じ位置(2)にゼロ幅が立つ。後退先 1 は既に出力済みなので
+        // 書けない=スキップ。後退の判定は**元テキスト**で行う(出力側には既に CRLF が無い)。
+        var (fragment, count) = Make(@"\r|(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 0, 4, "X");
+        Assert.Equal("aX\nb", fragment);
+        Assert.Equal(1, count);
+    }
+
     // ----- ゼロ幅マッチ（I-1） -----
 
     [Fact]

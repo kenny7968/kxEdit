@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using kxEdit.Core.Text;
 
 namespace kxEdit.Core.Search;
 
@@ -142,6 +143,20 @@ public sealed class TextSearcher
     /// [start, start+length) に完全に収まるヒットだけ置換し、その範囲の置換後断片と件数を返す。
     /// 範囲外・境界をまたぐヒットは対象外。start/length は text 範囲へクランプする。
     /// エディタはこの断片で当該文字範囲を差し替える。
+    /// <para>
+    /// <b>照合は範囲始端へ再アンカーする</b>(<c>Match(text, scan)</c>)。全文照合の結果を
+    /// 捨てるだけだと、範囲直前から始まるヒットが範囲内の文字を食って範囲内のヒットが
+    /// 消える(監査 M-29: <c>"aaa"</c> の <c>[1,3)</c> を <c>aa</c> で 0 件)。
+    /// <c>startat</c> は<b>入力を切らない</b>ので <c>\b</c>・先読み・後読みは全文文脈のまま。
+    /// </para>
+    /// <para>
+    /// <b>ゼロ幅マッチの挿入点は論理文字の境界まで後退させる</b>
+    /// (<c>EditorControl.ReplaceCharRangeExact</c> と同じ規則。規則の所有者は
+    /// <see cref="Text.TextBoundary"/>)。後退させないと CRLF やサロゲートペアの内側へ挿入して
+    /// しまい、書き戻し時に孤立サロゲートが U+FFFD へ潰れる。後退先が範囲始端より前
+    /// / 既に出力した位置より前になるマッチは<b>スキップし件数にも数えない</b>。
+    /// 後退の判定は<b>元テキスト</b>に対して行う(単発置換も編集前スナップショットで判定する)。
+    /// </para>
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
     /// </summary>
     public (string Fragment, int Count) ReplaceInRange(
@@ -158,17 +173,28 @@ public sealed class TextSearcher
 
         var sb = new StringBuilder();
         int count = 0,
-            pos = s;
-        foreach (Match m in _regex.Matches(text))
+            pos = s,
+            scan = s;
+        while (scan <= end)
         {
-            if (m.Index < s)
-                continue;
-            if (m.Index + m.Length > end)
+            var m = _regex.Match(text, scan);
+            if (!m.Success || m.Index + m.Length > end)
                 break;
-            sb.Append(text, pos, m.Index - pos);
+            int at =
+                m.Length == 0
+                    ? TextBoundary.SnapToLogicalCharStart(text.AsSpan(), m.Index)
+                    : m.Index;
+            if (at < pos)
+            {
+                // 範囲始端より前 / 既に出力した位置より前へは書けない。
+                scan = m.Index + 1; // ゼロ幅なので必ず 1 進める(同位置の無限ループ回避)
+                continue;
+            }
+            sb.Append(text, pos, at - pos);
             sb.Append(Expand(m, replacement));
-            pos = m.Index + m.Length;
+            pos = at + m.Length;
             count++;
+            scan = m.Index + Math.Max(1, m.Length);
         }
         sb.Append(text, pos, end - pos);
         return (sb.ToString(), count);
