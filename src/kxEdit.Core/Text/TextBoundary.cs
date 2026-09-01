@@ -9,17 +9,31 @@ namespace kxEdit.Core.Text;
 /// <c>'\r'</c> + <c>'\n'</c> の並び判定を手書きしないこと。2026-07-31 に 15 ファイル・22 箇所へ
 /// 散っていた手書き判定をここへ寄せた(うち 1 件は Task 6 のセルフレビューで見つけた棚卸し漏れ)。
 /// 規則を変えるときに直す場所が
-/// <b>本ファイルの境界述語 4 つと span 版 3 メソッドだけ</b>で済む状態を保つこと。
+/// <b>本ファイルの境界述語 6 つ(snapshot 4 + span 2)と、下に挙げる例外 1 つだけ</b>で済む
+/// 状態を保つこと。
 /// 述語は「前進 / 後退」×「サロゲート / CRLF」の 2×2 で、片方向だけ直して逆方向を落とす失敗
 /// (2026-07-24 に実際に起きた)を欠けが見える形で防ぐためにこの構成にしている:
 /// <list type="bullet">
 /// <item>前進: <see cref="IsSurrogatePairStartingAt"/> / <see cref="IsCrlfStartingAt"/></item>
-/// <item>後退・スナップ: <see cref="IsSurrogatePairEndingAt"/> / <see cref="IsCrlfEndingAt"/></item>
+/// <item>後退・スナップ: <see cref="IsSurrogatePairEndingAt(TextSnapshot, int, char)"/> /
+/// <see cref="IsCrlfEndingAt(TextSnapshot, int, char)"/>
+/// (span 版: <see cref="IsSurrogatePairEndingAt(ReadOnlySpan{char}, int, char)"/> /
+/// <see cref="IsCrlfEndingAt(ReadOnlySpan{char}, int, char)"/>)</item>
 /// </list>
 /// <b>述語を 1 つでもインライン展開して登録簿から外さないこと。</b> 単一利用でも述語のまま残す
 /// (登録簿は完全でなければ「ここだけ直せばよい」という宣言そのものが罠になる)。
-/// span 版 3 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
-/// 共有できないから(共有すると短絡が効かず読みが増える)。規則が 2 実装に分かれる分の drift は、
+/// <b>span 版も述語を持つ</b>(2026-09-01 B2)。<c>TextSnapshot</c> 版と読み口が違うので
+/// <c>snap.GetChar</c> ↔ indexer の間では述語を共有できないが、<b>span ↔ span は共有できる</b>=
+/// 後退・スナップ側の 2 規則は
+/// <see cref="IsSurrogatePairEndingAt(ReadOnlySpan{char}, int, char)"/> /
+/// <see cref="IsCrlfEndingAt(ReadOnlySpan{char}, int, char)"/> に括ってあり、
+/// <see cref="SnapToCodePointStart"/> と
+/// <see cref="SnapToLogicalCharStart(ReadOnlySpan{char}, int)"/> はこれを呼ぶだけ。
+/// <b>残る例外は <see cref="CodePointLengthAt(ReadOnlySpan{char}, int)"/> の前進判定 1 箇所</b>
+/// (span 側で前進規則を要るのがここだけなので述語化していない。span 版で前進側を触るコードが
+/// もう 1 つ増えたら、そのとき述語へ括ること)。
+/// span 版述語は<b>対応する snapshot 版の直後に置く</b>: 離すと Sonar <c>S4136</c> で落ちる。
+/// 規則が snapshot / span の 2 実装に分かれる分の drift は、
 /// <b>射程の違う全数テスト 2 本</b>(snapshot 版との同値 + snapshot を通さない事後条件)で防ぐ。
 /// <b>片方だけでは穴が開く</b>=どちらの網がどの変異を殺すかの実測は
 /// <see cref="SnapToLogicalCharStart(ReadOnlySpan{char}, int)"/> の remarks に書いてある。
@@ -101,7 +115,9 @@ namespace kxEdit.Core.Text;
 public static class TextBoundary
 {
     // ===== 境界述語(規則の唯一の定義。規則を変えるときはここだけを直す) =====
-    // 前進 / 後退 × サロゲート / CRLF の 2×2 をすべて述語として持つ。
+    // snapshot 版は 前進 / 後退 × サロゲート / CRLF の 2×2 をすべて述語として持つ。
+    // span 版は後退・スナップ側の 2 本(span 側で前進規則が要るのは CodePointLengthAt だけなので)。
+    // オーバーロードは隣接させること(Sonar S4136)。
     // 片方向だけを直して逆方向を落とす失敗(2026-07-24)を、欠けが見えることで防ぐ。
     // GetChar は安くないため、呼び出し側が既に読んだ char は引数で受け取り再読を避ける。
 
@@ -125,6 +141,17 @@ public static class TextBoundary
         char.IsLowSurrogate(charAtPos) && char.IsHighSurrogate(snap.GetChar(pos - 1));
 
     /// <summary>
+    /// span 版。<paramref name="pos"/>(= low サロゲート側)で終わるサロゲートペアか。
+    /// </summary>
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>text[pos]</c>。</param>
+    /// <remarks>
+    /// <paramref name="pos"/> &gt; 0 は呼び出し側が保証する(<c>pos - 1</c> を読むため)。
+    /// snapshot 版のすぐ隣に置くこと: 離すと Sonar <c>S4136</c>(オーバーロードは隣接)で落ちる。
+    /// </remarks>
+    private static bool IsSurrogatePairEndingAt(ReadOnlySpan<char> text, int pos, char charAtPos) =>
+        char.IsLowSurrogate(charAtPos) && char.IsHighSurrogate(text[pos - 1]);
+
+    /// <summary>
     /// <paramref name="pos"/>(= CR 側)から始まる CRLF pair か(前進側の規則の唯一の定義)。
     /// </summary>
     /// <param name="charAtPos">呼び出し側が既に読んだ <c>snap.GetChar(pos)</c>。</param>
@@ -139,6 +166,17 @@ public static class TextBoundary
     /// (<c>pos - 1</c> を読むため)。</remarks>
     private static bool IsCrlfEndingAt(TextSnapshot snap, int pos, char charAtPos) =>
         charAtPos == '\n' && snap.GetChar(pos - 1) == '\r';
+
+    /// <summary>
+    /// span 版。<paramref name="pos"/>(= LF 側)で終わる CRLF pair か。
+    /// </summary>
+    /// <param name="charAtPos">呼び出し側が既に読んだ <c>text[pos]</c>。</param>
+    /// <remarks>
+    /// <paramref name="pos"/> &gt; 0 は呼び出し側が保証する(<c>pos - 1</c> を読むため)。
+    /// snapshot 版のすぐ隣に置くこと: 離すと Sonar <c>S4136</c>(オーバーロードは隣接)で落ちる。
+    /// </remarks>
+    private static bool IsCrlfEndingAt(ReadOnlySpan<char> text, int pos, char charAtPos) =>
+        charAtPos == '\n' && text[pos - 1] == '\r';
 
     // ===== コードポイント単位: サロゲートのみ atomic・CR と LF は別々に数える =====
 
@@ -203,7 +241,8 @@ public static class TextBoundary
             return 0;
         if (i >= text.Length)
             return text.Length;
-        return char.IsLowSurrogate(text[i]) && char.IsHighSurrogate(text[i - 1]) ? i - 1 : i;
+        // CRLF は見ない(コードポイント単位)ので、サロゲート側の述語だけを呼ぶ。
+        return IsSurrogatePairEndingAt(text, i, text[i]) ? i - 1 : i;
     }
 
     // ===== 論理文字単位: サロゲート + CRLF atomic =====
@@ -259,6 +298,13 @@ public static class TextBoundary
     /// span 版。<c>TextSnapshot</c> を持たない呼び出し側(<c>Core.Search</c> が材質化した
     /// 本文 string 等)向け。論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
     /// 前方(pair 先頭)へスナップする。[0, text.Length] の外はクランプ。
+    ///
+    /// <b>span の両端は無条件に論理文字境界とみなす</b>(<c>pos == 0</c> で <c>text[-1]</c> を、
+    /// <c>pos == text.Length</c> で <c>text[Length]</c> を読まない)。したがって<b>より大きな
+    /// テキストの「窓」を渡すと、窓外へまたがる pair は見えない</b>=窓の先頭が low サロゲート /
+    /// LF でも動かさない。<see cref="CodePointLengthAt(ReadOnlySpan{char}, int)"/> が末尾の孤立
+    /// high サロゲートを 1 と数えるのと同じ流儀。窓を渡す呼び出し側は、<b>論理文字を割らない位置で
+    /// 窓を切る責任を持つ</b>(行単位で切るなら改行を含めない=CRLF の内側で切らない)。
     /// </summary>
     /// <remarks>
     /// <see cref="SnapToCodePointStart"/>(サロゲートのみ)と違い <b>CRLF も 1 論理文字として見る</b>。
@@ -287,9 +333,9 @@ public static class TextBoundary
         if (pos >= text.Length)
             return text.Length;
         char c = text[pos];
-        bool endsSurrogatePair = char.IsLowSurrogate(c) && char.IsHighSurrogate(text[pos - 1]);
-        bool endsCrlf = c == '\n' && text[pos - 1] == '\r';
-        return endsSurrogatePair || endsCrlf ? pos - 1 : pos;
+        if (IsSurrogatePairEndingAt(text, pos, c) || IsCrlfEndingAt(text, pos, c))
+            return pos - 1;
+        return pos;
     }
 
     /// <summary>

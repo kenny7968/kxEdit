@@ -336,6 +336,11 @@ public class TextBoundaryTests
         // 対を成さない片割れは論理文字を作らないので動かさない(snapshot 版と同じ規則)。
         Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\nb".AsSpan(), 1));
         Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\uDE00b".AsSpan(), 1));
+        // high サロゲート 2 連: pos は「サロゲートではあるが low ではない」=ペアを終えない。
+        // IsLowSurrogate を IsSurrogate へ緩める変異はここでしか殺せない
+        // (snapshot 版は TextBuffer が U+FFFD へ潰すため、この形に到達できない)。
+        // 既存 span 族の CodePointLengthAt_Span_HighSurrogateFollowedByNonLow_IsOne と対になる。
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("\uD83D\uD83D".AsSpan(), 1));
     }
 
     [Fact]
@@ -375,6 +380,35 @@ public class TextBoundaryTests
     }
 
     [Fact]
+    public void ShortStringsOverBoundaryAlphabet_CoversAllStringsUpToLengthFour_WithoutDuplicates()
+    {
+        // 「全数で固定してある」という主張そのものをピン留めする。これが無いと、alphabet の typo・
+        // ループ境界の編集・yield return "" の削除で被覆が静かに落ちてもテストは緑のままになり、
+        // 下 2 本が「全数」を騙る(嘘の安全宣言)。
+        var all = ShortStringsOverBoundaryAlphabet().ToList();
+        // 5^0 + 5^1 + 5^2 + 5^3 + 5^4 = 1 + 5 + 25 + 125 + 625 = 781
+        Assert.Equal(781, all.Count);
+        Assert.Equal(781, all.Distinct().Count()); // 重複が水増ししていない
+        Assert.Contains("", all); // 空文字列(長さ 0)を落としていない
+        Assert.Equal(4, all.Max(s => s.Length)); // 長さ 4 まで届いている
+        Assert.Equal(5, all.SelectMany(s => s).Distinct().Count()); // alphabet が 5 code unit
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LowSurrogateAtIndexZero_DoesNotReadBeforeStart()
+    {
+        // span の端は無条件に境界とみなす契約(xmldoc)を名前付きで固定する。
+        // より大きなテキストの「窓」を渡すと窓外へまたがる pair は見えない=窓の先頭が
+        // low サロゲート / LF でも動かさない(text[-1] を読まない)。
+        // 既存 span 族の SnapToCodePointStart_Span_LowSurrogateAtIndexZero_DoesNotReadBeforeStart
+        // の対応物。CRLF 側は snapshot 版の _LfAtDocumentStart_DoesNotReadBeforeStart と対。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("\uDE00b".AsSpan(), 0));
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("\nabc".AsSpan(), 0));
+        // 窓が CRLF を割っている場合(直前の '\r' は窓の外)も動かさない。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("a\r\nb".AsSpan(2, 2), 0));
+    }
+
+    [Fact]
     public void SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive()
     {
         foreach (string raw in ShortStringsOverBoundaryAlphabet())
@@ -384,10 +418,17 @@ public class TextBoundaryTests
             // 孤立サロゲートは U+FFFD へ潰れ、raw と snapshot の中身は一致しない。
             string text = snap.GetText(0, snap.CharLength);
             for (int pos = -2; pos <= text.Length + 2; pos++)
-                Assert.Equal(
-                    TextBoundary.SnapToLogicalCharStart(snap, pos),
-                    TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos)
+            {
+                // Assert.Equal はメッセージを付けられない。781 本 × 全 pos のどれで落ちたかが
+                // 判らないと原因究明できないので Assert.True + 明示メッセージにする。
+                int fromSnapshot = TextBoundary.SnapToLogicalCharStart(snap, pos);
+                int fromSpan = TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos);
+                Assert.True(
+                    fromSnapshot == fromSpan,
+                    $"snapshot/span mismatch: '{Escape(text)}' pos={pos} "
+                        + $"snapshot={fromSnapshot} span={fromSpan}"
                 );
+            }
         }
     }
 
@@ -401,19 +442,36 @@ public class TextBoundaryTests
             {
                 int got = TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos);
                 int clamped = Math.Max(0, Math.Min(pos, text.Length));
-                Assert.InRange(got, 0, text.Length);
-                Assert.True(got <= clamped, $"forward move: '{Escape(text)}' pos={pos} got={got}");
+                string where = $"'{Escape(text)}' pos={pos} got={got} clamped={clamped}";
                 Assert.True(
-                    clamped - got <= 1,
-                    $"moved more than 1: '{Escape(text)}' pos={pos} got={got}"
+                    got >= 0 && got <= text.Length,
+                    $"out of range: {where} len={text.Length}"
                 );
-                // 結果は論理文字の内側を指さない。
+                Assert.True(got <= clamped, $"forward move: {where}");
+                Assert.True(clamped - got <= 1, $"moved more than 1: {where}");
+                // (1) 結果は論理文字の内側を指さない。
                 if (got > 0 && got < text.Length)
                 {
                     Assert.False(
-                        char.IsLowSurrogate(text[got]) && char.IsHighSurrogate(text[got - 1])
+                        char.IsLowSurrogate(text[got]) && char.IsHighSurrogate(text[got - 1]),
+                        $"landed inside surrogate pair: {where}"
                     );
-                    Assert.False(text[got] == '\n' && text[got - 1] == '\r');
+                    Assert.False(
+                        text[got] == '\n' && text[got - 1] == '\r',
+                        $"landed inside CRLF: {where}"
+                    );
+                }
+                // (2) iff の残り半分: 動いたなら、動く必要が実際にあった。
+                // これが無いと「動くべきでないときに動く」過剰スナップ系の変異
+                // (IsLowSurrogate → IsSurrogate 等)が族ごと素通りする。
+                if (got != clamped)
+                {
+                    bool mustMove =
+                        (
+                            char.IsLowSurrogate(text[clamped])
+                            && char.IsHighSurrogate(text[clamped - 1])
+                        ) || (text[clamped] == '\n' && text[clamped - 1] == '\r');
+                    Assert.True(mustMove, $"moved but need not: {where}");
                 }
             }
         }

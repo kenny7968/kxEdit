@@ -81,7 +81,8 @@ internal sealed class CaretController
     /// キャレット/選択のすべての位置設定入り口が本メソッドを通るため、ここで一度スナップすれば
     /// mid-surrogate / mid-CRLF は不変条件として守られる。
     /// </summary>
-    /// <remarks>2026-07-31: 判定の実体は <see cref="TextBoundary.SnapToLogicalCharStart"/> へ移した
+    /// <remarks>2026-07-31: 判定の実体は
+    /// <see cref="TextBoundary.SnapToLogicalCharStart(TextSnapshot, int)"/> へ移した
     /// (同じ規則が Core / UIA / ここの 3 箇所に散っていたため)。</remarks>
     public static int SnapAndClamp(int offset, TextSnapshot snap) =>
         TextBoundary.SnapToLogicalCharStart(snap, offset);
