@@ -337,4 +337,61 @@ CLAUDE.md §4-A により、本ブランチは**原則対象外**(ファイル I
 
 ## 10. 実施記録
 
-(実装時に追記する)
+### 10.1 Task 1 — RCS1194 が基底 `IOException` の hresult ctor まで要求した
+
+**計画のコードは `-warnaserror` を通らなかった。** 実装計画 Task 1 のソースをそのまま置くと
+`AtomicReplaceFailedException.cs(17,21): error RCS1194: Implement exception constructors` で停止する。
+
+原因: RCS1194 は**基底型の public ctor をすべて鏡像実装する**ことを要求する。計画が前例に挙げた
+`DocumentTooLargeException` は基底が `Exception`(public ctor は 3 種)なので標準 ctor 3 種で足りて
+いたが、本型の基底 `IOException` には **`IOException(string message, int hresult)`** があり、
+これも鏡像実装しろと言ってくる。前例の当てはめが基底型の違いを見落としていた。
+
+**採った解決**: 理由コメント付きの `#pragma warning disable RCS1194`(class 宣言のみを囲む最小スコープ)。
+リポジトリ既存の単一箇所抑止パターン(`// reason:` 付き pragma・src 内に 5 例)に倣った。
+`.editorconfig` のリポジトリ全体設定は触っていない。
+
+**退けた案 1 — public な鏡像 ctor**: HResult を外から与える ctor は §3.4 の不変条件
+(「共有/ロック違反と一致しない HResult を持つ」)を**公開 API の穴**にする。
+`IsShareOrLockViolation` が真になれば、原本喪失後に in-place フォールバックへ流れる。
+
+**退けた案 2 — private な鏡像 ctor**: 実測では RCS1194 は消え、S1144 / CA1823 等の未使用警告も
+出ない(技術的には成立する)。それでも採らないのは、誰も呼ばない private ctor は「なぜあるのか」が
+コードから読めず、将来の掃除で消されて再びビルドが割れるため。抑止理由をコメントとして残せる
+pragma の方が意図が保存される。
+
+#### 実測で確定した事実(想定ではない・Task 3 の前提そのもの)
+
+一時プローブで測った値。`{既定 IOException} / {inner=0x80070020 で作った outer} / {パラメータレス ctor} / {inner}`:
+
+```
+80131620/80131620/80131620/80070020
+```
+
+- `IOException` 既定の HResult は **`0x80131620`**(COR_E_IO)であり、共有/ロック違反
+  (`0x80070020` / `0x80070021`)と**一致しない**。
+- **inner の HResult は outer へ伝播しない。** 共有違反を inner に持たせて
+  `AtomicReplaceFailedException` を作っても、outer の HResult は既定値のままだった。
+  Task 3 で `File.Replace` が投げた共有違反例外を inner に包んでも、
+  `IsShareOrLockViolation(outer)` は false のままでよい、という前提はこれで裏が取れている。
+
+#### 仕様レビューで塞いだ網の穴 2 件(いずれも変異を当てて生存を実測した)
+
+1. **テスト #1 の fixture が既定状態から始まっていた。** `replaceError` が素の
+   `new IOException(...)` = HResult 既定値 `0x80131620` で、outer の既定値と同じだった。
+   そのため主 ctor に `HResult = replaceError.HResult;`(「元のエラーコードを保存しよう」という
+   善意の変異)を足しても **3 PASS のまま生存**した。本番で `File.Replace` が投げるのは共有違反が
+   最も多く、§3.4 が恐れている当の経路である。fixture を `HResult = 0x80070020` から始める形へ
+   直したうえで同じ変異を当て直し、`Assert.False() Failure / Expected: False / Actual: True` で
+   殺せることを確認した。CLAUDE.md §4-B「no-change テストは非既定状態から始める」と同型の欠陥。
+2. **テスト #2 の Message assertion が targetPath 側を見ていなかった。** tmp パスは targetPath を
+   部分文字列として含む(`C:\dir\doc.txt` + `.abc.tmp`)ため、`Assert.Contains(tmpPath, ex.Message)`
+   だけでは補間から `'{targetPath}'` を丸ごと削る変異を**素通し**した(3 PASS のまま生存)。
+   引用符で閉じた形(`'C:\dir\doc.txt'`)の assertion を足して、
+   `Assert.Contains() Failure: Sub-string not found` で殺せることを確認した。
+
+#### 申し送り(Task 3 / Task 4 で確認する)
+
+`AtomicReplaceFailedException` は `IOException` 派生なので、App 層の広い `catch (IOException)` が
+これを握り潰し、`PreservedTempPath` をユーザーに見せないまま「保存に失敗しました」で終わる経路が
+ありうる。tmp を残す意味が消えるので、Task 3 / Task 4 で catch 経路を確認すること。
