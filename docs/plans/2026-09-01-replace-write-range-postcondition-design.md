@@ -87,8 +87,9 @@ PR #56 §9.1 のとおり**保存層の制約**であり、単発・一括のど
 `EditorControl` に、**書かずに実書込範囲だけを返す**照会 API を足す。
 
 ```csharp
-/// <summary>ReplaceCharRangeExact が同じ引数で実際に書き換える文字範囲を、何も書かずに返す。</summary>
-public (int Start, int End) GetExactWriteRange(int start, int length)
+/// <summary>ReplaceCharRangeExact が同じ引数で呼ばれたとき、
+/// 本文の内容が変わりうる文字範囲を、何も書かずに返す。</summary>
+public (int Start, int End) GetExactChangeRange(int start, int length)
 ```
 
 `ReplaceOne` / `ReplaceAll` は**書く直前**にこれを呼び、スコープ包含を検査して外れるなら
@@ -97,7 +98,7 @@ public (int Start, int End) GetExactWriteRange(int start, int length)
 ```csharp
 if (scope is { } sc)
 {
-    var w = ed.GetExactWriteRange(span.Start, span.Length);
+    var w = ed.GetExactChangeRange(span.Start, span.Length);
     if (w.Start < sc.Start || w.End > sc.End)
     {
         Announce("選択範囲の外に及ぶため置換できません");
@@ -114,23 +115,38 @@ if (scope is { } sc)
 
 **規則の二重実装を作らないこと**が本 seam の唯一の要求である。範囲計算を private ヘルパー
 `ExactRangeParts(snap, start, length) → (S0, E0, S, E)` へ括り出し、
-`ReplaceCharRangeExact` と `GetExactWriteRange` の**両方がそれを呼ぶ**。
+`ReplaceCharRangeExact` と `GetExactChangeRange` の**両方がそれを呼ぶ**。
 `ReplaceCharRangeExact` の挙動は 1 bit も変えない(括り出し前後で同一式)。
 
-**検査対象は「広げた範囲」`[S, E)`** とする。「内容が実際に変わる範囲」ではない。
+**検査対象は「内容が変わりうる範囲」** とする。`ReplaceCharRange` へ渡す「広げた範囲」ではない。
 
-| ケース | `[S,E)` | 判定 | 妥当性 |
-|--------|---------|------|--------|
-| 非ゼロ幅・広がりなし | `[s0,e0)` | 通す | ✓ |
-| ゼロ幅で `scope.Start` より前へ後退 | `[at,at)` | **拒否** | ✓ 本件の主題 |
-| 非ゼロ幅・端でサロゲートペアを割る | 広がる | **拒否** | ✓ スコープ外の半身が U+FFFD 化するのを防ぐ |
-| 非ゼロ幅・端で CRLF を割る | 広がる | **拒否** | △ 復元は長さ保存なのでスコープ外の内容は変わらない=**偽陽性** |
+巻き込み復元は**長さ保存**なので、広げた分の prefix / suffix は原則そのまま書き戻され、
+スコープ外の内容は変わらない。例外は**復元する半身が孤立サロゲートになる場合**だけで、
+このとき UTF-8 往復で U+FFFD へ潰れる(PR #56 §9.1)。CRLF を割ったときの `\r` / `\n` は無傷で戻る。
 
-最後の 1 行は**意図的に安全側へ倒した偽陽性**である。到達には「先行する置換がスコープ端に
-CRLF を作る」という 1.1 と同じ病的状態が要り、そこで拒否して選び直しを促すことは
-虚偽発声より害が小さい。「変わる範囲」を厳密に求めるには「復元する半身が UTF-8 往復で
-生き残るか」まで判定する必要があり、規則が 1 つ増えるわりに救えるのはこの 1 行だけになる。
-§6 の申し送りへ回す。
+| ケース | 変わりうる範囲 | 判定 |
+|--------|---------------|------|
+| 非ゼロ幅・広がりなし | `[s0,e0)` | 通す |
+| 非ゼロ幅・端で CRLF を割る | `[s0,e0)`(復元は無傷) | 通す |
+| 非ゼロ幅・端でサロゲートペアを割る | 広げた `[s,e)` | **拒否** |
+| ゼロ幅で `scope.Start` より前へ後退 | `[at,at)` | **拒否** |
+
+```csharp
+bool prefixCorrupts = s < s0 && char.IsLowSurrogate(snap.GetChar(s0));
+bool suffixCorrupts = e > e0 && char.IsLowSurrogate(snap.GetChar(e0));
+```
+
+`s < s0` になる後退要因は「`s0` が low サロゲート」か「`s0` が LF で直前が CR」の 2 つしかないので、
+`s0` の文字が low サロゲートかで弁別できる(終端側も同じ)。`s < s0` は `s0 < CharLength` を
+含意する(`SnapToLogicalCharStart` は `pos >= CharLength` を動かさない)ので `GetChar(s0)` は安全。
+
+**CRLF を通す判断は必須であり、選択の余地がない。** 策定中に当初案「広げた範囲で一律に拒否」を
+既存テストへ当てて**反証した**: PR #56 §9.9 が main 既存バグとして根治した「スコープ端が
+CRLF の内側にある一括置換」は**成功しなければならない**
+(`SearchControllerTests.cs:1063` `ReplaceAll_InSelection_ScopeEndInsideCrlf_DoesNotDuplicateCr` /
+`:1093` `..._ScopeStartInsideCrlf_DoesNotDeleteOutsideCr` が固定済み)。一律拒否はこの 2 件を
+赤にし、PR #56 の修正を打ち消す。**「安全側だから厳しくしておく」が既存の修正を潰す実例**であり、
+[[rationale-not-just-conclusion]] の型どおり結論ではなく根拠を当てて初めて出た。
 
 `ReplaceAll` にも同じ検査を同じ文言で入れる。`SearchController` は
 「`ReplaceOne` と片方だけ通る非一貫を作らない」を既存の設計原則として持っている(`:293` / `:460`)。
@@ -273,11 +289,15 @@ snapshot 版と span 版が**同値**であること(同じ本文・同じ pos �
 
 ### L2 — `tests/kxEdit.Editor.Tests/EditorControlReplaceExactTests.cs`
 
-- `GetExactWriteRange` の戻り値が `ReplaceCharRangeExact` の**実書込範囲と一致する**ことを、
-  置換前後の本文差分から実測して照合する。PR #56 §9.8 と同じ全数プローブ形
-  (文書 8 種 × `start` / `length` の境界値 × 置換文字列 4 種)。
+- **全数プローブ**(PR #56 §9.8 と同じ形。文書 8 種 × `start` / `length` の境界値 ×
+  置換文字列 4 種)で、`GetExactChangeRange` が返す範囲の**外側の本文が、実際に
+  `ReplaceCharRangeExact` を呼んだ後も 1 文字も変わっていない**ことを実測で照合する。
+  **これが本 seam の契約そのもの**であり、`ReplaceCharRange` へ渡す範囲との一致ではない。
+- 3 形の弁別を個別に固定する(全数だけだと規則の取り違えが埋もれる):
+  CRLF を割る非ゼロ幅 → `[s0,e0)` を返す / サロゲートを割る非ゼロ幅 → 広げた `[s,e)` を返す /
+  ゼロ幅 → 後退した `[at,at)` を返す。
 - `ReplaceCharRangeExact` の**挙動不変**: 括り出し前の既存テストが 1 件も落ちないこと。
-- `ReadOnly` / `_buffer is null` のとき `GetExactWriteRange` が空範囲を返すこと。
+- `ReadOnly` / `_buffer is null` のとき `GetExactChangeRange` が空範囲を返すこと。
 
 ### L3 — `tests/kxEdit.App.Tests/SearchControllerTests.cs`
 
@@ -286,12 +306,16 @@ snapshot 版と span 版が**同値**であること(同じ本文・同じ pos �
 | 1 | §1.1 の再現手順で**本文が 1 文字も変わらない**・新文言を発声する |
 | 2 | 同じ手順でスコープが更新されない(次の操作が拒否されない) |
 | 3 | 端が境界に乗る通常のスコープでは従来どおり置換できる(偽陽性の網) |
-| 4 | `ReplaceAll` でも同じ検査・同じ文言 |
-| 5 | `ReadOnly=true` で `ReplaceOne` が本文・スコープ・発声のいずれも動かさない |
-| 6 | M-29: 「選択範囲のみ」の `ReplaceAll` が `"aaa"` `[1,3)` `aa` を 1 件置換する |
+| 4 | **スコープ端が CRLF の内側でも置換できる**(既存 `:1063` / `:1093` の 2 件が green のまま) |
+| 5 | `ReplaceAll` でも同じ検査・同じ文言 |
+| 6 | `ReadOnly=true` で `ReplaceOne` が本文・スコープ・発声のいずれも動かさない |
+| 7 | M-29: 「選択範囲のみ」の `ReplaceAll` が `"aaa"` `[1,3)` `aa` を 1 件置換する |
 
 **#3 は partial-selection の fixture 要件**(CLAUDE.md §4-B)を満たすこと=スコープの前後に
 除外されるべき prefix / suffix を置き、全選択と区別できるようにする。
+
+**#4 は新規テストを書かない**。既存 2 件が落ちないことが要件であり、同じ主張の重複を足さない
+(落ちたら §2.1 の判定規則が壊れたということ)。
 
 ### ミューテーション検証
 
@@ -321,9 +345,9 @@ CLAUDE.md §4-A の**有効域**(置換エンジンのコアロジック)に該�
 
 ## 6. 申し送り
 
-- **CRLF 割りによる偽陽性拒否**(§2.1 の表の最終行)。「内容が実際に変わる範囲」で判定すれば
-  救えるが、そのためには「復元する半身が UTF-8 往復で生き残るか」の規則が 1 つ増える。
-  実害は「病的なスコープ状態で置換が 1 回拒否される」だけなので次リリースへ。
+- **サロゲート割りの拒否は保守的**。PR #56 §9.1 の例外(`replacement` が対の相手で
+  始まる / 終わり、復元される半身と繋がって正しいペアになる場合)では実際には壊れないが、
+  本設計は判定せず拒否する。救えるのはこの 1 形だけで、規則を 1 つ増やすに見合わない。
 - **`LiteralWindowSearchStrategy` はゼロ幅後退を持たない。** リテラルパターンがゼロ幅に
   なりえないことに依存している。将来リテラル経路が空パターンを受けるようになったら破れる。
 - **`RegexPerLineSearchStrategy` の M-29 は行単位まで。** 行を跨ぐスコープの先頭行で、
@@ -341,7 +365,7 @@ CLAUDE.md §3 の簡略化基準には**該当しない**(Core / Editor / App �
 2. **Task 2**: `TextSearcher.ReplaceInRange` の再アンカー化 + ゼロ幅後退 + L1(#1〜#8)
    — 外部入力(正規表現)のパース結果で書込範囲が決まる中核なので、前倒し**脆弱性レビュー**を行う
    (傘設計書 §8 が B2 を V-7 の教訓の直接該当と指定している)
-3. **Task 3**: `ExactRangeParts` 括り出し + `GetExactWriteRange` + L2
+3. **Task 3**: `ExactRangeParts` 括り出し + `GetExactChangeRange` + L2
    — 新 seam のため前倒し**コード品質レビュー**を行う
 4. **Task 4**: `SearchController` の包含検査・`ReadOnly` ガード・再捕捉コメントの訂正 + L3
 5. **Task 5**: L5 チェックリスト起こし
