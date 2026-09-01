@@ -50,19 +50,20 @@ public class CsvWriterTests
     // CsvParser は引用符内の CR / LF を literal のまま Value へ積む(CsvParser.cs:117-124)ため、
     // ConvertEols 後の Value は変換前と素の比較で一致しない。正規化はその差を吸収する。
 
-    // kill 対象(以下 2 本が担う): 置換順序の入替(\r→\n を先に適用)・
-    // Replace("\r\n","\n") の削除・過剰置換(CRLF→LF 2 個)・丸ごと no-op。
-    // いずれも CRLF が LF 2 個へ化けるため落ちる=順序と非過剰性はこの 2 本が守る。
+    // kill 対象: 置換順序の入替(\r→\n を先に適用)・Replace("\r\n","\n") の削除・
+    // 過剰置換(CRLF→LF 2 個)・丸ごと no-op。CRLF が LF 1 個へ畳まれない変異はここで落ちる
+    // (実測: いずれも本テストと Mixed_... の 2 本が落ちる。順序と非過剰性はこの 2 本が守る)。
     [Fact]
     public void Crlf_is_normalized_to_lf() =>
         Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\r\nb"));
 
-    // kill 対象: Replace("\r","\n") の削除・丸ごと no-op(単独 CR が残る)。
+    // kill 対象: Replace("\r","\n") の削除・丸ごと no-op(単独 CR が LF にならない)。
+    // 実測: いずれも本テストと Mixed_... の 2 本が落ちる。
     [Fact]
     public void Lone_cr_is_normalized_to_lf() =>
         Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\rb"));
 
-    // 混在は上記 4 変異すべてを単独で殺す(CRLF と単独 CR を 1 本で踏む)。
+    // CRLF と単独 CR を 1 本で踏むため、上記 5 変異すべてを単独で殺す(実測)。
     [Fact]
     public void Mixed_breaks_are_normalized_to_lf() =>
         Assert.Equal("a\nb\nc\nd", CsvWriter.NormalizeEols("a\r\nb\rc\nd"));
