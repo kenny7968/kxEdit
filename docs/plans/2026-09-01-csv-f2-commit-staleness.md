@@ -158,25 +158,13 @@ CLAUDE.md §3-4 の前倒し例外「後続タスクが依存する共通パタ�
 - Modify: `src/kxEdit.App/CsvController.cs:250-272`
 - Test: `tests/kxEdit.App.Tests/CsvControllerTests.cs`
 
-### Step 1: テスト用の本文書き換えヘルパーを足す
+### Step 1: `ConvertEols` が ReadOnly を無視することを確かめる
 
-CSV モード中は `EditorControl.ReadOnly = true` で、`ReplaceCharRange` / `SetSource` 系は
-**ReadOnly のとき黙って no-op になる**(`EditorControl.cs:1182-1183`)。テストから本文を
-差し替えるには production と同じく ReadOnly を一時的に落とす必要がある。
-`CsvControllerTests.cs` の `GetOverlayBox` の下に足す:
-
-```csharp
-    /// <summary>F2 編集中に「別経路が本文を書き換えた」状況を作る。CSV モード中は
-    /// ReadOnly=true で ReplaceCharRange が no-op になるため、production の onCommit と
-    /// 同じ流儀で ReadOnly を一時的に落として書き、元へ戻す。</summary>
-    private static void MutateBodyWhileEditing(EditorControl ed, Action<EditorControl> mutate)
-    {
-        bool wasRo = ed.ReadOnly;
-        ed.ReadOnly = false;
-        mutate(ed);
-        ed.ReadOnly = wasRo;
-    }
-```
+> **【2026-09-01 訂正】** 当初この Step には本文書き換えヘルパー `MutateBodyWhileEditing` を
+> 足す指示があったが、**Task 2 では 1 度も使わないため `-warnaserror` でビルドが壊れる**
+> (`error S1144: Remove the unused private method`)。ヘルパーは実際に使う **Task 3 の
+> Step 1a へ移した**。`using kxEdit.Editor;`(`EditorControl`)もヘルパーと同時に足す
+> (Task 2 の範囲では `var` で足り、単独で足すと未使用 using になる)。
 
 `ConvertEols` は ReadOnly を見ない(`EditorControl.cs:483-505` にガードが無い)。
 これが**保存経路が CSV モード中でも本文を差し替えられる理由**そのものなので、
@@ -263,7 +251,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --no-build --filter "FullyQualifie
 Expected: **2 件とも FAIL**。実際の差分(`Assert.Equal` の Actual)を**設計書 §8 へ逐語で控える**。
 想定は次のとおりだが、**一致しなければ実測を正とする**:
 - T1 Actual: `a1,a2\r\nNEW",b2\r\nc1,c2`(閉じ引用符が残る)
-- T2 Actual: `a1,"p\r\nq"\r\nb1NEW\r\nc1,c2`(区切りカンマが食われる)
+- T2 Actual: `a1,"p\r\nq"\r\nb1NEW2\r\nc1,c2`(区切りカンマが食われる)
 
 **この赤が出ないなら先へ進まない。** fixture が短すぎて実は変換が起きていない
 (`ConvertEols` が fast-path で `false` を返した)可能性を先に潰すこと。
@@ -360,6 +348,26 @@ Ctrl+S → ConvertEols。onCommit のクロージャから座標を消し、確�
 - Modify: `src/kxEdit.App/CsvController.cs`(Task 2 で書き換えた `onCommit`)
 - Test: `tests/kxEdit.App.Tests/CsvControllerTests.cs`
 - Test: `tests/kxEdit.Core.Tests/Csv/CsvAnnounceFormatterTests.cs`(定数の存在確認が既存様式にあれば)
+
+### Step 1a: 本文書き換えヘルパーを足す(Task 2 から移設)
+
+CSV モード中は `EditorControl.ReadOnly = true` で、`ReplaceCharRange` は **ReadOnly のとき
+黙って no-op になる**(`EditorControl.cs:1182-1183`)。テストから本文を差し替えるには
+production の `onCommit` と同じ流儀で ReadOnly を一時的に落とす必要がある。
+`CsvControllerTests.cs` の `GetOverlayBox` の下に足す。`using kxEdit.Editor;` も同時に足すこと。
+
+```csharp
+    /// <summary>F2 編集中に「別経路が本文を書き換えた」状況を作る。CSV モード中は
+    /// ReadOnly=true で ReplaceCharRange が no-op になるため、production の onCommit と
+    /// 同じ流儀で ReadOnly を一時的に落として書き、元へ戻す。</summary>
+    private static void MutateBodyWhileEditing(EditorControl ed, Action<EditorControl> mutate)
+    {
+        bool wasRo = ed.ReadOnly;
+        ed.ReadOnly = false;
+        mutate(ed);
+        ed.ReadOnly = wasRo;
+    }
+```
 
 ### Step 1: 失敗するテスト T3 / T4 を書く
 
