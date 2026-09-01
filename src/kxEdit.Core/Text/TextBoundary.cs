@@ -22,6 +22,11 @@ namespace kxEdit.Core.Text;
 /// </list>
 /// <b>述語を 1 つでもインライン展開して登録簿から外さないこと。</b> 単一利用でも述語のまま残す
 /// (登録簿は完全でなければ「ここだけ直せばよい」という宣言そのものが罠になる)。
+/// <b>公開しているのは <see cref="IsSurrogatePairEndingAt(TextSnapshot, int)"/> 1 本だけ</b>
+/// (2026-09-01 B2 Task 3)= <c>Snap*</c> が<b>なぜ</b>動いたかを呼び出し側が事後に弁別するための
+/// 窓口で、範囲ガードを足して同名 private 版へ委譲するだけ。<b>規則の定義は 6 つのまま</b>
+/// (公開版は規則を持たない)。<b>弁別を呼び出し側で手書きさせないための公開</b>である=
+/// 手書きされた瞬間に規則がこのクラスの外へ二重化し、この登録簿が嘘になる。
 /// <b>span 版も述語を持つ</b>(2026-09-01 B2)。<c>TextSnapshot</c> 版と読み口が違うので
 /// <c>snap.GetChar</c> ↔ indexer の間では述語を共有できないが、<b>span ↔ span は共有できる</b>=
 /// 後退・スナップ側の 2 規則は
@@ -43,13 +48,23 @@ namespace kxEdit.Core.Text;
 /// <c>Core.Search</c> が材質化した本文 string もここへ乗せたので限定を外した)。
 /// バイト層(<c>TextChunk</c> / <c>Utf8Scan</c>)と、EOL 変換・整形・計数系
 /// (Rune ベース)は対象外。<c>rg IsHighSurrogate src</c> が次にヒットするのは
-/// <b>seam の破れではなく意図的な除外</b>(設計書 §3 でスコープ外と決めた 4 ファイル・5 箇所):
+/// <b>seam の破れではなく意図的な除外</b>(<b>5 ファイル・6 箇所</b>。設計書 §3 は 4 ファイル・
+/// 5 箇所だったが、2026-09-01 B2 Task 3 の棚卸しで <c>EditorControl.Input</c> の
+/// 登録漏れが 1 件見つかった):
 /// <list type="bullet">
 /// <item><c>Text.KinsokuFormatter</c>(禁則整形・2 箇所)/ <c>Text.SanitizeForDisplay</c>
 /// (表示用サニタイズ)= Rune ベースで流儀が違う</item>
 /// <item><c>Documents.CharacterCounter</c> = 文字数の数え上げ(境界歩進ではない)</item>
 /// <item><c>kxEdit.App.GrepResultsWindow</c> = 表示文字列の切り詰め</item>
+/// <item><c>kxEdit.Editor.EditorControl.Input</c> の <c>OnKeyPress</c> = WM_CHAR で
+/// <b>1 文字ずつ届く</b>サロゲートの組み立て(A-20)。判定対象は本文中の位置ではなく
+/// 入力イベントの単独 char なので、本クラスの述語(位置と隣接 char を読む)では表現できない</item>
 /// </list>
+/// <b><c>rg IsLowSurrogate src</c> も同じ集合に収まること</b>(上記のうち
+/// <c>KinsokuFormatter</c> / <c>CharacterCounter</c> / <c>EditorControl.Input</c> がヒットする)。
+/// 旧記述は <c>IsHighSurrogate</c> だけを棚卸しの網にしていたが、
+/// <b>後退・スナップ側の弁別は <c>IsLowSurrogate</c> で書ける</b>ので片方だけでは漏れる
+/// (2026-09-01 B2 Task 3 に <c>EditorControl</c> で実際に漏れた)。
 /// CRLF 隣接判定も同様に、境界歩進でないものは対象外:
 /// <see cref="Buffers.TextSnapshot"/> の <c>GetLineEnd</c> / <c>CountCrlfPairs</c>
 /// (加えて前者は本クラスが依存する<b>下位層</b>=寄せると循環参照になる)、
@@ -139,6 +154,39 @@ public static class TextBoundary
     /// (<c>pos - 1</c> を読むため)。</remarks>
     private static bool IsSurrogatePairEndingAt(TextSnapshot snap, int pos, char charAtPos) =>
         char.IsLowSurrogate(charAtPos) && char.IsHighSurrogate(snap.GetChar(pos - 1));
+
+    /// <summary>
+    /// <paramref name="pos"/>(= low サロゲート側)で終わるサロゲートペアか。<b>全域関数</b>=
+    /// <paramref name="pos"/> が <c>[1, CharLength)</c> の外なら <c>false</c> を返す
+    /// (private 版と違い呼び出し側のガードを要求しない)。規則そのものは private 版が持ち、
+    /// これは範囲ガードを足して委譲するだけ。
+    /// </summary>
+    /// <remarks>
+    /// <b>用途は「<c>Snap*</c> がなぜ動いたか」の事後弁別。</b>
+    /// <see cref="SnapToLogicalCharStart(TextSnapshot, int)"/> /
+    /// <see cref="SnapToLogicalCharEnd(TextSnapshot, int)"/> が位置を動かす要因は
+    /// 「サロゲートペアを割った」か「CRLF を割った」かの 2 つしかなく、しかも<b>排他</b>
+    /// (low サロゲートは <c>'\n'</c> ではない)。よってスナップ後にこの述語 1 つを当てれば
+    /// どちらが起きたかが分かる。
+    /// <para>
+    /// <c>EditorControl.GetExactChangeCharRange</c> がこれを使う。復元する半身が
+    /// <b>孤立サロゲートになる</b>(= UTF-8 往復で U+FFFD へ潰れる)のはサロゲート側だけで、
+    /// CRLF 側は <c>\r</c> / <c>\n</c> が無傷で戻るため、両者を弁別しないと
+    /// 「内容が変わりうる範囲」を過大に見積もる。
+    /// </para>
+    /// <para>
+    /// <b>呼び出し側で <c>char.IsLowSurrogate</c> + 隣接読みを手書きしないこと</b>
+    /// (class doc の宣言)。手書きすると規則がこのクラスの外へ二重化し、登録簿が嘘になる。
+    /// 公開しているのはこの 1 本だけで、規則の定義数(6)は増えていない。
+    /// </para>
+    /// </remarks>
+    public static bool IsSurrogatePairEndingAt(TextSnapshot snap, int pos)
+    {
+        ArgumentNullException.ThrowIfNull(snap);
+        if (pos <= 0 || pos >= snap.CharLength)
+            return false;
+        return IsSurrogatePairEndingAt(snap, pos, snap.GetChar(pos));
+    }
 
     /// <summary>
     /// span 版。<paramref name="pos"/>(= low サロゲート側)で終わるサロゲートペアか。

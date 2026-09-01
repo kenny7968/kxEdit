@@ -539,4 +539,49 @@ public class TextBoundaryTests
         // 早期 return を落とす変異(pos <= 0 → pos < 0)をそちらでは殺せない。
         Assert.Equal(0, TextBoundary.SnapToLogicalCharEnd(Snap("\nabc"), 0));
     }
+
+    // ===== 公開述語: Snap* が「なぜ」動いたかの事後弁別(2026-09-01 B2 Task 3) =====
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_DiscriminatesSurrogateFromCrlf()
+    {
+        // 本述語の存在理由。Snap* が位置を動かす要因は「ペアを割った」か「CRLF を割った」かの
+        // 2 つで排他。どちらでも Snap* は動くので、動いたこと自体では弁別できない。
+        var pair = Snap("a\U0001F600b"); // a(0) high(1) low(2) b(3)
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(pair, 2)); // 動く
+        Assert.True(TextBoundary.IsSurrogatePairEndingAt(pair, 2)); // 理由はペア割り
+
+        var crlf = Snap("a\r\nb"); // a(0) \r(1) \n(2) b(3)
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(crlf, 2)); // 同じく動く
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(crlf, 2)); // が理由は CRLF 割り
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_IsFalseOnLogicalCharStarts()
+    {
+        // pair の「先頭」側や無関係な位置では false(low サロゲート位置だけが true)。
+        var s = Snap("a\U0001F600b");
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 0)); // 'a'
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 1)); // high サロゲート側
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 3)); // 'b'
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_IsTotal_OutOfRangeIsFalse()
+    {
+        // **全域関数**であることが private 版との唯一の差。呼び出し側にガードを要求しない
+        // = EditorControl.GetExactChangeCharRange が e0 == CharLength でも安全に呼べる
+        // (生の GetChar(CharLength) は throw する)。
+        var s = Snap("a\U0001F600b"); // CharLength=4
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, -1));
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 0)); // pos <= 0(GetChar(-1) を読まない)
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 4)); // pos == CharLength(EOF)
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 99));
+        // 空文書でも throw しない(pos <= 0 と pos >= CharLength が同時に成立する縮退)。
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(Snap(""), 0));
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_ThrowsOnNullSnapshot() =>
+        Assert.Throws<ArgumentNullException>(() => TextBoundary.IsSurrogatePairEndingAt(null!, 1));
 }
