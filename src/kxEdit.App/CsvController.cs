@@ -239,8 +239,13 @@ public sealed class CsvController : IDisposable
             return;
         if (!TryContext(out var ed, out var csv, out var row, out var col))
             return;
-        // 開始時点のセル。使い道は「オーバーレイの配置座標(f.Start)と初期値(f.Value)」だけで、
-        // どちらも Begin が同期的に読む。確定時の書込先へは持ち越さない（M-25: onCommit 参照）。
+        // 開始時点のセル。読まれるのは次の 3 か所だけで、いずれも _editor.Begin が戻るまでに
+        // 同期的に読み切られる（CsvCellEditor は CsvField をフィールドへ保存しない。持つのは
+        // _box / _closing / _refocus / _onCommit / _onCancel の 5 つ）:
+        //   1. 直下の EnsureVisibleCharRange(f.Start, f.Length) —— これは BeginEdit 自身が読む
+        //   2. CsvCellEditor.Begin の PointFromCharOffset(field.Start) —— オーバーレイの配置座標
+        //   3. CsvCellEditor.Begin の TextBox.Text = field.Value —— 編集の初期値
+        // 確定時の書込先へは持ち越さない（M-25: onCommit 参照）。
         // csv は TryContext がメモ化済みの現在パース（=開始時点のスナップショット）。
         var f = csv.GetField(row, col);
         if (f is null)
