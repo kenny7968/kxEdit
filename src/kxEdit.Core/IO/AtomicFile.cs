@@ -3,9 +3,21 @@ namespace kxEdit.Core.IO;
 /// <summary>
 /// 原子的ファイル書き込みの共通実装（TextFileService の保存と BackupStore の退避で共用）。
 /// 同ディレクトリの temp（"ファイル名.乱数.tmp"）へステージングしてから File.Replace
-/// （新規は File.Move）で差し替える。どの段階で失敗しても原本には一切触れず、tmp の掃除だけ
-/// 試みて例外を伝播する（= 原本喪失の回避が目的）。フォールバック（共有違反時の in-place
-/// 上書き等）を行うかは呼び出し側の責務で、IsShareOrLockViolation で判定できる。
+/// （新規は File.Move）で差し替える。目的は<b>原本喪失の回避</b>。
+/// <para>
+/// 失敗時のポリシーは段階で異なる:
+/// <list type="bullet">
+/// <item>①（ステージング）の失敗 —— 原本に一切触れず、tmp を掃除して例外を伝播する。</item>
+/// <item>②（差替）の失敗で<b>原本が残っている</b>とき —— 同様に tmp を掃除して伝播する。</item>
+/// <item>②の失敗で<b>原本が失われていた</b>とき —— tmp は<b>掃除しない</b>。
+/// リネームによる復旧を試み、それも失敗したときだけ
+/// <see cref="AtomicReplaceFailedException"/> で残した tmp のパスを伝える。
+/// この場合 tmp がディスク上の唯一のコピーであり、消すと内容が完全に失われる
+/// （M-12・設計 2026-09-02 §3）。</item>
+/// </list>
+/// </para>
+/// フォールバック（共有違反時の in-place 上書き等）を行うかは呼び出し側の責務で、
+/// IsShareOrLockViolation で判定できる。
 /// </summary>
 public static class AtomicFile
 {
@@ -13,7 +25,10 @@ public static class AtomicFile
     private const int HResultSharingViolation = unchecked((int)0x80070020); // ERROR_SHARING_VIOLATION
     private const int HResultLockViolation = unchecked((int)0x80070021); // ERROR_LOCK_VIOLATION
 
-    /// <summary>payload を path へ原子的に書き込む。失敗時は tmp を掃除して例外を伝播する。</summary>
+    /// <summary>
+    /// payload を path へ原子的に書き込む。失敗時は tmp を掃除して例外を伝播する
+    /// (例外は差替で原本が失われた場合のみ —— <see cref="CommitStaged"/> を参照)。
+    /// </summary>
     public static void Write(string path, byte[] payload)
     {
         string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
@@ -78,10 +93,39 @@ public static class AtomicFile
         ex.HResult is HResultSharingViolation or HResultLockViolation;
 
     /// <summary>
-    /// ステージング済み tmp を path へ差し替える。<b>差替段全体(= 失敗時ポリシーを含む)</b>で
-    /// あり、現状の挙動は「失敗したら tmp を掃除して伝播する」= 集約前と同一。
-    /// M-12 の復旧(原本が消えていたら復旧を試み、駄目なら tmp を残す)はここへ入る
-    /// ——設計 2026-09-02 §3。
+    /// ステージング済み tmp を path へ差し替える。<b>差替段全体(= 失敗時ポリシーを含む)</b>。
+    /// 差替が失敗したとき、原本が失われていれば復旧を試み、それも駄目なら tmp を残す
+    /// (M-12・設計 2026-09-02 §3)。
+    /// <para>
+    /// <b>判定は事後条件で行う(エラーコードで分岐しない)。</b> Win32 の
+    /// ERROR_UNABLE_TO_MOVE_REPLACEMENT 等を列挙して前置ガードにすると、列挙から漏れたエラーで
+    /// 同じ状態(原本が消え tmp だけが残る)になったときに素通しする —— 前置の列挙は原理的に
+    /// 漏れる(監査 §9 V-7 / 設計 2026-09-02 §3.1・§8)。「どのエラーで失敗したか」ではなく
+    /// 「失敗後にディスクがどうなっているか」を見るので、未知のエラーでも効く。
+    /// </para>
+    /// <para>
+    /// 事後条件だけでは足りず、差替<b>前</b>に採った destExists と組で判定する。新規作成の失敗でも
+    /// <c>!File.Exists(path)</c> は真になるが、そこには失われた原本が無い。片方を落とすと
+    /// 「残骸を残すだけの誤検出」か「唯一のコピーの削除」のどちらかに倒れる(設計 §3.1 の判定表)。
+    /// </para>
+    /// <para>
+    /// <b>受容するトレードオフ —— 復旧は ACL / 属性 / 作成日時を引き継がない。</b>
+    /// <c>File.Replace</c> は差替先のそれらを引き継ぐが、復旧に使う <c>File.Move</c> は引き継がず、
+    /// 復旧後のファイルは置かれたディレクトリの継承 ACL を持つ。元ファイルに個別の(より厳しい)
+    /// ACL があった場合、復旧は<b>権限を広げる方向へ倒す</b>。比較しているのは
+    /// 「権限が広がったファイルが残る」と「ファイルが消える」であり、後者の方が回復不能なので
+    /// 受容する(設計 §3.3)。復旧成功時に無言で return するのも同様に受容している
+    /// (保存は実際に成立しているので「保存しました」は虚偽ではない)。
+    /// </para>
+    /// <para>
+    /// <b>保証が及ぶ範囲</b>(設計 §10.3): ここは <c>Write</c> の 4 呼出者すべての通り道だが、
+    /// 「tmp を残して例外で伝える」が実際にユーザーへ届くのは<b>文書保存経路
+    /// (<c>TextFileService.Save</c>)だけ</b>である。<c>BackupStore.Write</c> /
+    /// <c>SessionLayoutStore.Save</c> は <c>SerialBackupWriter</c> のワーカーが catch で
+    /// 握り潰し、さらに残した tmp は次回起動の <c>BackupStore.SweepTempFiles</c>
+    /// (<c>*.tmp</c> を無差別削除)が回収するため、これらの経路では静かに消える。
+    /// 握り潰しの解消は別ブランチ(B5 / M-20)の担当で、本修正の射程外。
+    /// </para>
     /// </summary>
     private static void CommitStaged(string tmp, string path)
     {
@@ -93,8 +137,23 @@ public static class AtomicFile
         {
             RunReplaceStep(tmp, path, destExists);
         }
-        catch
+        catch (Exception replaceError)
         {
+            // 原本があったのに消えている = tmp が唯一のコピー。新規作成(destExists=false)の
+            // 失敗はここに入らない(失われた原本が無いので、残骸を残すだけになる)。
+            if (destExists && !File.Exists(path))
+            {
+                try
+                {
+                    File.Move(tmp, path);
+                    return; // 復旧成功 = 保存は成立している
+                }
+                catch (Exception recoveryError)
+                {
+                    // tmp は掃除しない。ここで消すと内容が完全に失われる。
+                    throw new AtomicReplaceFailedException(path, tmp, replaceError, recoveryError);
+                }
+            }
             TryDelete(tmp);
             throw;
         }
