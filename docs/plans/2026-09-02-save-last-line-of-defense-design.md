@@ -715,6 +715,101 @@ Task 3 の xmldoc(および下の申し送りの前提)は、`BackupStore.Write`
 > 呼ばれる)」は `DeleteAll` / `DeleteSessionDir` の呼出であって、**起動時の掃除は
 > `BackupCoordinator.cs:346-347`** である。§10.3 は当時の記録なので書き換えず、ここに補正を残す。
 
+#### 前倒し脆弱性レビューの反映(Critical / High ゼロ・Medium 1 / Low 3)
+
+**§3.3 の ACL 非継承の受容は「妥当・緩和不要・コード変更不要」と裁定された。** 緩和案(差替の前に
+`FileInfo.GetAccessControl()` を採って復旧後に復元する)は、**絶対に失敗してはいけない happy path に
+新しい失敗点を足す**ため主目的(原本喪失の回避)を損なう、という理由で退けられている。
+
+##### (a) 受容の中心根拠を実測へ差し替えた
+
+従来書いていた「消えるより権限が広がる方がマシ」という比較衡量は間違いではないが弱い。より強い根拠が
+レビューの実測で出た: **復旧後の ACL は、同じ状況でユーザーが手で保存し直したときの ACL と完全に
+一致する。** 原本が消えた後の再保存は `destExists == false` → `File.Move` を通るので、
+**本修正の前のコードでも継承 ACL になる**。つまり復旧は<b>ユーザーの再試行を代行しているだけ</b>で、
+**変更前が到達できなかった権限状態を新しく作り出してはいない**。これを xmldoc の中心根拠に据えた。
+
+##### (b) 頻度の前提が偽だった —— 「二重障害が要る」は ACL の話には当てはまらない
+
+ACL が実際に置き換わるのは復旧が**成功**したときである。差替の直前に別プロセス(AV の隔離・同期
+クライアント・ユーザー自身の削除)が宛先を消せば、**単一の平凡な失敗**で復旧枝に入り `File.Move` は
+ほぼ確実に成功する。したがって「復旧成功 = よく起こる」側であり、稀ではない。
+「差替失敗と復旧失敗の二重障害が要る」が正しいのは **tmp が残るケース**(= 復旧も失敗)の方であって、
+ACL 置換の頻度の根拠にしてはいけない。xmldoc に書き分けた。
+
+**挙動変化の記録(Low)**: 副作用として「別プロセスが消したファイルを kxEdit が黙って復活させる」が
+入る(変更前は保存失敗ダイアログ)。起点がユーザー自身の保存操作なので攻撃者が駆動できるものではない。
+
+##### (c) 非上書き overload の網 —— レビューが提案した形は実測で成立しなかった
+
+`File.Move(tmp, path)` を `File.Move(tmp, path, overwrite: true)` にする変異が無網、という指摘は
+**正しい**(下記のとおり生存を実測)。ただし提案された網の形
+(「フックで `File.Delete(dest)` してから別内容のファイルを `dest` に置いて例外を投げる →
+`AtomicReplaceFailedException` になり squat 側が無傷で tmp も保持されることを assert する」)は
+**そのままでは動かない**。実測(使い捨てプローブ):
+
+```
+P1: ex=IOException | invocations=1 | destContent=squatter | tmpLeftovers=0
+```
+
+ファイルが名前を埋めると `File.Exists(path)` が **true** になるため、**復旧枝そのものへ到達しない**
+(従来どおり `TryDelete(tmp); throw;` が走る)。`AtomicReplaceFailedException` にならず、tmp も残らない。
+
+そこで「復旧枝へ到達できる(= `File.Exists` が false)占有物」を総当たりで実測した:
+
+| 占有物 | `File.Exists` | 2 引数 `Move` | `overwrite: true` の `Move` |
+|--------|---------------|---------------|------------------------------|
+| 素のファイル | **true** | (復旧枝へ入らない) | (同左) |
+| reparse タグ付きファイル(非 surrogate / surrogate) | **true** | (同上) | (同上) |
+| ディレクトリ | false | `IOException` 0x800700B7 | `UnauthorizedAccessException` 0x80070005 |
+| surrogate タグ付きディレクトリ | false | `IOException` 0x800700B7 | `UnauthorizedAccessException` 0x80070005 |
+| 宙ぶらりんの symlink | — | — | **作成不可**(下記) |
+
+`File.CreateSymbolicLink` は検証機で
+`IOException: クライアントは要求された特権を保有していません。` で失敗した
+(`SeCreateSymbolicLinkPrivilege` = 要管理者 / 開発者モード)。
+
+**結論**: `overwrite: true` の差が事後状態(例外の型・tmp の有無・占有物の中身)に出る状態は、
+**特権なしでは作れない**。復旧枝へ到達できる占有物はディレクトリ系だけで、そこでは両 overload とも
+失敗して外形は同じ `AtomicReplaceFailedException` + tmp 保持になる。
+
+**採った網**: 唯一決定的に差が出る `RecoveryError` の型と HResult を固定した。
+`0x800700B7`(ERROR_ALREADY_EXISTS)=「既に埋まっているので触らない」に対し、
+`overwrite: true` は `0x80070005`(ERROR_ACCESS_DENIED / `UnauthorizedAccessException`)=
+「置換しようとして弾かれた」になる。**置換を試みたかどうかが型に出る**ので、そこを押さえる。
+byte[] 版・Stream 版の 2 本を追加した(`*_recovery_refuses_to_replace_an_entry_occupying_the_name`)。
+
+**この網が示していないことも、テストのセクションコメントに明記した**: 「他人が置いた**ファイル**を
+潰さない」は直接観測していない(その状態では復旧枝へ到達しないため)。
+[[net-absence-claims-are-also-verifiable]] の逆側 —— 張れない網を張ったと書かないこと。
+
+**変異の実測**:
+
+```
+# 網を足す前(生存)
+成功!   -失敗:     0、合格:  1398、スキップ:     0、合計:  1398
+
+# 網を足した後(同じ変異)
+失敗 …AtomicFileRecoveryTests.Bytes_recovery_refuses_to_replace_an_entry_occupying_the_name
+失敗 …AtomicFileRecoveryTests.Stream_recovery_refuses_to_replace_an_entry_occupying_the_name
+   Assert.IsType() Failure: Value is not the exact type
+   Expected: typeof(System.IO.IOException)
+   Actual:   typeof(System.UnauthorizedAccessException)
+失敗!   -失敗:     2、合格:  1398、スキップ:     0、合計:  1400
+```
+
+変異は `git diff` で復帰確認済み(`src` 側の差分が空になることを確認)。
+
+##### (d) Low-3: `session-state.json` の残置 tmp は実質リスクなし、ただし性質が 1 点違う
+
+中身はパス列 + キャレット位置で数 KB・本文を含まず、`%APPDATA%` の既定 ACL はユーザー専用なので
+実質リスクなしと裁定された。ただし **`session-state.json` 本体は正常終了時に
+`SessionLayoutStore.Delete` で意図的に消される**のに、残置 tmp はその削除を生き延びる。
+「開いていたファイルの一覧を残さない」という既存の挙動を、残骸だけが破ることになる。
+
+また**検証機の `%APPDATA%` には追加 ACE(開発機固有のサンドボックス設定)があった**。
+「`%APPDATA%` は常にユーザー専用」と決め打たない根拠として記録しておく。
+
 #### 申し送り(Task 4 で回収すること)
 
 1. **`PreservedTempPath` が実在しないケースがありうる。** 復旧の `File.Move` が
@@ -732,5 +827,21 @@ Task 3 の xmldoc(および下の申し送りの前提)は、`BackupStore.Write`
    `FileController.WriteToPath`(`:900`)の catch は `_prompt.Error($"保存できませんでした:
    {SanitizeForDisplay.OneLine(ex.Message, 200)}", …)` なので、`AtomicReplaceFailedException`
    のメッセージ(保存先と退避先の 2 パスを含む)は**ユーザーへ届く**。ただし
-   **200 文字で切り詰められる**ため、長いパスでは退避先が末尾から落ちうる。Task 4 の主眼は
-   ここになる。
+   **200 文字で切り詰められる**ため、長いパスでは退避先が末尾から落ちうる。
+
+3. **Medium-1(脆弱性レビュー)—— 文書保存経路で残す tmp は「本文の完全なコピー」で、掃除する者が
+   誰もいない。** バックアップ経路と違い、原本と同じディレクトリ = ユーザーの Documents や共有
+   フォルダー、クラウド同期フォルダーに落ちる(`*.tmp` を消すコードは `%APPDATA%\kxEdit\backups`
+   配下しか見ない —— 上の sweeper 節を参照)。しかも ACL は原本のものではなくディレクトリの継承 ACL、
+   拡張子 `.tmp` で通常の一覧に出ず、クラウド同期なら自動アップロードされる。
+   そして**唯一の案内である例外メッセージが `FileController.cs:929` の
+   `SanitizeForDisplay.OneLine(ex.Message, 200)` で切られ、tmp パスは文末にある**。
+   レビュアーの算定: 固定部 36 文字 + 原本パス `L` + tmp パス `L+17` = `53 + 2L` なので
+   **`L ≧ 74` で 200 を超える**(`%USERPROFILE%\OneDrive - <会社名>\Documents\…\notes.txt` を
+   展開した程度の長さで普通に超える)。
+
+   **自動削除は足さないこと**(M-12 の目的そのものを潰す)。Task 4 は次の 3 点セットで回収する:
+   1. `ex.PreservedTempPath` を**別引数として組み立て、丸めの対象を原本パス側だけにする**
+      (tmp パスは丸めない)
+   2. 文言に「**復旧後にこのファイルを削除してください**」を入れる
+   3. `File.Exists(ex.PreservedTempPath)` で**実在を確かめてから**案内する(上の申し送り #1)

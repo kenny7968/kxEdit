@@ -341,6 +341,109 @@ public class AtomicFileRecoveryTests
         }
     }
 
+    // ===== 復旧は「上書きしない」2 引数 overload であること =====
+    //
+    // 復旧に使う File.Move(tmp, path) を File.Move(tmp, path, overwrite: true) へ変える変異は、
+    // 「復旧先に別の誰かが置いたものを黙って潰す」に化ける。セキュリティ上の意味を持つ選択なのに、
+    // 2026-09-02 の脆弱性レビュー時点では**この変異が全テストを素通りしていた**(Core 1398 全 PASS)。
+    //
+    // ★ この網が実際に殺しているのは「拒否の理由」である。復旧枝へ入れるのは
+    //    File.Exists(path) == false のときだけで、その状態で名前を埋めている実体は
+    //    (特権なしで作れる範囲では)ディレクトリ系しかない。実測(2026-09-02・検証機):
+    //
+    //      占有物                      File.Exists  2 引数 Move        overwrite: true の Move
+    //      ------------------------    -----------  -----------------  ------------------------
+    //      素のファイル                 true         (復旧枝へ入らない) (同左)
+    //      reparse タグ付きファイル      true         (同上)             (同上)
+    //      ディレクトリ                 false        IOException        UnauthorizedAccessException
+    //                                                0x800700B7          0x80070005
+    //      surrogate タグ付きディレクトリ false        IOException        UnauthorizedAccessException
+    //                                                0x800700B7          0x80070005
+    //
+    //    0x800700B7 = ERROR_ALREADY_EXISTS =「既に埋まっているので触らない」、
+    //    0x80070005 = ERROR_ACCESS_DENIED =「置換しようとして弾かれた」。
+    //    **置換を試みたかどうかが RecoveryError の型と HResult に出る**ので、そこを固定する。
+    //
+    // ★ この網が示していないこと(嘘の安全宣言にしないための注記):
+    //    「他人が置いた**ファイル**を潰さない」は直接観測できていない。ファイルが名前を埋めて
+    //    いる状態では File.Exists が true になり、復旧枝そのものへ到達しない(従来どおり tmp を
+    //    掃除して伝播する)。直接観測するには宙ぶらりんの symlink を置く必要があるが、その作成には
+    //    SeCreateSymbolicLinkPrivilege が要る(検証機で実測:「クライアントは要求された特権を
+    //    保有していません」)ため、環境依存で無音 skip する網になってしまう。
+
+    /// <summary>ERROR_ALREADY_EXISTS。「名前が既に埋まっているので触らなかった」の署名。</summary>
+    private const int HResultAlreadyExists = unchecked((int)0x800700B7);
+
+    /// <summary>復旧が名前の占有物を置換しにいかないこと(byte[] 版)。</summary>
+    [Fact]
+    public void Bytes_recovery_refuses_to_replace_an_entry_occupying_the_name()
+    {
+        string path = NewTempPath();
+        try
+        {
+            File.WriteAllText(path, "old");
+
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    DestroyDestinationAndBlockRecovery
+                )
+            )
+            {
+                var ex = Assert.Throws<AtomicReplaceFailedException>(() =>
+                    AtomicFile.Write(path, new byte[] { 0x6E, 0x65, 0x77 })
+                );
+                Assert.Equal(1, scope.Invocations);
+
+                // ここが変異を殺す 2 行。overwrite: true だと置換を試みて
+                // UnauthorizedAccessException(0x80070005)に変わる。
+                var recoveryError = Assert.IsType<IOException>(ex.RecoveryError);
+                Assert.Equal(HResultAlreadyExists, recoveryError.HResult);
+
+                // 名前を占有していた側は無傷・tmp は唯一のコピーとして残っている。
+                Assert.True(Directory.Exists(path));
+                Assert.True(File.Exists(ex.PreservedTempPath));
+            }
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    /// <summary>復旧が名前の占有物を置換しにいかないこと(Stream 版 = 本番の主保存経路)。</summary>
+    [Fact]
+    public void Stream_recovery_refuses_to_replace_an_entry_occupying_the_name()
+    {
+        string path = NewTempPath();
+        byte[] payload = new byte[] { 0x6E, 0x65, 0x77 }; // "new"
+        try
+        {
+            File.WriteAllText(path, "old");
+
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    DestroyDestinationAndBlockRecovery
+                )
+            )
+            {
+                var ex = Assert.Throws<AtomicReplaceFailedException>(() =>
+                    AtomicFile.Write(path, s => s.Write(payload, 0, payload.Length))
+                );
+                Assert.Equal(1, scope.Invocations);
+
+                var recoveryError = Assert.IsType<IOException>(ex.RecoveryError);
+                Assert.Equal(HResultAlreadyExists, recoveryError.HResult);
+
+                Assert.True(Directory.Exists(path));
+                Assert.True(File.Exists(ex.PreservedTempPath));
+            }
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
     // ===== 本番の保存経路から見た挙動(設計 2026-09-02 §3.4) =====
     // AtomicReplaceFailedException が TextFileService の in-place フォールバック
     // (`catch (IOException ex) when (AtomicFile.IsShareOrLockViolation(ex))`)へ<b>流れない</b>ことを、
