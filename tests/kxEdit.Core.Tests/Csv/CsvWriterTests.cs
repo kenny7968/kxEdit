@@ -50,19 +50,25 @@ public class CsvWriterTests
     // CsvParser は引用符内の CR / LF を literal のまま Value へ積む(CsvParser.cs:117-124)ため、
     // ConvertEols 後の Value は変換前と素の比較で一致しない。正規化はその差を吸収する。
 
+    // kill 対象(以下 2 本が担う): 置換順序の入替(\r→\n を先に適用)・
+    // Replace("\r\n","\n") の削除・過剰置換(CRLF→LF 2 個)・丸ごと no-op。
+    // いずれも CRLF が LF 2 個へ化けるため落ちる=順序と非過剰性はこの 2 本が守る。
     [Fact]
     public void Crlf_is_normalized_to_lf() =>
         Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\r\nb"));
 
+    // kill 対象: Replace("\r","\n") の削除・丸ごと no-op(単独 CR が残る)。
     [Fact]
     public void Lone_cr_is_normalized_to_lf() =>
         Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\rb"));
 
+    // 混在は上記 4 変異すべてを単独で殺す(CRLF と単独 CR を 1 本で踏む)。
     [Fact]
     public void Mixed_breaks_are_normalized_to_lf() =>
         Assert.Equal("a\nb\nc\nd", CsvWriter.NormalizeEols("a\r\nb\rc\nd"));
 
-    // 恒等性: すでに LF のみなら 1 文字も変えない(過剰置換=CRLF を 2 個の LF にする変異を殺す)。
+    // このファイルで末尾に改行を持つ唯一の fixture。入力に CR が無いので CR 関連の変異は
+    // 1 つも殺さない(実測)。単独で殺すのは末尾の改行を落とす変異(TrimEnd 相当)のみ。
     [Fact]
     public void Lf_only_value_is_not_changed_by_normalize() =>
         Assert.Equal("a\nb\n", CsvWriter.NormalizeEols("a\nb\n"));
@@ -74,4 +80,10 @@ public class CsvWriterTests
     [InlineData("a,b\"c")]
     public void Value_without_breaks_is_not_changed_by_normalize(string s) =>
         Assert.Equal(s, CsvWriter.NormalizeEols(s));
+
+    // kill 対象: ArgumentNullException.ThrowIfNull の削除(null は Replace で
+    // NullReferenceException になり、契約どおりの ArgumentNullException にならない)。
+    [Fact]
+    public void NormalizeEols_throws_on_null_value() =>
+        Assert.Throws<ArgumentNullException>(() => CsvWriter.NormalizeEols(null!));
 }

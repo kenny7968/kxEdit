@@ -673,6 +673,30 @@ public class CsvControllerTests
             Assert.Equal(Grid3x3, doc.Editor.SnapshotText); // Cancel は本文へ一切書き込まない
         });
 
+    // kill 対象: CsvCellEditor.Commit の EOL 正規化を落とす変異(`string text = _box.Text;`)。
+    // Alt+Enter はセル内改行として "\r\n" を TextBox へ挿入する(CsvCellEditor.cs:79)ため、
+    // 正規化を落とすと EscapeField が CR ごと引用符で包み、本文に CR が残る。
+    // 既存の Commit テストは値が "NEW"(CR なし)なのでこの変異を素通しする。
+    [Fact]
+    public void BeginEdit_ThenCommit_NormalizesCrlfInCellValue_BeforeSerializing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3);
+            host.Csv.TryEnterMode(doc);
+            host.Csv.BeginEdit(); // 初期位置 (0,0)="a1" を編集対象にする
+            Assert.True(host.Csv.IsEditing);
+
+            var editor = GetCellEditor(host.Csv);
+            var box = GetOverlayBox(editor);
+            box.Text = "x\r\ny"; // Alt+Enter でセル内改行を入れた状態を再現
+            editor.Commit(); // Enter 相当
+
+            Assert.False(host.Csv.IsEditing);
+            // 確定値は LF へ正規化されてから EscapeField に渡る=本文に CR は現れない。
+            Assert.Equal("\"x\ny\",a2,a3\nb1,b2,b3\nc1,c2,c3", doc.Editor.SnapshotText);
+        });
+
     // ===== GoToCell の列側境界(Task 8・行側は ReadCurrent 経由で ClampRow 側を固定済) =====
     // GoToCell は picker が返した Ok(row1,col1) を csv.GoTo(row1-1, col1-1) に投げ、
     // 範囲外なら OutOfRange 通知(=クランプではない)。ここで列側の巨大値/負値を pin する。

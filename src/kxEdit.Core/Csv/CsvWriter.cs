@@ -1,6 +1,7 @@
 namespace kxEdit.Core.Csv;
 
-/// <summary>CSV フィールドの直列化（RFC 4180・区切りはカンマ固定）。F2 編集確定時に使う。</summary>
+/// <summary>CSV フィールドの直列化（RFC 4180・区切りはカンマ固定）。F2 編集確定時に使う。
+/// あわせてセル値の EOL 正規化規則（<see cref="NormalizeEols"/>）の持ち主でもある。</summary>
 public static class CsvWriter
 {
     /// <summary>論理値を CSV フィールド文字列へ直列化する。カンマ・二重引用符・CR・LF を含む場合のみ
