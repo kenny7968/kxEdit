@@ -192,6 +192,32 @@ public class TextSearcherTests
         Assert.Equal(2, count);
     }
 
+    [Theory]
+    // 全文置換(s == 0)は Matches ベースの旧実装と 1 文字も変わらないこと。
+    // 期待値は**変更前の src での実測値**(計画の値ではない)。
+    [InlineData("ab_ab_ab", "ab", false, "X", "X_X_X", 3)]
+    [InlineData("aaaa", "aa", true, "X", "XX", 2)] // 非重複・左端優先
+    [InlineData("abc", "x*", true, "-", "-a-b-c-", 4)] // ゼロ幅は各位置で 1 件
+    // 空マッチと実マッチの混在。"b*" は 0(空)・1("b")・2(空)の 3 件で、
+    // index1 の実マッチが 'b' を消費するので出力に 'b' は残らない。
+    [InlineData("ab", "b*", true, "-", "-a--", 3)]
+    [InlineData("a\r\nb", "\\r\\n", true, "X", "aXb", 1)] // CRLF 丸ごと
+    [InlineData("aaa", "a", false, "", "", 3)] // 空置換
+    public void ReplaceInRange_WholeText_KeepsMatchesSemantics(
+        string text,
+        string pattern,
+        bool useRegex,
+        string repl,
+        string expected,
+        int expectedCount
+    )
+    {
+        var (fragment, count) = Make(pattern, useRegex: useRegex)
+            .ReplaceInRange(text, 0, text.Length, repl);
+        Assert.Equal(expected, fragment);
+        Assert.Equal(expectedCount, count);
+    }
+
     // ----- ゼロ幅マッチ（I-1） -----
 
     [Fact]
