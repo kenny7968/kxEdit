@@ -214,6 +214,12 @@ public class WordBoundaryTests
         // 最初の 1 歩で予算を 1 消費し、pos から左へ実際に走れるのは maxScan - 1 歩
         // = 4000 - 99 = 3901(WordEnd との非対称。クラス <remarks> の窓の表を参照)。
         Assert.Equal(3901, start);
+        // EOF 経路(pos >= CharLength)は PrevWordStart(pos) 委譲=pos + 1 を渡さないため
+        // 最初の 1 歩を予算から使わず、窓は 1 広い maxScan になる
+        // (5000 - 100 = 4900。内部経路の 4000 - 99 = 3901 と対比)。
+        // 2026-09-01 の最終レビュー Important-2: 本番レンジ(DefaultMaxScan = 128)側が
+        // 無網のまま xmldoc だけ訂正されていた(設計書 §12.8)。
+        Assert.Equal(4900, WordBoundary.WordStart(snap, 5000, maxScan: 100));
     }
 
     [Fact]
@@ -302,8 +308,14 @@ public class WordBoundaryTests
     /// これが成り立つと、<c>maxScan &gt;= 1</c> 側は <c>maxScan - 1</c> と算術的に等価
     /// (既存の上限テスト群が固定している)なので、修正は縮退側だけを変えたことになる。
     ///
-    /// <c>maxScan &lt;= 0</c> は <c>Debug.Assert</c> の契約違反でもあるが、ビルド / CI /
-    /// ローカルゲートはすべて Release 構成(<c>Debug.Assert</c> は消える)なので発火しない。
+    /// 2026-09-01 まで <c>WordBoundary</c> は <c>maxScan &gt;= 1</c> を <c>Debug.Assert</c> で
+    /// 表明しており、本 Theory の 4 ケースは <b>Debug 構成で赤</b>だった。ゲートに Core.Tests は
+    /// Release でしか載っておらず(Debug で走っていたのは <c>App.Tests</c> だけ=Issue #48 の
+    /// 最終レビュー Q-I-4)、<c>Debug.Assert</c> ごと消えていたため誰も踏まなかった(申し送り S-5)。
+    /// 表明の側が V-1 修正前の文言のまま取り残されていたので削除し、非正値の縮退は
+    /// <c>WordBoundary</c> のクラス <c>&lt;remarks&gt;</c> の規定挙動になった。以後この Theory は
+    /// <b>Debug / Release の両構成で緑</b>であり、<b>2026-09-01 に Core.Tests の Debug ステップを
+    /// ゲートへ足したので、両方がゲートで走る</b>。
     /// </remarks>
     [Theory]
     [InlineData(int.MinValue)] // ← 修正前はここだけが上限を失っていた
@@ -321,6 +333,11 @@ public class WordBoundaryTests
         // 前方側は元から縮退していた(予算を先に引かないため)= 1 歩も進まない。
         Assert.Equal(1000, WordBoundary.NextWordStart(snap, 1000, maxScan));
         Assert.Equal(1000, WordBoundary.WordEnd(snap, 1000, maxScan));
+        // EOF 経路(pos >= CharLength)は PrevWordStart(pos) 委譲=pos + 1 を渡さないため、
+        // 内部経路と違って pos ではなく pos の 1 code point 左になる。
+        // 2026-09-01 の Task 2 仕様レビュー Important-1 で、この経路が無網のまま
+        // xmldoc に「WordStart = pos」と書かれていたことが判明した(設計書 §12.7)。
+        Assert.Equal(4999, WordBoundary.WordStart(snap, 5000, maxScan));
     }
 
     /// <summary>

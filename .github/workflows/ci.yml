@@ -61,11 +61,25 @@ jobs:
       # [Conditional("DEBUG")] のため Release バイナリに残らない。DocumentState.Path の不変条件を
       # 守る網は Debug.Assert なので、Release だけでは 1 行も走らない(実証: IsPathFullyQualified →
       # IsPathRooted の変異が Release 全緑で生存・Debug では赤)。
-      # --no-build を付けないのは別構成のバイナリが要るため。ビルドは App.Tests の依存グラフだけ。
-      # Core.Tests の Debug は足さない(既知 S-5 で 4 件赤)。
+      # --no-build を付けないのは別構成のバイナリが要るため。
+      #
+      # 2026-09-01(B1): Core / Editor も Debug で走らせて 3 本を揃えた。旧コメントの
+      # 「Core.Tests の Debug は足さない(既知 S-5 で 4 件赤)」は S-5 の解消により失効。
+      # kxEdit.Editor 自身に Debug.Assert は現状 0 件だが、歯抜けにしておくと「assert を
+      # 足したのにゲートステップを足し忘れる」= Q-I-4 の失敗モードが再発する。
+      #
       # ステップ名は tools/pre-merge-check.ps1 と**完全一致**させる(CLAUDE.md §6: ローカル / CI の
-      # 失敗ログを同じキーワードで探せるようにする)。App.Tests に LocalOnly は現状 0 件だが、
-      # 上の Release 版と同じ除外を付けて将来追加時の CI 落ちを防ぐ。
+      # 失敗ログを同じキーワードで探せるようにする)。LocalOnly 除外は Editor / App では上の
+      # Release 版と同じものを付ける。Core は Release 側にフィルタが無いので Debug 側だけに付く
+      # (Category=LocalOnly の実宣言は Editor.Tests の ClipboardTests のみで、Core / App は現状
+      # 0 件。Core.Tests に足す場合はフィルタ無しの Release ステップが先に落ちるため、
+      # そちらの除外も同時に足すこと)。
+      - name: Core.Tests(Debug・Debug.Assert 有効)
+        run: dotnet test tests/kxEdit.Core.Tests -c Debug --filter "Category!=LocalOnly"
+
+      - name: Editor.Tests(Debug・Debug.Assert 有効)
+        run: dotnet test tests/kxEdit.Editor.Tests -c Debug --filter "Category!=LocalOnly"
+
       - name: App.Tests(Debug・Debug.Assert 有効)
         run: dotnet test tests/kxEdit.App.Tests -c Debug --filter "Category!=LocalOnly"
 

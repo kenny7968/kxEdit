@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Text;
 
@@ -55,7 +54,15 @@ internal enum CharClass
 /// 上限なしを<b>明示的に選ばせる</b>ため(既定が無制限だと新しい呼び出しが黙って無制限になる)。
 ///
 /// <c>maxScan</c> は 1 呼び出し全体の予算で、単語 run と空白 run を<b>またいでも合算</b>で
-/// 消費される。契約は <c>maxScan &gt;= 1</c>(各 API 冒頭の <c>Debug.Assert</c> で検証)。
+/// 消費される。<b>推奨は <c>maxScan &gt;= 1</c></b>(新しい呼び出しで 0 以下を渡さないこと)。
+/// ただし 0 以下は未定義動作ではなく<b>「予算を使い切った状態と同じ」</b>へ規定どおり縮退する
+/// = DoS 対策の多重防御(2026-08-08 設計書 §4 / §5)。縮退時の返り値は
+/// <c>NextWordStart</c> = <c>caret</c> / <c>WordEnd</c> = <c>pos</c> /
+/// <c>PrevWordStart</c> = <c>caret</c> の <b>1 code point 左</b>(手順 2 の 1 歩だけは予算外なので
+/// 「1 歩も走らない」と書くと <c>PrevWordStart</c> で嘘になる)/
+/// <c>WordStart</c> = <c>pos</c>。ただし <b>EOF 経路(<c>pos &gt;= CharLength</c>)だけは</b>
+/// <see cref="PrevWordStart"/>(<c>pos</c>) 委譲=<c>pos + 1</c> を渡さないため
+/// <c>pos</c> の <b>1 code point 左</b>になる(2026-09-01 の仕様レビュー Important-1)。
 /// 上限なしは <see cref="NoScanLimit"/>。<b>予算を使い切ったらその位置でそのまま返す</b>
 /// (単語の途中でも切る=SR は run の一部だけを読み、キャレットも run の途中で止まる)。
 /// 各 API が触れる窓(<b>単位は code point 数</b>。下の表の <c>maxScan</c> も同じ):
@@ -67,13 +74,23 @@ internal enum CharClass
 /// <item><term><see cref="PrevWordStart"/>(caret)</term>
 ///   <description><c>[caret - maxScan, caret]</c></description></item>
 /// <item><term><see cref="WordStart"/>(pos)</term>
-///   <description><c>[pos - (maxScan - 1), pos]</c> ← <b>左だけ 1 狭い</b></description></item>
+///   <description><c>[pos - (maxScan - 1), pos]</c> ← <b>左だけ 1 狭い</b>。
+///   <b>EOF 経路(<c>pos &gt;= CharLength</c>)だけは <c>[pos - maxScan, pos]</c></b>=
+///   狭くならない(理由は下の段落)</description></item>
 /// <item><term><see cref="WordEnd"/>(pos)</term>
 ///   <description><c>[pos, pos + maxScan]</c></description></item>
 /// </list>
 ///
+/// <b>この窓の表は <c>maxScan &gt;= 1</c> の場合。</b>0 以下のときは上の縮退の段落を見ること
+/// (窓ではなく固定の返り値になる)。
+///
 /// <see cref="WordStart"/> だけ 1 狭いのは <see cref="PrevWordStart"/> へ <c>pos + 1</c> を渡すため=
 /// 最初の 1 歩が pos へ戻るのに消費される。cap の較正時にこの 1 のズレが効く。
+/// <b>ただし EOF 経路(<c>pos &gt;= CharLength</c>)は <c>pos</c> をそのまま渡すのでこのズレが無く、
+/// 窓は <see cref="PrevWordStart"/> と同一の <c>[pos - maxScan, pos]</c> になる</b>
+/// (2026-09-01 の再レビュー Important-2。実測 <c>'a'</c> x 5000:
+/// <c>WordStart(5000, 128) = 4872</c> = 幅 128 に対し <c>WordStart(4000, 128) = 3873</c> = 幅 127。
+/// <c>maxScan</c> = 1 / 2 / 256 でも EOF 側だけ 1 広い)。
 ///
 /// <b>窓についてよくある誤読 2 つは、この節が正本である。</b>
 /// <c>TextRangeProviderV2</c> / <c>IUiaTextHost.WordStart</c> / <c>UiaWordUnitExpandTests</c> /
@@ -92,7 +109,8 @@ internal enum CharClass
 ///
 /// <b>(2)「窓がキャレット中心」なのは「走査」であって、スパンの包含ではない。</b>
 /// <see cref="WordStart"/>(pos) と <see cref="WordEnd"/>(pos) へ<b>同じ pos</b> を渡せば
-/// 走査の窓は <c>[pos - (maxScan - 1), pos + maxScan]</c> とキャレットを中心に据わる。
+/// 走査の窓は <c>[pos - (maxScan - 1), pos + maxScan]</c> とキャレットを中心に据わる
+/// (EOF 経路の例外は上の表の <see cref="WordStart"/> 行)。
 /// だが返るスパンが pos の文字を含むとは限らない: pos が空白 run の上にあると
 /// <see cref="WordStart"/> は左の空白 run を越えて前の単語の頭まで戻り、
 /// <see cref="WordEnd"/> は pos をそのまま返すので、スパン <c>[start, pos)</c> は
@@ -182,16 +200,13 @@ public static class WordBoundary
     /// </remarks>
     public const int DefaultMaxScan = 128;
 
-    /// <summary>
-    /// <c>maxScan &gt;= 1</c> 契約違反の <c>Debug.Assert</c> メッセージ。
-    /// </summary>
-    /// <remarks>
-    /// 3 引数版の <c>Debug.Assert</c> を使うのは、2 引数版の message が
-    /// <c>[CallerArgumentExpression]</c> 付きで明示指定が S3236 になるため
-    /// (<c>TextSnapshot.DecodeUtf16At</c> と同じ流儀)。
-    /// </remarks>
-    private const string MaxScanContract =
-        "maxScan は 1 以上でなければならない(0 以下は未規定=正規化しない)";
+    // Debug.Assert(maxScan >= 1, ...) をここへ戻さないこと。実装 4 本は非正値をクラス
+    // <remarks> の規定どおり縮退させており、食い違っていたのは表明の文言の側だった
+    // (V-1 修正で「非正値を明示的に正規化する」を選んだのに、メッセージが「0 以下は未規定」の
+    // まま取り残された = 申し送り S-5 / 2026-08-08 設計書 §2)。
+    // 戻すと WordBoundaryTests.MaxScan_NonPositive_NeverRemovesScanLimit が Debug 構成で
+    // 4 件赤になる。2026-09-01 に tools/pre-merge-check.ps1 と ci.yml へ
+    // 「Core.Tests(Debug・Debug.Assert 有効)」ステップを足したので、**ゲートで落ちる**。
 
     /// <summary>次の単語の先頭に進む。EOF に達したら CharLength を返す。</summary>
     /// <remarks>
@@ -203,12 +218,11 @@ public static class WordBoundary
     /// <param name="snap">走査対象のスナップショット。</param>
     /// <param name="caret">走査開始位置。</param>
     /// <param name="maxScan">
-    /// 走査上限(契約 <c>&gt;= 1</c>・窓はクラス <c>&lt;remarks&gt;</c> の表)。
-    /// 上限なしは <see cref="NoScanLimit"/>。
+    /// 走査上限(<b>推奨 <c>&gt;= 1</c></b>・窓はクラス <c>&lt;remarks&gt;</c> の表。
+    /// 0 以下の縮退も同 <c>&lt;remarks&gt;</c>)。上限なしは <see cref="NoScanLimit"/>。
     /// </param>
     public static int NextWordStart(TextSnapshot snap, int caret, int maxScan)
     {
-        Debug.Assert(maxScan >= 1, MaxScanContract, nameof(maxScan));
         if (caret >= snap.CharLength)
             return snap.CharLength;
         int budget = maxScan;
@@ -250,19 +264,21 @@ public static class WordBoundary
     /// <param name="snap">走査対象のスナップショット。</param>
     /// <param name="caret">走査開始位置。</param>
     /// <param name="maxScan">
-    /// 走査上限(契約 <c>&gt;= 1</c>・窓はクラス <c>&lt;remarks&gt;</c> の表)。手順 2 の
-    /// <b>最初の 1 歩も予算に数える</b>。上限なしは <see cref="NoScanLimit"/>。
+    /// 走査上限(<b>推奨 <c>&gt;= 1</c></b>・窓はクラス <c>&lt;remarks&gt;</c> の表)。手順 2 の
+    /// <b>最初の 1 歩も予算に数える</b>(ただし 0 以下に縮退したときの 1 歩は予算外=
+    /// クラス <c>&lt;remarks&gt;</c>)。上限なしは <see cref="NoScanLimit"/>。
     /// </param>
     public static int PrevWordStart(TextSnapshot snap, int caret, int maxScan)
     {
-        Debug.Assert(maxScan >= 1, MaxScanContract, nameof(maxScan));
         if (caret <= 0)
             return 0;
         // 手順 2(最初の 1 歩)ぶんを先に引いた予算。`budget = maxScan; budget--;` と書くと
         // maxScan == int.MinValue のとき unchecked で int.MaxValue へ化けて上限が消える
         // (実測: 'a' x 200,000 の caret=100,000 が 0 を返して 964 ms。cap=128 なら 0.5 ms)。
         // 上限の導入自体が DoS 対策なので、特定の入力値でそれが無効化される形は残さない。
-        // maxScan >= 1 では maxScan - 1 と完全に等価・0 以下はすべて「1 歩も走らない」に収束する
+        // maxScan >= 1 では maxScan - 1 と完全に等価・0 以下はすべて budget = 0 へ収束する
+        // (= 下の while が 1 周も回らない。ただし直後の手順 2 の 1 歩は予算外なので、
+        //  メソッドとしては 1 code point 左へ動く = クラス <remarks> の縮退表)
         // (2026-08-04 最終レビュー 脆弱性パス V-1)。
         int budget = maxScan > 0 ? maxScan - 1 : 0;
         int pos = TextBoundary.PrevCodePoint(snap, caret);
@@ -312,7 +328,8 @@ public static class WordBoundary
     /// <c>MouseInputTests.DoubleClick_OnWhitespace_SelectsPrevWordPlusWhitespaceRun</c> が固定している。
     /// 詳細はクラス <c>&lt;remarks&gt;</c> の「窓についてよくある誤読」(2) を参照。
     ///
-    /// <b>窓が左だけ 1 狭い(<c>[pos - (maxScan - 1), pos]</c>)のを対称化しない理由</b>
+    /// <b>窓が左だけ 1 狭い(<c>[pos - (maxScan - 1), pos]</c>。EOF 経路を除く=
+    /// クラス <c>&lt;remarks&gt;</c> の表)のを対称化しない理由</b>
     /// (2026-08-04 Task 1 品質レビューで次の 2 案とも棄却した。最終レビュー Minor-7 で記録):
     /// <list type="number">
     /// <item>内部で <c>PrevWordStart(snap, pos + 1, maxScan + 1)</c> を渡す案 →
@@ -335,12 +352,12 @@ public static class WordBoundary
     /// CharLength で受け止めるので投げない。上限側だけを見て「クランプ不要」と判断しないこと。
     /// </param>
     /// <param name="maxScan">
-    /// 走査上限(契約 <c>&gt;= 1</c>・窓はクラス <c>&lt;remarks&gt;</c> の表=<b>左だけ 1 狭い</b>)。
+    /// 走査上限(<b>推奨 <c>&gt;= 1</c></b>・窓はクラス <c>&lt;remarks&gt;</c> の表=<b>左だけ 1 狭い</b>。
+    /// EOF 経路の例外と 0 以下の縮退も同 <c>&lt;remarks&gt;</c>)。
     /// 上限なしは <see cref="NoScanLimit"/>。
     /// </param>
     public static int WordStart(TextSnapshot snap, int pos, int maxScan)
     {
-        Debug.Assert(maxScan >= 1, MaxScanContract, nameof(maxScan));
         if (pos <= 0)
             return 0;
         if (pos >= snap.CharLength)
@@ -370,13 +387,13 @@ public static class WordBoundary
     /// <param name="snap">走査対象のスナップショット。</param>
     /// <param name="pos">word run の終端を求めたい位置。</param>
     /// <param name="maxScan">
-    /// 走査上限(契約 <c>&gt;= 1</c>・窓はクラス <c>&lt;remarks&gt;</c> の表)。末尾空白の巻き戻しは
+    /// 走査上限(<b>推奨 <c>&gt;= 1</c></b>・窓はクラス <c>&lt;remarks&gt;</c> の表。
+    /// 0 以下の縮退も同 <c>&lt;remarks&gt;</c>)。末尾空白の巻き戻しは
     /// <see cref="NextWordStart"/> が進んだ範囲の内側でしか動かないため追加の予算を消費しない。
     /// 上限なしは <see cref="NoScanLimit"/>。
     /// </param>
     public static int WordEnd(TextSnapshot snap, int pos, int maxScan)
     {
-        Debug.Assert(maxScan >= 1, MaxScanContract, nameof(maxScan));
         if (pos >= snap.CharLength)
             return snap.CharLength;
         int nextWordStart = NextWordStart(snap, pos, maxScan);
