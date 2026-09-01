@@ -1307,9 +1307,37 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 巻き込み復元のために外側へ広げた範囲 <c>[S,E)</c> を返す。
     /// </summary>
     /// <remarks>
-    /// <b>この計算をここ以外に書かないこと。</b> <see cref="ReplaceCharRangeExact"/> と
-    /// <see cref="GetExactChangeRange"/> が同じ答えを出すことが後者の存在意義であり、
-    /// 2 実装に分かれた瞬間に「問うた範囲と実際に書く範囲が違う」という最悪の形で腐る。
+    /// <b>共有するのは「答え」ではなく範囲計算の素材</b>(<c>S0/E0/S/E</c> の導出)である。
+    /// <see cref="ReplaceCharRangeExact"/> と <see cref="GetExactChangeRange"/> の<b>返り値は
+    /// 意図的に異なる</b>=前者は広げた範囲 <c>[S,E)</c> へ書き、後者は<b>内容が変わりうる範囲</b>を
+    /// 端ごとに判断して返すため、CRLF を割った側は広げた分を<b>捨てる</b>
+    /// (例: <c>"abc\r\ndef"</c> の <c>(4, 1)</c> は <c>S=3, E=5</c> に対し戻り値 <c>(4, 5)</c>)。
+    /// 捨ててよいのは巻き込み復元が<b>長さ保存</b>で、割った <c>\r</c> / <c>\n</c> がそのまま
+    /// 書き戻される=内容が変わらないから。捨てられないのは復元する半身が孤立サロゲートになる側で、
+    /// そこは UTF-8 往復で U+FFFD へ潰れるため広げた分を残す。弁別の規則は
+    /// <see cref="GetExactChangeRange"/> の remarks が持つ。
+    /// <para>
+    /// <b>この範囲計算をここ以外に書かないこと。</b> 分かれてはならないのは<b>素材</b>の計算であって
+    /// 返り値ではない。素材が 2 実装に分かれた瞬間に「問うた範囲と実際に書く範囲が違う」という
+    /// 最悪の形で腐る。
+    /// </para>
+    /// <para>
+    /// <b><see cref="GetExactChangeRange"/> が CRLF 分割で <c>[S0,E0)</c> を返す分岐を、
+    /// 「doc と実装の食い違い」と読んで削らないこと。</b> それが守っているのは
+    /// 「スコープ端が CRLF の内側にある一括置換は成功しなければならない」=PR #56 §9.9 が
+    /// main 既存バグとして根治した挙動であり、
+    /// <c>SearchControllerTests.ReplaceAll_InSelection_ScopeEndInsideCrlf_DoesNotDuplicateCr</c> /
+    /// <c>..._ScopeStartInsideCrlf_DoesNotDeleteOutsideCr</c> が固定している。
+    /// </para>
+    /// <para>
+    /// <b>ただし上の 2 件が今すぐ番人になるわけではない</b>(実測 / 2026-09-01 B2 Task 3)。
+    /// 現時点で <see cref="GetExactChangeRange"/> に production の呼び出し元は無いため、
+    /// 端ごとの弁別を落として常に広げた範囲を返す変異を当てても、赤くなるのは
+    /// <c>EditorControlReplaceExactTests.GetExactChangeRange_CrlfSplit_DoesNotWiden</c> の
+    /// 1 本だけで、App 側は 714 件 green のままだった。<b>この分岐の唯一の番人は今のところ
+    /// その Editor テストである。</b> <c>SearchController</c> の包含検査がこれを呼ぶのは
+    /// B2 Task 4 からで、繋がった後は上の 2 件も拒否側へ倒れて赤くなる(想定・未実測)。
+    /// </para>
     /// <para>
     /// ゼロ幅(<c>S0 == E0</c>)は外側へ広げず、挿入点だけを境界へ後退させて
     /// <c>S == E == 後退後の位置</c> を返す(理由は
