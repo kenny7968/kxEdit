@@ -19,8 +19,10 @@ namespace kxEdit.Core.Text;
 /// <b>述語を 1 つでもインライン展開して登録簿から外さないこと。</b> 単一利用でも述語のまま残す
 /// (登録簿は完全でなければ「ここだけ直せばよい」という宣言そのものが罠になる)。
 /// span 版 3 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
-/// 共有できないから(共有すると短絡が効かず読みが増える)。規則が 2 実装に分かれる分は、
-/// snapshot 版との<b>同値を全数テストで固定して</b>drift を防いでいる。
+/// 共有できないから(共有すると短絡が効かず読みが増える)。規則が 2 実装に分かれる分の drift は、
+/// <b>射程の違う全数テスト 2 本</b>(snapshot 版との同値 + snapshot を通さない事後条件)で防ぐ。
+/// <b>片方だけでは穴が開く</b>=どちらの網がどの変異を殺すかの実測は
+/// <see cref="SnapToLogicalCharStart(ReadOnlySpan{char}, int)"/> の remarks に書いてある。
 ///
 /// <b>本登録簿の適用範囲</b>: <c>TextSnapshot</c> 上 / span 上を<b>キャレット・選択・描画単位で
 /// 歩く</b>経路に限る(2026-09-01 B2 まで span 側は「行内」に限ると書いていたが、
@@ -262,9 +264,21 @@ public static class TextBoundary
     /// <see cref="SnapToCodePointStart"/>(サロゲートのみ)と違い <b>CRLF も 1 論理文字として見る</b>。
     /// 判定を述語へ括らずインラインで書いているのは他の span 版 2 メソッドと同じ理由
     /// (indexer 読みなので snapshot 版の述語と共有できない)。
-    /// snapshot 版との<b>同値は全数テストで固定してある</b>
-    /// (<c>SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive</c>)ので、
-    /// 片方だけ直すと必ず赤くなる。
+    ///
+    /// <b>drift 防止の網は 2 本あり、射程が違う。「同値テストがあるから片方だけ直せば必ず赤くなる」は
+    /// 偽</b>(2026-09-01 B2 に変異で実測。素通りを 2 方向とも確認済み):
+    /// <list type="bullet">
+    /// <item><c>SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive</c> = snapshot 版との同値。
+    /// 射程は<b>snapshot が表現できる本文に限る</b>=<c>TextBuffer</c> が孤立サロゲートを U+FFFD へ
+    /// 潰すため、材質化後の本文に孤立 low サロゲートは 1 つも現れない。よって
+    /// <c>IsHighSurrogate(text[pos - 1])</c> を落とす変異は<b>この網を素通りする</b>(不一致 0 件)。</item>
+    /// <item><c>SnapToLogicalCharStart_Span_Exhaustive_NeverMovesForwardAndStaysInRange</c> =
+    /// snapshot を通さない事後条件。孤立サロゲートを含む入力にも直接当たるので上の変異を殺す
+    /// (違反 22 件)。逆に <c>c == '\n'</c> を落とす変異は、戻り先が CR になって「論理文字の内側を
+    /// 指さない」を満たしてしまうため<b>この網を素通りし</b>(違反 0 件)、同値テスト側だけが殺す
+    /// (不一致 344 件)。</item>
+    /// </list>
+    /// <b>2 本は相補的。どちらか一方を消すと、対応する側の変異が生存する。</b>
     /// </remarks>
     public static int SnapToLogicalCharStart(ReadOnlySpan<char> text, int pos)
     {
