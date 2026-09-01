@@ -217,4 +217,92 @@ T1 / T2 は **修正前の src で赤になること**を実装時に確認す�
 
 ## 8. 実施記録
 
-(実装時に追記する)
+### 8.1 Task 1 — EOL 正規化を `CsvWriter` へ集約(挙動不変)
+
+`CsvCellEditor.Commit` が持っていた `\r\n` / `\r` → `\n` の置換を `CsvWriter.NormalizeEols`
+へ移し、`Commit` はそれを呼ぶ形へ寄せた。§4.3 が要求する「規則の持ち主を 1 つにする」の実体。
+
+**Step 2 で観測した赤**(逐語。リポジトリ絶対パスのみ `no-local-paths` フックの規約に従い
+`<repo>` へ置換):
+
+```
+<repo>\tests\kxEdit.Core.Tests\Csv\CsvWriterTests.cs(54,78): error CS0117: 'CsvWriter' に 'NormalizeEols' の定義がありません [<repo>\tests\kxEdit.Core.Tests\kxEdit.Core.Tests.csproj]
+```
+
+同文が 5 箇所(新規テスト 5 本すべて)。計画の予測どおり。
+
+**集約が実効を持つことの確認**: `src/` 全体を `Replace("\r` で grep し、他の EOL 正規化サイトが
+**0 件**であることを確認した。比較側が別規則を持つ余地は残っていない。
+
+### 8.2 Task 1 — 計画からの逸脱
+
+| 逸脱 | 理由 |
+|------|------|
+| テストメソッド名を計画の PascalCase(`NormalizeEols_Crlf_BecomesLf` 等)から既存様式へ(`Crlf_is_normalized_to_lf` 等) | `CsvWriterTests.cs` の既存は `Plain_value_is_unchanged` / `Lf_is_quoted` =「先頭のみ大文字 + snake」。計画の名前だけが浮く |
+| `CsvCellEditor.cs` へ `using kxEdit.Core.Csv;` を足さなかった | 既に 1 行目にあった(計画の「確認すること」を充足) |
+| `ArgumentNullException` を無修飾で書いた | 同ファイルの既存は `System.StringComparison` と修飾するが、`Directory.Build.props` の `ImplicitUsings=enable` で無修飾が有効。IDE0001 等の警告も出ない |
+| CSharpier が `Crlf_is_normalized_to_lf` の式本体を 2 行へ折った | pre-commit フックの整形。再 stage して同一 commit に収めた |
+
+### 8.3 Task 1 レビュー Important-1 — 「どの変異を殺すか」の記述が偽だった
+
+`Lf_only_value_is_not_changed_by_normalize` に「過剰置換=CRLF を 2 個の LF にする変異を殺す」
+と書いていたが**偽**。入力 `"a\nb\n"` は CR を 1 文字も含まないので、CR の扱いを変える変異は
+**すべて**この fixture 上で恒等になる。
+
+**結論(3 変異はすべて殺される)は正しく、根拠(どのテストが殺すか)だけが誤っていた。**
+[[rationale-not-just-conclusion]] の類型が本ブランチでも出た形。
+
+訂正にあたり、**変異を実際に注入して**殺したテストを実測した(実装者による再実測。
+レビュー担当は独立に 6 変異 × 7 ケースの総当たりで同じ表を得ている):
+
+| 変異 | 実測で落ちたテスト |
+|------|--------------------|
+| 置換順序の入替(`\r→\n` を先に) | `Crlf_...` / `Mixed_...`(2 失敗) |
+| `Replace("\r\n","\n")` を削る | `Crlf_...` / `Mixed_...`(2 失敗) |
+| `Replace("\r","\n")` を削る | `Lone_cr_...` / `Mixed_...`(2 失敗) |
+| 過剰置換(CRLF→LF 2 個) | `Crlf_...` / `Mixed_...`(2 失敗) |
+| 丸ごと no-op(`return value;`) | `Crlf_...` / `Lone_cr_...` / `Mixed_...`(3 失敗) |
+| 末尾 LF を落とす(`TrimEnd('\n')`) | **`Lf_only_...` のみ**(1 失敗) |
+| `ArgumentNullException.ThrowIfNull` を削る | **`NormalizeEols_throws_on_null_value` のみ**(1 失敗) |
+
+`Lf_only_...` の存在価値は「このファイルで末尾に改行を持つ唯一の fixture」であって
+過剰置換の網ではない。コメントはこの実測どおりに書き直した。
+
+**同じ型を訂正作業中に自分で再発させた**(fixup `0ca02be`)。書き直したコメントに
+「(順序入替・crlf 削除・過剰置換・no-op の)いずれも CRLF が LF 2 個へ化けるため落ちる」と
+書いたが、**no-op では CRLF は CRLF のまま残る**ので理由節が偽。列挙した変異の数も
+数え間違えていた。**「殺される」という結論だけを検算して理由節を検算しないと、訂正のたびに
+同じ穴が空く。** 理由節も 1 つずつ変異を当てて確かめること。
+
+### 8.4 Task 1 レビュー Important-2 — 呼出側(`Commit`)に網が 1 本も無かった
+
+計画 Step 6 の観点「`Commit` の置換が挙動不変か(既存テストで足りているか)」の答えは **No** だった。
+既存の F2 テストは確定値が `"NEW"` / `"SHOULD_NOT_APPLY"` で **CR を 1 文字も含まない**ため、
+`string text = _box.Text;`(正規化を丸ごと落とす変異)が**全テスト緑のまま生存**していた。
+
+しかもこれは到達不能な枝ではない。**Alt+Enter がセル内改行として `"\r\n"` を TextBox へ
+挿入する**(`CsvCellEditor.cs:79`)ので、CR を含む確定値は実運用の主経路である。
+
+`BeginEdit_ThenCommit_NormalizesCrlfInCellValue_BeforeSerializing`(L3)を追加し、
+変異を注入して赤を実測した:
+
+```
+Assert.Equal() Failure: Strings differ
+Expected: ""x\ny",a2,a3\nb1,b2,b3\nc1,c2,c3"
+Actual:   ""x\r\ny",a2,a3\nb1,b2,b3\nc1,c2,c3"
+```
+
+同じ実行で既存の `BeginEdit_ThenCommit_Replaces...` は**緑のまま**であり、
+「既存テストがこの変異を素通しする」というレビューの指摘も同時に実証された。
+
+**教訓**: 規則を関数へ括り出したとき、網は**関数側だけでなく呼出側にも**要る。
+`NormalizeEols` 側の 6 本は「規則が正しいこと」しか守らず、
+「呼出側がその規則を使い続けること」は 1 ビットも守らない。
+リファクタで「移しただけ」の箇所こそ、移した先の網が移す前の網を代替していないか確かめる。
+
+### 8.5 Task 1 — §4.3 の根拠は実読で真と確認された
+
+§4.3 が引く「`CsvParser` は引用符内の CR / LF を literal のまま `Value` へ積む」は、
+レビュー担当の実読で真と確認された。`inQuotes` ブロックが `"` 以外の文字を無条件に
+`sb.Append(c)` する構造(「引用符内のカンマ・改行も literal」コメントの直上)で、
+CR / LF に特別扱いが無い。**§4.3 は想定ではなく実測として扱ってよい。**
