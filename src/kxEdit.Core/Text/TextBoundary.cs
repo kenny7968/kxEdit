@@ -9,7 +9,7 @@ namespace kxEdit.Core.Text;
 /// <c>'\r'</c> + <c>'\n'</c> の並び判定を手書きしないこと。2026-07-31 に 15 ファイル・22 箇所へ
 /// 散っていた手書き判定をここへ寄せた(うち 1 件は Task 6 のセルフレビューで見つけた棚卸し漏れ)。
 /// 規則を変えるときに直す場所が
-/// <b>本ファイルの境界述語 4 つと span 版 2 メソッドだけ</b>で済む状態を保つこと。
+/// <b>本ファイルの境界述語 4 つと span 版 3 メソッドだけ</b>で済む状態を保つこと。
 /// 述語は「前進 / 後退」×「サロゲート / CRLF」の 2×2 で、片方向だけ直して逆方向を落とす失敗
 /// (2026-07-24 に実際に起きた)を欠けが見える形で防ぐためにこの構成にしている:
 /// <list type="bullet">
@@ -18,11 +18,14 @@ namespace kxEdit.Core.Text;
 /// </list>
 /// <b>述語を 1 つでもインライン展開して登録簿から外さないこと。</b> 単一利用でも述語のまま残す
 /// (登録簿は完全でなければ「ここだけ直せばよい」という宣言そのものが罠になる)。
-/// span 版 2 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
-/// 共有できないから(共有すると短絡が効かず読みが増える)。
+/// span 版 3 メソッドが例外なのは、<c>TextSnapshot</c> ではなく indexer で読むため述語を
+/// 共有できないから(共有すると短絡が効かず読みが増える)。規則が 2 実装に分かれる分は、
+/// snapshot 版との<b>同値を全数テストで固定して</b>drift を防いでいる。
 ///
-/// <b>本登録簿の適用範囲</b>: <c>TextSnapshot</c> 上 / 行内 span 上を<b>キャレット・描画単位で
-/// 歩く</b>経路に限る。バイト層(<c>TextChunk</c> / <c>Utf8Scan</c>)と、EOL 変換・整形・計数系
+/// <b>本登録簿の適用範囲</b>: <c>TextSnapshot</c> 上 / span 上を<b>キャレット・選択・描画単位で
+/// 歩く</b>経路に限る(2026-09-01 B2 まで span 側は「行内」に限ると書いていたが、
+/// <c>Core.Search</c> が材質化した本文 string もここへ乗せたので限定を外した)。
+/// バイト層(<c>TextChunk</c> / <c>Utf8Scan</c>)と、EOL 変換・整形・計数系
 /// (Rune ベース)は対象外。<c>rg IsHighSurrogate src</c> が次にヒットするのは
 /// <b>seam の破れではなく意図的な除外</b>(設計書 §3 でスコープ外と決めた 4 ファイル・5 箇所):
 /// <list type="bullet">
@@ -64,7 +67,12 @@ namespace kxEdit.Core.Text;
 /// 逆向きを足すと循環に見える)。
 ///
 /// <c>TextSnapshot</c> を受ける版は文書全体を、<c>ReadOnlySpan&lt;char&gt;</c> を受ける版は
-/// Layout / 描画が扱う行内テキスト(改行を含まない=CRLF 概念が不要)を対象とする。
+/// <c>TextSnapshot</c> を持たない呼び出し側(Layout / 描画の行内テキスト・
+/// <c>Core.Search</c> が材質化した本文 string)を対象とする。
+/// <b>CRLF を見るかどうかは span / snapshot の別ではなく「コードポイント単位か論理文字単位か」で
+/// 決まる</b>: <see cref="SnapToCodePointStart"/> はサロゲートだけを見るが、
+/// <see cref="SnapToLogicalCharStart(ReadOnlySpan{char}, int)"/> は CRLF も 1 論理文字として見る
+/// (2026-09-01 B2: 行内テキスト専用という旧宣言はここで失効した)。
 ///
 /// <b>範囲外入力の契約</b>(置き換え元 <see cref="Editing.NavigationCommands"/> の
 /// <c>&lt;remarks&gt;</c> を引き継ぐ)。<b>クランプで隠さず throw させる</b>のが方針=
@@ -72,7 +80,7 @@ namespace kxEdit.Core.Text;
 /// それぞれ「進めない側」だけを no-op として許容しているから(<c>Next*</c> は EOF で止まり、
 /// <c>Prev*</c> は先頭で止まる)。
 /// <list type="table">
-/// <listheader><term>家族</term><description><c>pos &lt; 0</c> / <c>pos &gt; CharLength</c></description></listheader>
+/// <listheader><term>家族(<c>TextSnapshot</c> 版)</term><description><c>pos &lt; 0</c> / <c>pos &gt; CharLength</c></description></listheader>
 /// <item><term><c>Next*</c></term><description>throw / クランプ(<c>CharLength</c> を返す)</description></item>
 /// <item><term><c>Prev*</c></term><description>クランプ(0 を返す) / throw</description></item>
 /// <item><term><c>SnapToLogicalCharStart</c></term><description>クランプ / クランプ</description></item>
@@ -81,10 +89,12 @@ namespace kxEdit.Core.Text;
 /// throw は <see cref="ArgumentOutOfRangeException"/>(<see cref="TextSnapshot.GetChar"/> 由来)。
 /// 実装は必要な位置しか読まないため、読取が発生しない縮退ケースでは範囲外でも throw しない
 /// (例: 空文書に <c>PrevCodePoint(snap, 1)</c> は 0 を返す)。呼び出し側はこれに依存せず、
-/// <see cref="SnapToLogicalCharStart"/> 等で [0, CharLength] に正規化してから歩進すること。
+/// <see cref="SnapToLogicalCharStart(TextSnapshot, int)"/> 等で [0, CharLength] に正規化してから
+/// 歩進すること。
 /// <c>ReadOnlySpan&lt;char&gt;</c> 版は <see cref="CodePointLengthAt(ReadOnlySpan{char}, int)"/> が
 /// 範囲外で <see cref="IndexOutOfRangeException"/>(indexer 由来)、
-/// <see cref="SnapToCodePointStart"/> は両端クランプ。
+/// <see cref="SnapToCodePointStart"/> と
+/// <see cref="SnapToLogicalCharStart(ReadOnlySpan{char}, int)"/> は両端クランプ。
 /// </summary>
 public static class TextBoundary
 {
@@ -244,12 +254,38 @@ public static class TextBoundary
     }
 
     /// <summary>
-    /// [0, CharLength] にクランプし、論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
-    /// 後方(pair 終端)へスナップする。<see cref="SnapToLogicalCharStart"/> の対。
+    /// span 版。<c>TextSnapshot</c> を持たない呼び出し側(<c>Core.Search</c> が材質化した
+    /// 本文 string 等)向け。論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
+    /// 前方(pair 先頭)へスナップする。[0, text.Length] の外はクランプ。
     /// </summary>
     /// <remarks>
-    /// 範囲の<b>終端</b>に使う。終端に <see cref="SnapToLogicalCharStart"/> を掛けると範囲が
-    /// 狭まり、割ってはいけない論理文字ごと範囲から落ちる(例: CRLF の CR にヒットした
+    /// <see cref="SnapToCodePointStart"/>(サロゲートのみ)と違い <b>CRLF も 1 論理文字として見る</b>。
+    /// 判定を述語へ括らずインラインで書いているのは他の span 版 2 メソッドと同じ理由
+    /// (indexer 読みなので snapshot 版の述語と共有できない)。
+    /// snapshot 版との<b>同値は全数テストで固定してある</b>
+    /// (<c>SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive</c>)ので、
+    /// 片方だけ直すと必ず赤くなる。
+    /// </remarks>
+    public static int SnapToLogicalCharStart(ReadOnlySpan<char> text, int pos)
+    {
+        if (pos <= 0)
+            return 0;
+        if (pos >= text.Length)
+            return text.Length;
+        char c = text[pos];
+        bool endsSurrogatePair = char.IsLowSurrogate(c) && char.IsHighSurrogate(text[pos - 1]);
+        bool endsCrlf = c == '\n' && text[pos - 1] == '\r';
+        return endsSurrogatePair || endsCrlf ? pos - 1 : pos;
+    }
+
+    /// <summary>
+    /// [0, CharLength] にクランプし、論理文字の中間位置(low サロゲート位置 / CR と LF の間)を
+    /// 後方(pair 終端)へスナップする。
+    /// <see cref="SnapToLogicalCharStart(TextSnapshot, int)"/> の対。
+    /// </summary>
+    /// <remarks>
+    /// 範囲の<b>終端</b>に使う。終端に <see cref="SnapToLogicalCharStart(TextSnapshot, int)"/> を
+    /// 掛けると範囲が狭まり、割ってはいけない論理文字ごと範囲から落ちる(例: CRLF の CR にヒットした
     /// <c>[3,4)</c> が <c>[3,3)</c> のゼロ幅に潰れる)。始端に Start・終端に End を掛けると、
     /// 元の範囲を必ず含み、かつ論理文字を割らない最小の範囲になる。
     /// </remarks>

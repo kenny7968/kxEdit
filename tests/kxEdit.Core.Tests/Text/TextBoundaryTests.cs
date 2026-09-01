@@ -310,6 +310,115 @@ public class TextBoundaryTests
         Assert.Equal(3, TextBoundary.SnapToCodePointStart(text, 99));
     }
 
+    // ===== span 版 SnapToLogicalCharStart(2026-09-01 B2 Task 1) =====
+    // snapshot 版と違い CRLF も見る。Core.Search が材質化した本文 string を扱うため。
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_SnapsMidSurrogateAndMidCrlf()
+    {
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\U0001F600b".AsSpan(), 2));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\r\nb".AsSpan(), 2));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LeavesBoundariesAlone()
+    {
+        var text = "a\r\nb".AsSpan();
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(text, 0));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(text, 1));
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharStart(text, 3));
+        Assert.Equal(4, TextBoundary.SnapToLogicalCharStart(text, 4)); // 末尾は許可
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LoneLfAndLoneLowSurrogateAreNotSnapped()
+    {
+        // 対を成さない片割れは論理文字を作らないので動かさない(snapshot 版と同じ規則)。
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\nb".AsSpan(), 1));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\uDE00b".AsSpan(), 1));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_ClampsOutOfRange()
+    {
+        var text = "abc".AsSpan();
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(text, -5));
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharStart(text, 99));
+    }
+
+    /// <summary>
+    /// 全数の材料: 論理文字境界に関わる 5 code unit だけで長さ 4 以下の全文字列を作る。
+    /// 通常文字 / CR / LF / high サロゲート / low サロゲートで、
+    /// 「対を成す・成さない」の全組合せが 4 文字以内に現れる。
+    /// </summary>
+    private static IEnumerable<string> ShortStringsOverBoundaryAlphabet()
+    {
+        // 絵文字は UTF-16 で 2 code unit なので、この文字列の Length は 5
+        // (a / CR / LF / high サロゲート / low サロゲート)。
+        const string alphabet = "a\r\n\U0001F600";
+        var cur = new List<string> { "" };
+        yield return "";
+        for (int len = 1; len <= 4; len++)
+        {
+            var next = new List<string>(cur.Count * alphabet.Length);
+            foreach (string s in cur)
+            foreach (char c in alphabet)
+                next.Add(s + c);
+            foreach (string s in next)
+                yield return s;
+            cur = next;
+        }
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive()
+    {
+        foreach (string raw in ShortStringsOverBoundaryAlphabet())
+        {
+            var snap = Snap(raw);
+            // 比較は「保存層を通った後の本文」で行う。TextBuffer は UTF-8 で保持するため
+            // 孤立サロゲートは U+FFFD へ潰れ、raw と snapshot の中身は一致しない。
+            string text = snap.GetText(0, snap.CharLength);
+            for (int pos = -2; pos <= text.Length + 2; pos++)
+                Assert.Equal(
+                    TextBoundary.SnapToLogicalCharStart(snap, pos),
+                    TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos)
+                );
+        }
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_Exhaustive_NeverMovesForwardAndStaysInRange()
+    {
+        // snapshot を通さない=孤立サロゲートを含む入力も直接当てる(同値テストが届かない領域)。
+        foreach (string text in ShortStringsOverBoundaryAlphabet())
+        {
+            for (int pos = -2; pos <= text.Length + 2; pos++)
+            {
+                int got = TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos);
+                int clamped = Math.Max(0, Math.Min(pos, text.Length));
+                Assert.InRange(got, 0, text.Length);
+                Assert.True(got <= clamped, $"forward move: '{Escape(text)}' pos={pos} got={got}");
+                Assert.True(
+                    clamped - got <= 1,
+                    $"moved more than 1: '{Escape(text)}' pos={pos} got={got}"
+                );
+                // 結果は論理文字の内側を指さない。
+                if (got > 0 && got < text.Length)
+                {
+                    Assert.False(
+                        char.IsLowSurrogate(text[got]) && char.IsHighSurrogate(text[got - 1])
+                    );
+                    Assert.False(text[got] == '\n' && text[got - 1] == '\r');
+                }
+            }
+        }
+    }
+
+    /// <summary>失敗メッセージ用。制御文字とサロゲートを可視化する。</summary>
+    private static string Escape(string s) =>
+        string.Concat(s.Select(c => c is >= ' ' and <= '~' ? c.ToString() : $@"\u{(int)c:X4}"));
+
     // ===== SnapToLogicalCharEnd: 論理文字の中間位置を後方(pair 終端)へ寄せる =====
 
     [Fact]
