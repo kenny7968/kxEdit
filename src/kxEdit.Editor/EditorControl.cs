@@ -1330,13 +1330,23 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <c>..._ScopeStartInsideCrlf_DoesNotDeleteOutsideCr</c> が固定している。
     /// </para>
     /// <para>
-    /// <b>ただし上の 2 件が今すぐ番人になるわけではない</b>(実測 / 2026-09-01 B2 Task 3)。
-    /// 現時点で <see cref="GetExactChangeCharRange"/> に production の呼び出し元は無いため、
-    /// 端ごとの弁別を落として常に広げた範囲を返す変異を当てても、赤くなるのは
-    /// <c>EditorControlReplaceExactTests.GetExactChangeCharRange_CrlfSplit_DoesNotWiden</c> の
-    /// 1 本だけで、App 側は 714 件 green のままだった。<b>この分岐の唯一の番人は今のところ
-    /// その Editor テストである。</b> <c>SearchController</c> の包含検査がこれを呼ぶのは
-    /// B2 Task 4 からで、繋がった後は上の 2 件も拒否側へ倒れて赤くなる(想定・未実測)。
+    /// <b>ただし上の 2 件はこの分岐の番人ではない</b>(実測 / 2026-09-01 B2 Task 4)。
+    /// Task 3 時点では「<c>SearchController</c> の包含検査が繋がれば上の 2 件も拒否側へ倒れて
+    /// 赤くなる」と想定していたが、<b>繋いだうえで実測したところこの想定は偽だった</b>。
+    /// 端ごとの弁別を落として常に広げた範囲 <c>[S,E)</c> を返す変異を当てても、
+    /// <b>App は 721 件 green のまま</b>で、赤くなるのは Editor 側の 2 本
+    /// (<c>EditorControlReplaceExactTests.GetExactChangeCharRange_CrlfSplit_DoesNotWiden</c> /
+    /// <c>..._MixedCrlfAndSurrogate_DecidesEachEndIndependently</c>)だけだった。理由は 2 つ:
+    /// <list type="bullet">
+    /// <item>production の呼び出し元は <c>SearchController.ReplaceOne</c> の包含検査ただ 1 つで、
+    /// 上の 2 件が CRLF 分割スコープを踏むのは <c>ReplaceAll</c> 経路である。<c>ReplaceAll</c> には
+    /// 包含検査を置いていない(到達 fixture が全数探索で見つからず、置けば死んだガードになるため
+    /// = B2 Task 4 Step 2)。</item>
+    /// <item>上の 2 件が通る <c>ReplaceOne</c> のヒットは両端が論理文字境界に乗るので、
+    /// 広げた範囲と素の範囲が一致し変異と原実装の区別がつかない。</item>
+    /// </list>
+    /// <b>この分岐の番人は依然として Editor テスト 2 本だけである。</b>
+    /// 「App 側の 2 件が守っている」と読んで Editor 側を消さないこと。
     /// </para>
     /// <para>
     /// ゼロ幅(<c>S0 == E0</c>)は外側へ広げず、挿入点だけを境界へ後退させて
@@ -1389,6 +1399,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <b>用途</b>: 「選択範囲のみ」の置換が、ユーザーの選んでいない位置を書き換えないことを
     /// <b>書く前に</b>確かめる(<c>SearchController</c>)。後退が起きる条件を呼び出し側で
     /// 数え上げるのは本クラスの規則の複製であり、規則が変われば黙って腐る。
+    /// production の呼び出し元は <c>SearchController.ReplaceOne</c> の包含検査<b>だけ</b>
+    /// (2026-09-01 B2 Task 4)。<c>ReplaceAll</c> は書込範囲がスコープそのものに収まるため
+    /// 呼ばない(理由は同メソッドのコメント)。
     /// </para>
     /// <para>
     /// 書けない状態(<c>_buffer is null</c> / <see cref="ReadOnly"/>)では何も変わらないので
