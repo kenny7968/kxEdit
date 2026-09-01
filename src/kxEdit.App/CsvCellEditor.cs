@@ -109,7 +109,7 @@ internal sealed class CsvCellEditor : IDisposable
     {
         if (_box is null || _closing)
             return;
-        string text = _box.Text.Replace("\r\n", "\n").Replace("\r", "\n");
+        string text = CsvWriter.NormalizeEols(_box.Text);
         var cb = _onCommit;
         Close();
         cb?.Invoke(text);

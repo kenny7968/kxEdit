@@ -45,4 +45,33 @@ public class CsvWriterTests
     [Fact]
     public void Empty_value_parses_to_no_rows() =>
         Assert.Empty(CsvParser.Parse(CsvWriter.EscapeField("")).Rows);
+
+    // ===== NormalizeEols(F2 確定値と CsvParser の Value を同じ土俵に乗せる) =====
+    // CsvParser は引用符内の CR / LF を literal のまま Value へ積む(CsvParser.cs:117-124)ため、
+    // ConvertEols 後の Value は変換前と素の比較で一致しない。正規化はその差を吸収する。
+
+    [Fact]
+    public void Crlf_is_normalized_to_lf() =>
+        Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\r\nb"));
+
+    [Fact]
+    public void Lone_cr_is_normalized_to_lf() =>
+        Assert.Equal("a\nb", CsvWriter.NormalizeEols("a\rb"));
+
+    [Fact]
+    public void Mixed_breaks_are_normalized_to_lf() =>
+        Assert.Equal("a\nb\nc\nd", CsvWriter.NormalizeEols("a\r\nb\rc\nd"));
+
+    // 恒等性: すでに LF のみなら 1 文字も変えない(過剰置換=CRLF を 2 個の LF にする変異を殺す)。
+    [Fact]
+    public void Lf_only_value_is_not_changed_by_normalize() =>
+        Assert.Equal("a\nb\n", CsvWriter.NormalizeEols("a\nb\n"));
+
+    // 改行を含まない値は素通し(空文字列を含む)。
+    [Theory]
+    [InlineData("")]
+    [InlineData("abc")]
+    [InlineData("a,b\"c")]
+    public void Value_without_breaks_is_not_changed_by_normalize(string s) =>
+        Assert.Equal(s, CsvWriter.NormalizeEols(s));
 }

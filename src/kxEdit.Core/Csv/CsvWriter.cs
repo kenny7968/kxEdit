@@ -14,4 +14,17 @@ public static class CsvWriter
             || value.Contains('\n', System.StringComparison.Ordinal);
         return needsQuote ? "\"" + value.Replace("\"", "\"\"") + "\"" : value;
     }
+
+    /// <summary>
+    /// セル値の改行を LF へ正規化する。<see cref="CsvParser"/> は引用符内の CR / LF を
+    /// literal のまま <c>CsvField.Value</c> へ積むため、<c>EditorControl.ConvertEols</c> の
+    /// 前後でセル値の見かけが変わる。F2 確定値(<c>CsvCellEditor.Commit</c>)と
+    /// パース結果の値を比較する側は、必ずこの規則で揃えてから比較すること
+    /// (2026-09-01 設計書 §4.3)。
+    /// </summary>
+    public static string NormalizeEols(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return value.Replace("\r\n", "\n").Replace("\r", "\n");
+    }
 }
