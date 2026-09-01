@@ -576,3 +576,181 @@ CLAUDE.md §2「意図的な挙動変更は文書化する」の対象。
    「行 / 列が減って `GetField` が `null`」のケースでは「CSVとして解析できません」は**文言が偽**であり、
    かつどちらの条件でもユーザーの入力が黙って捨てられることを発声が伝えない。
    **Task 2 単独ではマージできない。**
+
+### 8.18 Task 3 — 同一性の検証と専用発声(Step 2 の赤)
+
+開始時の `Value`(EOL 正規化済)・`Rows.Count`・`Rows[row].Count` をスカラーで捕捉し、確定時の
+パース結果と突き合わせて、崩れていれば本文へ 1 文字も触れずに `CommitTargetChanged` を発声する
+形にした。§8.17-4 の暫定(`ParseError` で受ける)は解消。
+
+まずビルドが `error CS0117: 'CsvAnnounceFormatter' に 'CommitTargetChanged' の定義がありません` を
+**6 箇所**(新規テスト 6 本すべて)で出して失敗。定数だけ足して再実行した赤(逐語):
+
+| テスト | Actual |
+|---|---|
+| `Commit_WhenCellAtRowColBecameAnotherCell` | `Expected: "a1,a2,a3\nb1,ZZ,b3\nc1,c2,c3"` / `Actual: "a1,a2,a3\nb1,NEW,b3\nc1,c2,c3"` |
+| `Commit_WhenCellAtRowColDisappeared` | `Expected: "本文が変わったため確定できません"` / `Actual: "CSVとして解析できません"` |
+| `Commit_WhenRowCountChanged_AndValueCoincides` | `Expected: "X,Y\nX,Y"` / `Actual: "X,Y\nNEW,Y"` |
+| `Commit_WhenColumnCountChanged_AndValueCoincides` | `Expected: "p,q\nX,X,X"` / `Actual: "p,q\nX,NEW,X"` |
+| `Commit_WhenBodyBecameUnparsable` | `Expected: "本文が変わったため確定できません"` / `Actual: "CSVとして解析できません"` |
+| `Commit_WhenRejected_RestoresCellHighlight...` | `Expected: "a1,a2\r\nZZ,b2\r\nc1,c2"` / `Actual: "a1,a2\r\nNEW,b2\r\nc1,c2"` |
+
+**計画の想定と全件一致。** 前提固定の `Assert.Equal(..., afterMutation)` は 6 本とも先に通ったので、
+計画のオフセット(12/2・17/9・0/4・4/0)は数え直した結果も正しく、期待値の修正は要らなかった。
+
+### 8.19 Task 3 — §8.17-1 の論証が実測へ昇格した
+
+`CsvParserTests` に `Unterminated_trailing_record_sets_not_ok_but_leaves_preceding_rows_intact` を
+足し、`"a1,a2\nb1,b2\n\"x"` を実測(初回から PASS):
+
+- `Ok` = **false** / `Rows.Count` = **2** / `Rows[0].Count` = **2** / `GetField(0,0)` = **`(Start=0, Length=2, Value="a1")`**
+
+**§8.17-1 が「コード読解による論証であって実測していない」と留保した帰結は真だった。** 値も形も
+開始時と全一致するので「値 + 形」の guard は全部素通りし、`csvNow.Ok` だけが書込を止める。
+L3 側でも `csvNow.Ok` 判定を落とす変異を殺すのが `Commit_WhenBodyBecameUnparsable` 1 本だけである
+ことを実測した(§8.24 の m1 列)。**§8.17-1 は回収済み。**
+
+### 8.20 Task 3 — M-1 の網は「2 手」でしか作れない(§8.17-2 の回収)
+
+拒否枝でセル強調を復元する手当て(§8.17-2)を入れ、網も張った。fixture の設計で分かったこと:
+
+- `ConvertEols` は `_cellHighlight = null` を実行する(実測: `Assert.Null(CellHighlight(...))` が通る)。
+- **しかし `ConvertEols` 単独では拒否枝に入れない。** 行列構造も正規化後 `Value` も変えないので
+  同一性検証が必ず通り、受理枝へ行く(T1 / T2 が緑であることがその実測)。
+- したがって「強調が消えている」と「拒否される」を**同時に作るには 2 手要る**:
+  1 手目 `ConvertEols(Crlf)` で強調を落とし、2 手目 `MutateBodyWhileEditing` で編集セルの値だけを
+  差し替える。fixture は混在 EOL の `"a1,a2\nb1,b2\r\nc1,c2"`。
+- 観測は `EditorControlConvertEolsTests` の `CellHighlight` と同じ流儀のリフレクション。
+  `System.Windows.Forms.SelectionRange` と名前が衝突したので別名 using で入れた(計画に無い実物都合)。
+
+### 8.21 Task 3 — 計画の T4 kill 主張が偽だった / T4 の網に穴があった
+
+**(a) 計画の kill 主張が偽。** 計画は `Commit_WhenCellAtRowColDisappeared`(T4)の kill 対象を
+「`GetField` の null 判定削除(`NullReferenceException`)」としていたが、**実測では T4 はこの変異を
+殺さない**。行が消えると `csvNow.Rows.Count != startRowCount` が先に true になり `target.Value` へ
+到達しないためである。この変異を殺すのは `Commit_WhenBodyBecameUnparsable` **だけ**だった。
+「結論(null 判定は要る)は正しいが理由節(どのテストが守るか)が偽」の型。
+
+**(b) T4 の網に穴があった。** 当初 T4 は `Said[^1]` だけを見ていたため、強調復元の前置ガード
+`if (target is not null)` だけを削る変異が**全緑で生存**した(セル消失時に `ApplyCell` が
+「移動できません」を先に喋る = 余計な発声が 1 本増えるが、末尾だけ見る assert は素通しする)。
+T4 を `Assert.Equal(new[]{ CommitTargetChanged }, Said)` の全件固定へ強化して塞いだ。
+
+### 8.22 Task 3 レビュー I-1 — 「結論は正しいが理由節が偽」の 5 回目
+
+拒否枝に書いた M-1 のコメント
+
+> 到達経路である `ConvertEols` は本文差し替えの直後に `_cellHighlight` を捨てるため、
+> ここで戻さないと晴眼・弱視ユーザーが現在セルを見失ったまま残る
+
+は 2 点とも偽だった:
+
+1. **`ConvertEols` はこの拒否枝の到達経路ではない**(§8.20 のとおり必ず受理枝へ行く。T1 / T2 が
+   緑であることが実測)。
+2. **受理枝は末尾の `ApplyCell(ed, csv2, row, col, announce: true)` が強調を張り直す**
+   (実読で確認。`ApplyCell` は `HighlightCharRange` を呼ぶ)。したがって Ctrl+S 経路では
+   戻さなくても見失わない。**強調が失われたまま残るのは到達不能な拒否枝だけ。**
+
+決定的なのは、**同じ commit のテスト側コメントが正反対を明記していた**こと ——
+「`ConvertEols` だけでは行列構造も値も変わらず拒否枝に入らないので、…2 手で同時に作る」。
+§8.7 が記録した「同じ commit の中で記述が食い違っていた」型の**再発(5 回目)**である。
+さらにこの書き方は「拒否枝が実運用で到達する」という**逆向きの誤読**を生み、テスト側の
+「実運用から到達できない」宣言と衝突していた。
+
+**結論(拒否枝でも強調を戻す)は正しいので、理由節だけを書き直した**(fixup)。
+**なお元 commit のメッセージ本文にも同じ誤りが残っている**(`fix(app): 確定先が別セルに…` の
+「到達経路の ConvertEols が `_cellHighlight` を捨てるため、戻さないと…見失う」)。
+commit は書き換えない規範なので、**訂正の場所はここ**である。
+
+### 8.23 Task 3 レビュー I-2 / I-3 — 「網を塞いだつもりが兄弟変異に開いていた」
+
+§8.21(b) で m11 を塞いだ直後に、**同じ型の変異が 2 つ残っていた**。どちらも実測で確認した。
+
+**I-2: 拒否枝の `ApplyCell` を `announce: true` にする変異が 730 本全緑で生存。** 全件固定してある
+唯一のテスト(T4)は `target is null` で `ApplyCell` を**呼ばない**枝なのでこの変異に対して恒等、
+残り 5 本は `Said[^1]` しか見ないため先頭に 1 本増えても素通しする。生存する変異体は無害ではなく、
+**拒否したのにセルの新しい値を読み上げてから「確定できません」と言う**(傘設計書 B5)。
+`Commit_WhenCellAtRowColBecameAnotherCell` を全件固定へ強化して塞いだ。観測した赤:
+
+```
+Assert.Equal() Failure: Collections differ
+Expected: string[]     ["本文が変わったため確定できません。入力は破棄しました"]
+Actual:   List<string> ["ZZ 2行2列", "本文が変わったため確定できません。入力は破棄しました"]
+```
+
+**教訓**: 「余計な発声が先頭に 1 本増える」型の変異は、`Said[^1]` を見る assert では**原理的に**
+捕まらない。1 本を全件固定にしても、その 1 本が通らない枝の兄弟変異は残る。
+
+**I-3: `startColCount` を `csv.Rows[0].Count`(見出し行の幅)から取る変異も 730 本全緑で生存。**
+理由は **fixture が全部長方形**だったから(`Grid3x3` 3/3/3・`"p,q\nX,Y\nX,Y"` 2/2/2・
+`"p,q\nX,X"` 2/2・`"a1,a2\nb1,b2"` 2/2・`MixedEolGrid` 2/2/2)。CLAUDE.md §4-B
+「fixture は区別できる形にする」(partial-selection と同型)の未適用箇所。
+
+**ここでレビューの推奨(既存 fixture を非長方形へ差し替える)はそのまま採らなかった。** 実測:
+
+| 変異 | 長方形 `"p,q\nX,X"` | 非長方形 `"p,q,r\nX,X"` |
+|------|---------------------|-------------------------|
+| 捕捉側 `csv.Rows[0].Count` | – (恒等) | ✗ |
+| 検査側 `csvNow.Rows[0].Count` | ✗ | – (拒否側へ倒れる) |
+
+**1 つの fixture では両方殺せない。** 捕捉側を殺すには開始時に `Rows[0].Count != Rows[row].Count` が
+要り、検査側を殺すには変異後に `Rows[0].Count == startColCount` が要るが、両立しない。
+差し替えていたら検査側の網が黙って消えていた。**既存の長方形テストを残し、非長方形の 1 本
+(`Commit_WhenColumnCountChangedInJaggedRow_...`)を追加**した。
+
+### 8.24 Task 3 — 変異 14 種 × テスト 7 本(fixup 後の最終実測)
+
+1 変異ずつ注入 → App 全件実行 → revert(毎回 `git diff -- src/` が意図した差分だけに戻ることを確認)。
+ビルド判定は `grep -E " error [A-Z]+[0-9]+"`(Sonar の `error S###` を見落とさないため)。
+
+| テスト \ 変異 | m1 | m2 | m3 | m4 | m6 | m7 | m8 | m9 | m10 | m11 | m12 | m13 | m14 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `...BecameAnotherCell` | – | – | – | ✗ | – | ✗ | – | ✗ | – | – | **✗** | – | – |
+| `...Disappeared` | – | – | – | – | – | – | – | ✗ | ✗ | **✗** | – | – | – |
+| `...RowCountChanged` | – | **✗** | – | – | – | ✗ | – | ✗ | – | – | – | – | – |
+| `...ColumnCountChanged` | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | – | **✗** |
+| `...ColumnCountChangedInJaggedRow` | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | **✗** | – |
+| `...BodyBecameUnparsable` | **✗** | – | – | – | **✗** | – | – | ✗ | ✗ | – | – | – | – |
+| `...RestoresCellHighlight...` | – | – | – | ✗ | – | ✗ | **✗** | ✗ | – | – | – | – | – |
+| **App 失敗数(731 本中)** | 1 | 1 | 2 | 2 | 1 | 5 | 1 | 7 | 2 | 1 | 1 | 1 | 1 |
+
+変異の内訳: m1 `csvNow.Ok` 判定削除 / m2 行数比較削除 / m3 列数比較削除 / m4 値比較削除 /
+m6 `target is null` を条件から削除 / m7 同一性検証を丸ごと削除(= Task 2 の状態) /
+m8 拒否枝の強調復元削除 / m9 発声を `ParseError` へ戻す / m10 `target is null` だけ `ParseError` /
+m11 強調復元の前置ガードだけ削除 / m12 `announce: true` 化 / m13 捕捉側 `Rows[0]` / m14 検査側 `Rows[0]`。
+
+**別枠 m5(同一性検証から EOL 正規化を外す)**: 落ちるのは Task 2 の T1
+`Commit_AfterEolConversion_WritesEditedCell_NotStaleOffsets` **1 本だけ**(App 731 中 1 失敗)。観測した赤:
+
+```
+Assert.Equal() Failure: Strings differ
+Expected: "a1,a2\r\nNEW,b2\r\nc1,c2"
+Actual:   "a1,a2\r\n"x\r\ny",b2\r\nc1,c2"
+```
+
+= 確定が拒否されてセルが編集前のまま残る。**§8.17-3 の申し送り(T1 の第 2 の役割)は、この実測を
+確認してから `MixedEolCsv` のコメントへ書き戻した。回収済み。**
+
+**注入できなかった変異**(アナライザが `error` 相当で先に殺す): 比較 1 本だけを消して
+`startXxx` を残す → `S1481` / `target is null` を `false` や `csvNow.Rows.Count < 0` へ置換 →
+`S1125`・`CS8602`・`RCS1215`・`S3981`。
+
+### 8.25 Task 3 レビュー Minor 群と申し送り
+
+対応した Minor(すべて fixup):
+
+| # | 指摘 | 対応 |
+|---|------|------|
+| M-1 | 「短絡順序を入れ替えるな」が src に無い | src へ追記。**ただし計画の書き方は不正確だった** —— 行数比較を先頭へ動かす並べ替えは**安全**(`row < startRowCount == Rows.Count` が成り立つ)。危険なのは `Rows[row].Count` を行数比較より前へ出すことだけ。正確に書いた |
+| M-2 | 文言が「入力が捨てられた」を伝えない | `"本文が変わったため確定できません。入力は破棄しました"` へ伸ばした。既存 14 定数との部分文字列関係を全ペア機械検査し、**新たな包含は 0**(既存の `ParseError` ⊂ `OpenParseFailed` 1 組のみで、これは本件以前からある) |
+| M-3 | 到達不能の根拠が断定形 | 「T1 / T2 の 2 fixture 分だけが実測。一般には §4.4 の論証(§8.9 の留保つき)」を明記 |
+| M-4 | 到達不能宣言から最後のテストまで 180 行 | `...RestoresCellHighlight...` に「1 手目は実運用で到達するが、拒否枝そのものは到達不能」の射程を追記 |
+| M-5 | `...BecameAnotherCell` が単独 kill を持たない | I-2 の対応(m12)で解消 |
+| M-6 | 「上の 4 本」が曖昧 | 「guard の `Ok` 以外の 3 節(行数・列数・値)」へ具体化 |
+
+**申し送り(PR description へ)**: 拒否枝の `ApplyCell` は `doc.State.CsvRow` / `CsvCol` を
+**書き戻す**(`ApplyCell` の実装)。現行配線では F2 編集中に State が動かない(§4.1: ナビは
+`TryContext` 冒頭の `_editor.IsEditing` で撥ねられる)ので開始時 `(row, col)` の書き戻しは冪等だが、
+**将来 F2 編集中に State が動く配線が増えると、拒否のたびに論理カーソルを開始位置へ巻き戻す
+潜在結合**になる。強調の復元だけが要るなら `HighlightCharRange` + `EnsureVisibleCharRange` に
+限定する形へ切り出す余地がある(本ブランチでは `ApplyCell` の既存経路に乗せる判断)。
