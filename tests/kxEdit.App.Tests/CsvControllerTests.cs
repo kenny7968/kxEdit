@@ -1,6 +1,7 @@
 using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Csv;
+using kxEdit.Core.Text;
 
 namespace kxEdit.App.Tests;
 
@@ -701,6 +702,72 @@ public class CsvControllerTests
             // 確定値は LF へ正規化されてから EscapeField に渡る=本文に CR は現れず、
             // かつ連続改行は畳まれない(ユーザーが入れた空行が残る)。
             Assert.Equal("\"x\n\ny\",a2,a3\nb1,b2,b3\nc1,c2,c3", doc.Editor.SnapshotText);
+        });
+
+    // ===== M-25: F2 確定が「開始時の座標」を持ち越さないこと(2026-09-01 設計書) =====
+    // 実運用の再現経路は「F2 編集中の Ctrl+S」。MainForm.ProcessCmdKey の CSV 素キー横取りは
+    // !_csv.IsEditing で自分を無効化するため Ctrl+S はメニューショートカットへ素通りし、
+    // FileController.SaveDocument が ConvertEols で本文を差し替える。ここではその 1 手
+    // (ConvertEols)だけを直接呼んで、UI とファイル I/O を挟まずに同じ状態を作る。
+    // ConvertEols は ReadOnly を見ない(EditorControl.cs の ConvertEols にガードが無い)ので、
+    // CSV モード(ReadOnly=true)のままでも本文が差し替わる=これが到達経路の実体そのもの。
+
+    // セル内 LF を持つ混在 EOL。編集対象 (1,0) は自分自身に LF を含むので、ConvertEols で
+    // 「長さ」も「Value」も変わる。前後に無傷であるべき行(a1,a2 / c1,c2)を置き、全書き換えと区別する。
+    private const string MixedEolCsv = "a1,a2\r\n\"x\ny\",b2\r\nc1,c2";
+
+    // 先行セルだけが LF を持つ混在 EOL。編集対象 (1,1)="b2" 自身は改行を含まないので、
+    // 「オフセットが後ろへずれるだけ」のケースを T1 と分離できる。
+    private const string ShiftOnlyCsv = "a1,\"p\nq\"\r\nb1,b2\r\nc1,c2";
+
+    // kill 対象(実測。onCommit の書込先 2 引数を 1 つずつ陳腐化させた総当たり):
+    //   (a) start/length を両方持ち越す(=修正前の実装そのもの) → 落ちるのは下の 2 本だけ
+    //   (b) start は解決し直すが length を持ち越す             → 落ちるのは本テストだけ
+    //   (c) length は解決し直すが start を持ち越す             → 落ちるのは次のテストだけ
+    // (a) を注入した実測では App テスト 724 本中の失敗はこの 2 本のみ=既存の網は 1 本も
+    // この欠陥を捕まえていなかった。(b)/(c) が別々のテストを落とすので 2 本は互いに冗長でない。
+    // 本テストは (a)(b) を殺す。修正前の src での Actual は
+    // "a1,a2\r\nNEW\",b2\r\nc1,c2"(閉じ引用符が残る)。
+    [Fact]
+    public void Commit_AfterEolConversion_WritesEditedCell_NotStaleOffsets() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, MixedEolCsv, 1, 0); // 非既定位置 (1,0) から開始
+            host.Csv.BeginEdit();
+            Assert.True(host.Csv.IsEditing);
+            var editor = GetCellEditor(host.Csv);
+            var box = GetOverlayBox(editor);
+            box.Text = "NEW";
+
+            // Ctrl+S 相当: 保存前の EOL 統一でバッファが差し替わる(セル内 LF → CRLF)。
+            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+
+            editor.Commit();
+
+            Assert.False(host.Csv.IsEditing);
+            // (1,0) の "x\r\ny"(引用符込み 6 文字)だけが NEW になり、引用符も区切りも残らない。
+            Assert.Equal("a1,a2\r\nNEW,b2\r\nc1,c2", doc.Editor.SnapshotText);
+        });
+
+    // kill 対象(実測): 上の表の (a)(c)。編集セル自身は改行を含まない=ConvertEols で長さが
+    // 変わらないので (b) はこの fixture 上で恒等になり、本テストでは殺せない(だから 2 本要る)。
+    // 修正前の src での Actual は "a1,\"p\r\nq\"\r\nb1NEW2\r\nc1,c2"(区切りカンマが食われる)。
+    [Fact]
+    public void Commit_AfterEolConversion_WritesShiftedCell_NotStaleOffsets() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, ShiftOnlyCsv, 1, 1); // 非既定位置 (1,1)="b2"
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+
+            editor.Commit();
+
+            Assert.Equal("a1,\"p\r\nq\"\r\nb1,NEW\r\nc1,c2", doc.Editor.SnapshotText);
         });
 
     // ===== GoToCell の列側境界(Task 8・行側は ReadCurrent 経由で ClampRow 側を固定済) =====

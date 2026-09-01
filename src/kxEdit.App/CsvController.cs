@@ -239,7 +239,8 @@ public sealed class CsvController : IDisposable
             return;
         if (!TryContext(out var ed, out var csv, out var row, out var col))
             return;
-        // 開始時点のセル span（直列化対象）を確定。row/col はセル内容変更では不変。
+        // 開始時点のセル。使い道は「オーバーレイの配置座標(f.Start)と初期値(f.Value)」だけで、
+        // どちらも Begin が同期的に読む。確定時の書込先へは持ち越さない（M-25: onCommit 参照）。
         // csv は TryContext がメモ化済みの現在パース（=開始時点のスナップショット）。
         var f = csv.GetField(row, col);
         if (f is null)
@@ -247,11 +248,9 @@ public sealed class CsvController : IDisposable
             _announcer.Say(CsvAnnounceFormatter.CannotMove);
             return;
         }
-        int start = f.Start,
-            length = f.Length;
         // オーバーレイの配置座標（PointFromCharOffset）は可視領域基準なので、
         // ナビ後にリサイズ等で当該セルが視野外へずれていた場合に備えて明示的に可視化する。
-        ed.EnsureVisibleCharRange(start, length);
+        ed.EnsureVisibleCharRange(f.Start, f.Length);
 
         var doc = _docs.Active!; // TryContext 成功時は Active 非 null。タブ切替は AbortEdit が
         // 先に走るため、確定/取消コールバック時点でも同一文書が対象。
@@ -261,10 +260,24 @@ public sealed class CsvController : IDisposable
             doc.FocusTarget, // P6: 復帰先は FocusTarget=Editor(旧: CsvSink)
             onCommit: text =>
             {
+                // M-25(2026-09-01): 開始時の f.Start / f.Length を**持ち越さない**。F2 開始から
+                // 確定までの間に本文が差し替わりうるため(到達経路 = F2 編集中の Ctrl+S →
+                // FileController.SaveDocument の ConvertEols。設計書 §2.2 / §3)、確定時の
+                // パースから (row, col) で解決し直す。row / col は編集中に動かない
+                // (ナビは TryContext 冒頭の _editor.IsEditing で撥ねられる)。
+                // ParseCsv はスナップショット参照が同じなら開始時と同一インスタンスを返すので、
+                // 本文が変わっていない通常経路に追加コストは無い。
+                var csvNow = doc.ParseCsv();
+                var target = csvNow.Ok ? csvNow.GetField(row, col) : null;
+                if (target is null)
+                {
+                    _announcer.Say(CsvAnnounceFormatter.ParseError);
+                    return;
+                }
                 string serialized = CsvWriter.EscapeField(text);
                 bool wasRo = ed.ReadOnly;
                 ed.ReadOnly = false;
-                ed.ReplaceCharRange(start, length, serialized);
+                ed.ReplaceCharRange(target.Start, target.Length, serialized);
                 ed.ReadOnly = wasRo;
                 var csv2 = doc.ParseCsv();
                 if (csv2.Ok)
