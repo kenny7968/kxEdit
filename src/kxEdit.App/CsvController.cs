@@ -292,6 +292,10 @@ public sealed class CsvController : IDisposable
                 //    Value 自体を変えるため(設計書 §4.3)。
                 // これは同一性の**代用**であって同一性の証明ではない。行数・列数・値が
                 // すべて一致する別セル(例: 2 行の入れ替え)は弁別できない。
+                // 並べ替えの注意: `csvNow.Rows[row]` を **行数比較より前へ出さないこと**
+                // (開始時に row < startRowCount は保証されるが、行数が減っていれば範囲外になる)。
+                // 逆に `csvNow.Rows.Count != startRowCount` を先頭へ動かすのは安全
+                // (それが false なら csvNow.Rows.Count == startRowCount > row が成り立つ)。
                 if (
                     target is null
                     || csvNow.Rows.Count != startRowCount
@@ -304,9 +308,14 @@ public sealed class CsvController : IDisposable
                 )
                 {
                     // M-1: 書かないと決めた枝でも、セルが現存しているなら強調は現在の (row, col)
-                    // へ戻す。到達経路である ConvertEols は本文差し替えの直後に _cellHighlight を
-                    // 捨てる(EditorControl.ConvertEols)ため、ここで戻さないと晴眼・弱視ユーザーが
-                    // 現在セルを見失ったまま残る(CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
+                    // へ戻す。本文を差し替える経路(現状は ConvertEols)は差し替えの直後に
+                    // _cellHighlight を捨てる(EditorControl.ConvertEols)ので、そうした経路から
+                    // **将来この拒否枝へ入ったとき**に強調を失ったまま残さないための復元である。
+                    // 現行配線では拒否枝そのものが到達不能で(ConvertEols は行列構造も正規化後の
+                    // Value も変えないので必ず受理枝へ行く)、受理枝は末尾の ApplyCell が強調を
+                    // 張り直す。つまりこの復元が効くのは到達不能枝だけ=安全宣言に使わないこと。
+                    // 到達したときに晴眼・弱視ユーザーが現在セルを見失わない側へ倒しておく
+                    // (CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
                     // target is not null は csvNow.Ok == true を含意する(target の作り方から)ので
                     // ApplyCell に渡す csvNow は正常なパース結果である。target is null のときは
                     // 強調すべきセルがそもそも無いので何もしない。

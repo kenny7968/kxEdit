@@ -811,15 +811,17 @@ public class CsvControllerTests
         });
 
     // ===== M-25: (row,col) が別セルを指していたら書かない(設計書 §4.2) =====
-    // 以下 6 本が踏む枝は、現行の配線では実運用から到達できない。到達経路は設計書 §3 の表のとおり
+    // 以下 7 本が踏む枝は、現行の配線では実運用から到達できない。到達経路は設計書 §3 の表のとおり
     // Ctrl+S → ConvertEols の 1 本だけで、ConvertEols は CSV の行列構造を変えないため
-    // 同一性検証は必ず一致する。ここはテストからだけ踏める「将来配線が増えたときの受け皿」で、
+    // 同一性検証は必ず一致する —— ただしこの「変えない」は、T1 / T2 の 2 fixture 分だけが実測で、
+    // 一般には設計書 §4.4 の**論証**である(§8.9 が「§4.4 の全体が実測になったわけではない」と
+    // 釘を刺している)。ここはテストからだけ踏める「将来配線が増えたときの受け皿」で、
     // 網があること自体を安全宣言に使ってはならない。
     //
     // 各テストの kill 対象は、下の「変異 × テスト」実測表から書き写している(注入 → App 全件実行 →
     // revert を 1 変異ずつ実施。CLAUDE.md §4 / 設計書 §8.7 の手順)。✗ = そのテストが落ちる。
     //
-    //   変異(すべて CsvController.BeginEdit の onCommit ガードに対して)
+    //   変異(すべて CsvController.BeginEdit の捕捉 3 行と onCommit ガードに対して)
     //     (m1) csvNow.Ok 判定削除 …… var target = csvNow.GetField(row, col);
     //     (m2) 行数比較削除(startRowCount ごと)
     //     (m3) 列数比較削除(startColCount ごと)
@@ -830,23 +832,35 @@ public class CsvControllerTests
     //     (m9) 発声を CsvAnnounceFormatter.ParseError に戻す
     //     (m10) target is null のときだけ ParseError を言う(Task 2 の暫定を残す)
     //     (m11) 強調復元の前置ガード `if (target is not null)` だけ削除
+    //     (m12) 拒否枝の ApplyCell を announce: true にする(拒否したのに新しい値を読み上げる)
+    //     (m13) 捕捉側 …… startColCount を csv.Rows[0].Count(見出し行の幅)から取る
+    //     (m14) 検査側 …… csvNow.Rows[0].Count と比べる
+    //   (m5 = 同一性検証から EOL 正規化を外す変異は、この 7 本ではなく上の T1 だけが殺す。
+    //    kill 対象は T1 のコメント側に書いてある。)
     //
-    //   テスト                          | m1 | m2 | m3 | m4 | m6 | m7 | m8 | m9 | m10 | m11 |
-    //   ...BecameAnotherCell            | –  | –  | –  | ✗  | –  | ✗  | –  | ✗  |  –  |  –  |
-    //   ...Disappeared                  | –  | –  | –  | –  | –  | –  | –  | ✗  |  ✗  |  ✗  |
-    //   ...RowCountChanged              | –  | ✗  | –  | –  | –  | ✗  | –  | ✗  |  –  |  –  |
-    //   ...ColumnCountChanged           | –  | –  | ✗  | –  | –  | ✗  | –  | ✗  |  –  |  –  |
-    //   ...BodyBecameUnparsable         | ✗  | –  | –  | –  | ✗  | –  | –  | ✗  |  ✗  |  –  |
-    //   ...RestoresCellHighlight...     | –  | –  | –  | ✗  | –  | ✗  | ✗  | ✗  |  –  |  –  |
-    //   App 全体の失敗数(730 本中)      | 1  | 1  | 1  | 2  | 1  | 4  | 1  | 6  |  2  |  1  |
+    //   テスト                        | m1| m2| m3| m4| m6| m7| m8| m9|m10|m11|m12|m13|m14|
+    //   ...BecameAnotherCell          | – | – | – | ✗ | – | ✗ | – | ✗ | – | – | ✗ | – | – |
+    //   ...Disappeared                | – | – | – | – | – | – | – | ✗ | ✗ | ✗ | – | – | – |
+    //   ...RowCountChanged            | – | ✗ | – | – | – | ✗ | – | ✗ | – | – | – | – | – |
+    //   ...ColumnCountChanged         | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | – | ✗ |
+    //   ...ColumnCountChangedInJagged | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | ✗ | – |
+    //   ...BodyBecameUnparsable       | ✗ | – | – | – | ✗ | – | – | ✗ | ✗ | – | – | – | – |
+    //   ...RestoresCellHighlight...   | – | – | – | ✗ | – | ✗ | ✗ | ✗ | – | – | – | – | – |
+    //   App 全体の失敗数(731 本中)    | 1 | 1 | 2 | 2 | 1 | 5 | 1 | 7 | 2 | 1 | 1 | 1 | 1 |
+    //
+    // 表から分かること(表を作らなければ気付けなかった 2 つ):
+    //   - m13 と m14 は**別々のテストが殺す**。長方形 fixture では捕捉側が恒等になり、
+    //     非長方形 fixture では検査側が拒否側へ倒れる。1 本にまとめると必ず片方が生存する。
+    //   - m12 を殺すのは全件固定の assert を持つ 1 本だけ。Said[^1] だけを見る 6 本は
+    //     「余計な発声が先頭に 1 本増える」型の変異(m11 / m12)を原理的に素通しする。
     //
     // 注入できなかった変異(アナライザが先に殺す。-warnaserror 以前に error 相当):
     //   比較 1 本だけを消して startXxx を残す → S1481 / target is null を false や
     //   Rows.Count < 0 へ置換 → S1125・CS8602・RCS1215・S3981。
 
-    // kill 対象(実測): (m4) 値比較削除 / (m7) 同一性検証の丸ごと削除 / (m9) 文言の据え置き。
-    // (m4)(m7) は ...RestoresCellHighlight... も落とすので単独の網ではないが、
-    // 「値だけが別物になった」最も素朴な形をここで固定する。
+    // kill 対象(実測): (m12) 拒否枝の announce: true 化 —— **これを殺すのは本テストだけ**。
+    // ほかに (m4) 値比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す
+    // ((m4)(m7) は ...RestoresCellHighlight... も落とすので単独の網ではない)。
     [Fact]
     public void Commit_WhenCellAtRowColBecameAnotherCell_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
@@ -867,7 +881,11 @@ public class CsvControllerTests
 
             Assert.False(host.Csv.IsEditing);
             Assert.Equal(afterMutation, doc.Editor.SnapshotText); // 1 文字も書いていない
-            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+            // Said[^1] ではなく全件で固定する。拒否枝の ApplyCell を announce: true にすると
+            // 「拒否したのにセルの新しい値を読み上げてから『確定できません』と言う」発声になるが
+            //(傘設計書 B5「実際と違うことを言わない」に触れる)、末尾だけ見る assert は
+            // それを素通しする(実測: m12 が 730 本全緑で生存した)。
+            Assert.Equal(new[] { CsvAnnounceFormatter.CommitTargetChanged }, host.Announcer.Said);
         });
 
     // kill 対象(実測): (m11) 強調復元の前置ガード削除 —— **これを殺すのは本テストだけ**。
@@ -901,11 +919,17 @@ public class CsvControllerTests
         });
 
     // ===== M-25: 形が変われば値が一致していても書かない =====
-    // 下 2 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
+    // 下 3 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
+    // うち後ろ 2 本は「列数をどの行から取るか」を弁別する対で、**片方だけでは足りない**:
+    // 長方形 fixture は検査側(csvNow.Rows[0].Count と比べる変異)を殺すが捕捉側を素通しし、
+    // 非長方形 fixture は捕捉側(csv.Rows[0].Count から取る変異)を殺すが検査側を素通しする。
+    // 1 つの fixture では両方殺せない —— 捕捉側を殺すには開始時に Rows[0].Count != Rows[row].Count が
+    // 要り、検査側を殺すには変異後に Rows[0].Count == startColCount が要るが、両立しない(実測済み)。
 
     // 行が消えて (row,col) が「同じ値の別セル」を指す。
     // kill 対象(実測): (m2) 行数比較削除 —— **これを殺すのは本テストだけ**。
     // ほかに (m7) 同一性検証の丸ごと削除と (m9) 文言の据え置きを殺す。
+    // なお (m3) 列数比較削除は殺せない(前後どちらも 2 列で形が保たれるため)。
     [Fact]
     public void Commit_WhenRowCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
@@ -928,9 +952,11 @@ public class CsvControllerTests
             Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
         });
 
-    // 列が増えて (row,col) が「同じ値の別セル」を指す。
-    // kill 対象(実測): (m3) 列数比較削除 —— **これを殺すのは本テストだけ**。
-    // ほかに (m7) 同一性検証の丸ごと削除と (m9) 文言の据え置きを殺す。
+    // 列が増えて (row,col) が「同じ値の別セル」を指す(長方形 fixture: 行 0 の幅も 2)。
+    // kill 対象(実測): (m14) 検査側を csvNow.Rows[0].Count にする変異 —— **これを殺すのは本テストだけ**。
+    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
+    // 捕捉側の変異(m13 = csv.Rows[0].Count から startColCount を取る)は、行 0 と行 1 の幅が
+    // 同じこの fixture では恒等になるので殺せない。直後の非長方形テストがその役目を負う。
     [Fact]
     public void Commit_WhenColumnCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
@@ -953,12 +979,41 @@ public class CsvControllerTests
             Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
         });
 
+    // 同上だが **非長方形**(行 0 = 3 列 / 行 1 = 2 列)。開始時に Rows[0].Count != Rows[row].Count
+    // なので、startColCount を「見出し行の幅」から取る典型的な取り違えを弁別できる。
+    // kill 対象(実測): (m13) 捕捉側を csv.Rows[0].Count にする変異 —— **これを殺すのは本テストだけ**。
+    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
+    // 検査側の変異(m14)は本 fixture では拒否側へ倒れるので殺せない(直前のテストが負う)。
+    [Fact]
+    public void Commit_WhenColumnCountChangedInJaggedRow_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q,r\nX,X", 1, 1); // 行 0=3 列 / 行 1=2 列。(1,1)="X" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 2 行目の先頭へ列を 1 つ挿す → 行 1 は 3 列になり、(1,1) は元 (1,0) だった "X" を指す。
+            // 行 0 の幅は 3 のまま = 捕捉側を Rows[0] にすると開始時 3・確定時 3 で形が通ってしまう。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(6, 0, "X,"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("p,q,r\nX,X,X", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
     // ===== M-25: パースが壊れていたら書かない(csvNow.Ok の網) =====
     // kill 対象(実測): (m1) csvNow.Ok 判定削除 と (m6) target is null 判定削除 ——
     // **どちらも殺すのは本テストだけ**。ほかに (m9) 文言の据え置きと (m10) を殺す。
     // 「値 + 形」の guard は本テストの fixture を 1 つも弾けない: 変異後の本文でも
     // Rows.Count=2 / Rows[0].Count=2 / GetField(0,0)="a1" が開始時と全部一致するので、
-    // 上の 4 本は素通りする。csvNow.Ok だけが書込を止める。
+    // guard の **`Ok` 以外の 3 節(行数・列数・値)はどれも真にならない**。
+    // 書込を止めているのは csvNow.Ok(と、それを受ける target is null)だけである。
     [Fact]
     public void Commit_WhenBodyBecameUnparsable_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
@@ -991,6 +1046,9 @@ public class CsvControllerTests
 
     // kill 対象(実測): (m8) 拒否枝のセル強調復元(ApplyCell)の削除 —— **これを殺すのは本テストだけ**。
     // ほかに (m4) 値比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
+    // **射程の注意**: 2 手のうち 1 手目(Ctrl+S 相当の ConvertEols でセル強調が消える)は実運用で
+    // 到達するが、**このテストが確かめている拒否枝そのものは到達不能**である(2 手目 = 値を
+    // 食い違わせる本文書き換えは、現行配線では F2 編集中に起こらずテストからしか作れない)。
     [Fact]
     public void Commit_WhenRejected_RestoresCellHighlightClearedByEolConversion() =>
         Sta.Run(() =>
