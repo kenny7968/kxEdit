@@ -23,7 +23,8 @@ internal sealed class CsvCellEditor : IDisposable
 
     internal bool IsEditing => _box is not null;
 
-    /// <summary>セル編集を開始する。onCommit は確定値（改行は \n 正規化済み）、onCancel は取消で呼ぶ。</summary>
+    /// <summary>セル編集を開始する。onCommit は確定値(改行は
+    /// <see cref="CsvWriter.NormalizeEols"/> で正規化済み)、onCancel は取消で呼ぶ。</summary>
     internal void Begin(
         EditorControl ed,
         CsvField field,
@@ -103,13 +104,16 @@ internal sealed class CsvCellEditor : IDisposable
     }
 
     /// <summary>Enter 相当=編集内容を確定する。<see cref="_box"/> の現在テキストを
-    /// (\r\n/\r を \n に正規化した上で) <c>onCommit</c> へ渡し、オーバーレイを閉じる。
+    /// <see cref="CsvWriter.NormalizeEols"/> に通してから <c>onCommit</c> へ渡し、
+    /// オーバーレイを閉じる。正規化規則そのものはここに書かない —— 規則の持ち主は
+    /// <c>NormalizeEols</c> 1 か所(2026-09-01 設計書 §4.3 / §8.1)で、呼出側 doc に
+    /// 散文で再掲すると契約が変わった日に黙って偽になる。
     /// Task 7 でテストからも呼べるよう internal 化(F2 経路の観測ポイント)。</summary>
     internal void Commit()
     {
         if (_box is null || _closing)
             return;
-        string text = _box.Text.Replace("\r\n", "\n").Replace("\r", "\n");
+        string text = CsvWriter.NormalizeEols(_box.Text);
         var cb = _onCommit;
         Close();
         cb?.Invoke(text);

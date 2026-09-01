@@ -239,7 +239,16 @@ public sealed class CsvController : IDisposable
             return;
         if (!TryContext(out var ed, out var csv, out var row, out var col))
             return;
-        // 開始時点のセル span（直列化対象）を確定。row/col はセル内容変更では不変。
+        // 開始時点のセル。読まれるのは次の 4 か所だけで、いずれも _editor.Begin が戻るまでに
+        // 同期的に読み切られる（CsvCellEditor は CsvField をフィールドへ保存しない。持つのは
+        // _box / _closing / _refocus / _onCommit / _onCancel の 5 つ）:
+        //   1. 直下の EnsureVisibleCharRange(f.Start, f.Length) —— これは BeginEdit 自身が読む
+        //   2. CsvCellEditor.Begin の PointFromCharOffset(field.Start) —— オーバーレイの配置座標
+        //   3. CsvCellEditor.Begin の TextBox.Text = field.Value —— 編集の初期値
+        //   4. 直下の startValue = NormalizeEols(f.Value) —— 確定時の同一性検査に使う開始値
+        // 4 だけは唯一「f 由来の値がクロージャの向こう側へ渡る」箇所だが、渡るのは
+        // **正規化済みの値のコピー**(string)だけで Start / Length は渡らない。
+        // 確定時の書込先へは持ち越さない（M-25: onCommit 参照）。
         // csv は TryContext がメモ化済みの現在パース（=開始時点のスナップショット）。
         var f = csv.GetField(row, col);
         if (f is null)
@@ -247,11 +256,18 @@ public sealed class CsvController : IDisposable
             _announcer.Say(CsvAnnounceFormatter.CannotMove);
             return;
         }
-        int start = f.Start,
-            length = f.Length;
         // オーバーレイの配置座標（PointFromCharOffset）は可視領域基準なので、
         // ナビ後にリサイズ等で当該セルが視野外へずれていた場合に備えて明示的に可視化する。
-        ed.EnsureVisibleCharRange(start, length);
+        ed.EnsureVisibleCharRange(f.Start, f.Length);
+
+        // 確定時の同一性検査に要る値を、ここでスカラーとして取り出す。
+        // CsvField f そのものをクロージャへ捕捉してはいけない —— Start / Length が構造的に
+        // 残り、Task 2 で消した陳腐化の余地が f 経由で復活する。設計書 §4 の芯
+        //(陳腐化しうる値を持ち越さない)は字面で守られて初めて後続の改変に耐える。
+        // 正規化は開始時に 1 回だけ行う(単一セルは最大 8M chars = CsvParser.MaxFieldChars)。
+        string startValue = CsvWriter.NormalizeEols(f.Value);
+        int startRowCount = csv.Rows.Count;
+        int startColCount = csv.Rows[row].Count;
 
         var doc = _docs.Active!; // TryContext 成功時は Active 非 null。タブ切替は AbortEdit が
         // 先に走るため、確定/取消コールバック時点でも同一文書が対象。
@@ -261,11 +277,72 @@ public sealed class CsvController : IDisposable
             doc.FocusTarget, // P6: 復帰先は FocusTarget=Editor(旧: CsvSink)
             onCommit: text =>
             {
+                // M-25(2026-09-01): 開始時の f.Start / f.Length を**持ち越さない**。F2 開始から
+                // 確定までの間に本文が差し替わりうるため(到達経路 = F2 編集中の Ctrl+S →
+                // FileController.SaveDocument の ConvertEols。設計書 §2.2 / §3)、確定時の
+                // パースから (row, col) で解決し直す。row / col は編集中に動かない
+                // (ナビは TryContext 冒頭の _editor.IsEditing で撥ねられる)。
+                // ParseCsv はスナップショット参照が同じなら開始時と同一インスタンスを返すので、
+                // 本文が変わっていない通常経路に追加コストは無い。
+                var csvNow = doc.ParseCsv();
+                var target = csvNow.Ok ? csvNow.GetField(row, col) : null;
+                // (row, col) が生きていても、本文が変わっていればそこが指すセルは別物でありうる
+                // (行が消える・列が増える等)。そこへ書けば座標が陳腐化しているのと同じ
+                // データ破壊になるので、「同じセルらしさ」が崩れていたら書かない。
+                //  - 値の一致だけでは弱い。「別セルになったが値は同じ」を素通しする
+                //    (CSV では空セルや繰り返し値がありふれている)ので、形も見る。
+                //  - EOL を正規化して比べるのは、ConvertEols がセル内改行を書き換えて
+                //    Value 自体を変えるため(設計書 §4.3)。
+                // これは同一性の**代用**であって同一性の証明ではない。行数・列数・値が
+                // すべて一致する別セル(例: 2 行の入れ替え)は弁別できない。
+                // 並べ替えの注意: `csvNow.Rows[row]` を **行数比較より前へ出さないこと**
+                // (開始時に row < startRowCount は保証されるが、行数が減っていれば範囲外になる)。
+                // 逆に `csvNow.Rows.Count != startRowCount` を先頭へ動かすのは安全
+                // (それが false なら csvNow.Rows.Count == startRowCount > row が成り立つ)。
+                if (
+                    target is null
+                    || csvNow.Rows.Count != startRowCount
+                    || csvNow.Rows[row].Count != startColCount
+                    || !string.Equals(
+                        CsvWriter.NormalizeEols(target.Value),
+                        startValue,
+                        StringComparison.Ordinal
+                    )
+                )
+                {
+                    // M-1: 書かないと決めた枝でも、セルが現存しているなら強調は現在の (row, col)
+                    // へ戻す。本文を差し替える経路(現状は ConvertEols)は差し替えの直後に
+                    // _cellHighlight を捨てる(EditorControl.ConvertEols)ので、そうした経路から
+                    // **将来この拒否枝へ入ったとき**に強調を失ったまま残さないための復元である。
+                    // 現行配線では拒否枝そのものが到達不能で(ConvertEols は行列構造も正規化後の
+                    // Value も変えないので必ず受理枝へ行く —— ただしこの「変えない」は T1 / T2 の
+                    // 2 fixture 分だけが実測で、一般には設計書 §4.4 の**論証**である。§8.9 / §8.27 の
+                    // 留保つき)、受理枝は末尾の ApplyCell が強調を張り直す。
+                    // つまりこの復元が効くのは到達不能枝だけ=安全宣言に使わないこと。
+                    // 到達したときに晴眼・弱視ユーザーが現在セルを見失わない側へ倒しておく
+                    // (CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
+                    // target is not null は csvNow.Ok == true を含意する(target の作り方から)ので
+                    // ApplyCell に渡す csvNow は正常なパース結果である。target is null のときは
+                    // 強調すべきセルがそもそも無いので何もしない。
+                    if (target is not null)
+                        ApplyCell(ed, csvNow, row, col, announce: false);
+                    _announcer.Say(CsvAnnounceFormatter.CommitTargetChanged);
+                    return;
+                }
                 string serialized = CsvWriter.EscapeField(text);
+                // ReadOnly の昇降は try/finally で括る(FileController.WriteToPath の
+                // ConvertEols 前後と同じ idiom)。ReplaceCharRange が throw しても
+                // CSV モードが読み書き可のまま残らないようにする。
                 bool wasRo = ed.ReadOnly;
                 ed.ReadOnly = false;
-                ed.ReplaceCharRange(start, length, serialized);
-                ed.ReadOnly = wasRo;
+                try
+                {
+                    ed.ReplaceCharRange(target.Start, target.Length, serialized);
+                }
+                finally
+                {
+                    ed.ReadOnly = wasRo;
+                }
                 var csv2 = doc.ParseCsv();
                 if (csv2.Ok)
                     ApplyCell(ed, csv2, row, col, announce: true);

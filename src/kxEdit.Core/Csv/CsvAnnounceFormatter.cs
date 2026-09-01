@@ -80,6 +80,20 @@ public static class CsvAnnounceFormatter
     /// <summary>CSVモード中に本文変更コマンド（置換/折り返し整形等）を試みたときの読み上げ。</summary>
     public const string BlockedInCsvMode = "CSVモード中は実行できません";
 
+    /// <summary>F2 セル編集の確定時に、書込先の同一性が確かめられなかったときの読み上げ。
+    /// 本文へは一切書かずにこれだけを発声する(2026-09-01 設計書 §4.2)。
+    /// <para>出す条件は独立に 3 つある: (1) セルが別物へ変わっていた(値または行列の形が不一致) /
+    /// (2) セルが消えていた(<c>GetField</c> が null) / (3) **本文が CSV として壊れた**
+    /// (<c>CsvDocument.Ok == false</c>)。(3) は (1)(2) から導けない独立のケースで、
+    /// 末尾に未終端引用符のレコードが付いた場合は行数・列数・値がすべて開始時と一致したまま
+    /// <c>Ok</c> だけが false になる(設計書 §8.19 に L1 実測あり)。</para>
+    /// <para>後半の「入力は破棄しました」は削れない —— この枝はユーザーが打った文字列を捨てる。
+    /// 設計書 §8.17-4 が <see cref="ParseError"/> の暫定利用を欠陥とした理由が
+    /// 「入力が黙って捨てられることを発声が伝えない」ことなので、置き換え先が同じ欠点を
+    /// 持っていては意味が薄い。</para></summary>
+    public const string CommitTargetChanged =
+        "本文が変わったため確定できません。入力は破棄しました";
+
     /// <summary>左端で左移動したときの読み上げ。</summary>
     public const string LeftEdge = "左端です";
 
