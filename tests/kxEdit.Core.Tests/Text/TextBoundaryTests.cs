@@ -361,9 +361,13 @@ public class TextBoundaryTests
         for (int len = 1; len <= 4; len++)
         {
             var next = new List<string>(cur.Count * alphabet.Length);
+            // 外側に波括弧が要る: CSharpier は括弧なしの入れ子 foreach を同じ深さへ畳むため、
+            // 括弧を外すと Sonar S3973(条件実行の範囲が見えない)でビルドが落ちる。
             foreach (string s in cur)
-            foreach (char c in alphabet)
-                next.Add(s + c);
+            {
+                foreach (char c in alphabet)
+                    next.Add(s + c);
+            }
             foreach (string s in next)
                 yield return s;
             cur = next;
