@@ -80,6 +80,10 @@ public static class CsvAnnounceFormatter
     /// <summary>CSVモード中に本文変更コマンド（置換/折り返し整形等）を試みたときの読み上げ。</summary>
     public const string BlockedInCsvMode = "CSVモード中は実行できません";
 
+    /// <summary>F2 セル編集の確定時に、編集対象のセルが別物へ変わっていた/消えていたときの読み上げ。
+    /// 本文へは一切書かずにこれだけを発声する(2026-09-01 設計書 §4.2)。</summary>
+    public const string CommitTargetChanged = "本文が変わったため確定できません";
+
     /// <summary>左端で左移動したときの読み上げ。</summary>
     public const string LeftEdge = "左端です";
 

@@ -2,6 +2,9 @@ using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Csv;
 using kxEdit.Core.Text;
+using kxEdit.Editor;
+// System.Windows.Forms.SelectionRange(DateTime の範囲型)と名前が衝突するので別名で入れる。
+using CellHighlightRange = kxEdit.Core.Layout.SelectionRange;
 
 namespace kxEdit.App.Tests;
 
@@ -630,6 +633,33 @@ public class CsvControllerTests
         return (TextBox)field.GetValue(editor)!;
     }
 
+    /// <summary>F2 編集中に「別経路が本文を書き換えた」状況を作る。CSV モード中は
+    /// ReadOnly=true で ReplaceCharRange が no-op になるため、production の onCommit と
+    /// 同じ流儀で ReadOnly を一時的に落として書き、元へ戻す。</summary>
+    private static void MutateBodyWhileEditing(EditorControl ed, Action<EditorControl> mutate)
+    {
+        bool wasRo = ed.ReadOnly;
+        ed.ReadOnly = false;
+        mutate(ed);
+        ed.ReadOnly = wasRo;
+    }
+
+    /// <summary>セル強調(private フィールド <c>_cellHighlight</c>)を取り出す。
+    /// <c>EditorControlConvertEolsTests.CellHighlight</c> と同じ流儀で、リネームで静かに
+    /// 緑になる事故を防ぐためフィールド名つきで明示的に落とす。</summary>
+    private static CellHighlightRange? CellHighlight(EditorControl ed)
+    {
+        var fi = typeof(EditorControl).GetField(
+            "_cellHighlight",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
+        Assert.True(
+            fi is not null,
+            "EditorControl に private フィールド _cellHighlight が見つからない"
+        );
+        return (CellHighlightRange?)fi!.GetValue(ed);
+    }
+
     // kill 対象: onCommit 内の ReplaceCharRange の削除/引数取り違え・serialized 未反映・
     // Commit の onCommit 呼び出し漏れ(Close だけして早退)・_box.Text ではなく初期値を渡す変異。
     [Fact]
@@ -714,6 +744,10 @@ public class CsvControllerTests
 
     // セル内 LF を持つ混在 EOL。編集対象 (1,0) は自分自身に LF を含むので、ConvertEols で
     // 「長さ」も「Value」も変わる。前後に無傷であるべき行(a1,a2 / c1,c2)を置き、全書き換えと区別する。
+    // 「Value も変わる」ことには第 2 の役割がある: Task 3 の同一性検証は開始時と確定時の Value を
+    // 比べるので、そこから EOL 正規化を外すと "x\ny" と "x\r\ny" が不一致になり確定が拒否される
+    // = この fixture だけが「正規化を省いた同一性検証」を殺す(下の T1 の kill 対象 (e) 参照)。
+    // MixedEolCsv を編集するときはこの役割を壊さないこと(セル内改行を落とすと網が黙って消える)。
     private const string MixedEolCsv = "a1,a2\r\n\"x\ny\",b2\r\nc1,c2";
 
     // 先行セルだけが LF を持つ混在 EOL。編集対象 (1,1)="b2" 自身は改行を含まないので、
@@ -728,6 +762,12 @@ public class CsvControllerTests
     // この欠陥を捕まえていなかった。(b)/(c) が別々のテストを落とすので 2 本は互いに冗長でない。
     // 本テストは (a)(b) を殺す。修正前の src での Actual は
     // "a1,a2\r\nNEW\",b2\r\nc1,c2"(閉じ引用符が残る)。
+    //
+    // Task 3 で追加の kill 対象が 1 つ増えた(実測):
+    //   (e) 同一性検証から EOL 正規化を外す(startValue = f.Value / 素の target.Value と比較)
+    //       → 落ちるのは **本テストだけ**(App 730 本中 1 失敗)。Actual は
+    //          "a1,a2\r\n\"x\r\ny\",b2\r\nc1,c2" = 確定が拒否されてセルが編集前のまま残る。
+    //       T2 は編集セル自身が改行を持たないので (e) の下で恒等になり、殺せない。
     [Fact]
     public void Commit_AfterEolConversion_WritesEditedCell_NotStaleOffsets() =>
         Sta.Run(() =>
@@ -768,6 +808,220 @@ public class CsvControllerTests
             editor.Commit();
 
             Assert.Equal("a1,\"p\r\nq\"\r\nb1,NEW\r\nc1,c2", doc.Editor.SnapshotText);
+        });
+
+    // ===== M-25: (row,col) が別セルを指していたら書かない(設計書 §4.2) =====
+    // 以下 6 本が踏む枝は、現行の配線では実運用から到達できない。到達経路は設計書 §3 の表のとおり
+    // Ctrl+S → ConvertEols の 1 本だけで、ConvertEols は CSV の行列構造を変えないため
+    // 同一性検証は必ず一致する。ここはテストからだけ踏める「将来配線が増えたときの受け皿」で、
+    // 網があること自体を安全宣言に使ってはならない。
+    //
+    // 各テストの kill 対象は、下の「変異 × テスト」実測表から書き写している(注入 → App 全件実行 →
+    // revert を 1 変異ずつ実施。CLAUDE.md §4 / 設計書 §8.7 の手順)。✗ = そのテストが落ちる。
+    //
+    //   変異(すべて CsvController.BeginEdit の onCommit ガードに対して)
+    //     (m1) csvNow.Ok 判定削除 …… var target = csvNow.GetField(row, col);
+    //     (m2) 行数比較削除(startRowCount ごと)
+    //     (m3) 列数比較削除(startColCount ごと)
+    //     (m4) 値比較削除(startValue ごと)
+    //     (m6) target is null 判定を条件から削除(残る参照を target! 化)
+    //     (m7) 同一性検証を丸ごと削除(= Task 2 の状態 = target is null だけ)
+    //     (m8) 拒否枝のセル強調復元(ApplyCell)を削除
+    //     (m9) 発声を CsvAnnounceFormatter.ParseError に戻す
+    //     (m10) target is null のときだけ ParseError を言う(Task 2 の暫定を残す)
+    //     (m11) 強調復元の前置ガード `if (target is not null)` だけ削除
+    //
+    //   テスト                          | m1 | m2 | m3 | m4 | m6 | m7 | m8 | m9 | m10 | m11 |
+    //   ...BecameAnotherCell            | –  | –  | –  | ✗  | –  | ✗  | –  | ✗  |  –  |  –  |
+    //   ...Disappeared                  | –  | –  | –  | –  | –  | –  | –  | ✗  |  ✗  |  ✗  |
+    //   ...RowCountChanged              | –  | ✗  | –  | –  | –  | ✗  | –  | ✗  |  –  |  –  |
+    //   ...ColumnCountChanged           | –  | –  | ✗  | –  | –  | ✗  | –  | ✗  |  –  |  –  |
+    //   ...BodyBecameUnparsable         | ✗  | –  | –  | –  | ✗  | –  | –  | ✗  |  ✗  |  –  |
+    //   ...RestoresCellHighlight...     | –  | –  | –  | ✗  | –  | ✗  | ✗  | ✗  |  –  |  –  |
+    //   App 全体の失敗数(730 本中)      | 1  | 1  | 1  | 2  | 1  | 4  | 1  | 6  |  2  |  1  |
+    //
+    // 注入できなかった変異(アナライザが先に殺す。-warnaserror 以前に error 相当):
+    //   比較 1 本だけを消して startXxx を残す → S1481 / target is null を false や
+    //   Rows.Count < 0 へ置換 → S1125・CS8602・RCS1215・S3981。
+
+    // kill 対象(実測): (m4) 値比較削除 / (m7) 同一性検証の丸ごと削除 / (m9) 文言の据え置き。
+    // (m4)(m7) は ...RestoresCellHighlight... も落とすので単独の網ではないが、
+    // 「値だけが別物になった」最も素朴な形をここで固定する。
+    [Fact]
+    public void Commit_WhenCellAtRowColBecameAnotherCell_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, Grid3x3, 1, 1); // (1,1)="b2" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // (1,1) の中身だけを別物へ差し替える = 座標は生きているがセルは別物。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(12, 2, "ZZ"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("a1,a2,a3\nb1,ZZ,b3\nc1,c2,c3", afterMutation); // 前提の固定
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.False(host.Csv.IsEditing);
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText); // 1 文字も書いていない
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // kill 対象(実測): (m11) 強調復元の前置ガード削除 —— **これを殺すのは本テストだけ**。
+    // ほかに (m9) 文言の据え置きと (m10) target is null だけ ParseError を言う変異を殺す。
+    // (m6) null 判定削除は本テストでは殺せない: 行が消えると行数比較が先に true になるため
+    // target.Value まで到達せず、NullReferenceException にならない(想定と実測が食い違った点)。
+    [Fact]
+    public void Commit_WhenCellAtRowColDisappeared_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, Grid3x3, 2, 2); // 最終行 (2,2)="c3" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 3 行目ごと削る = GetField(2,2) が null になる。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(17, 9, ""));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("a1,a2,a3\nb1,b2,b3", afterMutation); // 前提の固定
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.False(host.Csv.IsEditing);
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            // Said[^1] ではなく全件で固定する。セルが消えている枝で強調復元を無条件に呼ぶと
+            // ApplyCell が「移動できません」を先に喋る=余計な発声が 1 本増えるが、
+            // 末尾だけ見る assert はそれを素通しする(実測: m11 が全緑で生存した)。
+            Assert.Equal(new[] { CsvAnnounceFormatter.CommitTargetChanged }, host.Announcer.Said);
+        });
+
+    // ===== M-25: 形が変われば値が一致していても書かない =====
+    // 下 2 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
+
+    // 行が消えて (row,col) が「同じ値の別セル」を指す。
+    // kill 対象(実測): (m2) 行数比較削除 —— **これを殺すのは本テストだけ**。
+    // ほかに (m7) 同一性検証の丸ごと削除と (m9) 文言の据え置きを殺す。
+    [Fact]
+    public void Commit_WhenRowCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q\nX,Y\nX,Y", 1, 0); // (1,0)="X" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 先頭行 "p,q\n" を削る → (1,0) は 3 行目だった "X" を指す = 値は一致するが別セル。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(0, 4, ""));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("X,Y\nX,Y", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // 列が増えて (row,col) が「同じ値の別セル」を指す。
+    // kill 対象(実測): (m3) 列数比較削除 —— **これを殺すのは本テストだけ**。
+    // ほかに (m7) 同一性検証の丸ごと削除と (m9) 文言の据え置きを殺す。
+    [Fact]
+    public void Commit_WhenColumnCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q\nX,X", 1, 1); // (1,1)="X" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 2 行目の先頭へ列を 1 つ挿す → (1,1) は元 (1,0) だった "X" を指す。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(4, 0, "X,"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("p,q\nX,X,X", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // ===== M-25: パースが壊れていたら書かない(csvNow.Ok の網) =====
+    // kill 対象(実測): (m1) csvNow.Ok 判定削除 と (m6) target is null 判定削除 ——
+    // **どちらも殺すのは本テストだけ**。ほかに (m9) 文言の据え置きと (m10) を殺す。
+    // 「値 + 形」の guard は本テストの fixture を 1 つも弾けない: 変異後の本文でも
+    // Rows.Count=2 / Rows[0].Count=2 / GetField(0,0)="a1" が開始時と全部一致するので、
+    // 上の 4 本は素通りする。csvNow.Ok だけが書込を止める。
+    [Fact]
+    public void Commit_WhenBodyBecameUnparsable_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "a1,a2\nb1,b2", 0, 0); // (0,0)="a1" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 末尾へ未終端引用符のレコードを足す。CsvParser は `if (inQuotes) ok = false;` で
+            // Ok=false にしつつ、`if (ok && (pos > fieldStart || row.Count > 0))` が末尾の
+            // 不完全レコードを rows へ混ぜないので、先行 2 行の行数・列数・値は 1 つも変わらない
+            // (L1 Unterminated_trailing_record_sets_not_ok_but_leaves_preceding_rows_intact で実測)。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(11, 0, "\n\"x"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("a1,a2\nb1,b2\n\"x", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // ===== M-25 / M-1: 書かないと決めた枝でもセル強調は残す =====
+    // 混在 EOL(1 行目末尾が LF・2 行目末尾が CRLF)。ConvertEols(Crlf) が fast-path へ落ちず
+    // 本文を差し替える = EditorControl が _cellHighlight を捨てる状態を作れる唯一の fixture 形。
+    private const string MixedEolGrid = "a1,a2\nb1,b2\r\nc1,c2";
+
+    // kill 対象(実測): (m8) 拒否枝のセル強調復元(ApplyCell)の削除 —— **これを殺すのは本テストだけ**。
+    // ほかに (m4) 値比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
+    [Fact]
+    public void Commit_WhenRejected_RestoresCellHighlightClearedByEolConversion() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, MixedEolGrid, 0, 0);
+            host.Csv.Move(Direction.Down); // (1,0)="b1" へ移動 = ApplyCell がセル強調を張る
+            Assert.Equal(new CellHighlightRange(6, 8), CellHighlight(doc.Editor)); // "b1" = [6,8)
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 1 手目: Ctrl+S 相当。本文が差し替わり、EditorControl がセル強調を捨てる
+            // (EditorControl.ConvertEols の `_cellHighlight = null;`)。
+            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+            Assert.Null(CellHighlight(doc.Editor));
+
+            // 2 手目: (1,0) の値だけを別物へ変える。ConvertEols だけでは行列構造も値も変わらず
+            // 拒否枝に入らないので、「強調が消えている」と「拒否される」を 2 手で同時に作る。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(7, 2, "ZZ"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("a1,a2\r\nZZ,b2\r\nc1,c2", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+            // 確定は捨てたが、セルは現存している。晴眼・弱視ユーザーが現在セルを見失わないよう
+            // 強調は現在の (1,0)=[7,9) へ戻す(CLAUDE.md §2)。
+            Assert.Equal(new CellHighlightRange(7, 9), CellHighlight(doc.Editor));
         });
 
     // ===== GoToCell の列側境界(Task 8・行側は ReadCurrent 経由で ClampRow 側を固定済) =====

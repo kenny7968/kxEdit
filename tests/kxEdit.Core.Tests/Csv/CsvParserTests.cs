@@ -100,6 +100,25 @@ public class CsvParserTests
         Assert.False(d.Ok);
     }
 
+    // M-25(2026-09-01 設計書 §8.17-1): 末尾に未終端引用符のレコードを足すと Ok=false になるが、
+    // **先行するレコードの行数・列数・値・スパンは 1 つも変わらない**。
+    // `if (inQuotes) ok = false;` の直後の `if (ok && (pos > fieldStart || row.Count > 0))` が
+    // 末尾の不完全レコードだけを rows へ混ぜないため。
+    // この帰結は CsvController の F2 確定 guard が Ok を見なければならない唯一の根拠なので、
+    // 論証ではなく実測として固定する(上の Unterminated_quote_is_not_ok は Ok しか見ていない)。
+    [Fact]
+    public void Unterminated_trailing_record_sets_not_ok_but_leaves_preceding_rows_intact()
+    {
+        var d = CsvParser.Parse("a1,a2\nb1,b2\n\"x");
+        Assert.False(d.Ok);
+        Assert.Equal(2, d.Rows.Count); // 末尾の不完全レコードは rows に混ざらない
+        Assert.Equal(2, d.Rows[0].Count);
+        Assert.Equal(2, d.Rows[1].Count);
+        var f = d.GetField(0, 0);
+        Assert.NotNull(f);
+        Assert.Equal((0, 2, "a1"), (f!.Start, f.Length, f.Value));
+    }
+
     [Fact]
     public void Parse_TextSnapshotOverload_ProducesSameResultAsString()
     {

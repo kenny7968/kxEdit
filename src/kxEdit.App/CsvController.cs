@@ -257,6 +257,15 @@ public sealed class CsvController : IDisposable
         // ナビ後にリサイズ等で当該セルが視野外へずれていた場合に備えて明示的に可視化する。
         ed.EnsureVisibleCharRange(f.Start, f.Length);
 
+        // 確定時の同一性検査に要る値を、ここでスカラーとして取り出す。
+        // CsvField f そのものをクロージャへ捕捉してはいけない —— Start / Length が構造的に
+        // 残り、Task 2 で消した陳腐化の余地が f 経由で復活する。設計書 §4 の芯
+        //(陳腐化しうる値を持ち越さない)は字面で守られて初めて後続の改変に耐える。
+        // 正規化は開始時に 1 回だけ行う(単一セルは最大 8M chars = CsvParser.MaxFieldChars)。
+        string startValue = CsvWriter.NormalizeEols(f.Value);
+        int startRowCount = csv.Rows.Count;
+        int startColCount = csv.Rows[row].Count;
+
         var doc = _docs.Active!; // TryContext 成功時は Active 非 null。タブ切替は AbortEdit が
         // 先に走るため、確定/取消コールバック時点でも同一文書が対象。
         _editor.Begin(
@@ -274,9 +283,36 @@ public sealed class CsvController : IDisposable
                 // 本文が変わっていない通常経路に追加コストは無い。
                 var csvNow = doc.ParseCsv();
                 var target = csvNow.Ok ? csvNow.GetField(row, col) : null;
-                if (target is null)
+                // (row, col) が生きていても、本文が変わっていればそこが指すセルは別物でありうる
+                // (行が消える・列が増える等)。そこへ書けば座標が陳腐化しているのと同じ
+                // データ破壊になるので、「同じセルらしさ」が崩れていたら書かない。
+                //  - 値の一致だけでは弱い。「別セルになったが値は同じ」を素通しする
+                //    (CSV では空セルや繰り返し値がありふれている)ので、形も見る。
+                //  - EOL を正規化して比べるのは、ConvertEols がセル内改行を書き換えて
+                //    Value 自体を変えるため(設計書 §4.3)。
+                // これは同一性の**代用**であって同一性の証明ではない。行数・列数・値が
+                // すべて一致する別セル(例: 2 行の入れ替え)は弁別できない。
+                if (
+                    target is null
+                    || csvNow.Rows.Count != startRowCount
+                    || csvNow.Rows[row].Count != startColCount
+                    || !string.Equals(
+                        CsvWriter.NormalizeEols(target.Value),
+                        startValue,
+                        StringComparison.Ordinal
+                    )
+                )
                 {
-                    _announcer.Say(CsvAnnounceFormatter.ParseError);
+                    // M-1: 書かないと決めた枝でも、セルが現存しているなら強調は現在の (row, col)
+                    // へ戻す。到達経路である ConvertEols は本文差し替えの直後に _cellHighlight を
+                    // 捨てる(EditorControl.ConvertEols)ため、ここで戻さないと晴眼・弱視ユーザーが
+                    // 現在セルを見失ったまま残る(CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
+                    // target is not null は csvNow.Ok == true を含意する(target の作り方から)ので
+                    // ApplyCell に渡す csvNow は正常なパース結果である。target is null のときは
+                    // 強調すべきセルがそもそも無いので何もしない。
+                    if (target is not null)
+                        ApplyCell(ed, csvNow, row, col, announce: false);
+                    _announcer.Say(CsvAnnounceFormatter.CommitTargetChanged);
                     return;
                 }
                 string serialized = CsvWriter.EscapeField(text);
