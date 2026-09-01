@@ -350,8 +350,17 @@ public class AtomicFileRecoveryTests
 
     /// <summary>
     /// Stream 経路(<c>TextFileService.Save(string, TextBuffer, …)</c> = 本番の主保存経路)。
-    /// フォールバックへ流れると byte[] 版 Save へ委譲されて seam をもう一度通るため、
-    /// <c>Invocations</c> が 2 になる。1 であることが「流れていない」の観測点。
+    /// <para>
+    /// <b>退行を実際に検出しているのは例外の型</b>である。フォールバックへ流れると byte[] 版
+    /// Save へ委譲され、差替先(ディレクトリに化けている)を掴もうとして別の例外になるため、
+    /// <c>Assert.Throws</c> の型完全一致がそこで落ちる。機構としては seam をもう一度通って
+    /// <c>Invocations</c> も 2 になるが、<b>その assert には到達しない</b>(型不一致で先に
+    /// 中断する)ので、観測点として数えてはいけない。
+    /// </para>
+    /// <para>
+    /// 下の <c>Assert.Equal(1, …)</c> は「フックが不発でないこと」のガード
+    /// (設計 2026-09-02 §10.4 I-2)として置いている。
+    /// </para>
     /// </summary>
     [Fact]
     public void Save_buffer_propagates_recovery_failure_without_in_place_fallback()

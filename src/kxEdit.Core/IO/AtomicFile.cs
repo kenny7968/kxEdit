@@ -27,7 +27,8 @@ public static class AtomicFile
 
     /// <summary>
     /// payload を path へ原子的に書き込む。失敗時は tmp を掃除して例外を伝播する
-    /// (例外は差替で原本が失われた場合のみ —— <see cref="CommitStaged"/> を参照)。
+    /// (この規則が当てはまらない唯一の場合 = 差替で原本が失われたときは、tmp を掃除せず残す
+    /// —— <see cref="CommitStaged"/> を参照)。
     /// </summary>
     public static void Write(string path, byte[] payload)
     {
@@ -118,12 +119,26 @@ public static class AtomicFile
     /// (保存は実際に成立しているので「保存しました」は虚偽ではない)。
     /// </para>
     /// <para>
-    /// <b>保証が及ぶ範囲</b>(設計 §10.3): ここは <c>Write</c> の 4 呼出者すべての通り道だが、
-    /// 「tmp を残して例外で伝える」が実際にユーザーへ届くのは<b>文書保存経路
+    /// <b>保証が及ぶ範囲</b>(設計 §10.3 / §10.5): ここは <c>Write</c> の 4 呼出者すべての
+    /// 通り道だが、「tmp を残して例外で伝える」が実際にユーザーへ届くのは<b>文書保存経路
     /// (<c>TextFileService.Save</c>)だけ</b>である。<c>BackupStore.Write</c> /
     /// <c>SessionLayoutStore.Save</c> は <c>SerialBackupWriter</c> のワーカーが catch で
-    /// 握り潰し、さらに残した tmp は次回起動の <c>BackupStore.SweepTempFiles</c>
-    /// (<c>*.tmp</c> を無差別削除)が回収するため、これらの経路では静かに消える。
+    /// 握り潰すため、例外はユーザーへ届かない。
+    /// </para>
+    /// <para>
+    /// 残した tmp の行方は、この 2 経路で<b>異なる</b>。
+    /// <list type="bullet">
+    /// <item><b>バックアップ</b>(<c>%APPDATA%\kxEdit\backups</c> 配下)—— 起動時に
+    /// <c>BackupCoordinator</c> が自セッション dir と base dir へ
+    /// <c>BackupStore.SweepTempFiles</c>(<c>*.tmp</c> を無差別削除)を掛けるので回収される
+    /// = 静かに消える。</item>
+    /// <item><b>セッションレイアウト</b>(<c>%APPDATA%\kxEdit\session-state.json</c>)—— その
+    /// tmp は <c>%APPDATA%\kxEdit\</c> 直下に落ちる。<c>*.tmp</c> を消すコードは
+    /// <c>BackupStore</c> にしか無く、<b>どれも <c>backups</c> 配下しか見ていない</b>ため
+    /// <b>恒久残留する</b>。本文を含まない数 KB で、かつ差替失敗と復旧失敗の二重障害が要るので
+    /// 実害は小さいが、「静かに消える」ではない。<c>%APPDATA%\kxEdit\</c> 直下へ書く経路を
+    /// 増やすときは同じことが起きる。</item>
+    /// </list>
     /// 握り潰しの解消は別ブランチ(B5 / M-20)の担当で、本修正の射程外。
     /// </para>
     /// </summary>

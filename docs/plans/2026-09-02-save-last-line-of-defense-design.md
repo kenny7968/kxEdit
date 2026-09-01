@@ -667,8 +667,11 @@ kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
    §3.4 は Task 1 で `IsShareOrLockViolation(ex) == false` を固定済みだが、それは
    **判定関数の網であって配線の網ではない**。`TextFileService.Save` の
    `catch (IOException ex) when (…)` を実際に通して、例外がフォールバックへ落ちずに
-   伝播することを固定した。Stream 版は「フォールバックへ落ちれば byte[] 版 Save へ委譲されて
-   seam をもう一度通る」ので `Invocations == 1` が観測点になる(2 なら落ちている)。
+   伝播することを固定した。**両版とも、退行を実際に検出しているのは例外の型**である
+   (`Assert.Throws` は xUnit では型完全一致)。Stream 版はフォールバックへ落ちれば byte[] 版
+   Save へ委譲されて seam をもう一度通るので機構としては `Invocations` が 2 になるが、
+   型不一致の assert が先に中断して**そこへ到達しない**ため、観測点として数えてはいけない。
+   `Assert.Equal(1, scope.Invocations)` はフック不発ガード(§10.4 I-2)として置いている。
 2. **ヘルパを静的メソッドにした**: 計画は `DestroyThenBlockRecovery` をテスト内のローカル関数に
    していたが、何も捕捉していないため static メソッドへ引き上げた(byte[] / Stream の 2 本で共用)。
    同時に、例外メッセージへ 3 引数(`tmp` / `dest` / `destExists`)をすべて埋め込む形にした。
@@ -678,14 +681,53 @@ kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
    確定している。`ThrowsAny` へ緩められた場合に弁別を残す重ね掛けとして残し、その旨を
    テストの xmldoc に書いた(「この網は何を守っているのか」を後から読める形にする)。
 
+#### 仕様レビューで直した理由節 —— layout の tmp は sweeper 対象外(恒久残留する)
+
+Task 3 の xmldoc(および下の申し送りの前提)は、`BackupStore.Write` と `SessionLayoutStore.Save` を
+**まとめて**「残した tmp は次回起動の `BackupStore.SweepTempFiles` が回収する = 静かに消える」と
+書いていた。**layout については偽**である。自分で確かめた結果:
+
+- `src` 全体で `*.tmp` を消すコードは `BackupStore` にしか無い(`SweepTempFiles` `:426` /
+  `DeleteAll` 経由 `:151` / `DeleteSessionDir` 経由 `:257` / `DeleteTargetTempsIn` `:388`)。
+  `grep -rn '\*\.tmp' src/ --include=*.cs` の全ヒットを当たって確認した。
+- そのうち**起動時の掃除**は `BackupCoordinator.cs:346-347` の 2 呼出だけで、対象は
+  `_sessionDir` と `_dir`。`_dir = BackupStore.DefaultDirectory`(`BackupStore.cs:23-28` =
+  `%APPDATA%\kxEdit\backups`)、`_sessionDir = Path.Combine(_dir, "session-" + guid)`
+  (`BackupCoordinator.cs:120` / `:128`)。**どちらも `backups` 配下**である。
+- 一方 `SessionLayoutStore.DefaultPath` は `%APPDATA%\kxEdit\session-state.json`
+  (`SessionLayoutStore.cs:27-34`)で、`BackupCoordinator.cs:134` がそのまま `_layoutPath` にし、
+  `SerialBackupWriter.cs:94` が `SessionLayoutStore.Save(path, layout)` を呼ぶ。したがって
+  その tmp は **`%APPDATA%\kxEdit\` 直下**に落ちる = 上の掃除対象に**含まれない**。
+
+つまり layout 経路では、残した tmp が**恒久残留**する。実害は小さい(本文を含まない数 KB・
+差替失敗と復旧失敗の二重障害が要る)が、根拠が偽だったので xmldoc を 2 経路に書き分けた。
+結論(「これらの経路では例外がユーザーへ届かない」)は `SerialBackupWriter.cs:46-53` / `:92-101` の
+握り潰しで成立しており、変わらない。
+
+**Task 6 への申し送り**: `SettingsStore.DefaultPath` は `%APPDATA%\kxEdit\settings.json`
+(`SettingsStore.cs:13-18`)で、layout と**同じディレクトリ**である。Task 6 で設定を
+`AtomicFile` 経由にすると、その tmp も同じく sweeper 対象外になる。保証範囲を書くときは
+「静かに消える」ではなく**「残留する」**が正しい。
+
+> §10.3(Task 2 の記録)は「**バックアップ側は**…バックアップ経路では『静かに消える』」と
+> 範囲を限って書いており、その範囲では正しい。ただし layout 側に何も書いていないため、
+> 表と併せて読むと 2 経路とも消えるように読める。また §10.3 の「(`:151` / `:257` から
+> 呼ばれる)」は `DeleteAll` / `DeleteSessionDir` の呼出であって、**起動時の掃除は
+> `BackupCoordinator.cs:346-347`** である。§10.3 は当時の記録なので書き換えず、ここに補正を残す。
+
 #### 申し送り(Task 4 で回収すること)
 
 1. **`PreservedTempPath` が実在しないケースがありうる。** 復旧の `File.Move` が
    `FileNotFoundException`(tmp まで失われていた)で落ちた場合も
    `AtomicReplaceFailedException` になり、メッセージは「書き込んだ内容は '…' に残してあります」と
    言い切る。**Task 4 の文言生成では `File.Exists(ex.PreservedTempPath)` で分岐すること**
-   (実在しない退避先を案内するのは、単なる保存失敗より悪い)。`RecoveryError` の型で
-   弁別してもよい。`AtomicFile` 側は設計 §3.2 どおりに保ち、コードは変えていない。
+   (実在しない退避先を案内するのは、単なる保存失敗より悪い)。**観測面はこれ 1 本に
+   一本化する** —— `RecoveryError` の型(`FileNotFoundException` 等)で弁別してはいけない。
+   tmp 喪失は親ディレクトリごと消えた場合の `DirectoryNotFoundException` でも起こり、
+   **型の列挙は漏れる**。要求 1 でこのタスク自身が守った「前置の列挙は原理的に漏れる・
+   事後条件で検査する」(監査 §9 V-7)と同型の誤りになる。
+   `AtomicFile` 側は設計 §3.2 どおりに保ち、コードは変えていない
+   (復旧直前に `File.Exists(tmp)` を採り直すと TOCTOU 窓を増やすため)。
 2. **Task 1 の申し送り(App 層の広い `catch (IOException)`)は「握り潰し」ではなかった。**
    `FileController.WriteToPath`(`:900`)の catch は `_prompt.Error($"保存できませんでした:
    {SanitizeForDisplay.OneLine(ex.Message, 200)}", …)` なので、`AtomicReplaceFailedException`
