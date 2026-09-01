@@ -436,6 +436,71 @@ Expected: **ビルド失敗** — `CsvAnnounceFormatter.CommitTargetChanged` が
 - T3: 本文が `a1,a2,a3\nb1,NEW,b3\nc1,c2,c3` になる(別セルへ書いてしまう)
 - T4: `ParseError` を発声している(文言不一致)
 
+### Step 1b: 形の変化を踏むテストを 2 本足す(2026-09-01 Task 1 品質レビュー由来の精密化)
+
+値の一致だけでは同一性の代用として弱い。**「別セルになったが値は同じ」を素通しする**からで、
+CSV では空セルや繰り返し値がありふれているため、§4.2 が名指しする「行が消える・列が増える」が
+実際に起きても値が一致すれば guard を通ってしまう。開始時の `Rows.Count` と
+`Rows[row].Count` も併せて比べる(2 比較)。下の 2 本は**その形の検査だけが殺せる**網である。
+
+```csharp
+    // ===== M-25: 形が変われば値が一致していても書かない =====
+    // 下 2 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
+
+    // 行が消えて (row,col) が「同じ値の別セル」を指す。
+    [Fact]
+    public void Commit_WhenRowCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q\nX,Y\nX,Y", 1, 0); // (1,0)="X" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 先頭行 "p,q\n" を削る → (1,0) は 3 行目だった "X" を指す = 値は一致するが別セル。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(0, 4, ""));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("X,Y\nX,Y", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // 列が増えて (row,col) が「同じ値の別セル」を指す。
+    [Fact]
+    public void Commit_WhenColumnCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q\nX,X", 1, 1); // (1,1)="X" を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 2 行目の先頭へ列を 1 つ挿す → (1,1) は元 (1,0) だった "X" を指す。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(4, 0, "X,"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("p,q\nX,X,X", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+```
+
+**オフセットは実装時に必ず数え直すこと**(`"p,q\nX,Y\nX,Y"` は `p`=0 / `\n`=3 / `"p,q\n"`=0..3、
+`"p,q\nX,X"` は 2 行目が 4 から始まる、という手計算)。前提固定の `Assert.Equal` が先に落ちたら
+そこで数え直す。
+
+**この検査でも弁別できない残りの限界**(行数・列数・値がすべて一致する別セル。例: 2 行の入れ替え)は
+コメントに明記すること。**「同一性を検証している」と読める書き方をしない**(強すぎる安全宣言になる)。
+
 ### Step 3: 実装する
 
 `src/kxEdit.Core/Csv/CsvAnnounceFormatter.cs` の `BlockedInCsvMode` の下に足す:
@@ -446,20 +511,41 @@ Expected: **ビルド失敗** — `CsvAnnounceFormatter.CommitTargetChanged` が
     public const string CommitTargetChanged = "本文が変わったため確定できません";
 ```
 
-`src/kxEdit.App/CsvController.cs` の `onCommit`(Task 2 で入れた null 判定)を差し替える:
+`src/kxEdit.App/CsvController.cs` の `_editor.Begin(...)` の**手前**(まだ `f` が生きている位置)で、
+確定時に要る値を**スカラーだけ**捕捉する:
+
+```csharp
+        // 確定時の同一性検査に要る値を、ここでスカラーとして取り出す。
+        // CsvField f そのものをクロージャへ捕捉してはいけない —— Start / Length が構造的に
+        // 残り、Task 2 で消した陳腐化の余地が f 経由で復活する。設計書 §4 の芯
+        //(陳腐化しうる値を持ち越さない)は字面で守られて初めて後続の改変に耐える。
+        // 正規化は開始時に 1 回だけ行う(単一セルは最大 8M chars = CsvParser.MaxFieldChars)。
+        string startValue = CsvWriter.NormalizeEols(f.Value);
+        int startRowCount = csv.Rows.Count;
+        int startColCount = csv.Rows[row].Count;
+```
+
+そのうえで `onCommit`(Task 2 で入れた null 判定)を差し替える:
 
 ```csharp
                 var csvNow = doc.ParseCsv();
                 var target = csvNow.Ok ? csvNow.GetField(row, col) : null;
                 // (row, col) が生きていても、本文が変わっていればそこが指すセルは別物でありうる
-                // (行が消える・列が増える等)。座標が陳腐化しているのと同じデータ破壊になるため、
-                // 開始時に読んだ値と一致するときだけ書く。EOL を正規化して比べるのは、
-                // ConvertEols がセル内改行を書き換えて Value 自体を変えるため(設計書 §4.3)。
+                // (行が消える・列が増える等)。そこへ書けば座標が陳腐化しているのと同じ
+                // データ破壊になるので、「同じセルらしさ」が崩れていたら書かない。
+                //  - 値の一致だけでは弱い。「別セルになったが値は同じ」を素通しする
+                //    (CSV では空セルや繰り返し値がありふれている)ので、形も見る。
+                //  - EOL を正規化して比べるのは、ConvertEols がセル内改行を書き換えて
+                //    Value 自体を変えるため(設計書 §4.3)。
+                // これは同一性の**代用**であって同一性の証明ではない。行数・列数・値が
+                // すべて一致する別セル(例: 2 行の入れ替え)は弁別できない。
                 if (
                     target is null
+                    || csvNow.Rows.Count != startRowCount
+                    || csvNow.Rows[row].Count != startColCount
                     || !string.Equals(
                         CsvWriter.NormalizeEols(target.Value),
-                        CsvWriter.NormalizeEols(f.Value),
+                        startValue,
                         StringComparison.Ordinal
                     )
                 )
@@ -469,19 +555,11 @@ Expected: **ビルド失敗** — `CsvAnnounceFormatter.CommitTargetChanged` が
                 }
 ```
 
-条件式が長くなるなら private static ヘルパーへ括ってよい(CSharpier の整形に任せる):
+`csvNow.Rows[row]` が安全なのは `target is null` を**先に**短絡しているからである
+(`GetField` が非 null を返した = `row` / `col` は範囲内)。**この短絡順序を入れ替えないこと。**
 
-```csharp
-    /// <summary>F2 を開始したセルと、確定時に (row,col) が指すセルが同じものかを判定する。
-    /// EOL 正規化が必須である理由は 2026-09-01 設計書 §4.3。</summary>
-    private static bool IsSameCell(CsvField? now, CsvField begun) =>
-        now is not null
-        && string.Equals(
-            CsvWriter.NormalizeEols(now.Value),
-            CsvWriter.NormalizeEols(begun.Value),
-            StringComparison.Ordinal
-        );
-```
+条件式が長いので private static ヘルパーへ括ってよいが、**括るなら引数もスカラーにする**
+(`CsvField` を渡すと捕捉禁止の趣旨が呼び出し側から見えなくなる)。整形は CSharpier に任せる。
 
 ### Step 4: 緑を確認する
 
