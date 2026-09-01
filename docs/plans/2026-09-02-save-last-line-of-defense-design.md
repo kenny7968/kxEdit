@@ -559,3 +559,136 @@ M-3 は `Dispose()` の引数を `null` にする形が **`error S4487`(unread p
 
 **M-3 は却下**(フック第 3 引数 `destExists` が全テストで捨てられている件)。既定実装に必要で、
 `CommitStaged` から引き渡す判断(TOCTOU 回避)は正しいため現状維持。
+
+### 10.5 Task 3 — M-12 本体(復旧と tmp 保持)の実測
+
+#### 計画のコードは今回そのまま通った(Task 1 / Task 2 との違い)
+
+Task 1(RCS1194)・Task 2(S2696 + S3398)は計画のコードがアナライザで割れたが、**Task 3 は
+`CommitStaged` の差替コードも 4 本のテストも無修正でビルドが通った**(`-warnaserror` / 0 warning)。
+懸念していた `catch (Exception replaceError)` に Sonar は何も言わなかった。`src` 配下に
+`catch (Exception ex)` が 35 か所あり(`BackupCoordinator` / `FileController` ほか)、
+S2221 は本リポジトリのアナライザ構成では発火していない。
+
+**catch の範囲が従来と同一であることの確認**: 従来の裸 `catch` と `catch (Exception ex)` は、
+アセンブリが `[assembly: RuntimeCompatibility(WrapNonExceptionThrows = false)]` を持たない限り
+等価(非 CLS 例外は `RuntimeWrappedException` に包まれて `Exception` で捕まる)。
+リポジトリ全体を grep して `RuntimeCompatibility` / `WrapNonExceptionThrows` の指定が
+**1 件も無い**ことを確認した(= 既定の `true`)。実挙動としても、非 IOException を投げる
+Task 2 の網 2 本(`Replace_step_failure_with_non_io_exception_still_cleans_tmp` /
+`Write_Stream_ReplaceStepFailureWithNonIoException_StillCleansTmp`)が緑のままである。
+
+#### Step 2 —— 修正前の実測(赤 6 / 緑 4)
+
+計画は「4 本中 2 本が赤・2 本は修正前から PASS」と書いていたが、実際に書いたのは
+byte[] / Stream 各 4 本 + 実経路 2 本の**計 10 本**で、内訳は赤 6 / 緑 4 だった。
+
+```
+失敗 …AtomicFileRecoveryTests.Bytes_recovers_when_replace_loses_the_original
+   System.IO.IOException : simulated partial replace failure: destroyed '…' (destExists=True); only copy is '…'
+失敗 …AtomicFileRecoveryTests.Stream_recovers_when_replace_loses_the_original
+   System.IO.IOException : simulated partial replace failure: …
+失敗 …AtomicFileRecoveryTests.Bytes_preserves_tmp_when_recovery_also_fails
+失敗 …AtomicFileRecoveryTests.Stream_preserves_tmp_when_recovery_also_fails
+   Assert.Throws() Failure: Exception type was not an exact match
+   Expected: typeof(kxEdit.Core.IO.AtomicReplaceFailedException)
+   Actual:   typeof(System.IO.IOException)
+失敗 …AtomicFileRecoveryTests.Save_text_propagates_recovery_failure_without_in_place_fallback
+失敗 …AtomicFileRecoveryTests.Save_buffer_propagates_recovery_failure_without_in_place_fallback
+   (同上)
+失敗!   -失敗:     6、合格:     4、スキップ:     0、合計:    10
+```
+
+**「修正前から PASS する」側が本当に PASS することも単独で実測した**(回帰網として働いている
+= 修正が従来挙動を壊していないことの基準線になる)。修正前に 4 本だけを filter して実行:
+
+```
+成功!   -失敗:     0、合格:     4、スキップ:     0、合計:     4
+  (Bytes/Stream × still_deletes_tmp_when_original_survives, deletes_tmp_when_creating_a_new_file_fails)
+```
+
+#### Step 4 —— 修正後(全緑)
+
+```
+dotnet build kxEdit.sln -c Debug -warnaserror   →  0 個の警告 / 0 エラー (EXITCODE=0)
+kxEdit.Core.Tests    成功!  合格: 1398 / 合計: 1398   (修正前 1388 + 新規 10)
+kxEdit.App.Tests     成功!  合格:  734 / 合計:  734
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+```
+
+既存テストの失敗はゼロ。§10.2 の「Task 3 で M-1 / M-2 の 2 本を書き換える必要が出たら判定表を
+見直す合図」に該当する事態は起きなかった(2 本とも無修正で緑)。
+
+#### Step 5 —— 2 変異の実測(どちらも殺せた)
+
+いずれも**クリーンビルドの終了コード 0 / 0 warning を確認してから**テストを走らせている。
+
+| # | 変異 | 結果 |
+|---|------|------|
+| 1 | `if (destExists && !File.Exists(path))` → `if (!File.Exists(path))` | Core 1398 中 **2 失敗** |
+| 2 | `if (destExists && !File.Exists(path))` → `if (destExists)` | Core 1398 中 **9 失敗** |
+
+```
+# 変異 1(新規作成の失敗でも復旧枝へ入り、File.Move が成功して Write が返ってしまう)
+失敗 kxEdit.Core.Tests.IO.AtomicFileRecoveryTests.Bytes_deletes_tmp_when_creating_a_new_file_fails
+   Assert.Throws() Failure: No exception was thrown
+失敗 kxEdit.Core.Tests.IO.AtomicFileRecoveryTests.Stream_deletes_tmp_when_creating_a_new_file_fails
+   Assert.Throws() Failure: No exception was thrown
+失敗!   -失敗:     2、合格:  1396、スキップ:     0、合計:  1398
+
+# 変異 2(原本が残っているのに復旧枝へ入り、File.Move が「既にある」で失敗して
+#        AtomicReplaceFailedException に化ける = tmp も残る)
+失敗 kxEdit.Core.Tests.IO.AtomicFileRecoveryTests.Bytes_still_deletes_tmp_when_original_survives
+失敗 kxEdit.Core.Tests.IO.AtomicFileRecoveryTests.Stream_still_deletes_tmp_when_original_survives
+   Assert.Throws() Failure: Exception type was not an exact match
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Write_to_fully_locked_target_throws_share_violation_and_keeps_original
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Replace_step_failure_with_non_io_exception_still_cleans_tmp
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Write_Stream_TargetLocked_ThrowsShareViolation_KeepsOriginal_CleansTmp
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Write_Stream_ReplaceStepFailureWithNonIoException_StillCleansTmp
+失敗 kxEdit.Core.Tests.Text.TextFileServiceSaveTests.Save_does_not_truncate_original_when_unrecoverably_locked
+失敗 kxEdit.Core.Tests.Text.TextFileServiceSaveTests.Save_falls_back_to_inplace_when_replace_blocked_by_share_lock
+失敗 kxEdit.Core.Tests.Text.TextFileServiceSaveTextBufferTests.SaveTextBuffer_ShareViolation_FallsBackToInPlaceOverwrite
+失敗!   -失敗:     9、合格:  1389、スキップ:     0、合計:  1398
+```
+
+変異 2 が既存 7 本まで巻き込んだのは、**共有違反(= 本番で最も多い差替失敗)がこの変異では
+`AtomicReplaceFailedException` に化けて in-place フォールバックの `when` 節を素通りする**ため。
+判定の片側を落とすと §3.4 の設計まで同時に崩れることが、意図せず可視化された。
+変異は 2 件とも `git diff` で完全復帰を確認済み(`if` 行が 1 本追加されているだけの差分)。
+
+**適用範囲は §6.4 のとおり判定表の 2 変異に限定**し、復旧の `File.Move` や `TryDelete`、
+ステージング段へは広げていない(CLAUDE.md §4-A の I/O 禁止に対する例外条件の適用範囲)。
+
+#### 計画と実物が食い違った点
+
+1. **テスト本数**: 計画は byte[] 4 本 + Stream 4 本 = 8 本。実際は **10 本**で、
+   `Save_buffer_propagates_recovery_failure_without_in_place_fallback` /
+   `Save_text_propagates_recovery_failure_without_in_place_fallback` を足した。
+   §3.4 は Task 1 で `IsShareOrLockViolation(ex) == false` を固定済みだが、それは
+   **判定関数の網であって配線の網ではない**。`TextFileService.Save` の
+   `catch (IOException ex) when (…)` を実際に通して、例外がフォールバックへ落ちずに
+   伝播することを固定した。Stream 版は「フォールバックへ落ちれば byte[] 版 Save へ委譲されて
+   seam をもう一度通る」ので `Invocations == 1` が観測点になる(2 なら落ちている)。
+2. **ヘルパを静的メソッドにした**: 計画は `DestroyThenBlockRecovery` をテスト内のローカル関数に
+   していたが、何も捕捉していないため static メソッドへ引き上げた(byte[] / Stream の 2 本で共用)。
+   同時に、例外メッセージへ 3 引数(`tmp` / `dest` / `destExists`)をすべて埋め込む形にした。
+   S1172(未使用パラメータ)を確実に避けつつ、失敗時の出力に実パスが出る。
+3. **`Assert.IsNotType<AtomicReplaceFailedException>(ex)` は現状では冗長**。xUnit の
+   `Assert.Throws<IOException>` は型完全一致なので、その時点で復旧枝に入っていないことは
+   確定している。`ThrowsAny` へ緩められた場合に弁別を残す重ね掛けとして残し、その旨を
+   テストの xmldoc に書いた(「この網は何を守っているのか」を後から読める形にする)。
+
+#### 申し送り(Task 4 で回収すること)
+
+1. **`PreservedTempPath` が実在しないケースがありうる。** 復旧の `File.Move` が
+   `FileNotFoundException`(tmp まで失われていた)で落ちた場合も
+   `AtomicReplaceFailedException` になり、メッセージは「書き込んだ内容は '…' に残してあります」と
+   言い切る。**Task 4 の文言生成では `File.Exists(ex.PreservedTempPath)` で分岐すること**
+   (実在しない退避先を案内するのは、単なる保存失敗より悪い)。`RecoveryError` の型で
+   弁別してもよい。`AtomicFile` 側は設計 §3.2 どおりに保ち、コードは変えていない。
+2. **Task 1 の申し送り(App 層の広い `catch (IOException)`)は「握り潰し」ではなかった。**
+   `FileController.WriteToPath`(`:900`)の catch は `_prompt.Error($"保存できませんでした:
+   {SanitizeForDisplay.OneLine(ex.Message, 200)}", …)` なので、`AtomicReplaceFailedException`
+   のメッセージ(保存先と退避先の 2 パスを含む)は**ユーザーへ届く**。ただし
+   **200 文字で切り詰められる**ため、長いパスでは退避先が末尾から落ちうる。Task 4 の主眼は
+   ここになる。
