@@ -69,4 +69,43 @@ public class AtomicFileTests
     [Fact]
     public void IsShareOrLockViolation_is_false_for_generic_io_error() =>
         Assert.False(AtomicFile.IsShareOrLockViolation(new IOException("generic")));
+
+    /// <summary>
+    /// seam は差替段だけを差し替え、スコープを抜けたら必ず既定実装へ戻ること。
+    /// 戻らないと、並列実行される他のテストクラス(SettingsStoreTests / BackupStore 系)が
+    /// 巻き添えになる。ThreadStatic なので他スレッドへは漏れないが、同一スレッド上での
+    /// 後始末はこのテストでしか固定できない。
+    /// </summary>
+    [Fact]
+    public void Commit_override_applies_only_inside_scope()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            int calls = 0;
+            using (
+                AtomicFile.OverrideCommitForTest(
+                    (tmp, dest, destExists) =>
+                    {
+                        calls++;
+                        File.Move(tmp, dest, overwrite: true);
+                    }
+                )
+            )
+            {
+                AtomicFile.Write(path, new byte[] { 1 });
+            }
+            Assert.Equal(1, calls);
+
+            // スコープ外は既定実装(= フックは呼ばれない)。
+            AtomicFile.Write(path, new byte[] { 2 });
+            Assert.Equal(1, calls);
+            Assert.Equal(new byte[] { 2 }, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
 }
