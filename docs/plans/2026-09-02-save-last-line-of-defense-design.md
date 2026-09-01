@@ -461,6 +461,16 @@ M-3 は `-warnaserror` でも 0 warning で通ることを確認済み(アナラ
 
 M-2 の網は Stream 側だけを赤にし、byte[] 側は緑のまま = 網が経路を弁別できている。
 
+> 上の変異名・テスト名・出力は**当時のもの**(証跡なので書き換えない)。その後 §10.4 の M-1 で
+> 改名しており、現在の名前は `CommitOverrideScope` → `ReplaceStepOverrideScope` /
+> `SetCommitOverride` → `SetReplaceStepOverride` /
+> `Commit_failure_with_non_io_exception_still_cleans_tmp` →
+> `Replace_step_failure_with_non_io_exception_still_cleans_tmp` /
+> `Commit_override_scopes_restore_in_lifo_order` →
+> `Replace_step_override_scopes_restore_in_lifo_order` /
+> `Write_Stream_CommitFailureWithNonIoException_StillCleansTmp` →
+> `Write_Stream_ReplaceStepFailureWithNonIoException_StillCleansTmp`。
+
 #### Task 3 で壊さないための注意
 
 M-1 / M-2 の網はフックに**差替先を消させない**形にしてある。Task 3 で tmp 保持が入っても
@@ -470,10 +480,82 @@ M-1 / M-2 の網はフックに**差替先を消させない**形にしてある
 
 #### 実装計画からの逸脱(受容済み)
 
-計画どおりの `CommitOverrideScope.Dispose() => t_commitOverride = _previous;` は
+計画どおりの `Dispose() => t_commitOverride = _previous;` は
 `error S2696`(インスタンスメソッドから static フィールドを更新するな)でビルドが割れ、
 復帰用 static メソッドを外側へ足すと今度は `error S3398`(入れ子型からのみ使われるので中へ移せ)に
-なる。張る側と戻す側の両方が通る `SetCommitOverride` 1 つへ集約して両方を解消した
+なる。張る側と戻す側の両方が通る `SetReplaceStepOverride` 1 つへ集約して両方を解消した
 (= フィールドへの書込口が 1 か所になる)。レビューで計画どおりの形へ一時的に戻して両エラーの
 再現を実測したうえで**受容**と結論した。Task 1 の RCS1194 に続き、計画のコードがアナライザを
 通らなかったのは 2 件目。
+
+### 10.3 Task 2 — M-12 の保証が及ぶ範囲(コード品質レビュー I-3・受容)
+
+`CommitStaged` は `AtomicFile.Write` の 4 呼出者すべての通り道だが、**M-12 の「tmp を残して例外で
+伝える」が実際にユーザーへ届くのは文書保存経路だけ**である。設計 §3.2 と Task 3 の xmldoc は
+そのままだと「全永続化経路でデータ喪失を防いだ」と読めてしまうので、範囲をここに明記する。
+
+| 呼出者 | 例外はユーザーへ届くか |
+|--------|------------------------|
+| `TextFileService.Save`(文書保存) | **届く**。これが M-12 の対象 |
+| `BackupStore.Write`(`BackupStore.cs:49`) | **届かない**。`SerialBackupWriter.cs:47-53` が `catch { OnWriteFailed?.Invoke(...); }` で握り潰す |
+| `SessionLayoutStore.Save`(`SessionLayoutStore.cs:125`) | **届かない**。同じワーカーの `catch` で握り潰す(`SerialBackupWriter.cs:94`) |
+
+さらにバックアップ側は、残した tmp を**次回起動の `BackupStore.SweepTempFiles`(`BackupStore.cs:426`)
+が `*.tmp` を無差別削除して回収する**(`:151` / `:257` から呼ばれる)。つまり M-12 が tmp を残しても
+バックアップ経路では「静かに消える」。
+
+**コード変更はしない**(本ブランチの射程外)。握り潰しの解消は B5 の M-20 が担当する。
+**Task 6(設定の原子化)でも同じ判断が要る**——`SettingsStore` の保存が握り潰し側か通知側かを
+確認してから、M-12 の保証範囲に含めるかを決めること。
+
+### 10.4 Task 2 — コード品質レビューの反映(I-1 / I-2 / M-1 / M-2)
+
+**I-1 理由節が構造的に偽だった**: 「テストからのみ置換できる」と断言していたが、
+`kxEdit.Core.csproj:13,16` は production アセンブリ `kxEdit.Editor` と `kxEdit.Core.Bench` へも
+internal を可視化しており、強制ではない。`#if DEBUG` で構造的に封じる案は
+`tools/pre-merge-check.ps1:33-43` が Release でもテストを走らせるため**使えない**と結論済み。
+文言を「production コードからは呼んでいない(強制ではなく現在の観測)」へ直した。
+実装報告では同じことを懸念として自分で挙げていたのに、コードのコメントは断言のままだった
+——「結論は正しいが理由節が偽」の再発。
+
+**I-2 「張ったのに不発」を検出できなかった(最重要)**: フックはスレッド親和なので、張った
+スレッドと `Write` が走るスレッドがずれると**黙って既定実装が走る**。事後状態は既定実装が
+成功したときとまったく同じになるため、事後状態だけを見るテストは不発に気付けない。
+Task 3 の主テスト `Bytes_recovers_when_replace_loses_the_original` は事後状態しか見ないので、
+**復旧ロジックを一度も通さずに緑**になりうる。不発は空論ではなく、`BackupStore.Write` /
+`SessionLayoutStore.Save` は `SerialBackupWriter.cs:39` の専用ワーカースレッドで走る。
+
+対策として seam 自身に発火回数を持たせた(`ReplaceStepOverrideScope.Invocations`)。
+`OverrideReplaceStepForTest` の戻り値型を具体型にして `Assert.Equal(1, scope.Invocations)` を
+書けるようにし、**既存 4 本すべてをこの形へ寄せた**(手書きカウンタは廃止)。
+投げるフックも発火として数えるため、記録はフック呼出の**前**に行う。
+
+網が実際に不発を捕まえることは実測で確認した。`Replace_step_override_applies_only_inside_scope`
+の `Write` を一時的にワーカースレッドで走らせると
+`Assert.Equal() Failure / Expected: 1 / Actual: 0` で赤になる。さらに恒久テスト
+`Replace_step_override_does_not_fire_on_another_thread` を追加し、**事後状態(内容・tmp 残骸)は
+フックが効いた場合と区別が付かないのに `Invocations` だけが 0 になる**ことを固定した。
+**Task 3 / Task 4 でフックを張るテストは必ず `Invocations` を assert すること。**
+
+**M-1 名前が段差を伝えていなかった**: 内側の `Commit` は実体が `File.Replace` / `File.Move` の
+1 手しかないのに広く聞こえ、`OverrideCommitForTest` は「コミットを丸ごと差し替えた」と読める。
+実際にはフックが投げても外側の復旧が走って `Write` が成功 return し得る(M-12 の復旧成功枝)ため、
+期待と逆の assertion を書きやすい。呼出が 4 か所しかない今のうちに改名した:
+`Commit` → `RunReplaceStep` / `OverrideCommitForTest` → `OverrideReplaceStepForTest` /
+`t_commitOverride` → `t_replaceStepOverride` / `CommitOverrideScope` → `ReplaceStepOverrideScope`。
+外側の `CommitStaged`(= 失敗時ポリシー全体)は据え置き。
+
+**改名後に 3 変異を当て直した**(網の形が変わったため)。M-1 / M-2 は同じ出力で再度死ぬ。
+M-3 は `Dispose()` の引数を `null` にする形が **`error S4487`(unread private field `_previous`)で
+コンパイルできなくなった**ため、読み取りを残す等価な変異
+(`new ReplaceStepOverrideScope(hook, t_replaceStepOverride)` → `(hook, null)` = previous を
+そもそも捕まえない)へ差し替えて実測し、`Expected: 1 / Actual: 0` で死ぬことを確認した。
+なお最初にこの非コンパイル変異を当てたとき、ビルド失敗に気付かず**古い DLL のテスト結果を
+読みかけた**——`grep "error CS"` 系の罠(既知)。以後ビルドの終了コードで実行を止めている。
+
+**M-2 コード内の「Task N」は不安定な参照**: どの計画の Task か書かれておらず、
+`Task 2 では不変` は Task 3 が入った瞬間に偽になる。リポジトリの他のコメントに倣い
+`M-12` / 「設計 2026-09-02 §3」「同 §10.2」へ寄せた。
+
+**M-3 は却下**(フック第 3 引数 `destExists` が全テストで捨てられている件)。既定実装に必要で、
+`CommitStaged` から引き渡す判断(TOCTOU 回避)は正しいため現状維持。

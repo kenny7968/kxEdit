@@ -78,17 +78,20 @@ public static class AtomicFile
         ex.HResult is HResultSharingViolation or HResultLockViolation;
 
     /// <summary>
-    /// ステージング済み tmp を path へ差し替える。<b>この時点の挙動は Task 2 では不変</b>
-    /// (失敗したら tmp を掃除して伝播する)。Task 3 で事後条件による復旧を足す。
+    /// ステージング済み tmp を path へ差し替える。<b>差替段全体(= 失敗時ポリシーを含む)</b>で
+    /// あり、現状の挙動は「失敗したら tmp を掃除して伝播する」= 集約前と同一。
+    /// M-12 の復旧(原本が消えていたら復旧を試み、駄目なら tmp を残す)はここへ入る
+    /// ——設計 2026-09-02 §3。
     /// </summary>
     private static void CommitStaged(string tmp, string path)
     {
-        // destExists は差替の分岐条件そのもの。Task 3 の「原本が消えたか」の判定でも
-        // この同じ値を使う(別途 File.Exists を採り直すと TOCTOU 窓が広がる)。
+        // destExists は差替の分岐条件そのもの。M-12 の「原本が消えたか」の判定
+        // (設計 2026-09-02 §3.1)でもこの同じ値を使う
+        // (別途 File.Exists を採り直すと TOCTOU 窓が広がる)。
         bool destExists = File.Exists(path);
         try
         {
-            Commit(tmp, path, destExists);
+            RunReplaceStep(tmp, path, destExists);
         }
         catch
         {
@@ -97,13 +100,20 @@ public static class AtomicFile
         }
     }
 
-    /// <summary>差替の実処理。テストからのみ <see cref="OverrideCommitForTest"/> で置換できる。</summary>
-    private static void Commit(string tmp, string path, bool destExists)
+    /// <summary>
+    /// 差替の<b>1 手</b>(File.Replace / File.Move)だけを行う。失敗時ポリシーは呼出元
+    /// <see cref="CommitStaged"/> 側にあるので、<b>ここを差し替えても Write の成否を
+    /// 支配できるわけではない</b>(M-12 導入後は、フックが投げても外側の復旧が走って
+    /// Write が成功 return し得る——設計 2026-09-02 §3.2)。
+    /// </summary>
+    private static void RunReplaceStep(string tmp, string path, bool destExists)
     {
-        var hook = t_commitOverride;
-        if (hook is not null)
+        var scope = t_replaceStepOverride;
+        if (scope is not null)
         {
-            hook(tmp, path, destExists);
+            // 投げるフックも「発火した」と数えるため、呼び出しの前に記録する。
+            scope.RecordInvocation();
+            scope.Hook(tmp, path, destExists);
             return;
         }
         if (destExists)
@@ -113,42 +123,76 @@ public static class AtomicFile
     }
 
     // ===== テスト専用 seam =====
-    // File.Replace の部分失敗(差替先が消える)は実環境で決定的に起こせないため、差替段だけを
-    // 差し替えられるようにする。production では常に null=既定実装しか走らない。
+    // File.Replace の部分失敗(差替先が消える)は実環境で決定的に起こせないため、差替の 1 手だけを
+    // 差し替えられるようにする。production コードは OverrideReplaceStepForTest を呼んでいないため
+    // 実際に走るのは既定実装だけだが、これは<現在の観測>であって強制ではない
+    // (kxEdit.Core.csproj が kxEdit.Editor / kxEdit.Core.Bench へ internal を可視化しているため、
+    //  それらの production アセンブリからは呼べてしまう)。
     //
     // [ThreadStatic] であることが必須: kxEdit.Core.Tests はテストクラスを並列実行する
     // (直列化しているのは kxEdit.App.Tests / kxEdit.Editor.Tests だけ)。素の static にすると、
     // フックを張っている間に別スレッドで走る SettingsStoreTests / BackupStore 系 /
     // TextFileService 系の書込まで差し替わり、無関係なテストが壊れる。
+    //
+    // その裏返しの事故として「張ったスレッドと Write が走るスレッドがずれると、黙って既定実装が
+    // 走る」がある(例: BackupStore / SessionLayoutStore は SerialBackupWriter の専用ワーカー
+    // スレッドで書く)。事後状態だけを見るテストはこの不発に気付けない——既定実装が成功すると
+    // 同じ事後状態になるため。そこで発火回数を ReplaceStepOverrideScope.Invocations で観測できる
+    // ようにしてある。<b>フックを張るテストは必ず Invocations を assert すること。</b>
     [ThreadStatic]
-    private static Action<string, string, bool>? t_commitOverride;
+    private static ReplaceStepOverrideScope? t_replaceStepOverride;
 
-    /// <summary>差替段をテスト用に差し替える(<b>呼んだスレッドにのみ効く</b>)。
-    /// 戻り値を Dispose するまで有効。</summary>
-    internal static IDisposable OverrideCommitForTest(Action<string, string, bool> hook)
+    /// <summary>
+    /// 差替の 1 手だけをテスト用に差し替える(<b>呼んだスレッドにのみ効く</b>)。
+    /// 戻り値を Dispose するまで有効で、<see cref="ReplaceStepOverrideScope.Invocations"/> で
+    /// フックが実際に発火したかを確かめられる。
+    /// </summary>
+    internal static ReplaceStepOverrideScope OverrideReplaceStepForTest(
+        Action<string, string, bool> hook
+    )
     {
         ArgumentNullException.ThrowIfNull(hook);
-        var previous = t_commitOverride;
-        SetCommitOverride(hook);
-        return new CommitOverrideScope(previous);
+        var scope = new ReplaceStepOverrideScope(hook, t_replaceStepOverride);
+        SetReplaceStepOverride(scope);
+        return scope;
     }
 
     /// <summary>
-    /// t_commitOverride への<b>唯一の書込口</b>(張る側=OverrideCommitForTest と戻す側=
-    /// CommitOverrideScope.Dispose の両方がここを通る)。static メソッドにしてあるのは、
-    /// インスタンスメソッドから static フィールドを書き換えると S2696 になるため。
+    /// t_replaceStepOverride への<b>唯一の書込口</b>(張る側=OverrideReplaceStepForTest と
+    /// 戻す側=ReplaceStepOverrideScope.Dispose の両方がここを通る)。static メソッドに
+    /// してあるのは、インスタンスメソッドから static フィールドを書き換えると S2696 になるため。
     /// </summary>
-    private static void SetCommitOverride(Action<string, string, bool>? hook) =>
-        t_commitOverride = hook;
+    private static void SetReplaceStepOverride(ReplaceStepOverrideScope? scope) =>
+        t_replaceStepOverride = scope;
 
-    private sealed class CommitOverrideScope : IDisposable
+    /// <summary>
+    /// 差替フックの有効範囲。入れ子にでき、Dispose で 1 つ外側へ戻る(LIFO)。
+    /// </summary>
+    internal sealed class ReplaceStepOverrideScope : IDisposable
     {
-        private readonly Action<string, string, bool>? _previous;
+        private readonly ReplaceStepOverrideScope? _previous;
+        private int _invocations;
 
-        internal CommitOverrideScope(Action<string, string, bool>? previous) =>
+        internal ReplaceStepOverrideScope(
+            Action<string, string, bool> hook,
+            ReplaceStepOverrideScope? previous
+        )
+        {
+            Hook = hook;
             _previous = previous;
+        }
 
-        public void Dispose() => SetCommitOverride(_previous);
+        internal Action<string, string, bool> Hook { get; }
+
+        /// <summary>
+        /// このスコープのフックが実際に呼ばれた回数。<b>0 のままなら「張ったのに不発」</b>で、
+        /// 既定実装が走っている(スレッドがずれた等)。事後状態だけでは区別できない。
+        /// </summary>
+        internal int Invocations => Volatile.Read(ref _invocations);
+
+        internal void RecordInvocation() => Interlocked.Increment(ref _invocations);
+
+        public void Dispose() => SetReplaceStepOverride(_previous);
     }
 
     private static void TryDelete(string p)
