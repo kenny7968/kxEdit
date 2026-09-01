@@ -277,6 +277,18 @@ public sealed class SearchController
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);
             return;
         }
+        // 委譲先(ReplaceCharRangeExact)は ReadOnly のとき何も書かずに戻るが、ここから先は
+        // それを見ずにスコープを更新し成功発声する。snap2 == snap なので世代チェックを通る
+        // 不正なスコープが残る。
+        // **包含検査より前に置くこと**: GetExactChangeCharRange は書けない状態で空範囲を返し、
+        // 空範囲はどんな包含検査も通る=このガードを削ると「検査を通る → no-op → 成功発声」に
+        // なる(GetExactChangeCharRange の remarks 参照)。
+        // 到達経路は実質無い(CSV モードは上で弾かれ、保存中の一時解除に ReplaceOne が
+        // 割り込む経路がない)が、「呼び出し側が委譲先の no-op を見ていない」構造を消す。
+        // 発声しないのは、App に「読み取り専用」を告げる既存文言が無く、
+        // 新文言を足しても L5 で確認できる操作が作れないため。
+        if (ed.ReadOnly)
+            return;
         var searcher = ResolveSearcher();
         if (searcher is null || !searcher.IsValid)
         {
@@ -359,6 +371,44 @@ public sealed class SearchController
                 repl = replCand;
             }
 
+            // 事後条件: 実際に内容が変わる範囲がスコープに収まることを、書く前に確かめる。
+            // WithinScope は生の UTF-16 span しか見ないので、ゼロ幅マッチの挿入点が論理文字の
+            // 境界まで後退してスコープの外へ落ちる経路を防げない。
+            // 後退条件をここで数え上げるのは EditorControl の規則の複製=規則が変われば腐るので、
+            // 「実際に何を変えるか」を当人へ問う(監査 §9 V-7 の教訓)。
+            // 端の扱いは非対称ではない: ゼロ幅ヒットが端ちょうど(at == check.Start /
+            // at == check.End)に立つのは WithinScope が既に通した形であり、そこへ書くのは
+            // 「承認された位置へ承認どおり書く」=拒否しない。本検査は WithinScope の判定を
+            // 厳しくするものではなく、「承認した位置と実際に書く位置がずれていないか」を
+            // 見る事後条件なので、WithinScope より狭くしてはならない。
+            //
+            // 実測(2026-09-01 B2 Task 4): 現時点で赤くできるのは Start 側だけで、
+            // `change.End > check.End` を落とす変異は App 721 件 green のまま生存する。
+            // 死んだ操作ではなく、現在の不変条件の下では発火しえないだけ:
+            //   - ゼロ幅は change.End == 後退後の挿入点 ≤ span.Start ≤ check.End(WithinScope)
+            //     なので終端側を超えられない=構造的に始端側専用。
+            //   - 非ゼロ幅で終端が広がるのはサロゲートペアを割ったときだけで、そのとき
+            //     広げ先は「ペアの終わり」=span.End 以上で最小の論理文字境界。
+            //     check.End が境界に乗っていれば必ず change.End ≤ check.End になる
+            //     (全数実測: 3 単位までの {a,\r,\n,😀} 全テキスト × 全 (start,length) で、
+            //      終端が境界に乗るケースの広がりは 0 件)。
+            //   - check.End が境界から外れるのは CRLF の内側だけで、そこは
+            //     GetExactChangeCharRange が広げない(PR #56 §9.9 の一括置換を通すため)。
+            //     スコープ端がサロゲートペアの内側に入る経路は見つからなかった
+            //     (全数探索 172,960 状態。捕捉は境界へスナップし、端の隣の文字は
+            //      スコープ内の置換では変わらないため)。
+            // 片側だけ書くと「包含を見ている」という読みが嘘になり、GetExactChangeCharRange の
+            // 弁別規則が増えたときに黙って素通りする。両側を残す。
+            if (scope is { } check)
+            {
+                var change = ed.GetExactChangeCharRange(span.Start, span.Length);
+                if (change.Start < check.Start || change.End > check.End)
+                {
+                    Announce("選択範囲の外に及ぶため置換できません");
+                    return;
+                }
+            }
+
             // 論理文字の内側を指すヒット(CRLF の LF だけ等)でも巻き込みを復元する(Task 2)。
             // 戻り値=置換文字列の直後の位置。span.Start + repl.Length で導出してはいけない:
             // ゼロ幅マッチは挿入点が論理文字の境界まで後退する(ReplaceCharRangeExact は
@@ -377,18 +427,17 @@ public sealed class SearchController
                 // これが無いと次の置換が世代不一致=「陳腐化」で拒否される。
                 // 終端の差分が repl.Length - span.Length ちょうどなのは、ReplaceCharRangeExact の
                 // 巻き込み復元が長さ保存(削った prefix / suffix をそのまま書き戻す)だから。
-                // 始端を据え置ける根拠は「非ゼロ幅なら」であって、span ⊆ scope からは導けない:
-                //   非ゼロ幅 = 巻き込みで外側へ広げても接頭辞をそのまま書き戻すので、
-                //              span.Start より前の内容は不変=スコープ始端は動かなくてよい。
-                //   ゼロ幅   = ReplaceCharRangeExact は広げない代わりに挿入点を論理文字の境界まで
-                //              「後退」させる(ReplaceCharRangeExact の remarks 参照)。
-                // ゆえに scope.Start が論理文字の内側に来ていると、挿入がスコープの外へ落ちる
-                // = ユーザーが選択していない位置を書き換えたうえで成功発声する既知の穴。
-                // WithinScope は生の UTF-16 span で判定するのでこれを防げない。再現には
-                // 「スコープ内の置換がスコープ端に CRLF を作る」と「ゼロ幅正規表現」の両方が要る
-                // (例: "X\rYZ" の [2,4) を捕捉 → Y を \n へ置換 → 位置 2 が CRLF の内側になる)。
-                // 塞ぐには置換後の実書込範囲を返す新しい seam が要るため本ブランチでは扱わず、
-                // 設計書の申し送りへ回収する。
+                // 始端を据え置ける根拠は、span ⊆ scope(WithinScope)ではなく直前の
+                // GetExactChangeCharRange 検査:
+                //   ここへ来るのは「実際に内容が変わる範囲」が [scope.Start, scope.End) に
+                //   収まったヒットだけなので、scope.Start より前の内容は定義上変わらない。
+                //   非ゼロ幅の巻き込み復元は長さ保存で接頭辞をそのまま書き戻すため
+                //   change.Start == span.Start ≥ scope.Start、ゼロ幅は挿入点が論理文字の境界まで
+                //   「後退」しうるが(ReplaceCharRangeExact の remarks 参照)、後退先が
+                //   scope.Start より前になるヒットは上の検査で拒否済み。
+                //   検査を外すと、スコープ始端が論理文字の内側にあるとき
+                //   (例: "X\rYZ" の [2,4) を捕捉 → Y を \n へ置換 → 位置 2 が CRLF の内側)
+                //   挿入がスコープの外へ落ち、始端据え置きが嘘になる。
                 var grown = (Start: prev.Start, End: prev.End + repl.Length - span.Length);
                 _selectionScope = (Weak(snap2), grown.Start, grown.End);
                 scope = grown;
@@ -442,6 +491,21 @@ public sealed class SearchController
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);
             return;
         }
+        // 理由は ReplaceOne の同じガードを参照(委譲先の no-op を見ずにスコープを
+        // 更新し成功発声する構造を消す)。
+        // 一方 ReplaceOne 側の GetExactChangeCharRange 包含検査は**ここには置かない**
+        // (実測 / 2026-09-01 B2 Task 4)。ReplaceAll の書込は常に
+        // [rangeStart, rangeStart+rangeLen)=スコープそのものに収まる:
+        //   - ゼロ幅は SnapshotSearcher.ReplaceInRange 側が後退先を見て
+        //     「範囲始端より前へ下がるマッチ」を件数にも数えないので(Task 2)、
+        //     count == 0 →「見つかりません」で書込へ到達しない
+        //     (実測: スコープが CRLF の内側の 1 点へ潰れた状態 × 全 80 パターン組で
+        //      本文が変わったケースは 0 件。同じ状態で ReplaceOne は 14 件書いた)。
+        //   - 非ゼロ幅で範囲が外へ広がるのはスコープ端がサロゲートペアの内側にあるときだけで、
+        //     その状態への到達経路は見つからなかった(全数探索 172,960 状態)。
+        // 到達 fixture の無いガードは変異で必ず生存する死んだ分岐になるため置かない。
+        if (ed.ReadOnly)
+            return;
         var searcher = ResolveSearcher();
         if (searcher is null || !searcher.IsValid)
         {

@@ -1415,6 +1415,177 @@ public class SearchControllerTests
             Assert.Equal("abc", doc.Editor.Text);
         });
 
+    // ===== B2: 実際に内容が変わる範囲でスコープ包含を検査する(2026-09-01) =====
+
+    [Fact]
+    public void ReplaceOne_InSelection_ZeroWidthHitRetreatingOutsideScope_DoesNotReplace() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("X\rYZ"); // X(0) \r(1) Y(2) Z(3)
+            host.View.Pattern = "Y";
+            host.View.Replacement = "\n";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(2, 2); // "YZ" を捕捉(prefix "X\r" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne(); // Y → \n。スコープ始端 2 が CRLF の内側になる
+            Assert.Equal("X\r\nZ", doc.Editor.Text);
+
+            // ゼロ幅ヒット [2,2) はスコープ内だが、挿入点は論理文字の境界 1 へ後退する。
+            host.View.Pattern = @"(?<=\r)";
+            host.View.Replacement = "Q";
+            host.View.UseRegex = true;
+            doc.Editor.SelectCharRange(2, 0); // 探索起点をスコープ始端へ戻す
+
+            host.Search.ReplaceOne();
+
+            // 修正前は "XQ\r\nZ"=スコープ外(位置 1)へ挿入したうえ成功発声していた。
+            Assert.Equal("X\r\nZ", doc.Editor.Text); // 本文は 1 文字も変わらない
+            Assert.Equal("選択範囲の外に及ぶため置換できません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_CollapsedScopeInsideCrlf_DoesNotReplace() =>
+        Sta.Run(() =>
+        {
+            // 上と同じ欠陥のもう 1 つの到達形(Step 2 の全数探索で見つけた実測経路)。
+            // スコープが 1 点へ潰れ、その点が CRLF の内側に来る=始端と終端の両方が
+            // 論理文字の内側にある状態。上の fixture はスコープが非空なので、
+            // 「潰れたスコープでは検査に入らない」形の退行はこちらだけが落とす。
+            using var host = new Host();
+            var doc = host.NewDoc("\ra\n"); // \r(0) a(1) \n(2)
+            host.View.Pattern = "a";
+            host.View.Replacement = "";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(1, 1); // "a" だけを捕捉(prefix "\r" と suffix "\n" を除外)
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne(); // a を削除 → スコープは [1,1)=CRLF の内側へ潰れる
+            Assert.Equal("\r\n", doc.Editor.Text);
+
+            host.View.Pattern = @"(?<=\r)";
+            host.View.Replacement = "Q";
+            host.View.UseRegex = true;
+
+            host.Search.ReplaceOne();
+
+            // 修正前は "Q\r\n"=スコープ外(位置 0)へ挿入したうえ成功発声していた。
+            Assert.Equal("\r\n", doc.Editor.Text);
+            Assert.Equal("選択範囲の外に及ぶため置換できません", host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_RefusalDoesNotInvalidateScope() =>
+        Sta.Run(() =>
+        {
+            // 拒否は「このヒットは置換できない」であってスコープの破棄ではない。
+            // 拒否のあとで通常のヒットが置換できることで示す。
+            using var host = new Host();
+            var doc = host.NewDoc("X\rYZ");
+            host.View.Pattern = "Y";
+            host.View.Replacement = "\n";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(2, 2);
+            host.Search.OnInSelectionToggled(true);
+            host.Search.ReplaceOne();
+
+            host.View.Pattern = @"(?<=\r)";
+            host.View.Replacement = "Q";
+            host.View.UseRegex = true;
+            doc.Editor.SelectCharRange(2, 0);
+            host.Search.ReplaceOne(); // 拒否される
+
+            host.View.Pattern = "Z";
+            host.View.Replacement = "W";
+            host.View.UseRegex = false;
+            host.Search.ReplaceOne();
+
+            Assert.Equal("X\r\nW", doc.Editor.Text); // スコープは生きている
+        });
+
+    [Fact]
+    public void ReplaceOne_InSelection_ScopeOnBoundaries_StillReplaces() =>
+        Sta.Run(() =>
+        {
+            // 偽陽性の網。端が論理文字の境界に乗る通常のスコープでは従来どおり置換できる。
+            // prefix "abc " と suffix " abc" の両方を除外できる fixture(全選択との区別)。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央の "abc" だけ
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text);
+        });
+
+    [Fact]
+    public void ReplaceOne_ReadOnly_ChangesNothingAndSaysNothing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            doc.Editor.ReadOnly = true;
+            int saidBefore = host.Announcer.Said.Count;
+
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc abc", doc.Editor.Text);
+            Assert.Equal(saidBefore, host.Announcer.Said.Count); // 発声もしない
+        });
+
+    [Fact]
+    public void ReplaceAll_ReadOnly_ChangesNothingAndSaysNothing() =>
+        Sta.Run(() =>
+        {
+            // ReplaceOne 版と同型。委譲先の no-op を見ない構造は 2 経路にあるので網も 2 本要る。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+            doc.Editor.ReadOnly = true;
+            int saidBefore = host.Announcer.Said.Count;
+
+            host.Search.ReplaceAll();
+
+            Assert.Equal("abc abc", doc.Editor.Text);
+            Assert.Equal(saidBefore, host.Announcer.Said.Count); // 「N 件置換しました」も言わない
+        });
+
+    [Fact]
+    public void ReplaceAll_InSelection_ReMatchesInsideScope() =>
+        Sta.Run(() =>
+        {
+            // M-29 の App 側(Task 2 の修正がここまで届くこと)。
+            // prefix "a" / suffix "a" を除外できる fixture(全選択との区別)。
+            using var host = new Host();
+            var doc = host.NewDoc("aaaa");
+            host.View.Pattern = "aa";
+            host.View.Replacement = "X";
+            host.View.InSelection = true;
+            host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(1, 2); // 中央の "aa" だけ
+            host.Search.OnInSelectionToggled(true);
+
+            host.Search.ReplaceAll();
+
+            // 修正前は 0 件(全文ヒット [0,2) / [2,4) がどちらもスコープに収まらない)。
+            Assert.Equal("aXa", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
+        });
+
     // ===== searcher の保持と破棄(照合条件ごとに 1 本を使い回す) =====
     // 保持/破棄は結果値からは観測できない(作り直しても同じ答えを返す)ため、
     // SearchController.SearcherForTest の参照同一性で観測する。
