@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using kxEdit.Core.Search;
 using Xunit;
 
@@ -190,6 +192,151 @@ public class TextSearcherTests
         var (fragment, count) = Make("ab").ReplaceInRange("ab_ab", -3, 100, "X");
         Assert.Equal("X_X", fragment);
         Assert.Equal(2, count);
+    }
+
+    [Theory]
+    // 全文置換(s == 0)でも**走査規則の変更(Matches → Match(text, scan) の再アンカー)に
+    // ついては**挙動不変であること。メソッド名の "KeepsMatchesSemantics" もこの走査規則を指す。
+    // <b>s == 0 なら何も変わらない、ではない</b>: ゼロ幅マッチが論理文字の内側に立つ場合は
+    // ゼロ幅後退により意図的に変わる(_ZeroWidthInsideCrlf_RetreatsToBoundary が
+    // まさに s == 0 の全文置換で "a\rX\nb" → "aX\r\nb" の変化を固定している)。
+    // 期待値は**変更前の src での実測値**(計画の値ではない)。
+    [InlineData("ab_ab_ab", "ab", false, "X", "X_X_X", 3)]
+    [InlineData("aaaa", "aa", true, "X", "XX", 2)] // 非重複・左端優先
+    [InlineData("abc", "x*", true, "-", "-a-b-c-", 4)] // ゼロ幅は各位置で 1 件
+    // 空マッチと実マッチの混在。"b*" は 0(空)・1("b")・2(空)の 3 件で、
+    // index1 の実マッチが 'b' を消費するので出力に 'b' は残らない。
+    [InlineData("ab", "b*", true, "-", "-a--", 3)]
+    [InlineData("a\r\nb", "\\r\\n", true, "X", "aXb", 1)] // CRLF 丸ごと
+    [InlineData("aaa", "a", false, "", "", 3)] // 空置換
+    public void ReplaceInRange_WholeText_KeepsMatchesSemantics(
+        string text,
+        string pattern,
+        bool useRegex,
+        string repl,
+        string expected,
+        int expectedCount
+    )
+    {
+        var (fragment, count) = Make(pattern, useRegex: useRegex)
+            .ReplaceInRange(text, 0, text.Length, repl);
+        Assert.Equal(expected, fragment);
+        Assert.Equal(expectedCount, count);
+    }
+
+    // ----- M-29: スコープ内での再照合(2026-09-01 B2 Task 2) -----
+
+    [Fact]
+    public void ReplaceInRange_ReMatchesInsideRange_WhenWholeTextHitEatsRangeStart()
+    {
+        // M-29: 文書全体の照合では [0,2) の "aa" しか出ず m.Index < 1 で捨てられ 0 件だった。
+        // 範囲始端へ再アンカーすれば [1,3) の "aa" が見つかる。
+        // 単発置換(FindNext)は Match(text, from) なので元から当たっており、両者が食い違っていた。
+        var (fragment, count) = Make("aa").ReplaceInRange("aaa", 1, 2, "X");
+        Assert.Equal("X", fragment);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ReAnchorDoesNotCutInputContext()
+    {
+        // Match(text, startat) は入力を切らないので \b は全文文脈で評価される
+        // = 位置 1 は語中なので \b は成立しない。
+        // 範囲を substring("aa") へ切って照合する実装なら 1 件になる
+        // = この fixture は「再アンカー」と「substring 化」を弁別できる形の 1 つ。
+        // 弁別できる形は他にもあり、逆向きにも作れる(実測: (?<=a)aa は再アンカーで 1 件・
+        // substring 化で 0 件。substring 化では左文脈の 'a' が切り落とされて後読みが不成立)。
+        // ただし<b>現に存在する網としてはこの 1 本だけ</b>=消すと弁別網がゼロになる。
+        // 他の ReplaceInRange テストは s == 0 か、両実装で同じ答えになる形しかない。
+        var (fragment, count) = Make(@"\baa", useRegex: true).ReplaceInRange("aaa", 1, 2, "X");
+        Assert.Equal("aa", fragment);
+        Assert.Equal(0, count);
+    }
+
+    // ----- 停止性: scan の前進をエンジンに賭けない(2026-09-01 B2 Task 2 脆弱性レビュー) -----
+
+    [Theory]
+    // Regex.Match(text, startat) は Index >= startat を保証しない(.NET 9.0.8 実測:
+    // new Regex("(?:b(?!a)+?)*").Match("abbbb", 4) が Index=3 Length=2 を返す)。
+    // scan = m.Index + ... を素直に受けると scan が据え置きになり、個々の Match は 0ms で
+    // 返るため RegexMatchTimeoutException も出ないまま永久にスピンする(UI 完全凍結)。
+    // 期待値は**実測値**。ゼロ幅後退と再アンカーを入れた時点で病的入力の出力は
+    // 変更前(Matches ベース)と一致しない=一致は要求しない。要求は「止まること」と
+    // 「断片が範囲の中身+置換だけであること」。
+    [InlineData(@"(?:b(?!a)+?)*", "abbbb", 0, 5, "XabXXbX", 4)]
+    [InlineData(@"(b(?!a)+?)*", "abb", 1, 2, "bbX", 1)]
+    [InlineData(@"(a(?!b)+?)*", "aaa", 1, 2, "aaX", 1)]
+    public async Task ReplaceInRange_PathologicalRegex_Terminates(
+        string pattern,
+        string text,
+        int start,
+        int length,
+        string expected,
+        int expectedCount
+    )
+    {
+        // ハングするテストは CI を止めるので、待ち時間を assert する形にする
+        // ([Fact(Timeout=...)] もスレッドを殺さないため、どちらにせよ観測用の網)。
+        // Task.Wait / .Result は xUnit1031(-warnaserror でビルド不能)なので WhenAny で待つ。
+        var t = Task.Run(() =>
+            Make(pattern, useRegex: true).ReplaceInRange(text, start, length, "X")
+        );
+        var finished = await Task.WhenAny(t, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.True(
+            ReferenceEquals(finished, t),
+            $"ReplaceInRange が停止しない(Match が Index < startat を返す入力): {pattern}"
+        );
+        var (fragment, count) = await t;
+        Assert.Equal(expected, fragment);
+        Assert.Equal(expectedCount, count);
+    }
+
+    // ----- ゼロ幅マッチの挿入点を論理文字境界へ後退させる(2026-09-01 B2 Task 2) -----
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthInsideCrlf_RetreatsToBoundary()
+    {
+        // 修正前は "a\rX\nb"=CRLF が 2 個の改行へ分裂した。
+        // 単発置換(ReplaceCharRangeExact)は挿入点を 1 へ後退させるので、そちらへ揃える。
+        var (fragment, count) = Make(@"(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 0, 4, "X");
+        Assert.Equal("aX\r\nb", fragment);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthInsideSurrogatePair_RetreatsToBoundary()
+    {
+        // 修正前はペアの内側へ挿入し、書き戻し時に孤立サロゲート 2 個が U+FFFD へ潰れた
+        // = 無警告のデータ破壊。"a😀b" = a(0) high(1) low(2) b(3)。
+        var (fragment, count) = Make(@"(?<=\ud83d)", useRegex: true)
+            .ReplaceInRange("a\U0001F600b", 0, 4, "X");
+        Assert.Equal("aX\U0001F600b", fragment);
+        Assert.Equal(1, count);
+        Assert.DoesNotContain('�', fragment);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthRetreatingBeforeRangeStart_IsSkippedAndNotCounted()
+    {
+        // 範囲 [2,4) の始端 2 は CRLF の内側。(?<=\r) はそこにヒットするが挿入点は 1 へ
+        // 後退する=範囲外。断片は範囲の中身だけを返す契約なので書かずにスキップし、
+        // 件数にも数えない("N 件置換しました" を嘘にしない)。
+        var (fragment, count) = Make(@"(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 2, 2, "X");
+        Assert.Equal("\nb", fragment);
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void ReplaceInRange_ZeroWidthRetreatingBeforeEmittedPosition_IsSkipped()
+    {
+        // "\r" を消費した直後、同じ位置(2)にゼロ幅が立つ。後退先 1 は既に出力済みなので
+        // 書けない=スキップ。後退の判定は**元テキスト**で行う(出力側には既に CRLF が無い)。
+        var (fragment, count) = Make(@"\r|(?<=\r)", useRegex: true)
+            .ReplaceInRange("a\r\nb", 0, 4, "X");
+        Assert.Equal("aX\nb", fragment);
+        Assert.Equal(1, count);
     }
 
     // ----- ゼロ幅マッチ（I-1） -----

@@ -310,6 +310,177 @@ public class TextBoundaryTests
         Assert.Equal(3, TextBoundary.SnapToCodePointStart(text, 99));
     }
 
+    // ===== span 版 SnapToLogicalCharStart(2026-09-01 B2 Task 1) =====
+    // snapshot 版と違い CRLF も見る。Core.Search が材質化した本文 string を扱うため。
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_SnapsMidSurrogateAndMidCrlf()
+    {
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\U0001F600b".AsSpan(), 2));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\r\nb".AsSpan(), 2));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LeavesBoundariesAlone()
+    {
+        var text = "a\r\nb".AsSpan();
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(text, 0));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(text, 1));
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharStart(text, 3));
+        Assert.Equal(4, TextBoundary.SnapToLogicalCharStart(text, 4)); // 末尾は許可
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LoneLfAndLoneLowSurrogateAreNotSnapped()
+    {
+        // 対を成さない片割れは論理文字を作らないので動かさない(snapshot 版と同じ規則)。
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\nb".AsSpan(), 1));
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("a\uDE00b".AsSpan(), 1));
+        // high サロゲート 2 連: pos は「サロゲートではあるが low ではない」=ペアを終えない。
+        // IsLowSurrogate を IsSurrogate へ緩める変異はここでしか殺せない
+        // (snapshot 版は TextBuffer が U+FFFD へ潰すため、この形に到達できない)。
+        // 既存 span 族の CodePointLengthAt_Span_HighSurrogateFollowedByNonLow_IsOne と対になる。
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart("\uD83D\uD83D".AsSpan(), 1));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_ClampsOutOfRange()
+    {
+        var text = "abc".AsSpan();
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart(text, -5));
+        Assert.Equal(3, TextBoundary.SnapToLogicalCharStart(text, 99));
+    }
+
+    /// <summary>
+    /// 全数の材料: 論理文字境界に関わる 5 code unit だけで長さ 4 以下の全文字列を作る。
+    /// 通常文字 / CR / LF / high サロゲート / low サロゲートで、
+    /// 「対を成す・成さない」の全組合せが 4 文字以内に現れる。
+    /// </summary>
+    private static IEnumerable<string> ShortStringsOverBoundaryAlphabet()
+    {
+        // 絵文字は UTF-16 で 2 code unit なので、この文字列の Length は 5
+        // (a / CR / LF / high サロゲート / low サロゲート)。
+        const string alphabet = "a\r\n\U0001F600";
+        var cur = new List<string> { "" };
+        yield return "";
+        for (int len = 1; len <= 4; len++)
+        {
+            var next = new List<string>(cur.Count * alphabet.Length);
+            // 外側に波括弧が要る: CSharpier は括弧なしの入れ子 foreach を同じ深さへ畳むため、
+            // 括弧を外すと Sonar S3973(条件実行の範囲が見えない)でビルドが落ちる。
+            foreach (string s in cur)
+            {
+                foreach (char c in alphabet)
+                    next.Add(s + c);
+            }
+            foreach (string s in next)
+                yield return s;
+            cur = next;
+        }
+    }
+
+    [Fact]
+    public void ShortStringsOverBoundaryAlphabet_CoversAllStringsUpToLengthFour_WithoutDuplicates()
+    {
+        // 「全数で固定してある」という主張そのものをピン留めする。これが無いと、alphabet の typo・
+        // ループ境界の編集・yield return "" の削除で被覆が静かに落ちてもテストは緑のままになり、
+        // 下 2 本が「全数」を騙る(嘘の安全宣言)。
+        var all = ShortStringsOverBoundaryAlphabet().ToList();
+        // 5^0 + 5^1 + 5^2 + 5^3 + 5^4 = 1 + 5 + 25 + 125 + 625 = 781
+        Assert.Equal(781, all.Count);
+        Assert.Equal(781, all.Distinct().Count()); // 重複が水増ししていない
+        Assert.Contains("", all); // 空文字列(長さ 0)を落としていない
+        Assert.Equal(4, all.Max(s => s.Length)); // 長さ 4 まで届いている
+        Assert.Equal(5, all.SelectMany(s => s).Distinct().Count()); // alphabet が 5 code unit
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_LowSurrogateAtIndexZero_DoesNotReadBeforeStart()
+    {
+        // span の端は無条件に境界とみなす契約(xmldoc)を名前付きで固定する。
+        // より大きなテキストの「窓」を渡すと窓外へまたがる pair は見えない=窓の先頭が
+        // low サロゲート / LF でも動かさない(text[-1] を読まない)。
+        // 既存 span 族の SnapToCodePointStart_Span_LowSurrogateAtIndexZero_DoesNotReadBeforeStart
+        // の対応物。CRLF 側は snapshot 版の _LfAtDocumentStart_DoesNotReadBeforeStart と対。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("\uDE00b".AsSpan(), 0));
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("\nabc".AsSpan(), 0));
+        // 窓が CRLF を割っている場合(直前の '\r' は窓の外)も動かさない。
+        Assert.Equal(0, TextBoundary.SnapToLogicalCharStart("a\r\nb".AsSpan(2, 2), 0));
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_MatchesSnapshotVersion_Exhaustive()
+    {
+        foreach (string raw in ShortStringsOverBoundaryAlphabet())
+        {
+            var snap = Snap(raw);
+            // 比較は「保存層を通った後の本文」で行う。TextBuffer は UTF-8 で保持するため
+            // 孤立サロゲートは U+FFFD へ潰れ、raw と snapshot の中身は一致しない。
+            string text = snap.GetText(0, snap.CharLength);
+            for (int pos = -2; pos <= text.Length + 2; pos++)
+            {
+                // Assert.Equal はメッセージを付けられない。781 本 × 全 pos のどれで落ちたかが
+                // 判らないと原因究明できないので Assert.True + 明示メッセージにする。
+                int fromSnapshot = TextBoundary.SnapToLogicalCharStart(snap, pos);
+                int fromSpan = TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos);
+                Assert.True(
+                    fromSnapshot == fromSpan,
+                    $"snapshot/span mismatch: '{Escape(text)}' pos={pos} "
+                        + $"snapshot={fromSnapshot} span={fromSpan}"
+                );
+            }
+        }
+    }
+
+    [Fact]
+    public void SnapToLogicalCharStart_Span_Exhaustive_NeverMovesForwardAndStaysInRange()
+    {
+        // snapshot を通さない=孤立サロゲートを含む入力も直接当てる(同値テストが届かない領域)。
+        foreach (string text in ShortStringsOverBoundaryAlphabet())
+        {
+            for (int pos = -2; pos <= text.Length + 2; pos++)
+            {
+                int got = TextBoundary.SnapToLogicalCharStart(text.AsSpan(), pos);
+                int clamped = Math.Max(0, Math.Min(pos, text.Length));
+                string where = $"'{Escape(text)}' pos={pos} got={got} clamped={clamped}";
+                Assert.True(
+                    got >= 0 && got <= text.Length,
+                    $"out of range: {where} len={text.Length}"
+                );
+                Assert.True(got <= clamped, $"forward move: {where}");
+                Assert.True(clamped - got <= 1, $"moved more than 1: {where}");
+                // (1) 結果は論理文字の内側を指さない。
+                if (got > 0 && got < text.Length)
+                {
+                    Assert.False(
+                        char.IsLowSurrogate(text[got]) && char.IsHighSurrogate(text[got - 1]),
+                        $"landed inside surrogate pair: {where}"
+                    );
+                    Assert.False(
+                        text[got] == '\n' && text[got - 1] == '\r',
+                        $"landed inside CRLF: {where}"
+                    );
+                }
+                // (2) iff の残り半分: 動いたなら、動く必要が実際にあった。
+                // これが無いと「動くべきでないときに動く」過剰スナップ系の変異
+                // (IsLowSurrogate → IsSurrogate 等)が族ごと素通りする。
+                if (got != clamped)
+                {
+                    bool mustMove =
+                        (
+                            char.IsLowSurrogate(text[clamped])
+                            && char.IsHighSurrogate(text[clamped - 1])
+                        ) || (text[clamped] == '\n' && text[clamped - 1] == '\r');
+                    Assert.True(mustMove, $"moved but need not: {where}");
+                }
+            }
+        }
+    }
+
+    /// <summary>失敗メッセージ用。制御文字とサロゲートを可視化する。</summary>
+    private static string Escape(string s) =>
+        string.Concat(s.Select(c => c is >= ' ' and <= '~' ? c.ToString() : $@"\u{(int)c:X4}"));
+
     // ===== SnapToLogicalCharEnd: 論理文字の中間位置を後方(pair 終端)へ寄せる =====
 
     [Fact]
@@ -368,4 +539,49 @@ public class TextBoundaryTests
         // 早期 return を落とす変異(pos <= 0 → pos < 0)をそちらでは殺せない。
         Assert.Equal(0, TextBoundary.SnapToLogicalCharEnd(Snap("\nabc"), 0));
     }
+
+    // ===== 公開述語: Snap* が「なぜ」動いたかの事後弁別(2026-09-01 B2 Task 3) =====
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_DiscriminatesSurrogateFromCrlf()
+    {
+        // 本述語の存在理由。Snap* が位置を動かす要因は「ペアを割った」か「CRLF を割った」かの
+        // 2 つで排他。どちらでも Snap* は動くので、動いたこと自体では弁別できない。
+        var pair = Snap("a\U0001F600b"); // a(0) high(1) low(2) b(3)
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(pair, 2)); // 動く
+        Assert.True(TextBoundary.IsSurrogatePairEndingAt(pair, 2)); // 理由はペア割り
+
+        var crlf = Snap("a\r\nb"); // a(0) \r(1) \n(2) b(3)
+        Assert.Equal(1, TextBoundary.SnapToLogicalCharStart(crlf, 2)); // 同じく動く
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(crlf, 2)); // が理由は CRLF 割り
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_IsFalseOnLogicalCharStarts()
+    {
+        // pair の「先頭」側や無関係な位置では false(low サロゲート位置だけが true)。
+        var s = Snap("a\U0001F600b");
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 0)); // 'a'
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 1)); // high サロゲート側
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 3)); // 'b'
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_IsTotal_OutOfRangeIsFalse()
+    {
+        // **全域関数**であることが private 版との唯一の差。呼び出し側にガードを要求しない
+        // = EditorControl.GetExactChangeCharRange が e0 == CharLength でも安全に呼べる
+        // (生の GetChar(CharLength) は throw する)。
+        var s = Snap("a\U0001F600b"); // CharLength=4
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, -1));
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 0)); // pos <= 0(GetChar(-1) を読まない)
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 4)); // pos == CharLength(EOF)
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(s, 99));
+        // 空文書でも throw しない(pos <= 0 と pos >= CharLength が同時に成立する縮退)。
+        Assert.False(TextBoundary.IsSurrogatePairEndingAt(Snap(""), 0));
+    }
+
+    [Fact]
+    public void IsSurrogatePairEndingAt_Public_ThrowsOnNullSnapshot() =>
+        Assert.Throws<ArgumentNullException>(() => TextBoundary.IsSurrogatePairEndingAt(null!, 1));
 }

@@ -261,6 +261,21 @@ public class SnapshotSearcherTests
     }
 
     // ==============================
+    // M-29 回帰: 範囲始端への再アンカーが閾値超 regex 経路でも行内で効く
+    // ==============================
+
+    [Fact]
+    public void ReplaceInRange_above_threshold_regex_reanchors_within_the_line()
+    {
+        // 閾値超 + 正規表現 = RegexPerLineSearchStrategy。行内 substring へ委譲するので
+        // M-29 の修正は行内でだけ効く(行頭より前から始まるヒットは依然拾えない)。
+        var snap = Snap("aaa\nbbb");
+        var (fragment, count) = MakeLarge("aa", useRegex: true).ReplaceInRange(snap, 1, 2, "X");
+        Assert.Equal("X", fragment);
+        Assert.Equal(1, count);
+    }
+
+    // ==============================
     // 端点 / 空 / IsValid
     // ==============================
 

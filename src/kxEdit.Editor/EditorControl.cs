@@ -1284,22 +1284,14 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             return Math.Clamp(start, 0, TextLength); // no-op=位置は動かない(returns 参照)
         ArgumentNullException.ThrowIfNull(replacement);
         var snap = _buffer.Current;
-        int s0 = Math.Clamp(start, 0, snap.CharLength);
-        // start + length は int 加算だとオーバーフローで負値になり得るため long 経由
-        // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
-        long endLong = (long)start + Math.Max(0, length);
-        int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
-        // ゼロ幅(純挿入)は外側へ広げない。理由は remarks の「ゼロ幅は広げない」を参照。
+        var (s0, e0, s, e) = ExactRangeParts(snap, start, length);
         if (s0 == e0)
         {
             // 挿入点は境界へ後退しうるので、戻り値はスナップ後の位置から作る
             // (s0 から作ると論理文字 1 つ分ずれる=呼び出し側が start から導出するのと同じ誤り)。
-            int insertAt = TextBoundary.SnapToLogicalCharStart(snap, s0);
-            ReplaceCharRange(insertAt, 0, replacement);
-            return insertAt + replacement.Length;
+            ReplaceCharRange(s, 0, replacement);
+            return s + replacement.Length;
         }
-        int s = TextBoundary.SnapToLogicalCharStart(snap, s0); // 外側へ(index が減る向き)
-        int e = TextBoundary.SnapToLogicalCharEnd(snap, e0); // 外側へ(index が増える向き)
         int prefixLen = s0 - s; // 復元する接頭辞。長さ保存で書き戻すので戻り値にも効く
         // 恒等ケース(s == s0 && e == e0)の分岐は置いていない。GetText(x, 0) は空を返し
         // (TextSnapshot.GetText の length == 0 早期 return。ただし範囲検査はその手前なので
@@ -1308,6 +1300,159 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         string text = snap.GetText(s, prefixLen) + replacement + snap.GetText(e0, e - e0);
         ReplaceCharRange(s, e - s, text);
         return s + prefixLen + replacement.Length;
+    }
+
+    /// <summary>
+    /// <see cref="ReplaceCharRangeExact"/> の範囲計算。要求範囲 <c>[S0,E0)</c>(クランプ済み)と、
+    /// 巻き込み復元のために外側へ広げた範囲 <c>[S,E)</c> を返す。
+    /// </summary>
+    /// <remarks>
+    /// <b>共有するのは「答え」ではなく範囲計算の素材</b>(<c>S0/E0/S/E</c> の導出)である。
+    /// <see cref="ReplaceCharRangeExact"/> と <see cref="GetExactChangeCharRange"/> の<b>返り値は
+    /// 意図的に異なる</b>=前者は広げた範囲 <c>[S,E)</c> へ書き、後者は<b>内容が変わりうる範囲</b>を
+    /// 端ごとに判断して返すため、CRLF を割った側は広げた分を<b>捨てる</b>
+    /// (例: <c>"abc\r\ndef"</c> の <c>(4, 1)</c> は <c>S=3, E=5</c> に対し戻り値 <c>(4, 5)</c>)。
+    /// 捨ててよいのは巻き込み復元が<b>長さ保存</b>で、割った <c>\r</c> / <c>\n</c> がそのまま
+    /// 書き戻される=内容が変わらないから。捨てられないのは復元する半身が孤立サロゲートになる側で、
+    /// そこは UTF-8 往復で U+FFFD へ潰れるため広げた分を残す。弁別の規則は
+    /// <see cref="GetExactChangeCharRange"/> の remarks が持つ。
+    /// <para>
+    /// <b>この範囲計算をここ以外に書かないこと。</b> 分かれてはならないのは<b>素材</b>の計算であって
+    /// 返り値ではない。素材が 2 実装に分かれた瞬間に「問うた範囲と実際に書く範囲が違う」という
+    /// 最悪の形で腐る。
+    /// </para>
+    /// <para>
+    /// <b><see cref="GetExactChangeCharRange"/> が CRLF 分割で <c>[S0,E0)</c> を返す分岐を、
+    /// 「doc と実装の食い違い」と読んで削らないこと。</b> それが守っているのは
+    /// 「スコープ端が CRLF の内側にある一括置換は成功しなければならない」=PR #56 §9.9 が
+    /// main 既存バグとして根治した挙動であり、
+    /// <c>SearchControllerTests.ReplaceAll_InSelection_ScopeEndInsideCrlf_DoesNotDuplicateCr</c> /
+    /// <c>..._ScopeStartInsideCrlf_DoesNotDeleteOutsideCr</c> が固定している。
+    /// </para>
+    /// <para>
+    /// <b>ただし上の 2 件はこの分岐の番人ではない</b>(実測 / 2026-09-01 B2 Task 4)。
+    /// Task 3 時点では「<c>SearchController</c> の包含検査が繋がれば上の 2 件も拒否側へ倒れて
+    /// 赤くなる」と想定していたが、<b>繋いだうえで実測したところこの想定は偽だった</b>。
+    /// 端ごとの弁別を落として常に広げた範囲 <c>[S,E)</c> を返す変異を当てても、
+    /// <b>App は 721 件 green のまま</b>で、赤くなるのは Editor 側の 2 本
+    /// (<c>EditorControlReplaceExactTests.GetExactChangeCharRange_CrlfSplit_DoesNotWiden</c> /
+    /// <c>..._MixedCrlfAndSurrogate_DecidesEachEndIndependently</c>)だけだった。理由は 2 つ:
+    /// <list type="bullet">
+    /// <item>production の呼び出し元は <c>SearchController.ReplaceOne</c> の包含検査ただ 1 つで、
+    /// 上の 2 件が CRLF 分割スコープを踏むのは <c>ReplaceAll</c> 経路である。<c>ReplaceAll</c> には
+    /// 包含検査を置いていない(到達 fixture が全数探索で見つからず、置けば死んだガードになるため
+    /// = B2 Task 4 Step 2)。</item>
+    /// <item>上の 2 件が通る <c>ReplaceOne</c> のヒットは両端が論理文字境界に乗るので、
+    /// 広げた範囲と素の範囲が一致し変異と原実装の区別がつかない。</item>
+    /// </list>
+    /// <b>この分岐の番人は依然として Editor テスト 2 本だけである。</b>
+    /// 「App 側の 2 件が守っている」と読んで Editor 側を消さないこと。
+    /// </para>
+    /// <para>
+    /// ゼロ幅(<c>S0 == E0</c>)は外側へ広げず、挿入点だけを境界へ後退させて
+    /// <c>S == E == 後退後の位置</c> を返す(理由は
+    /// <see cref="ReplaceCharRangeExact"/> の remarks「ゼロ幅は広げない」)。
+    /// </para>
+    /// </remarks>
+    private static (int S0, int E0, int S, int E) ExactRangeParts(
+        TextSnapshot snap,
+        int start,
+        int length
+    )
+    {
+        int s0 = Math.Clamp(start, 0, snap.CharLength);
+        // start + length は int 加算だとオーバーフローで負値になり得るため long 経由
+        // (ReplaceCharRange / EnsureVisibleCharRange と同じ流儀)。
+        long endLong = (long)start + Math.Max(0, length);
+        int e0 = (int)Math.Clamp(endLong, s0, (long)snap.CharLength);
+        if (s0 == e0)
+        {
+            int at = TextBoundary.SnapToLogicalCharStart(snap, s0);
+            return (s0, e0, at, at);
+        }
+        return (
+            s0,
+            e0,
+            TextBoundary.SnapToLogicalCharStart(snap, s0), // 外側へ(index が減る向き)
+            TextBoundary.SnapToLogicalCharEnd(snap, e0) // 外側へ(index が増える向き)
+        );
+    }
+
+    /// <summary>
+    /// <see cref="ReplaceCharRangeExact"/> が同じ引数・同じ世代で呼ばれたときに、
+    /// <b>本文の内容が変わりうる文字範囲</b>を、何も書かずに返す。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 返すのは <see cref="ReplaceCharRange"/> へ渡す「広げた範囲」<b>ではない</b>。巻き込み復元は
+    /// 長さ保存で、広げた分の接頭辞 / 接尾辞はそのまま書き戻されるため、CRLF を割ったときの
+    /// <c>\r</c> / <c>\n</c> は無傷で戻る=内容は変わらない。例外は復元する半身が
+    /// <b>孤立サロゲートになる場合</b>で、このとき UTF-8 往復で U+FFFD へ潰れる
+    /// (<see cref="ReplaceCharRangeExact"/> の remarks 参照)。この 1 形だけ広げた範囲を返す。
+    /// </para>
+    /// <para>
+    /// ゼロ幅(純挿入)は挿入点が論理文字の境界まで<b>後退</b>しうるので、後退後の位置の空範囲を返す。
+    /// 呼び出し側が <c>start</c> から導出してはならないのは
+    /// <see cref="ReplaceCharRangeExact"/> の戻り値と同じ理由。
+    /// </para>
+    /// <para>
+    /// <b>用途</b>: 「選択範囲のみ」の置換が、ユーザーの選んでいない位置を書き換えないことを
+    /// <b>書く前に</b>確かめる(<c>SearchController</c>)。後退が起きる条件を呼び出し側で
+    /// 数え上げるのは本クラスの規則の複製であり、規則が変われば黙って腐る。
+    /// production の呼び出し元は <c>SearchController.ReplaceOne</c> の包含検査<b>だけ</b>
+    /// (2026-09-01 B2 Task 4)。<c>ReplaceAll</c> は書込範囲がスコープそのものに収まるため
+    /// 呼ばない(理由は同メソッドのコメント)。
+    /// </para>
+    /// <para>
+    /// 書けない状態(<c>_buffer is null</c> / <see cref="ReadOnly"/>)では何も変わらないので
+    /// クランプした位置の空範囲を返す。
+    /// </para>
+    /// <para>
+    /// <b>空範囲はどんな包含検査も通る。</b> 書けない状態の戻り値は「何も変わらない」を表すが、
+    /// 包含ガードの入力としては「常に許可」と同義になる。置換の可否を決める側は
+    /// <see cref="ReadOnly"/> を<b>先に</b>見ること(<see cref="ReplaceCharRangeExact"/> の
+    /// returns と同じ罠=戻り値だけでは書けたかどうかを判別できない)。
+    /// これを怠ると<b>何も書いていないのに成功発声する</b>=本 API が消そうとしている
+    /// 「虚偽の成功発声」を、この API 自身で作れてしまう。
+    /// </para>
+    /// <para>
+    /// <b>IME 未確定中は呼ばないこと(照会と書込で世代がずれる)。</b>
+    /// <see cref="ReplaceCharRangeExact"/> は本体に入る前に <c>IsComposing</c> なら
+    /// <c>CancelCompositionAndDefault</c> を通し、同期配送する IME では<b>それ自体が本文を
+    /// 動かしうる</b>(同メソッドの remarks 参照)。照会である本メソッドは副作用を持てないので
+    /// この前段を<b>あえて持たない</b>=結果として「問うた世代 ≠ 書く世代」になりうる。
+    /// 呼び出し側が <c>IsComposing</c> でないことを保証すること。
+    /// (現状の起動点は検索ダイアログのボタンで、ダイアログがフォーカスを取る時点で
+    /// <c>OnLostFocus</c> が未確定を確定させるため実測上は到達しない。)
+    /// </para>
+    /// </remarks>
+    /// <returns>内容が変わりうる文字範囲 <c>[Start, End)</c>。この範囲の外側は変わらない。</returns>
+    public (int Start, int End) GetExactChangeCharRange(int start, int length)
+    {
+        if (_buffer is null || ReadOnly)
+        {
+            int noop = Math.Clamp(start, 0, TextLength);
+            return (noop, noop);
+        }
+        var snap = _buffer.Current;
+        var (s0, e0, s, e) = ExactRangeParts(snap, start, length);
+        if (s0 == e0)
+            return (s, s); // ゼロ幅=後退後の挿入点
+        // 端が外へ動く要因は「サロゲートペアを割った」か「CRLF を割った」かの 2 つだけで排他。
+        // 弁別規則は TextBoundary が持つ(ここで char.IsLowSurrogate を手書きすると規則が
+        // 二重化し、TextBoundary の class doc の登録簿が嘘になる)。
+        // **両端は独立に判断する**。始端が CRLF 割り・終端がペア割り(またはその逆)は実在し、
+        // 1 つのフラグに括ると片側が誤って広がる
+        // (網: GetExactChangeCharRange_MixedCrlfAndSurrogate_DecidesEachEndIndependently)。
+        //
+        // 範囲外読みの心配は無い。IsSurrogatePairEndingAt(snap, pos) は全域関数で、
+        // pos が [1, CharLength) の外なら false を返す(旧実装の生 GetChar は e0 == CharLength
+        // で throw しえたので、そこだけ e > e0 のガードが安全性を担っていた)。
+        // 残した s < s0 / e > e0 は**安全のためではなく**「その端が実際に広がった」ことの明示で、
+        // 述語が真なら Snap* も必ず動くため論理的には冗長=これを落とす変異は生存する。
+        int changeStart = s < s0 && TextBoundary.IsSurrogatePairEndingAt(snap, s0) ? s : s0;
+        int changeEnd = e > e0 && TextBoundary.IsSurrogatePairEndingAt(snap, e0) ? e : e0;
+        return (changeStart, changeEnd);
     }
 
     private int ClampTopLine(int value)

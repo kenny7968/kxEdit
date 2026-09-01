@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using kxEdit.Core.Text;
 
 namespace kxEdit.Core.Search;
 
@@ -142,6 +143,37 @@ public sealed class TextSearcher
     /// [start, start+length) に完全に収まるヒットだけ置換し、その範囲の置換後断片と件数を返す。
     /// 範囲外・境界をまたぐヒットは対象外。start/length は text 範囲へクランプする。
     /// エディタはこの断片で当該文字範囲を差し替える。
+    /// <para>
+    /// <b>照合は範囲始端へ再アンカーする</b>(<c>Match(text, scan)</c>)。全文照合の結果を
+    /// 捨てるだけだと、範囲直前から始まるヒットが範囲内の文字を食って範囲内のヒットが
+    /// 消える(監査 M-29: <c>"aaa"</c> の <c>[1,3)</c> を <c>aa</c> で 0 件)。
+    /// <c>startat</c> は<b>入力を切らない</b>ので <c>\b</c>・先読み・後読みは全文文脈のまま。
+    /// </para>
+    /// <para>
+    /// <b>ゼロ幅マッチの挿入点は論理文字の境界まで後退させる</b>
+    /// (<c>EditorControl.ReplaceCharRangeExact</c> と同じ規則。規則の所有者は
+    /// <see cref="Text.TextBoundary"/>)。後退させないと CRLF やサロゲートペアの内側へ挿入して
+    /// しまい、書き戻し時に孤立サロゲートが U+FFFD へ潰れる。後退先が範囲始端より前
+    /// / 既に出力した位置より前になるマッチは<b>スキップし件数にも数えない</b>。
+    /// 後退の判定は<b>元テキスト</b>に対して行う(単発置換も編集前スナップショットで判定する)。
+    /// </para>
+    /// <para>
+    /// <b><c>scan</c> の前進は <c>Math.Max(scan + 1, ...)</c> で強制する</b>=停止性をエンジンの
+    /// 振る舞いに賭けない。<c>Regex.Match(text, startat)</c> は
+    /// <b><c>Index &gt;= startat</c> を保証しない</b>: .NET 9.0.8 実測で
+    /// <c>new Regex("(?:b(?!a)+?)*", CultureInvariant | IgnoreCase).Match("abbbb", 4)</c> は
+    /// <c>Index=3 Length=2</c> を返す(<c>startat</c> より前で終わるマッチ)。これを
+    /// <c>scan = m.Index + 1</c> のように素直に受けると <c>scan</c> が据え置き / 後退して
+    /// <b>無限ループ</b>になる。個々の <c>Match</c> は 0ms で返るので
+    /// <see cref="RegexMatchTimeoutException"/> も出ず、UI スレッドが 100% CPU で永久にスピンする
+    /// (例外が無いためクラッシュハンドラにも到達せず、メッセージポンプ駆動の自動バックアップも
+    /// 止まる)。<c>Math.Max</c> により <c>scan</c> は<b>エンジンの返り値に依らず</b>毎周 1 以上
+    /// 増えるので、反復回数は <c>end - s + 1</c> 以下に収まる=停止性が<b>観測可能な事後条件</b>
+    /// だけで証明できる(「<c>Match</c> はこう振る舞うはず」という前提を置かない)。
+    /// 異常が起きない通常入力では <c>m.Index &gt;= scan</c> なので <c>Math.Max</c> は恒等=挙動不変
+    /// (全数コーパス 194,238 ケースで <c>Math.Max</c> 無し版と 1 バイトも違わないことを実測)。
+    /// 網 = <c>ReplaceInRange_PathologicalRegex_Terminates</c>。
+    /// </para>
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
     /// </summary>
     public (string Fragment, int Count) ReplaceInRange(
@@ -158,17 +190,31 @@ public sealed class TextSearcher
 
         var sb = new StringBuilder();
         int count = 0,
-            pos = s;
-        foreach (Match m in _regex.Matches(text))
+            pos = s,
+            scan = s;
+        while (scan <= end)
         {
-            if (m.Index < s)
-                continue;
-            if (m.Index + m.Length > end)
+            var m = _regex.Match(text, scan);
+            if (!m.Success || m.Index + m.Length > end)
                 break;
-            sb.Append(text, pos, m.Index - pos);
+            int at =
+                m.Length == 0
+                    ? TextBoundary.SnapToLogicalCharStart(text.AsSpan(), m.Index)
+                    : m.Index;
+            if (at < pos)
+            {
+                // 範囲始端より前 / 既に出力した位置より前へは書けない。
+                // ここへ来るのはゼロ幅マッチだけとは限らない: at < pos は m.Index < pos でも
+                // 成立し、実際 .NET 9.0.8 の Index < startat 異常では Length=2 のマッチが通る。
+                // scan + 1 との Math.Max が停止性の担保(理由は xmldoc)。
+                scan = Math.Max(scan + 1, m.Index + 1);
+                continue;
+            }
+            sb.Append(text, pos, at - pos);
             sb.Append(Expand(m, replacement));
-            pos = m.Index + m.Length;
+            pos = at + m.Length;
             count++;
+            scan = Math.Max(scan + 1, m.Index + Math.Max(1, m.Length));
         }
         sb.Append(text, pos, end - pos);
         return (sb.ToString(), count);

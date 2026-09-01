@@ -250,4 +250,171 @@ public class EditorControlReplaceExactTests
 
             Assert.Equal("abc\r\ndef", ctrl.Text);
         });
+
+    // ===== GetExactChangeCharRange(2026-09-01 B2 Task 3) =====
+    // 返すのは ReplaceCharRange へ渡す「広げた範囲」ではなく「内容が変わりうる範囲」。
+    // 巻き込み復元は長さ保存なので CRLF の半身は無傷で戻る=内容は変わらない。
+    // 孤立サロゲートになる半身だけが U+FFFD へ潰れる=そこだけ広げた範囲を返す。
+
+    [Fact]
+    public void GetExactChangeCharRange_CrlfSplit_DoesNotWiden() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
+            // LF だけの置換は書込が [3,5) へ広がるが、復元される CR は無傷。
+            Assert.Equal((4, 5), ctrl.GetExactChangeCharRange(4, 1));
+            // 終端側も同じ。CR だけの置換は書込が [3,5) へ広がるが、復元される LF は無傷。
+            // **始端側だけでは終端側の弁別を固定できない**(2026-09-01 B2 Task 3 で実測:
+            // changeEnd の `&& char.IsLowSurrogate(...)` を落とす変異は、始端側の 1 行だけでは
+            // 生存した)。全数プローブ Exhaustive も殺せない=あれは「返した範囲の外側は
+            // 変わらない」という**上位集合**の主張で、過剰に広げる変異は違反しないため。
+            Assert.Equal((3, 4), ctrl.GetExactChangeCharRange(3, 1));
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_SurrogateSplit_WidensToWholePair() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("a\U0001F600b")); // a(0) high(1) low(2) b(3)
+            // high だけの置換は復元される low が U+FFFD へ潰れる=ペア全体が変わる。
+            Assert.Equal((1, 3), ctrl.GetExactChangeCharRange(1, 1));
+            // low だけの置換も同じ(始端側で潰れる)。
+            Assert.Equal((1, 3), ctrl.GetExactChangeCharRange(2, 1));
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_ZeroWidthInsideLogicalChar_RetreatsToBoundary() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
+            Assert.Equal((3, 3), ctrl.GetExactChangeCharRange(4, 0)); // CRLF の先頭へ後退
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_ReadOnly_ReturnsEmptyRange() =>
+        Sta.Run(() =>
+        {
+            using var ctrl = new EditorControl();
+            ctrl.SetSource(TextBuffer.FromString("abc\r\ndef"));
+            ctrl.ReadOnly = true;
+            // no-op=何も変わらない。空範囲で表す(ReplaceCharRangeExact の no-op 契約と対)。
+            Assert.Equal((4, 4), ctrl.GetExactChangeCharRange(4, 1));
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_BeforeSetSource_ReturnsEmptyRange() =>
+        Sta.Run(() =>
+        {
+            // _buffer is null 側のガード。ReadOnly と同じ「書けない状態」だが分岐は別で、
+            // 今これを守っているのは -warnaserror の CS8602 だけ(_buffer!.Current と
+            // 書けば素通りする)。TextLength は 0 を返すので位置も 0 へクランプされる。
+            using var ctrl = new EditorControl();
+            Assert.Equal((0, 0), ctrl.GetExactChangeCharRange(4, 1));
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_MixedCrlfAndSurrogate_DecidesEachEndIndependently() =>
+        Sta.Run(() =>
+        {
+            // **両端は独立に決まる**。CRLF とサロゲートペアが同居する文書でしか弁別できない
+            // =狙い撃ち 4 本("abc\r\ndef" と "a😀b")も全数プローブの 8 文書も mixed を
+            // 1 つも持たないため、両端の判定を 1 つのフラグへ括る変異が Editor 全件を
+            // 素通りした(2026-09-01 B2 Task 3 レビューで実測)。
+            //
+            // 全数プローブへ mixed 文書を足しても**この変異は殺せない**。あれは「返した範囲の
+            // 外側は変わらない」という上位集合の主張で、過剰に広げる変異は違反しないため。
+            // 過剰広げの番人は厳密値を書くこのテストだけである。
+            using var ctrl = new EditorControl();
+            // \r(0) \n(1) high(2) low(3): 始端は CRLF を割る(広げない)/ 終端はペアを割る(広げる)
+            ctrl.SetOrReplaceSource(TextBuffer.FromString("\r\n\U0001F600"));
+            Assert.Equal((1, 4), ctrl.GetExactChangeCharRange(1, 2));
+            // 逆向き: high(0) low(1) \r(2) \n(3)。始端はペアを割る / 終端は CRLF を割る。
+            ctrl.SetOrReplaceSource(TextBuffer.FromString("\U0001F600\r\n"));
+            Assert.Equal((0, 3), ctrl.GetExactChangeCharRange(1, 2));
+        });
+
+    [Fact]
+    public void GetExactChangeCharRange_OutsideOfReturnedRangeNeverChanges_Exhaustive() =>
+        Sta.Run(() =>
+        {
+            // 本 seam の契約そのもの。主張は「返した範囲の外側は、実際に ReplaceCharRangeExact を
+            // 呼んだ後も 1 文字も変わらない」であって、ReplaceCharRange へ渡す範囲との一致ではない
+            // (一致で書くと CRLF ケース=復元が無傷な形を取り違える)。
+            string[] docs =
+            {
+                "",
+                "abc",
+                "a\r\nb",
+                "\r\n",
+                "a\U0001F600b",
+                "\U0001F600",
+                "a\rb",
+                "a\nb",
+            };
+            int[] lengths = { -1, 0, 1, 2, 3 };
+            string[] repls = { "", "X", "\r\n", "\U0001F600" };
+
+            // 反復ごとに本文を差し替える。SetSource は 1 度限りで 2 回目は InvalidOperationException
+            // になるため、任意回呼べる SetOrReplaceSource を使う。
+            using var ctrl = new EditorControl();
+            // 入れ子ループは波括弧を明示する。省略すると CSharpier が内側の foreach を
+            // 外側と同じ段へ畳んでしまい、Sonar S3973(条件実行の範囲が字面から読めない)で
+            // ビルドが止まる(2026-09-01 B2 Task 3 で実測)。
+            foreach (string doc in docs)
+            {
+                for (int start = -1; start <= doc.Length + 1; start++)
+                {
+                    foreach (int len in lengths)
+                    {
+                        foreach (string repl in repls)
+                        {
+                            ctrl.SetOrReplaceSource(TextBuffer.FromString(doc));
+                            string before = ctrl.Text;
+                            var (cs, ce) = ctrl.GetExactChangeCharRange(start, len);
+
+                            string ctx =
+                                $"doc={Show(before)} start={start} len={len} repl={Show(repl)} range=[{cs},{ce})";
+                            Assert.True(0 <= cs && cs <= ce && ce <= before.Length, ctx);
+
+                            ctrl.ReplaceCharRangeExact(start, len, repl);
+                            string after = ctrl.Text;
+
+                            int tail = before.Length - ce;
+                            Assert.True(after.Length >= cs + tail, $"{ctx} after={Show(after)}");
+                            // 前側は不変
+                            Assert.True(
+                                before[..cs] == after[..cs],
+                                $"{ctx} after={Show(after)} prefix"
+                            );
+                            // 後側は不変
+                            Assert.True(
+                                before[ce..] == after[(after.Length - tail)..],
+                                $"{ctx} after={Show(after)} suffix"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+    /// <summary>失敗メッセージ用。不可視文字(改行・孤立サロゲート・U+FFFD)を \uXXXX で見せる。</summary>
+    private static string Show(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length + 2);
+        sb.Append('\'');
+        foreach (char c in s)
+        {
+            if (c >= 0x20 && c < 0x7F)
+                sb.Append(c);
+            else
+                sb.Append("\\u")
+                    .Append(
+                        ((int)c).ToString("X4", System.Globalization.CultureInfo.InvariantCulture)
+                    );
+        }
+        return sb.Append('\'').ToString();
+    }
 }
