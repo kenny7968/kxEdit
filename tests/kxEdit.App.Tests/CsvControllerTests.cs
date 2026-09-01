@@ -634,14 +634,22 @@ public class CsvControllerTests
     }
 
     /// <summary>F2 編集中に「別経路が本文を書き換えた」状況を作る。CSV モード中は
-    /// ReadOnly=true で ReplaceCharRange が no-op になるため、production の onCommit と
-    /// 同じ流儀で ReadOnly を一時的に落として書き、元へ戻す。</summary>
+    /// ReadOnly=true で ReplaceCharRange が no-op になるため、production が本文を触るときと
+    /// 同じ流儀 —— <c>CsvController</c> の onCommit と <c>FileController.WriteToPath</c> の
+    /// ConvertEols 前後 —— で ReadOnly を一時的に落として書き、元へ戻す。
+    /// production 側と同じく try/finally で括る(mutate が throw しても ReadOnly を戻す)。</summary>
     private static void MutateBodyWhileEditing(EditorControl ed, Action<EditorControl> mutate)
     {
         bool wasRo = ed.ReadOnly;
         ed.ReadOnly = false;
-        mutate(ed);
-        ed.ReadOnly = wasRo;
+        try
+        {
+            mutate(ed);
+        }
+        finally
+        {
+            ed.ReadOnly = wasRo;
+        }
     }
 
     /// <summary>セル強調(private フィールド <c>_cellHighlight</c>)を取り出す。
@@ -739,8 +747,13 @@ public class CsvControllerTests
     // !_csv.IsEditing で自分を無効化するため Ctrl+S はメニューショートカットへ素通りし、
     // FileController.SaveDocument が ConvertEols で本文を差し替える。ここではその 1 手
     // (ConvertEols)だけを直接呼んで、UI とファイル I/O を挟まずに同じ状態を作る。
-    // ConvertEols は ReadOnly を見ない(EditorControl.cs の ConvertEols にガードが無い)ので、
-    // CSV モード(ReadOnly=true)のままでも本文が差し替わる=これが到達経路の実体そのもの。
+    // **CSV モード(ReadOnly=true)でも本文が差し替わる理由は「ConvertEols にガードが無いこと」
+    // ではない。** production は FileController.WriteToPath が ConvertEols の前後で明示的に
+    // ReadOnly を落として戻す(同ファイルの `bool wasReadOnly = doc.Editor.ReadOnly;` …
+    // try/finally)。つまり ConvertEols 側に ReadOnly ガードを足しても**この経路は塞がらない**。
+    // だから下の 2 本も MutateBodyWhileEditing(= 同じ ReadOnly 昇降)を通して呼ぶ。
+    // ConvertEols は ReadOnly を一度も読まないので結果は変わらないが、将来ガードが足されても
+    // production 挙動が不変なのにテストだけ赤くなる、という誤った失敗を出さない。
 
     // セル内 LF を持つ混在 EOL。編集対象 (1,0) は自分自身に LF を含むので、ConvertEols で
     // 「長さ」も「Value」も変わる。前後に無傷であるべき行(a1,a2 / c1,c2)を置き、全書き換えと区別する。
@@ -758,16 +771,19 @@ public class CsvControllerTests
     //   (a) start/length を両方持ち越す(=修正前の実装そのもの) → 落ちるのは下の 2 本だけ
     //   (b) start は解決し直すが length を持ち越す             → 落ちるのは本テストだけ
     //   (c) length は解決し直すが start を持ち越す             → 落ちるのは次のテストだけ
-    // (a) を注入した実測では App テスト 724 本中の失敗はこの 2 本のみ=既存の網は 1 本も
+    // (a) を注入した実測では App テスト 724 本中(当時)の失敗はこの 2 本のみ=既存の網は 1 本も
     // この欠陥を捕まえていなかった。(b)/(c) が別々のテストを落とすので 2 本は互いに冗長でない。
     // 本テストは (a)(b) を殺す。修正前の src での Actual は
     // "a1,a2\r\nNEW\",b2\r\nc1,c2"(閉じ引用符が残る)。
     //
     // Task 3 で追加の kill 対象が 1 つ増えた(実測):
-    //   (e) 同一性検証から EOL 正規化を外す(startValue = f.Value / 素の target.Value と比較)
-    //       → 落ちるのは **本テストだけ**(App 730 本中 1 失敗)。Actual は
+    //   (m16) 同一性検証の**比較側**から EOL 正規化を外す(素の target.Value と比較)
+    //       → 落ちるのは **本テストだけ**(App 734 本中 1 失敗)。Actual は
     //          "a1,a2\r\n\"x\r\ny\",b2\r\nc1,c2" = 確定が拒否されてセルが編集前のまま残る。
-    //       T2 は編集セル自身が改行を持たないので (e) の下で恒等になり、殺せない。
+    //       T2 は編集セル自身が改行を持たないので (m16) の下で恒等になり、殺せない。
+    //   **開始側**(startValue = NormalizeEols(f.Value))はここでは守れない —— この fixture は
+    //   F2 開始時点のセル値に CR を含まないので、開始側だけを落とす変異は恒等になる。
+    //   下の CrlfInCellLfBodyCsv の鏡像テストがその役目を負う(2 本で 1 対)。
     [Fact]
     public void Commit_AfterEolConversion_WritesEditedCell_NotStaleOffsets() =>
         Sta.Run(() =>
@@ -781,7 +797,7 @@ public class CsvControllerTests
             box.Text = "NEW";
 
             // Ctrl+S 相当: 保存前の EOL 統一でバッファが差し替わる(セル内 LF → CRLF)。
-            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+            MutateBodyWhileEditing(doc.Editor, ed => Assert.True(ed.ConvertEols(LineEnding.Crlf)));
 
             editor.Commit();
 
@@ -803,19 +819,54 @@ public class CsvControllerTests
             var editor = GetCellEditor(host.Csv);
             GetOverlayBox(editor).Text = "NEW";
 
-            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+            MutateBodyWhileEditing(doc.Editor, ed => Assert.True(ed.ConvertEols(LineEnding.Crlf)));
 
             editor.Commit();
 
             Assert.Equal("a1,\"p\r\nq\"\r\nb1,NEW\r\nc1,c2", doc.Editor.SnapshotText);
         });
 
+    // MixedEolCsv の**鏡像**: セル内が CRLF・行区切りが LF。F2 開始時点でセル値に CR が入る
+    // 唯一の fixture で、確定時の変換方向も逆(ConvertEols(Lf))になる。
+    // これが無いと **開始側の正規化(startValue = NormalizeEols(f.Value))に網が 1 本も無い**:
+    // 他の fixture はどれも開始時のセル値に CR を含まないので、開始側だけを落とす変異は恒等になる。
+    private const string CrlfInCellLfBodyCsv = "a1,a2\n\"x\r\ny\",b2\nc1,c2";
+
+    // kill 対象(実測。正規化を片側ずつ落とした 2 変異):
+    //   (m15) 開始側だけ落とす(startValue = f.Value)     → 落ちるのは **本テストだけ**
+    //   (m16) 比較側だけ落とす(素の target.Value と比較) → 落ちるのは **T1 だけ**
+    // 完全な鏡像であり、どちらか 1 本では片側が無防備なまま残る。
+    // これは到達不能枝ではない: 引用符内 CRLF・行区切り LF の CSV を F2 編集中に Ctrl+S すると
+    // ConvertEols(Lf) がセル内 CRLF を LF へ書き換えるので、開始側を正規化しないと
+    // **正常な編集が拒否されてユーザーの入力が捨てられる**(実運用の欠陥になる)。
+    [Fact]
+    public void Commit_AfterEolConversionToLf_WritesEditedCell_NotStaleOffsets() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, CrlfInCellLfBodyCsv, 1, 0); // (1,0)="x\r\ny"(引用符込み 6 文字)
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // Ctrl+S 相当。今度は LF へ統一する = セル内 CRLF が LF へ縮む(T1 と逆向き)。
+            MutateBodyWhileEditing(doc.Editor, ed => Assert.True(ed.ConvertEols(LineEnding.Lf)));
+
+            editor.Commit();
+
+            Assert.False(host.Csv.IsEditing);
+            Assert.Equal("a1,a2\nNEW,b2\nc1,c2", doc.Editor.SnapshotText);
+        });
+
     // ===== M-25: (row,col) が別セルを指していたら書かない(設計書 §4.2) =====
-    // 以下 7 本が踏む枝は、現行の配線では実運用から到達できない。到達経路は設計書 §3 の表のとおり
-    // Ctrl+S → ConvertEols の 1 本だけで、ConvertEols は CSV の行列構造を変えないため
-    // 同一性検証は必ず一致する —— ただしこの「変えない」は、T1 / T2 の 2 fixture 分だけが実測で、
-    // 一般には設計書 §4.4 の**論証**である(§8.9 が「§4.4 の全体が実測になったわけではない」と
-    // 釘を刺している)。ここはテストからだけ踏める「将来配線が増えたときの受け皿」で、
+    // 以下 9 本が踏む枝は、現行の配線では実運用から到達できない。F2 編集中に本文を変えうる
+    // 経路は Ctrl+S 系だけで、設計書 §8.32 が**成功 1 本 + 短絡 3 種 + 書込失敗 1 本の 5 通り**へ
+    // 精密化している(§3 の表と §8.27.1 の「1 本」「2 本」はいずれも策定時の粗い数)。
+    // 短絡 3 種と書込失敗は `_prompt.Error` のモーダルがフォーカスを奪い CancelEdit が走るので
+    // 確定自体が起きず、成功経路の ConvertEols は CSV の行列構造を変えないため同一性検証は
+    // 必ず一致する —— ただしこの「変えない」は T1 / T2 の 2 fixture 分だけが実測で、一般には
+    // 設計書 §4.4 の**論証**である(§8.9 が「§4.4 の全体が実測になったわけではない」と釘を刺す)。
+    // ここはテストからだけ踏める「将来配線が増えたときの受け皿」で、
     // 網があること自体を安全宣言に使ってはならない。
     //
     // 各テストの kill 対象は、下の「変異 × テスト」実測表から書き写している(注入 → App 全件実行 →
@@ -823,8 +874,7 @@ public class CsvControllerTests
     //
     //   変異(すべて CsvController.BeginEdit の捕捉 3 行と onCommit ガードに対して)
     //     (m1) csvNow.Ok 判定削除 …… var target = csvNow.GetField(row, col);
-    //     (m2) 行数比較削除(startRowCount ごと)
-    //     (m3) 列数比較削除(startColCount ごと)
+    //     (m2) 行数比較削除(startRowCount ごと)      (m3) 列数比較削除(startColCount ごと)
     //     (m4) 値比較削除(startValue ごと)
     //     (m6) target is null 判定を条件から削除(残る参照を target! 化)
     //     (m7) 同一性検証を丸ごと削除(= Task 2 の状態 = target is null だけ)
@@ -835,28 +885,45 @@ public class CsvControllerTests
     //     (m12) 拒否枝の ApplyCell を announce: true にする(拒否したのに新しい値を読み上げる)
     //     (m13) 捕捉側 …… startColCount を csv.Rows[0].Count(見出し行の幅)から取る
     //     (m14) 検査側 …… csvNow.Rows[0].Count と比べる
-    //   (m5 = 同一性検証から EOL 正規化を外す変異は、この 7 本ではなく上の T1 だけが殺す。
-    //    kill 対象は T1 のコメント側に書いてある。)
+    //     (m17) 捕捉側 …… csv.Rows[col].Count(行/列の取り違え)
+    //     (m18) 検査側 …… csvNow.Rows[col].Count(行/列の取り違え)
+    //     (m19) 行数比較を `<` へ弱める   (m21) 行数比較を `>` へ弱める
+    //     (m20) 列数比較を `>` へ弱める   (m22) 列数比較を `<` へ弱める
+    //   (EOL 正規化を落とす m5 / m15 / m16 はこのブロックではなく上の T1 / 鏡像テストが殺す。
+    //    kill 対象はそれぞれのコメント側に書いてある。)
     //
-    //   テスト                        | m1| m2| m3| m4| m6| m7| m8| m9|m10|m11|m12|m13|m14|
-    //   ...BecameAnotherCell          | – | – | – | ✗ | – | ✗ | – | ✗ | – | – | ✗ | – | – |
-    //   ...Disappeared                | – | – | – | – | – | – | – | ✗ | ✗ | ✗ | – | – | – |
-    //   ...RowCountChanged            | – | ✗ | – | – | – | ✗ | – | ✗ | – | – | – | – | – |
-    //   ...ColumnCountChanged         | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | – | ✗ |
-    //   ...ColumnCountChangedInJagged | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | ✗ | – |
-    //   ...BodyBecameUnparsable       | ✗ | – | – | – | ✗ | – | – | ✗ | ✗ | – | – | – | – |
-    //   ...RestoresCellHighlight...   | – | – | – | ✗ | – | ✗ | ✗ | ✗ | – | – | – | – | – |
-    //   App 全体の失敗数(731 本中)    | 1 | 1 | 2 | 2 | 1 | 5 | 1 | 7 | 2 | 1 | 1 | 1 | 1 |
+    //   テスト                        | m1| m2| m3| m4| m6| m7| m8| m9|m10|m11|m12|m13|m14|m17|m18|m19|m20|m21|m22|
+    //   ...BecameAnotherCell          | – | – | – | ✗ | – | ✗ | – | ✗ | – | – | ✗ | – | – | – | – | – | – | – | – |
+    //   ...Disappeared                | – | – | – | – | – | – | – | ✗ | ✗ | ✗ | – | – | – | – | – | – | – | – | – |
+    //   ...RowCountChanged            | – | ✗ | – | – | – | ✗ | – | ✗ | – | – | – | – | – | – | – | – | – | ✗ | – |
+    //   ...RowInserted                | – | ✗ | – | – | – | ✗ | – | ✗ | – | – | – | – | – | – | – | ✗ | – | – | – |
+    //   ...ColumnCountChanged         | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | – | ✗ | – | ✗ | – | – | – | ✗ |
+    //   ...ColumnCountChangedInJagged | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | ✗ | – | ✗ | – | – | – | – | ✗ |
+    //   ...ColumnRemoved              | – | – | ✗ | – | – | ✗ | – | ✗ | – | – | – | – | ✗ | – | ✗ | – | ✗ | – | – |
+    //   ...BodyBecameUnparsable       | ✗ | – | – | – | ✗ | – | – | ✗ | ✗ | – | – | – | – | – | – | – | – | – | – |
+    //   ...RestoresCellHighlight...   | – | – | – | ✗ | – | ✗ | ✗ | ✗ | – | – | – | – | – | – | – | – | – | – | – |
+    //   App 全体の失敗数(734 本中)    | 1 | 2 | 3 | 2 | 1 | 7 | 1 | 9 | 2 | 1 | 1 | 1 | 2 | 1 | 2 | 1 | 1 | 1 | 2 |
     //
-    // 表から分かること(表を作らなければ気付けなかった 2 つ):
-    //   - m13 と m14 は**別々のテストが殺す**。長方形 fixture では捕捉側が恒等になり、
-    //     非長方形 fixture では検査側が拒否側へ倒れる。1 本にまとめると必ず片方が生存する。
-    //   - m12 を殺すのは全件固定の assert を持つ 1 本だけ。Said[^1] だけを見る 6 本は
+    // 表から分かること(表を作らなければ気付けなかった):
+    //   - m13 / m17(捕捉側)と m14 / m18(検査側)は**別々のテストが殺す**。長方形 fixture では
+    //     捕捉側が恒等になり、非長方形 fixture では検査側が拒否側へ倒れる。1 本にまとめると
+    //     必ず片方が生存する。行/列取り違え(m17 / m18)は編集セルが row == col だと
+    //     字面どおり恒等になるので、列テストの編集セルは (1,0) にしてある。
+    //   - 等値比較を片側の大小比較へ弱める変異(m19〜m22)は、**踏んでいない向きの下で恒等**。
+    //     行は「減る / 増える」、列は「増える / 減る」の両向きの fixture が要る。
+    //   - m12 を殺すのは全件固定の assert を持つ 1 本だけ。Said[^1] だけを見る他の本は
     //     「余計な発声が先頭に 1 本増える」型の変異(m11 / m12)を原理的に素通しする。
+    //   - **...ColumnCountChanged だけは上の 19 変異に単独 kill を持たない**(m14 / m18 は
+    //     ...ColumnRemoved も、m22 は ...InJagged も落とす)。「長方形 × 列が増える」形を
+    //     代表する 1 本として残しているが、冗長性は測定済みの事実として書いておく。
     //
     // 注入できなかった変異(アナライザが先に殺す。-warnaserror 以前に error 相当):
     //   比較 1 本だけを消して startXxx を残す → S1481 / target is null を false や
     //   Rows.Count < 0 へ置換 → S1125・CS8602・RCS1215・S3981。
+    //
+    // 受容(② 網を張らないと決めた): StringComparison.Ordinal → OrdinalIgnoreCase は
+    // 全緑で生存する。書込先は依然「大小違いの同じ値を持つ実在セル」で実害が小さく、
+    // 既存 fixture の主旨を弱めずに弁別する形が作れなかった(設計書 §8.39)。
 
     // kill 対象(実測): (m12) 拒否枝の announce: true 化 —— **これを殺すのは本テストだけ**。
     // ほかに (m4) 値比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す
@@ -919,7 +986,7 @@ public class CsvControllerTests
         });
 
     // ===== M-25: 形が変われば値が一致していても書かない =====
-    // 下 3 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
+    // 下 5 本は「値の一致」だけの guard では素通りする。形(行数・その行の列数)の検査だけが殺す。
     // うち後ろ 2 本は「列数をどの行から取るか」を弁別する対で、**片方だけでは足りない**:
     // 長方形 fixture は検査側(csvNow.Rows[0].Count と比べる変異)を殺すが捕捉側を素通しし、
     // 非長方形 fixture は捕捉側(csv.Rows[0].Count から取る変異)を殺すが検査側を素通しする。
@@ -927,8 +994,9 @@ public class CsvControllerTests
     // 要り、検査側を殺すには変異後に Rows[0].Count == startColCount が要るが、両立しない(実測済み)。
 
     // 行が消えて (row,col) が「同じ値の別セル」を指す。
-    // kill 対象(実測): (m2) 行数比較削除 —— **これを殺すのは本テストだけ**。
-    // ほかに (m7) 同一性検証の丸ごと削除と (m9) 文言の据え置きを殺す。
+    // kill 対象(実測): (m21) 行数比較を `>` へ弱める変異 —— **これを殺すのは本テストだけ**
+    // (行が減る側なので `>` だと素通りする)。ほかに (m2) 行数比較削除・(m7) 同一性検証の
+    // 丸ごと削除・(m9) 文言の据え置きを殺す。(m2) は下の ...RowInserted も落とすので単独ではない。
     // なお (m3) 列数比較削除は殺せない(前後どちらも 2 列で形が保たれるため)。
     [Fact]
     public void Commit_WhenRowCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
@@ -953,21 +1021,25 @@ public class CsvControllerTests
         });
 
     // 列が増えて (row,col) が「同じ値の別セル」を指す(長方形 fixture: 行 0 の幅も 2)。
-    // kill 対象(実測): (m14) 検査側を csvNow.Rows[0].Count にする変異 —— **これを殺すのは本テストだけ**。
-    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
-    // 捕捉側の変異(m13 = csv.Rows[0].Count から startColCount を取る)は、行 0 と行 1 の幅が
+    // kill 対象(実測): (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置き・
+    // (m14)(m18) 検査側を csvNow.Rows[0] / Rows[col] にする変異・(m22) 列数比較を `<` へ弱める変異。
+    // **本テストに単独 kill は無い**(m14 / m18 は ...ColumnRemoved が、m22 は ...InJagged が
+    // 同時に落とす)。「長方形 × 列が増える」形を代表する 1 本として残している。
+    // 捕捉側の変異(m13 / m17 = 見出し行や col から startColCount を取る)は、行 0 と行 1 の幅が
     // 同じこの fixture では恒等になるので殺せない。直後の非長方形テストがその役目を負う。
     [Fact]
     public void Commit_WhenColumnCountChanged_AndValueCoincides_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
         {
             using var host = new Host();
-            var doc = EnterAt(host, "p,q\nX,X", 1, 1); // (1,1)="X" を編集開始
+            // 編集セルは (1,0) —— row != col にする。(1,1) だと Rows[row] → Rows[col] の
+            // 行/列取り違え変異が字面どおり恒等になり、弁別できない。
+            var doc = EnterAt(host, "p,q\nX,X", 1, 0); // (1,0)="X" を編集開始
             host.Csv.BeginEdit();
             var editor = GetCellEditor(host.Csv);
             GetOverlayBox(editor).Text = "NEW";
 
-            // 2 行目の先頭へ列を 1 つ挿す → (1,1) は元 (1,0) だった "X" を指す。
+            // 2 行目の先頭へ列を 1 つ挿す → (1,0) は挿入された別の "X" を指す(値は一致)。
             MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(4, 0, "X,"));
             string afterMutation = doc.Editor.SnapshotText;
             Assert.Equal("p,q\nX,X,X", afterMutation);
@@ -981,24 +1053,88 @@ public class CsvControllerTests
 
     // 同上だが **非長方形**(行 0 = 3 列 / 行 1 = 2 列)。開始時に Rows[0].Count != Rows[row].Count
     // なので、startColCount を「見出し行の幅」から取る典型的な取り違えを弁別できる。
-    // kill 対象(実測): (m13) 捕捉側を csv.Rows[0].Count にする変異 —— **これを殺すのは本テストだけ**。
-    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
-    // 検査側の変異(m14)は本 fixture では拒否側へ倒れるので殺せない(直前のテストが負う)。
+    // kill 対象(実測): (m13) 捕捉側を csv.Rows[0].Count にする変異と (m17) 捕捉側を
+    // csv.Rows[col].Count にする変異 —— **どちらも殺すのは本テストだけ**。
+    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置き・
+    // (m22) 列数比較を `<` へ弱める変異を殺す。
+    // 検査側の変異(m14 / m18)は本 fixture では拒否側へ倒れるので殺せない(長方形の 2 本が負う)。
     [Fact]
     public void Commit_WhenColumnCountChangedInJaggedRow_WritesNothing_AndAnnounces() =>
         Sta.Run(() =>
         {
             using var host = new Host();
-            var doc = EnterAt(host, "p,q,r\nX,X", 1, 1); // 行 0=3 列 / 行 1=2 列。(1,1)="X" を編集開始
+            // 直前のテストと同じ理由で編集セルは (1,0)(row != col)。
+            var doc = EnterAt(host, "p,q,r\nX,X", 1, 0); // 行 0=3 列 / 行 1=2 列。(1,0)="X" を編集開始
             host.Csv.BeginEdit();
             var editor = GetCellEditor(host.Csv);
             GetOverlayBox(editor).Text = "NEW";
 
-            // 2 行目の先頭へ列を 1 つ挿す → 行 1 は 3 列になり、(1,1) は元 (1,0) だった "X" を指す。
+            // 2 行目の先頭へ列を 1 つ挿す → 行 1 は 3 列になり、(1,0) は挿入された別の "X" を指す。
             // 行 0 の幅は 3 のまま = 捕捉側を Rows[0] にすると開始時 3・確定時 3 で形が通ってしまう。
             MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(6, 0, "X,"));
             string afterMutation = doc.Editor.SnapshotText;
             Assert.Equal("p,q,r\nX,X,X", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // ===== M-25: 形の検査は「増えた / 減った」の両向きを踏む =====
+    // 上の 3 本は行数が**減る** / 列数が**増える** fixture しか持たない。等値比較 `!=` を
+    // 片側の大小比較へ弱める変異(`<` / `>`)は、踏んでいない向きの下で恒等になって生存する。
+    // 下 2 本が逆向きを 1 つずつ埋める。
+
+    // 行が**増える**(先頭に行を挿す)。(row,col) は「同じ値の別セル」を指す = M-25 と同型。
+    // kill 対象(実測): (m19) 行数比較を `csvNow.Rows.Count < startRowCount` へ弱める変異 ——
+    // **これを殺すのは本テストだけ**(既存の行数テストは行が減る側なので `<` でも拒否側へ倒れる)。
+    // ほかに (m2) 行数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置きを殺す。
+    [Fact]
+    public void Commit_WhenRowInserted_AndValueCoincides_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "X,Y\nX,Y", 1, 0); // (1,0)="X"(2 行目)を編集開始
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 先頭へ 1 行挿す → (1,0) は元の 1 行目だった "X" を指す = 値は一致するが別セル。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(0, 0, "p,q\n"));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("p,q\nX,Y\nX,Y", afterMutation);
+            host.Announcer.Said.Clear();
+
+            editor.Commit();
+
+            Assert.Equal(afterMutation, doc.Editor.SnapshotText);
+            Assert.Equal(CsvAnnounceFormatter.CommitTargetChanged, host.Announcer.Said[^1]);
+        });
+
+    // 列が**減る**(その行の末尾列を削る)。ここだけは (row,col) が**同じセル**を指したまま
+    // 行の形だけが変わる = M-25 型のデータ破壊ではなく、guard が保守的に拒否する側の契約。
+    // 入力を捨てる偽陽性だが、形が崩れた本文へは書かないという §4.2 の設計どおりであり、
+    // かつ現行配線では到達しない(上のブロック冒頭の但し書きと同じ射程)。
+    // kill 対象(実測): (m20) 列数比較を `csvNow.Rows[row].Count > startColCount` へ弱める変異 ——
+    // **これを殺すのは本テストだけ**(既存の列テスト 2 本は列が増える側なので `>` でも拒否される)。
+    // ほかに (m3) 列数比較削除・(m7) 同一性検証の丸ごと削除・(m9) 文言の据え置き・
+    // (m14)(m18) 検査側の Rows[0] / Rows[col] 取り違えを殺す。
+    [Fact]
+    public void Commit_WhenColumnRemoved_WritesNothing_AndAnnounces() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt(host, "p,q\nX,X", 1, 0); // (1,0)="X" を編集開始(行 1 は 2 列)
+            host.Csv.BeginEdit();
+            var editor = GetCellEditor(host.Csv);
+            GetOverlayBox(editor).Text = "NEW";
+
+            // 行 1 の末尾列 ",X" を削る → 行 1 は 1 列になる。(1,0) の値 "X" は一致したまま。
+            MutateBodyWhileEditing(doc.Editor, ed => ed.ReplaceCharRange(5, 2, ""));
+            string afterMutation = doc.Editor.SnapshotText;
+            Assert.Equal("p,q\nX", afterMutation);
             host.Announcer.Said.Clear();
 
             editor.Commit();
@@ -1063,7 +1199,7 @@ public class CsvControllerTests
 
             // 1 手目: Ctrl+S 相当。本文が差し替わり、EditorControl がセル強調を捨てる
             // (EditorControl.ConvertEols の `_cellHighlight = null;`)。
-            Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf));
+            MutateBodyWhileEditing(doc.Editor, ed => Assert.True(ed.ConvertEols(LineEnding.Crlf)));
             Assert.Null(CellHighlight(doc.Editor));
 
             // 2 手目: (1,0) の値だけを別物へ変える。ConvertEols だけでは行列構造も値も変わらず

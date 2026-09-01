@@ -239,12 +239,15 @@ public sealed class CsvController : IDisposable
             return;
         if (!TryContext(out var ed, out var csv, out var row, out var col))
             return;
-        // 開始時点のセル。読まれるのは次の 3 か所だけで、いずれも _editor.Begin が戻るまでに
+        // 開始時点のセル。読まれるのは次の 4 か所だけで、いずれも _editor.Begin が戻るまでに
         // 同期的に読み切られる（CsvCellEditor は CsvField をフィールドへ保存しない。持つのは
         // _box / _closing / _refocus / _onCommit / _onCancel の 5 つ）:
         //   1. 直下の EnsureVisibleCharRange(f.Start, f.Length) —— これは BeginEdit 自身が読む
         //   2. CsvCellEditor.Begin の PointFromCharOffset(field.Start) —— オーバーレイの配置座標
         //   3. CsvCellEditor.Begin の TextBox.Text = field.Value —— 編集の初期値
+        //   4. 直下の startValue = NormalizeEols(f.Value) —— 確定時の同一性検査に使う開始値
+        // 4 だけは唯一「f 由来の値がクロージャの向こう側へ渡る」箇所だが、渡るのは
+        // **正規化済みの値のコピー**(string)だけで Start / Length は渡らない。
         // 確定時の書込先へは持ち越さない（M-25: onCommit 参照）。
         // csv は TryContext がメモ化済みの現在パース（=開始時点のスナップショット）。
         var f = csv.GetField(row, col);
@@ -312,8 +315,10 @@ public sealed class CsvController : IDisposable
                     // _cellHighlight を捨てる(EditorControl.ConvertEols)ので、そうした経路から
                     // **将来この拒否枝へ入ったとき**に強調を失ったまま残さないための復元である。
                     // 現行配線では拒否枝そのものが到達不能で(ConvertEols は行列構造も正規化後の
-                    // Value も変えないので必ず受理枝へ行く)、受理枝は末尾の ApplyCell が強調を
-                    // 張り直す。つまりこの復元が効くのは到達不能枝だけ=安全宣言に使わないこと。
+                    // Value も変えないので必ず受理枝へ行く —— ただしこの「変えない」は T1 / T2 の
+                    // 2 fixture 分だけが実測で、一般には設計書 §4.4 の**論証**である。§8.9 / §8.27 の
+                    // 留保つき)、受理枝は末尾の ApplyCell が強調を張り直す。
+                    // つまりこの復元が効くのは到達不能枝だけ=安全宣言に使わないこと。
                     // 到達したときに晴眼・弱視ユーザーが現在セルを見失わない側へ倒しておく
                     // (CLAUDE.md §2「晴眼・弱視ユーザーも第一級」)。
                     // target is not null は csvNow.Ok == true を含意する(target の作り方から)ので
@@ -325,10 +330,19 @@ public sealed class CsvController : IDisposable
                     return;
                 }
                 string serialized = CsvWriter.EscapeField(text);
+                // ReadOnly の昇降は try/finally で括る(FileController.WriteToPath の
+                // ConvertEols 前後と同じ idiom)。ReplaceCharRange が throw しても
+                // CSV モードが読み書き可のまま残らないようにする。
                 bool wasRo = ed.ReadOnly;
                 ed.ReadOnly = false;
-                ed.ReplaceCharRange(target.Start, target.Length, serialized);
-                ed.ReadOnly = wasRo;
+                try
+                {
+                    ed.ReplaceCharRange(target.Start, target.Length, serialized);
+                }
+                finally
+                {
+                    ed.ReadOnly = wasRo;
+                }
                 var csv2 = doc.ParseCsv();
                 if (csv2.Ok)
                     ApplyCell(ed, csv2, row, col, announce: true);
