@@ -417,3 +417,162 @@ Task 3 が比較するのは**開始時のパース結果と確定時のパー�
 - **却下(③)**: cref の粒度が不揃い。Core から Editor / App を参照できない以上
   `<c>` にするのは正しく、害がない。
 - **却下(③)**: §8.1 の「5 本」が時点依存。§8 は**実施記録**であり Step 2 時点の記述として正しい。
+
+### 8.11 Task 2 — 確定時に `(row, col)` から解決し直す(座標の持ち越しを消す)
+
+`onCommit` のクロージャから `start` / `length` を消し、確定時の `doc.ParseCsv()` →
+`GetField(row, col)` で書込先を解決し直した。§4 の芯(陳腐化しうる値をそもそも持ち越さない)の実体。
+
+**Step 3 で観測した赤**(逐語):
+
+```
+失敗 kxEdit.App.Tests.CsvControllerTests.Commit_AfterEolConversion_WritesEditedCell_NotStaleOffsets
+   Assert.Equal() Failure: Strings differ
+                       ↓ (pos 10)
+Expected: "a1,a2\r\nNEW,b2\r\nc1,c2"
+Actual:   "a1,a2\r\nNEW",b2\r\nc1,c2"
+                       ↑ (pos 10)
+
+失敗 kxEdit.App.Tests.CsvControllerTests.Commit_AfterEolConversion_WritesShiftedCell_NotStaleOffsets
+   Assert.Equal() Failure: Strings differ
+                            ↓ (pos 13)
+Expected: "a1,"p\r\nq"\r\nb1,NEW\r\nc1,c2"
+Actual:   "a1,"p\r\nq"\r\nb1NEW2\r\nc1,c2"
+                            ↑ (pos 13)
+```
+
+**計画の想定と完全一致**(T1 = 陳腐化した `length` が 1 足りず閉じ引用符が残る / T2 = 陳腐化した
+`start` が 1 手前を指し区切りカンマと `b` を食う)。fixture のオフセットも手計算を数え直したうえで
+一致し、期待値の修正は要らなかった。
+
+### 8.12 Task 2 — §2.2 / §3 の前提(Ctrl+S 経路)が実測になった
+
+`ConvertEols` は **`ReadOnly=true`(= CSV モードそのもの)のまま `true` を返し、本文を差し替えた**。
+根拠は 2 つとも上の赤に含まれている:
+
+- `Assert.True(doc.Editor.ConvertEols(LineEnding.Crlf))` が通っている(fast-path の `false` ではない)。
+- Actual の中でセル内改行が `\r\n` になっている(`"a1,a2\r\nNEW",b2...` / `"p\r\nq"`)= 実際に
+  バッファが差し替わった。
+
+`EditorControl.ConvertEols` の冒頭ガードは `if (_buffer is null) return false;` **だけ**で、
+ReadOnly 判定は無い。§3 の表が「Undo / Redo は `ReadOnly` ガードで no-op」と書き分けた一方で
+Ctrl+S だけが到達するとした理由が、コードの非対称として実物で確かめられた。
+
+### 8.13 Task 2 — この欠陥に既存の網は 1 本も無かった(変異表)
+
+書込先の 2 引数を 1 つずつ陳腐化させた総当たりを**実際に注入して**測った(注入後は毎回 revert し、
+`git diff -- src/` が意図した差分だけに戻ることを確認):
+
+| 変異 | T1 `..._WritesEditedCell_...` | T2 `..._WritesShiftedCell_...` | App 全体の失敗数 |
+|------|---|---|---|
+| (a) `start` / `length` を両方持ち越す(= **修正前の実装そのもの**) | ✗ | ✗ | **2 / 724** |
+| (b) `start` は解決し直すが `length` を持ち越す | ✗ | – | 1 |
+| (c) `length` は解決し直すが `start` を持ち越す | – | ✗ | 1 |
+
+分かったこと 2 つ:
+
+- **(a) を注入しても既存 722 本は全緑**。M-25 に既存の網は 1 本も無かった。
+- **(b) と (c) が別々のテストを落とすので、T1 / T2 は互いに冗長でない。** T2 の編集セルは
+  自分自身に改行を持たない = `ConvertEols` で長さが変わらないため、(b) は T2 の fixture 上で
+  恒等になる。計画が T1 / T2 を分けた意図(「オフセットずれのみのケースを分離する」)が
+  実測で裏付けられた形。
+
+この表はテスト側のコメントへ書き写した(CLAUDE.md §4 / §8.7 の手順「理由節を書く前に
+変異 × ケースの表を作り、表から書き写す」)。
+
+### 8.14 Task 2 — 計画の欠陥 2 点(`5fa12c3` で計画側を訂正済み)
+
+| # | 欠陥 | 実測 |
+|---|------|------|
+| A | Step 1 の `MutateBodyWhileEditing` ヘルパーを Task 2 に置くと**ビルドが壊れる** | Task 2 では 1 度も使わないため `error S1144: Remove the unused private method 'MutateBodyWhileEditing'`(`-warnaserror`)。実際に使う Task 3 へ移した。`using kxEdit.Editor;` も同様(Task 2 の範囲は `var` で足り、単独で足すと未使用 using になる) |
+| D | Step 3 の T2 想定 Actual の脱字 | `b1NEW\r\n` ではなく `b1NEW2\r\n` が正(陳腐化した `start` が区切りカンマと `b` を食い、元の `2` が残る) |
+
+そのほかの逸脱:
+
+- テストの挿入位置は計画本文の「`BeginEdit_ThenCancel_...` の直後」ではなく F2 節の末尾
+  (`BeginEdit_ThenCommit_NormalizesCrlfInCellValue_...` の直後)にした。計画本文は Task 1 で
+  テストが 1 本増えた分だけ古い。
+- `BeginEdit` 冒頭の既存コメント「開始時点のセル span(**直列化対象**)を確定」は本修正で偽になる
+  (`f` は直列化対象ではなくなった)ので書き直した。**ただしその書き直し自体に射程の誤りがあり、
+  §8.15 で再訂正した。**
+- CSharpier が 2 ファイルを整形(コメント表の桁揃え等)。pre-commit フック内で再 stage され
+  同一 commit に収まった。整形後に再ビルド + 再テストして緑を確認済み。
+
+### 8.15 Task 2 レビュー I-1 — 「結論は正しいが射程が偽」の 4 回目
+
+§8.14 で書き直した `BeginEdit` 冒頭のコメントに
+
+> 使い道は「オーバーレイの配置座標(`f.Start`)と初期値(`f.Value`)」**だけ**で、
+> どちらも `Begin` が同期的に読む。
+
+と書いたが、`f` の読取箇所は **3 か所**あり列挙が 1 つ足りなかった(実物を開いて確認した):
+
+| # | 場所 | 読む値 |
+|---|------|--------|
+| 1 | `CsvController.cs` の `ed.EnsureVisibleCharRange(f.Start, f.Length)` | `f.Start` / **`f.Length`** |
+| 2 | `CsvCellEditor.Begin` の `ed.PointFromCharOffset(field.Start)` | `f.Start` |
+| 3 | `CsvCellEditor.Begin` の `Text = field.Value` | `f.Value` |
+
+落としていた **`f.Length` は M-25 が問題にしている 2 つの陳腐化値の片方そのもの**で、
+「どこにも使われていない」と読んだ人が 1 を見て混乱する。加えて「どちらも `Begin` が読む」は
+2 / 3 については真だが **1 は `Begin` の外(`BeginEdit` 自身)**であり、ここも偽だった。
+
+**結論(確定時の書込先へは持ち越さない)は正しく、射程だけが偽。** §8.3 / §8.7 と同じ型の
+**4 回目**である。3 か所を列挙し「いずれも `_editor.Begin` が戻るまでに同期的に読み切られる」へ
+書き直した(fixup)。あわせて `CsvCellEditor` が `CsvField` をフィールドへ保存しないこと
+(持つのは `_box` / `_closing` / `_refocus` / `_onCommit` / `_onCancel` の 5 つだけ)も
+実読で確認してからコメントに書いた。
+
+### 8.16 Task 2 レビュー M-2 — `Ok=false` 時の挙動が変わった(意図的・安全側)
+
+CLAUDE.md §2「意図的な挙動変更は文書化する」の対象。
+
+- **修正前**: パース結果を見ずに**まず陳腐化した座標で書き**、そのあと `csv2.Ok == false` なら
+  `ParseError` を発声していた(= 壊れた本文が残る)。
+- **修正後**: `csvNow.Ok == false` なら `target` が `null` になり、**1 文字も書かずに**
+  `ParseError` を発声する。
+
+安全側であり §4 の設計どおりだが、**現行の配線ではこの差は到達不能**である。F2 編集中に本文を
+変える経路は §3 の表のとおり `ConvertEols` 1 本だけで、`ConvertEols` は CR / LF 以外の
+バイトに触れない = 引用符の対応も行列構造も変えないため、`Ok` が `true` から `false` へ
+転じることがない。到達経路が生まれるのは将来配線が増えたときである。
+
+**ただしこの到達不能性は §4.4 の論証を引いたものであって、Task 2 では実測していない**
+(`Ok=false` を踏む網は Task 2 に無い。§8.17-1 の fixture がその網の候補)。
+「網がある」と読める書き方をしないこと。
+
+### 8.17 Task 2 — Task 3 への申し送り(実装はしない・記録のみ)
+
+1. **`csvNow.Ok` は Task 3 の「値 + 形」guard でも守られない**(レビュー I-2)。弁別する
+   fixture の構成はレビュー担当が提示した ——「開始本文 `a1,a2\nb1,b2` の (0,0) で F2 開始 →
+   末尾へ `\n"x` を追記」。**実物で確認した条件**(`CsvParser.cs:189`。レビューの `:188` は 1 行ずれ):
+
+   ```csharp
+   if (ok && (pos > fieldStart || row.Count > 0))
+   ```
+
+   直前の `if (inQuotes) ok = false;`(`:184`)で未終端引用符は `ok=false` になり、上の
+   `if (ok && ...)` が**末尾の不完全レコードだけを rows へ混ぜない**。**条件式そのものは真と確認した。**
+   ただし「`Rows.Count=2` / `Rows[0].Count=2` / `GetField(0,0)="a1"` がすべて開始時と一致する」
+   という帰結は**コード読解による論証であって Task 2 では実測していない**(既存の L1
+   `Unterminated_quote_is_not_ok` は `Ok=false` しか assert していない)。**Task 3 で fixture を
+   書いて実測すること。**
+2. **早期 return はセル強調を復元しない**(レビュー M-1)。`ConvertEols` は本文差し替えの直後に
+
+   ```csharp
+   _cellHighlight = null; // 変換前オフセット由来のセル強調は無効化(EOL 変換で位置がずれる)
+   ```
+
+   を実行する(`EditorControl.cs:592`。**実物で確認して真**)。Task 2 の早期 return は
+   `target is null` = 強調すべきセルが存在しない場合なので対処不要だが、**Task 3 では同じ
+   return が「値・形が不一致(= セルは存在する)」の受け皿になる**。晴眼・弱視ユーザーは
+   CLAUDE.md §2 で第一級なので、強調を失ったまま放置しない手当てを Task 3 で検討すること。
+3. **T1 の「第 2 の役割」がコメントから落ちている。** 計画の fixture コメントにあった
+   「正規化を省いた同一性検証を殺せる fixture」という役割を、Task 2 のコメントには書いていない
+   (Task 2 時点では同一性検証が存在しないので**先食いしない**判断)。ただし Task 3 Step 4 は
+   「T1 が緑のままであること」を正規化の網として当てにしているので、**Task 3 でこの役割を
+   コメントへ書き戻すこと**。書き戻さないと将来 `MixedEolCsv` が編集されたときに網が黙って消える。
+4. **`ParseError` の暫定利用は Task 3 の完了が前提。** `target is null` の到達条件のうち
+   「行 / 列が減って `GetField` が `null`」のケースでは「CSVとして解析できません」は**文言が偽**であり、
+   かつどちらの条件でもユーザーの入力が黙って捨てられることを発声が伝えない。
+   **Task 2 単独ではマージできない。**
