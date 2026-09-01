@@ -395,3 +395,85 @@ pragma の方が意図が保存される。
 `AtomicReplaceFailedException` は `IOException` 派生なので、App 層の広い `catch (IOException)` が
 これを握り潰し、`PreservedTempPath` をユーザーに見せないまま「保存に失敗しました」で終わる経路が
 ありうる。tmp を残す意味が消えるので、Task 3 / Task 4 で catch 経路を確認すること。
+
+### 10.2 Task 2 — seam へのミューテーション検証を例外的に実施した判断と、生存した 3 変異
+
+#### なぜ §4-A の禁止を外したか
+
+CLAUDE.md §4-A はファイル I/O 処理へのミューテーション検証を**禁止**している。Task 2 は
+`AtomicFile` = まさにファイル I/O であり、原則どおりなら対象外である。それでも実施したのは、
+**ユーザー規範の例外条件「厳密な挙動を保証する必要がある場合」に当たると判断した**ため。
+根拠は「I/O だから」ではなく、**この seam が Task 3 のデータ喪失修正の土台**であることにある。
+
+- Task 3 の復旧ロジックは `CommitStaged` の 1 か所にだけ入る。2 つある `Write` の**片方が
+  静かに seam から外れても、修正が効かないまま全テストが緑になる**。緑は「直った」の証拠に
+  ならなくなる。
+- 本番の主保存経路 `TextFileService.Save(string, TextBuffer, …)` が使うのは **Stream 版**の
+  ほうであり、外れて困る側がまさにそこだった(下記 M-2)。
+- §6.4 は同じ例外条件を `§3.1 の判定表の 2 変異`へ既に適用している。Task 2 の seam は
+  その判定表を載せる土台なので、同じ理屈が及ぶ範囲と判断した。
+
+なお本記録は「§4-A を破った」ではなく「例外条件に当てた」という判断の記録である。
+**適用範囲は差替段の集約と seam の後始末に限る**。`AtomicFile` の他の部分(ステージング書込・
+`TryDelete`・`IsShareOrLockViolation`)へは広げていない。
+
+#### 生存していた 3 変異(すべて仕様レビューの指摘・実測)
+
+3 件のうち **M-1 / M-2 の 2 件は「タスク本文が明文で挙げた制約そのものが無網」**だった。実装
+報告では「catch は catch-all のまま」「両 `Write` が `CommitStaged` を通る」を確認済みと書いたが、
+確認したのは**現在のコードがそうなっていること**であって、**それが変えられたときに気付ける網**では
+なかった。この 2 つは別のことである。
+
+| # | 変異 | 修正前 | 修正後 |
+|---|------|--------|--------|
+| M-1 | `CommitStaged` の `catch` → `catch (IOException)` | Core 1384 / App 734 **全 PASS**・0 warning | Core 1387 中 **2 失敗** |
+| M-2 | Stream 版 `Write` の `CommitStaged(tmp, path)` を変更前のインラインへ戻す | Core 1384 / App 734 **全 PASS**・0 warning | Core 1387 中 **1 失敗** |
+| M-3 | `CommitOverrideScope.Dispose()` の `SetCommitOverride(_previous)` → `SetCommitOverride(null)` | Core 1384 **全 PASS**・0 warning | Core 1387 中 **1 失敗** |
+
+M-3 は `-warnaserror` でも 0 warning で通ることを確認済み(アナライザが殺しているのではなく、
+本当に網が無かった)。
+
+**M-1 が非等価である実証**: 保存先が ReadOnly 属性のとき `File.Replace` は
+`UnauthorizedAccessException`(= `IOException` ではない)を投げる。狭めた実装ではこれが catch を
+素通りし、**残骸 tmp が 1 個残る**(既定実装は 0 個)。`FileControllerTests` の ReadOnly 系は
+「原本不変」と「Modified 復元」しか見ておらず、tmp 残骸を見ていないため素通しになっていた。
+
+塞いだあとに実際に赤になった出力:
+
+```
+# M-1
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Commit_failure_with_non_io_exception_still_cleans_tmp
+   Assert.Empty() Failure: Collection was not empty
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Write_Stream_CommitFailureWithNonIoException_StillCleansTmp
+   Assert.Empty() Failure: Collection was not empty
+失敗! -失敗: 2、合格: 1385、合計: 1387
+
+# M-2
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Write_Stream_CommitFailureWithNonIoException_StillCleansTmp
+   Assert.Throws() Failure: No exception was thrown
+失敗! -失敗: 1、合格: 1386、合計: 1387
+
+# M-3
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Commit_override_scopes_restore_in_lifo_order
+   Assert.Equal() Failure: Values differ / Expected: 1 / Actual: 0
+失敗! -失敗: 1、合格: 1386、合計: 1387
+```
+
+M-2 の網は Stream 側だけを赤にし、byte[] 側は緑のまま = 網が経路を弁別できている。
+
+#### Task 3 で壊さないための注意
+
+M-1 / M-2 の網はフックに**差替先を消させない**形にしてある。Task 3 で tmp 保持が入っても
+保持されるのは「原本が消えた」枝だけなので、この 2 本は `Assert.Empty`(tmp 0 個)のまま
+生き残る。**Task 3 でこの 2 本を書き換える必要が出たら、それは復旧の分岐条件が
+「原本が消えたか」以外に広がった合図**なので、設計 §3.1 の判定表を先に見直すこと。
+
+#### 実装計画からの逸脱(受容済み)
+
+計画どおりの `CommitOverrideScope.Dispose() => t_commitOverride = _previous;` は
+`error S2696`(インスタンスメソッドから static フィールドを更新するな)でビルドが割れ、
+復帰用 static メソッドを外側へ足すと今度は `error S3398`(入れ子型からのみ使われるので中へ移せ)に
+なる。張る側と戻す側の両方が通る `SetCommitOverride` 1 つへ集約して両方を解消した
+(= フィールドへの書込口が 1 か所になる)。レビューで計画どおりの形へ一時的に戻して両エラーの
+再現を実測したうえで**受容**と結論した。Task 1 の RCS1194 に続き、計画のコードがアナライザを
+通らなかったのは 2 件目。

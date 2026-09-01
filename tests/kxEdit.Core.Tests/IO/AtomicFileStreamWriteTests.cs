@@ -130,4 +130,45 @@ public class AtomicFileStreamWriteTests
                 File.Delete(path);
         }
     }
+
+    /// <summary>
+    /// Stream 版の差替も <c>CommitStaged</c>(= seam)を通ること、かつその catch が catch-all で
+    /// あること(非 IOException でも tmp を掃除する)を同時に固定する。
+    /// <para>
+    /// <b>Stream 版であることが重要</b>: 本番の主保存経路 <c>TextFileService.Save(string,
+    /// TextBuffer, …)</c> が使うのはこちら。ここが seam から静かに外れると、Task 3 の復旧
+    /// ロジックが主経路に効いていなくても全テストが緑になる(Task 2 レビュー M-2)。
+    /// byte[] 版だけを通る網では、この退行を検出できない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Write_Stream_CommitFailureWithNonIoException_StillCleansTmp()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            File.WriteAllText(path, "stream-original");
+            using (
+                AtomicFile.OverrideCommitForTest(
+                    (_, _, _) => throw new InvalidOperationException("boom")
+                )
+            )
+            {
+                // フックへ到達しない実装(インライン差替へ戻す等)なら書込は成功してしまい、
+                // この Assert.Throws が落ちる。
+                Assert.Throws<InvalidOperationException>(() =>
+                    AtomicFile.Write(path, s => s.WriteByte(0x39))
+                );
+            }
+            // 原本は不変(フックは差替先に触っていない)・tmp 残骸なし。
+            Assert.Equal("stream-original", File.ReadAllText(path, Encoding.UTF8));
+            string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+            Assert.Empty(Directory.GetFiles(dir, Path.GetFileName(path) + ".*.tmp"));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
 }
