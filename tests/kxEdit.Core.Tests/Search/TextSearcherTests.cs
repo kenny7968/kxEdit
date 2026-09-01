@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using kxEdit.Core.Search;
 using Xunit;
 
@@ -249,6 +251,44 @@ public class TextSearcherTests
         var (fragment, count) = Make(@"\baa", useRegex: true).ReplaceInRange("aaa", 1, 2, "X");
         Assert.Equal("aa", fragment);
         Assert.Equal(0, count);
+    }
+
+    // ----- 停止性: scan の前進をエンジンに賭けない(2026-09-01 B2 Task 2 脆弱性レビュー) -----
+
+    [Theory]
+    // Regex.Match(text, startat) は Index >= startat を保証しない(.NET 9.0.8 実測:
+    // new Regex("(?:b(?!a)+?)*").Match("abbbb", 4) が Index=3 Length=2 を返す)。
+    // scan = m.Index + ... を素直に受けると scan が据え置きになり、個々の Match は 0ms で
+    // 返るため RegexMatchTimeoutException も出ないまま永久にスピンする(UI 完全凍結)。
+    // 期待値は**実測値**。ゼロ幅後退と再アンカーを入れた時点で病的入力の出力は
+    // 変更前(Matches ベース)と一致しない=一致は要求しない。要求は「止まること」と
+    // 「断片が範囲の中身+置換だけであること」。
+    [InlineData(@"(?:b(?!a)+?)*", "abbbb", 0, 5, "XabXXbX", 4)]
+    [InlineData(@"(b(?!a)+?)*", "abb", 1, 2, "bbX", 1)]
+    [InlineData(@"(a(?!b)+?)*", "aaa", 1, 2, "aaX", 1)]
+    public async Task ReplaceInRange_PathologicalRegex_Terminates(
+        string pattern,
+        string text,
+        int start,
+        int length,
+        string expected,
+        int expectedCount
+    )
+    {
+        // ハングするテストは CI を止めるので、待ち時間を assert する形にする
+        // ([Fact(Timeout=...)] もスレッドを殺さないため、どちらにせよ観測用の網)。
+        // Task.Wait / .Result は xUnit1031(-warnaserror でビルド不能)なので WhenAny で待つ。
+        var t = Task.Run(() =>
+            Make(pattern, useRegex: true).ReplaceInRange(text, start, length, "X")
+        );
+        var finished = await Task.WhenAny(t, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.True(
+            ReferenceEquals(finished, t),
+            $"ReplaceInRange が停止しない(Match が Index < startat を返す入力): {pattern}"
+        );
+        var (fragment, count) = await t;
+        Assert.Equal(expected, fragment);
+        Assert.Equal(expectedCount, count);
     }
 
     // ----- ゼロ幅マッチの挿入点を論理文字境界へ後退させる(2026-09-01 B2 Task 2) -----

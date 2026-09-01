@@ -157,6 +157,23 @@ public sealed class TextSearcher
     /// / 既に出力した位置より前になるマッチは<b>スキップし件数にも数えない</b>。
     /// 後退の判定は<b>元テキスト</b>に対して行う(単発置換も編集前スナップショットで判定する)。
     /// </para>
+    /// <para>
+    /// <b><c>scan</c> の前進は <c>Math.Max(scan + 1, ...)</c> で強制する</b>=停止性をエンジンの
+    /// 振る舞いに賭けない。<c>Regex.Match(text, startat)</c> は
+    /// <b><c>Index &gt;= startat</c> を保証しない</b>: .NET 9.0.8 実測で
+    /// <c>new Regex("(?:b(?!a)+?)*", CultureInvariant | IgnoreCase).Match("abbbb", 4)</c> は
+    /// <c>Index=3 Length=2</c> を返す(<c>startat</c> より前で終わるマッチ)。これを
+    /// <c>scan = m.Index + 1</c> のように素直に受けると <c>scan</c> が据え置き / 後退して
+    /// <b>無限ループ</b>になる。個々の <c>Match</c> は 0ms で返るので
+    /// <see cref="RegexMatchTimeoutException"/> も出ず、UI スレッドが 100% CPU で永久にスピンする
+    /// (例外が無いためクラッシュハンドラにも到達せず、メッセージポンプ駆動の自動バックアップも
+    /// 止まる)。<c>Math.Max</c> により <c>scan</c> は<b>エンジンの返り値に依らず</b>毎周 1 以上
+    /// 増えるので、反復回数は <c>end - s + 1</c> 以下に収まる=停止性が<b>観測可能な事後条件</b>
+    /// だけで証明できる(「<c>Match</c> はこう振る舞うはず」という前提を置かない)。
+    /// 異常が起きない通常入力では <c>m.Index &gt;= scan</c> なので <c>Math.Max</c> は恒等=挙動不変
+    /// (全数コーパス 194,238 ケースで <c>Math.Max</c> 無し版と 1 バイトも違わないことを実測)。
+    /// 網 = <c>ReplaceInRange_PathologicalRegex_Terminates</c>。
+    /// </para>
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
     /// </summary>
     public (string Fragment, int Count) ReplaceInRange(
@@ -187,14 +204,17 @@ public sealed class TextSearcher
             if (at < pos)
             {
                 // 範囲始端より前 / 既に出力した位置より前へは書けない。
-                scan = m.Index + 1; // ゼロ幅なので必ず 1 進める(同位置の無限ループ回避)
+                // ここへ来るのはゼロ幅マッチだけとは限らない: at < pos は m.Index < pos でも
+                // 成立し、実際 .NET 9.0.8 の Index < startat 異常では Length=2 のマッチが通る。
+                // scan + 1 との Math.Max が停止性の担保(理由は xmldoc)。
+                scan = Math.Max(scan + 1, m.Index + 1);
                 continue;
             }
             sb.Append(text, pos, at - pos);
             sb.Append(Expand(m, replacement));
             pos = at + m.Length;
             count++;
-            scan = m.Index + Math.Max(1, m.Length);
+            scan = Math.Max(scan + 1, m.Index + Math.Max(1, m.Length));
         }
         sb.Append(text, pos, end - pos);
         return (sb.ToString(), count);
