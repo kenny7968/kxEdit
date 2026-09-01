@@ -328,35 +328,44 @@ public class EditorControlReplaceExactTests
             // 反復ごとに本文を差し替える。SetSource は 1 度限りで 2 回目は InvalidOperationException
             // になるため、任意回呼べる SetOrReplaceSource を使う。
             using var ctrl = new EditorControl();
+            // 入れ子ループは波括弧を明示する。省略すると CSharpier が内側の foreach を
+            // 外側と同じ段へ畳んでしまい、Sonar S3973(条件実行の範囲が字面から読めない)で
+            // ビルドが止まる(2026-09-01 B2 Task 3 で実測)。
             foreach (string doc in docs)
+            {
                 for (int start = -1; start <= doc.Length + 1; start++)
+                {
                     foreach (int len in lengths)
-                    foreach (string repl in repls)
                     {
-                        ctrl.SetOrReplaceSource(TextBuffer.FromString(doc));
-                        string before = ctrl.Text;
-                        var (cs, ce) = ctrl.GetExactChangeRange(start, len);
+                        foreach (string repl in repls)
+                        {
+                            ctrl.SetOrReplaceSource(TextBuffer.FromString(doc));
+                            string before = ctrl.Text;
+                            var (cs, ce) = ctrl.GetExactChangeRange(start, len);
 
-                        string ctx =
-                            $"doc={Show(before)} start={start} len={len} repl={Show(repl)} range=[{cs},{ce})";
-                        Assert.True(0 <= cs && cs <= ce && ce <= before.Length, ctx);
+                            string ctx =
+                                $"doc={Show(before)} start={start} len={len} repl={Show(repl)} range=[{cs},{ce})";
+                            Assert.True(0 <= cs && cs <= ce && ce <= before.Length, ctx);
 
-                        ctrl.ReplaceCharRangeExact(start, len, repl);
-                        string after = ctrl.Text;
+                            ctrl.ReplaceCharRangeExact(start, len, repl);
+                            string after = ctrl.Text;
 
-                        int tail = before.Length - ce;
-                        Assert.True(after.Length >= cs + tail, $"{ctx} after={Show(after)}");
-                        // 前側は不変
-                        Assert.True(
-                            before[..cs] == after[..cs],
-                            $"{ctx} after={Show(after)} prefix"
-                        );
-                        // 後側は不変
-                        Assert.True(
-                            before[ce..] == after[(after.Length - tail)..],
-                            $"{ctx} after={Show(after)} suffix"
-                        );
+                            int tail = before.Length - ce;
+                            Assert.True(after.Length >= cs + tail, $"{ctx} after={Show(after)}");
+                            // 前側は不変
+                            Assert.True(
+                                before[..cs] == after[..cs],
+                                $"{ctx} after={Show(after)} prefix"
+                            );
+                            // 後側は不変
+                            Assert.True(
+                                before[ce..] == after[(after.Length - tail)..],
+                                $"{ctx} after={Show(after)} suffix"
+                            );
+                        }
                     }
+                }
+            }
         });
 
     /// <summary>失敗メッセージ用。不可視文字(改行・孤立サロゲート・U+FFFD)を \uXXXX で見せる。</summary>
