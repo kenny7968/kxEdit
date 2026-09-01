@@ -193,7 +193,11 @@ public class TextSearcherTests
     }
 
     [Theory]
-    // 全文置換(s == 0)は Matches ベースの旧実装と 1 文字も変わらないこと。
+    // 全文置換(s == 0)でも**走査規則の変更(Matches → Match(text, scan) の再アンカー)に
+    // ついては**挙動不変であること。メソッド名の "KeepsMatchesSemantics" もこの走査規則を指す。
+    // <b>s == 0 なら何も変わらない、ではない</b>: ゼロ幅マッチが論理文字の内側に立つ場合は
+    // ゼロ幅後退により意図的に変わる(_ZeroWidthInsideCrlf_RetreatsToBoundary が
+    // まさに s == 0 の全文置換で "a\rX\nb" → "aX\r\nb" の変化を固定している)。
     // 期待値は**変更前の src での実測値**(計画の値ではない)。
     [InlineData("ab_ab_ab", "ab", false, "X", "X_X_X", 3)]
     [InlineData("aaaa", "aa", true, "X", "XX", 2)] // 非重複・左端優先
@@ -237,7 +241,11 @@ public class TextSearcherTests
         // Match(text, startat) は入力を切らないので \b は全文文脈で評価される
         // = 位置 1 は語中なので \b は成立しない。
         // 範囲を substring("aa") へ切って照合する実装なら 1 件になる
-        // = この fixture が「再アンカー」と「substring 化」を弁別する唯一の形。
+        // = この fixture は「再アンカー」と「substring 化」を弁別できる形の 1 つ。
+        // 弁別できる形は他にもあり、逆向きにも作れる(実測: (?<=a)aa は再アンカーで 1 件・
+        // substring 化で 0 件。substring 化では左文脈の 'a' が切り落とされて後読みが不成立)。
+        // ただし<b>現に存在する網としてはこの 1 本だけ</b>=消すと弁別網がゼロになる。
+        // 他の ReplaceInRange テストは s == 0 か、両実装で同じ答えになる形しかない。
         var (fragment, count) = Make(@"\baa", useRegex: true).ReplaceInRange("aaa", 1, 2, "X");
         Assert.Equal("aa", fragment);
         Assert.Equal(0, count);
