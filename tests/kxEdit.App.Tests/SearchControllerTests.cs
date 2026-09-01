@@ -1528,40 +1528,65 @@ public class SearchControllerTests
         });
 
     [Fact]
-    public void ReplaceOne_ReadOnly_ChangesNothingAndSaysNothing() =>
+    public void ReplaceOne_ReadOnly_ChangesNothingSaysNothingAndKeepsScope() =>
         Sta.Run(() =>
         {
+            // 本文・発声・スコープの 3 つとも動かないことを見る。本文と発声だけだと、
+            // ガードが grown 更新の後ろへ移動する退行を素通しする: 委譲先が no-op なので
+            // 本文も発声も変わらないまま _selectionScope だけが伸縮し、しかも snap2 == snap で
+            // 世代チェックを通るため、次の置換が捕捉と違う範囲に効く。
+            // prefix "abc " と suffix " abc" の両方を除外できる fixture(全選択との区別)。
             using var host = new Host();
-            var doc = host.NewDoc("abc abc");
+            var doc = host.NewDoc("abc abc abc");
             host.View.Pattern = "abc";
             host.View.Replacement = "X";
+            host.View.InSelection = true;
             host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3); // 中央の "abc" だけを捕捉
+            host.Search.OnInSelectionToggled(true);
             doc.Editor.ReadOnly = true;
             int saidBefore = host.Announcer.Said.Count;
 
             host.Search.ReplaceOne();
 
-            Assert.Equal("abc abc", doc.Editor.Text);
+            Assert.Equal("abc abc abc", doc.Editor.Text);
             Assert.Equal(saidBefore, host.Announcer.Said.Count); // 発声もしない
+
+            // 書き込み可能へ戻すと、捕捉どおりの範囲へ効く=スコープは無傷。
+            doc.Editor.ReadOnly = false;
+            host.Search.ReplaceOne();
+
+            Assert.Equal("abc X abc", doc.Editor.Text);
         });
 
     [Fact]
-    public void ReplaceAll_ReadOnly_ChangesNothingAndSaysNothing() =>
+    public void ReplaceAll_ReadOnly_ChangesNothingSaysNothingAndKeepsScope() =>
         Sta.Run(() =>
         {
-            // ReplaceOne 版と同型。委譲先の no-op を見ない構造は 2 経路にあるので網も 2 本要る。
+            // ReplaceOne 版と同型。委譲先の no-op を見ない構造は 2 経路にあり、
+            // ReplaceAll 側もガードの後ろで _selectionScope を rangeStart + fragment.Length へ
+            // 取り直すので、同じ「本文も発声も動かないままスコープだけ壊れる」退行を持つ。
             using var host = new Host();
-            var doc = host.NewDoc("abc abc");
+            var doc = host.NewDoc("abc abc abc");
             host.View.Pattern = "abc";
             host.View.Replacement = "X";
+            host.View.InSelection = true;
             host.Search.OpenReplace();
+            doc.Editor.SelectCharRange(4, 3);
+            host.Search.OnInSelectionToggled(true);
             doc.Editor.ReadOnly = true;
             int saidBefore = host.Announcer.Said.Count;
 
             host.Search.ReplaceAll();
 
-            Assert.Equal("abc abc", doc.Editor.Text);
+            Assert.Equal("abc abc abc", doc.Editor.Text);
             Assert.Equal(saidBefore, host.Announcer.Said.Count); // 「N 件置換しました」も言わない
+
+            doc.Editor.ReadOnly = false;
+            host.Search.ReplaceAll();
+
+            Assert.Equal("abc X abc", doc.Editor.Text);
+            Assert.Equal("1 件置換しました", host.Announcer.Said[^1]);
         });
 
     [Fact]

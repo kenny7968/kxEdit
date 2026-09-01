@@ -383,24 +383,40 @@ public sealed class SearchController
             // 見る事後条件なので、WithinScope より狭くしてはならない。
             //
             // 実測(2026-09-01 B2 Task 4): 現時点で赤くできるのは Start 側だけで、
-            // `change.End > check.End` を落とす変異は App 721 件 green のまま生存する。
-            // 死んだ操作ではなく、現在の不変条件の下では発火しえないだけ:
+            // `change.End > check.End` を落とす変異は App 全件 green のまま生存する。
+            // 死んだ式ではなく、現在の不変条件の下では真枝へ倒れないだけ
+            // (`>` → `>=` の変異は赤くなる=境界の選び方には網が張ってある):
             //   - ゼロ幅は change.End == 後退後の挿入点 ≤ span.Start ≤ check.End(WithinScope)
             //     なので終端側を超えられない=構造的に始端側専用。
             //   - 非ゼロ幅で終端が広がるのはサロゲートペアを割ったときだけで、そのとき
             //     広げ先は「ペアの終わり」=span.End 以上で最小の論理文字境界。
-            //     check.End が境界に乗っていれば必ず change.End ≤ check.End になる
-            //     (全数実測: 3 単位までの {a,\r,\n,😀} 全テキスト × 全 (start,length) で、
-            //      終端が境界に乗るケースの広がりは 0 件)。
+            //     check.End が境界に乗っていれば必ず change.End ≤ check.End になる。
             //   - check.End が境界から外れるのは CRLF の内側だけで、そこは
             //     GetExactChangeCharRange が広げない(PR #56 §9.9 の一括置換を通すため)。
-            //     スコープ端がサロゲートペアの内側に入る経路は見つからなかった
-            //     (全数探索 172,960 状態。捕捉は境界へスナップし、端の隣の文字は
-            //      スコープ内の置換では変わらないため)。
+            //   - スコープ端がサロゲートペアの内側に入る経路は無い。捕捉は境界へスナップし
+            //     (SetSelectionCharRange)、スコープ始端より前と終端より後の内容は
+            //     スコープ内の置換では変わらない。ただし**それだけでは論証が閉じない**:
+            //     不変の隣接文字が孤立 low サロゲートなら、スコープ内の置換が末尾へ high を
+            //     置いた瞬間にペアが成立して端がペアの内側へ落ちうる。塞いでいるのは
+            //     「本文バッファは孤立サロゲートを保持できない」(UTF-8 往復で U+FFFD へ潰れる)
+            //     という別の不変条件で、ReplaceCharRangeExact の remarks が根拠、
+            //     網は Editor の ReplaceCharRangeExact_LowSurrogateOnly_HighHalfCollapsesTo…
+            //     と Core の Unpaired_high_surrogate_is_normalized_to_replacement_char_by_buffer。
             // 片側だけ書くと「包含を見ている」という読みが嘘になり、GetExactChangeCharRange の
             // 弁別規則が増えたときに黙って素通りする。両側を残す。
+            //
+            // 上の到達不能は {a, \r, \n, 😀} を 3 単位まで組んだ全テキスト × 全選択 ×
+            // {ReplaceOne, ReplaceAll} × 代表パターン / 置換文字列の全数プローブでも確認したが、
+            // **プローブは使い捨てで commit していない**(ゲートに乗る規模ではないため)。
+            // 再監査は状態数の突き合わせではなく、上の条件でプローブを組み直して行うこと。
             if (scope is { } check)
             {
+                // 前提: IsComposing でないこと(GetExactChangeCharRange の remarks の契約)。
+                // 照会側は IME 未確定を確定させないが、書込側の ReplaceCharRangeExact は本体前に
+                // CancelCompositionAndDefault を通す。同期配送する IME ではそこで本文が動きうる
+                // =「検査した世代 ≠ 書く世代」になり、本検査そのものが素通りする
+                // (この Task が塞いだ穴と同型)。ReplaceOne の起動点は検索ダイアログのボタン
+                // だけで、ダイアログがフォーカスを取る時点で OnLostFocus が確定させるため到達しない。
                 var change = ed.GetExactChangeCharRange(span.Start, span.Length);
                 if (change.Start < check.Start || change.End > check.End)
                 {
@@ -498,12 +514,14 @@ public sealed class SearchController
         // [rangeStart, rangeStart+rangeLen)=スコープそのものに収まる:
         //   - ゼロ幅は SnapshotSearcher.ReplaceInRange 側が後退先を見て
         //     「範囲始端より前へ下がるマッチ」を件数にも数えないので(Task 2)、
-        //     count == 0 →「見つかりません」で書込へ到達しない
-        //     (実測: スコープが CRLF の内側の 1 点へ潰れた状態 × 全 80 パターン組で
-        //      本文が変わったケースは 0 件。同じ状態で ReplaceOne は 14 件書いた)。
+        //     count == 0 →「見つかりません」で書込へ到達しない。スコープが CRLF の内側の
+        //     1 点へ潰れた状態は**到達する**("\ra\n" の [1,2) を捕捉 → a を削除)が、
+        //     その状態で代表パターン / 置換文字列を総当たりしても本文が変わることは無かった
+        //     (同じ状態で ReplaceOne は書いてしまう=そちらには網を張ってある)。
         //   - 非ゼロ幅で範囲が外へ広がるのはスコープ端がサロゲートペアの内側にあるときだけで、
-        //     その状態への到達経路は見つからなかった(全数探索 172,960 状態)。
+        //     その状態への到達経路は無い(理由は ReplaceOne 側の同じ検査のコメント)。
         // 到達 fixture の無いガードは変異で必ず生存する死んだ分岐になるため置かない。
+        // 探索に使ったプローブは使い捨てで commit していない(条件は ReplaceOne 側のコメント)。
         if (ed.ReadOnly)
             return;
         var searcher = ResolveSearcher();
