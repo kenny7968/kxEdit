@@ -15,6 +15,8 @@ namespace kxEdit.App;
 /// <list type="bullet">
 ///   <item>同梱 <c>https://kxedit.preview/*.html</c>/<c>.svg</c> への in-frame 遷移を Block
 ///     (attacker フォルダ由来の CSP 未適用ドキュメントが same-origin でスクリプト実行するのを塞ぐ・MD-H-1)。</item>
+///   <item>preview 仮想ホストは <c>http</c> でも Block (<c>LaunchExternal</c> だと既定ブラウザが
+///     <c>kxedit.preview</c> を実 DNS 解決してしまう・F-7)。</item>
 ///   <item>外部 http/https は in-frame ナビゲートさせず既定ブラウザへ逃がす
 ///     (プレビュー窓の title を保ったまま偽サイトが表示される phishing 防止)。</item>
 ///   <item><c>file://</c> UNC は Windows が SMB 経由で NTLM 認証を通してしまうため
@@ -29,13 +31,15 @@ public static class PreviewNavigationPolicy
     /// <summary>ナビゲーション分類。</summary>
     public enum Classification
     {
-        /// <summary>preview 内で許可 (about:blank のみ)。MD-H-1 以降 https://kxedit.preview/* は Block。</summary>
+        /// <summary>preview 内で許可 (about:blank のみ)。MD-H-1 / F-7 以降 http(s)://kxedit.preview/* は Block。</summary>
         AllowIntra,
 
         /// <summary>既定ブラウザ/アプリで開く安全 scheme (http/https 非 preview, mailto)。</summary>
         LaunchExternal,
 
-        /// <summary>阻止 (file://, ftp://, data:, javascript:, vbscript:, その他 unknown)。</summary>
+        /// <summary>
+        /// 阻止 (http(s)://kxedit.preview/*, file://, ftp://, data:, javascript:, vbscript:, その他 unknown)。
+        /// </summary>
         Block,
     }
 
@@ -75,15 +79,20 @@ public static class PreviewNavigationPolicy
         string scheme = parsed.Scheme.ToLowerInvariant();
         return scheme switch
         {
-            // https + preview 仮想ホストは全面 Block (MD-H-1)。
-            // kxedit.preview は実ホストではないので LaunchExternal (既定ブラウザ起動) しても無意味。
+            // preview 仮想ホストは全面 Block (MD-H-1)。
             // preview 本体は NavigateToString (data: URI) 経由、CSS/画像は WebResourceRequested
             // のサブリソース経由で届くため、正当な top-level ナビゲーションがこのホストを対象にする
             // ことは無い。ここを AllowIntra にすると、攻撃者が .md と同梱した CSP 未適用の
             // .html/.svg への相対リンク click が in-frame 遷移し、same-origin でスクリプト実行
             // (兄弟ファイル fetch + 外部 exfiltration) されてしまう。よって Block する。
-            // http は preview として認めない (strict): 仮想ホストマッピングは https のみで張っている。
-            "https"
+            //
+            // http / https のどちらでも preview 仮想ホストは全面 Block。
+            // かつてこのコメントは「kxedit.preview は実ホストではないので LaunchExternal しても
+            // 無意味」と書いていたが、無意味ではない —— 既定ブラウザが実 DNS 解決を行い、
+            // 企業 DNS の search suffix 等で「どの URL を踏ませたか」が外部へ漏れる
+            // (監査 §9 V-2 と同じ経路。2026-09-03・F-7)。
+            "http"
+            or "https"
                 when string.Equals(parsed.Host, PreviewHost, StringComparison.OrdinalIgnoreCase) =>
                 Classification.Block,
             "http" or "https" => Classification.LaunchExternal,

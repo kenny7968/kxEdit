@@ -103,13 +103,22 @@ public class PreviewNavigationPolicyTests
         );
 
     /// <summary>
-    /// http は preview として認めない (strict)。https 経由の VirtualHost マッピングだけを preview とする。
-    /// http://kxedit.preview/... が誤って allow-intra 化されないことを機械固定。
+    /// F-7: http の preview 仮想ホストも全面 Block。
+    /// <para>
+    /// 以前はここを <c>LaunchExternal</c> で固定していたが、それだと既定ブラウザが
+    /// <c>kxedit.preview</c> を<b>実 DNS 解決</b>する (監査 V-2 と同じ漏れ方: 企業 DNS の
+    /// search suffix 等に乗って「どの URL を踏ませたか」が外部へ出る)。本ブランチの
+    /// 不変条件「この名前を実 DNS に出さない」の唯一の残存経路だった。
+    /// </para>
+    /// <para>
+    /// http は preview として in-frame 許可もしない (strict): 仮想ホストマッピングは
+    /// https のみで張っているので、AllowIntra 化されないことも同時に固定している。
+    /// </para>
     /// </summary>
     [Fact]
-    public void Classify_HttpPreviewHost_ReturnsLaunchExternal() =>
+    public void Classify_HttpPreviewHost_ReturnsBlock() =>
         Assert.Equal(
-            PreviewNavigationPolicy.Classification.LaunchExternal,
+            PreviewNavigationPolicy.Classification.Block,
             PreviewNavigationPolicy.Classify("http://kxedit.preview/")
         );
 
