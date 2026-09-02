@@ -1,5 +1,7 @@
 using System.Linq;
 using System.Text;
+using System.Text.Json;
+using kxEdit.Core.IO;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
@@ -559,6 +561,134 @@ public class SettingsStoreTests
         {
             if (File.Exists(path))
                 File.Delete(path);
+        }
+    }
+
+    // ===== M-11 前半: Save を AtomicFile 経由にする(設計 2026-09-02 §5.1 / §6.3) =====
+
+    /// <summary>
+    /// 旧 <c>SettingsStore.Save</c> が使っていた <c>JsonSerializerOptions</c> の複製
+    /// (private なので同じ内容を組み直す)。CA1869 によりシリアル化ごとの new を避けて保持する。
+    /// </summary>
+    private static readonly JsonSerializerOptions LegacyOptions = new() { WriteIndented = true };
+
+    /// <summary>日本語・エスケープ対象文字・サロゲートペアを含む設定。バイト列比較用。</summary>
+    private static AppSettings JapaneseHeavySettings() =>
+        new()
+        {
+            FontName = "BIZ UDゴシック",
+            FontSize = 14.5f,
+            WindowWidth = 1234,
+            WindowHeight = 777,
+            Theme = "高コントラスト",
+            // エスケープが要る文字("' < > & \ 制御文字 NBSP 絵文字)を意図的に混ぜる。
+            KinsokuHangChars = "、。，．\"'<>&\\\u0007\u00a0\ud83d\ude00",
+            RecentFiles = new List<string>
+            {
+                @"C:\テスト\日本語 <&>'""ファイル.txt",
+                @"C:\a\b\タブ\t.txt",
+            },
+        };
+
+    /// <summary>
+    /// M-11: <c>Save</c> を <c>AtomicFile</c> 経由にしてもディスク上のバイト列が変わらないこと
+    /// (設計 2026-09-02 §5.1)。<b>旧実装のレシピ</b>
+    /// (<c>File.WriteAllText(path, JsonSerializer.Serialize(settings, Options))</c>)を毎回
+    /// 実際に走らせて突き合わせる。
+    /// <para>
+    /// 期待バイト列をハードコードした snapshot にしないのは、<c>SettingsStore.Options</c> を
+    /// 将来変えたときに「意図した書式変更」と「書き手を替えた副作用」を弁別できなくなるため。
+    /// レシピ比較なら Options の変更は両辺に等しく効き、書き手だけが変わったときに落ちる。
+    /// </para>
+    /// <para>
+    /// 実測(Task 6): 既定の <c>JavaScriptEncoder</c> が非 ASCII を <c>\uXXXX</c> へ逃がすため、
+    /// 出力バイトは<b>全て ASCII</b> になる。つまり「UTF-8 の符号化が食い違う」余地は元から無く、
+    /// 実際に危なかったのは <c>File.WriteAllText</c> の既定が BOM を付けるか否かだけだった
+    /// (実測: 先頭バイトは <c>0x7B</c> = <c>{</c>・BOM なし)。ASCII のみであること自体は
+    /// Options 次第で変わるので assert しない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Save_writes_the_same_bytes_as_the_previous_writer()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        string legacyPath = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            var s = JapaneseHeavySettings();
+            SettingsStore.Save(path, s);
+
+            // 旧実装そのもの(string へ直列化 → File.WriteAllText)。
+            File.WriteAllText(legacyPath, JsonSerializer.Serialize(s, LegacyOptions));
+
+            byte[] actual = File.ReadAllBytes(path);
+            Assert.Equal(File.ReadAllBytes(legacyPath), actual);
+
+            // 相対比較だけでは「両辺そろって BOM が付いた」を捕まえられないので絶対条件も見る。
+            Assert.NotEqual(new byte[] { 0xEF, 0xBB, 0xBF }, actual.Take(3).ToArray());
+
+            // BOM なし UTF-8 として読める(File.ReadAllText の既定デコードと一致する)。
+            Assert.Equal(new UTF8Encoding(false).GetString(actual), File.ReadAllText(path));
+
+            // バイト列が同じでも読み戻せなければ意味がない。
+            var loaded = SettingsStore.Load(path);
+            Assert.Equal(s.FontName, loaded.FontName);
+            Assert.Equal(s.Theme, loaded.Theme);
+            Assert.Equal(s.KinsokuHangChars, loaded.KinsokuHangChars);
+            Assert.Equal(s.RecentFiles, loaded.RecentFiles);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+            if (File.Exists(legacyPath))
+                File.Delete(legacyPath);
+        }
+    }
+
+    /// <summary>
+    /// M-11: <c>Save</c> が <c>AtomicFile</c> の差替段を通ること。差替が失敗したとき原本は
+    /// 無傷で残り、tmp は掃除される(= 旧実装の <c>File.WriteAllText</c> 直書きなら、この時点で
+    /// 原本は既に上書きされている)。
+    /// </summary>
+    [Fact]
+    public void Save_goes_through_AtomicFile_and_leaves_the_original_when_the_replace_step_fails()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, "settings.json");
+        const string original = "{\"FontName\":\"元の設定\"}";
+        try
+        {
+            File.WriteAllText(path, original);
+
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    (tmp, dest, destExists) =>
+                        throw new IOException(
+                            $"simulated replace failure: '{dest}' untouched (destExists={destExists}); staged copy is '{tmp}'"
+                        )
+                )
+            )
+            {
+                Assert.Throws<IOException>(() =>
+                    SettingsStore.Save(path, new AppSettings { FontName = "新しい設定" })
+                );
+
+                // seam は [ThreadStatic]。張ったスレッドと書込スレッドがずれると黙って既定実装が
+                // 走るため、事後状態(原本が残っている)だけでは不発と区別できない
+                // —— AtomicFile の xmldoc が「フックを張るテストは必ず Invocations を assert」と
+                // 定めている。
+                Assert.Equal(1, scope.Invocations);
+            }
+
+            Assert.Equal(original, File.ReadAllText(path));
+            Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
         }
     }
 }
