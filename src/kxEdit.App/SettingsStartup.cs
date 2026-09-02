@@ -1,3 +1,4 @@
+using System.IO;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
 
@@ -30,9 +31,27 @@ internal static class SettingsStartup
     private const string RewriteReason =
         "kxEdit はファイルを開いたときや終了するときに設定を書き直すので、";
 
+    /// <summary>退避の試行(テスト seam)。既定は <see cref="SettingsStore.TryQuarantineCorrupt"/>。
+    /// <para>
+    /// <b>seam が要るのは L-3(多重起動の後着)が実ファイルでは決定的に作れないため。</b>
+    /// 「退避に失敗し、かつ原本も既に無い」状態は、<see cref="SettingsStore.Load"/> が
+    /// 読めた<b>後</b>に原本が消えていないと成立しない = 単一スレッドの <see cref="Prepare"/>
+    /// 内では競合そのものを再現するしかない。設計 §6.1 が <c>File.Replace</c> の部分失敗で
+    /// 採ったのと同じ形(注入で「起こせない状態」を作る)。
+    /// </para></summary>
+    private static (bool Moved, string QuarantinePath) QuarantineCorrupt(string path)
+    {
+        bool moved = SettingsStore.TryQuarantineCorrupt(path, out string quarantinePath);
+        return (moved, quarantinePath);
+    }
+
     /// <summary>設定を読み、必要なら破損ファイルを退避し、起動後に出す警告文言を返す
-    /// (警告不要なら null)。</summary>
-    internal static (AppSettings Settings, string? Warning) Prepare(string path)
+    /// (警告不要なら null)。<paramref name="quarantineOverrideForTest"/> は上記 seam
+    /// (null=実物)。</summary>
+    internal static (AppSettings Settings, string? Warning) Prepare(
+        string path,
+        Func<string, (bool Moved, string QuarantinePath)>? quarantineOverrideForTest = null
+    )
     {
         var settings = SettingsStore.Load(path, out var status);
 
@@ -42,24 +61,46 @@ internal static class SettingsStartup
             {
                 // 退避の呼出はソリューション中ここ 1 か所だけ = 「Corrupt のときだけ改名する」は
                 // この分岐の位置で保たれている(設計 §5.2 / §10.15)。
-                bool moved = SettingsStore.TryQuarantineCorrupt(path, out string quarantined);
-                return (
-                    settings,
-                    moved
-                        ? CorruptHead
+                var (moved, quarantined) = (quarantineOverrideForTest ?? QuarantineCorrupt)(path);
+                if (moved)
+                    return (
+                        settings,
+                        CorruptHead
                             + "\n\n壊れたファイルは次の場所へ退避しました。不要になったら削除してください:\n  "
                             // 退避先は切り詰めない。ユーザーがこの場所を他所から知る手段は無く、
                             // 切れば案内そのものが失われる(設計 §10.6 の「切ってよい側と
                             // いけない側」の非対称)。無害化(OneLine)は外さない。
                             + SanitizeForDisplay.OneLine(quarantined)
-                        : CorruptHead
-                            + "\n\n壊れたファイルは退避できませんでした。"
-                            + RewriteReason
-                            + "このまま使うと上書きされます。"
-                            + "壊れた内容を残しておきたい場合は、先に次のファイルをコピーしてください:\n  "
-                            // 案内するのは「実在しない退避先」ではなく原本。これから上書きされる
-                            // 当のファイルであり、%APPDATA% 配下なのでユーザーには判らない。
-                            + SanitizeForDisplay.OneLine(path)
+                    );
+
+                // L-3(設計 §10.17 指摘 2)の回収。退避に失敗したうえ原本も消えている場合がある
+                // —— kxEdit を 2 つ同時に起動すると、後着は先着が改名し終えた後に File.Move を
+                // 呼ぶので FileNotFound で false を受け取る。このとき下の「原本をコピーして
+                // ください」は<実在しないファイル>を案内する = 設計 §10.6 (c) で潰したのと
+                // 同型の欠陥になる。
+                // 弁別は File.Exists 一本。例外の型(FileNotFoundException)で分けると、同じ結果に
+                // 至る別の事由(外部ツールが消した・親ごと消えた)を取りこぼす —— 前置の列挙は
+                // 原理的に漏れる(監査 §9 V-7)。
+                // 消えた先がどこかは書かない。先着の .bad があったとしても、それがこの破損の
+                // コピーである保証は無い(前回起動の残骸かもしれない)= 推測になる。
+                if (!File.Exists(path))
+                    return (
+                        settings,
+                        CorruptHead
+                            + "\n\n壊れたファイルは退避できず、元の場所にも残っていません。"
+                            + "壊れた内容の在りかは分かりません。"
+                    );
+
+                return (
+                    settings,
+                    CorruptHead
+                        + "\n\n壊れたファイルは退避できませんでした。"
+                        + RewriteReason
+                        + "このまま使うと上書きされます。"
+                        + "壊れた内容を残しておきたい場合は、先に次のファイルをコピーしてください:\n  "
+                        // 案内するのは「実在しない退避先」ではなく原本。これから上書きされる
+                        // 当のファイルであり、%APPDATA% 配下なのでユーザーには判らない。
+                        + SanitizeForDisplay.OneLine(path)
                 );
             }
 

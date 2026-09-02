@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Search;
@@ -75,13 +76,18 @@ public class MainFormSmokeTests
     /// 実 %APPDATA% に落ち、close 時の Shutdown(keepForRestore:false) 等が開発機の実ファイルを
     /// 消してしまうため、全テスト共通で 4 引数 ctor+seam により TempDir へ隔離する。
     /// </summary>
-    private static MainForm ShowMainForm(AppSettings settings, TempDir tmp)
+    private static MainForm ShowMainForm(
+        AppSettings settings,
+        TempDir tmp,
+        string? settingsWarning = null
+    )
     {
         var form = new MainForm(
             settings,
             tmp.SettingsPath,
             backupDirectory: tmp.BackupDir,
-            sessionLayoutPath: tmp.LayoutPath
+            sessionLayoutPath: tmp.LayoutPath,
+            settingsWarning: settingsWarning
         );
         form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
         form.StartPosition = FormStartPosition.Manual;
@@ -113,9 +119,13 @@ public class MainFormSmokeTests
     /// pump で発火させる。失敗パスの集約 Warn は既定で抑止
     /// (MessageBox がテストをブロックしないように。実運用経路では出る)。
     /// </summary>
-    private static MainForm ShowMainForm_Unified(AppSettings settings, TempDir tmp)
+    private static MainForm ShowMainForm_Unified(
+        AppSettings settings,
+        TempDir tmp,
+        string? settingsWarning = null
+    )
     {
-        var form = ShowMainForm(settings, tmp);
+        var form = ShowMainForm(settings, tmp, settingsWarning);
         form.SetSuppressRestoreDialogsForTest(true);
         PumpUntilShown();
         return form;
@@ -876,6 +886,195 @@ public class MainFormSmokeTests
             var doc = Assert.Single(form.FileForTest.DocsForTest);
             Assert.Equal("backup-newer", doc.Editor.SnapshotText);
         });
+
+    // ===== M-11(設計 2026-09-02 §5.4): 設定の破損 / 読取不能を起動時に 1 回知らせる =====
+
+    /// <summary>文言そのものは <see cref="SettingsStartupTests"/> が固定する。ここは配線=
+    /// 「渡した文言が起動時に 1 回だけ回収される」ことだけを見るので、中身は何でもよい。</summary>
+    private const string WarningForTest =
+        "設定ファイルが壊れていたため、既定の設定で起動しました。";
+
+    /// <summary>
+    /// 警告があるとき、<c>OnShown</c> が<b>1 回だけ</b>到達する。加えて<b>到達位置</b>を固定する:
+    /// ①復元ブロックの <c>finally</c>(<c>MarkStartupRestoreComplete</c>)を抜けた後
+    /// ②陳腐化警告より前。
+    /// <para>
+    /// 到達<b>数</b>だけでは位置は固定できない —— 復元より前へ動かしても、陳腐化警告より後ろへ
+    /// 動かしても、どちらの到達数も 1 のままである。そこで <c>MainForm</c> 側に到達した瞬間の
+    /// スナップショット(<c>SettingsWarningReachedAtForTest</c>)を持たせ、
+    /// <b>周囲の状態で位置を観測する</b>。
+    /// </para>
+    /// <para>
+    /// ①が守る不変条件: <c>MessageBox</c> はメッセージをポンプするので、ゲートが開く前に
+    /// モーダルを出すと復元の最中に再入経路を開く(A-8 と同型)。既存の陳腐化警告が
+    /// 復元の<b>後</b>に居るのも同じ理由。
+    /// </para>
+    /// <para>
+    /// fixture は<b>陳腐化警告も同時に出る</b>状態にしてある(ディスクがバックアップより新しい)。
+    /// 片方しか出ない fixture では ② の観測面が常に 0 で、順序を入れ替える変異が生存する。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void OnShown_SettingsWarning_ReachesOnce_AfterRestoreGate_AndBeforeStaleWarning() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("stale.txt");
+            var backupTime = DateTime.UtcNow.AddMinutes(-10);
+            File2.WriteAllText(p1, "disk-newer");
+            var bk = Rec(NewId(), p1, 0, "backup-older") with { TimestampUtc = backupTime };
+            PlantBackup(tmp, bk);
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp, WarningForTest);
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            // fixture の検算: 対になる陳腐化警告も実際に出ている(= ② の観測面が生きている)。
+            Assert.Equal(1, form.StaleBackupWarningCountForTest);
+
+            var reachedAt = form.SettingsWarningReachedAtForTest;
+            Assert.NotNull(reachedAt);
+            Assert.True(
+                reachedAt!.Value.RestoreGateOpen,
+                "設定警告は復元ブロックの finally(MarkStartupRestoreComplete)より後で出すこと"
+            );
+            Assert.Equal(0, reachedAt.Value.StaleWarningCount); // 陳腐化警告より前
+        });
+
+    /// <summary>
+    /// 対照: 警告が無ければ<b>1 回も</b>到達しない(初回起動=<c>Missing</c> で警告を読まされない)。
+    /// <c>OnShown</c> が実際に走ったことを <c>StartupRestoreGateOpenForTest</c> で併せて固定する
+    /// —— これが無いと「OnShown が動かなくなった」実装でも 0 件で緑になる。
+    /// </summary>
+    [Fact]
+    public void OnShown_NoSettingsWarning_NeverReaches() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp); // settingsWarning: null
+
+            Assert.Equal(0, form.SettingsWarningCountForTest);
+            Assert.Null(form.SettingsWarningReachedAtForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest); // OnShown は実際に走った
+        });
+
+    /// <summary>
+    /// 「警告が 2 回出ない」を<b>動かして観測することはできない</b>ことの実測。
+    /// <see cref="Form.Shown"/> は 1 つのフォームインスタンスにつき 1 回しか上がらないので、
+    /// <c>OnShown</c> を 2 周させる手段が無い —— <c>Hide()</c>→<c>Show()</c> も、
+    /// <see cref="Form.ShowInTaskbar"/> の切替によるハンドル再生成も、その両方の組合せも、
+    /// 追加の <c>Shown</c> を 1 件も起こさなかった(3 通りとも実測 0 件)。
+    /// <para>
+    /// したがって「1 回だけ」は<b>到達数が 1 であること</b>までしか固定できていない。
+    /// 2 回目が出ないことは <c>_restoreOffered</c> の early return と、この WinForms の性質の
+    /// 両方に依っている。<b>この検算を消すと、後から「Hide/Show で 2 回目を確かめる」空振りの
+    /// テスト(何を変異させても緑)が書かれる。</b>
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Shown_never_fires_twice_for_the_same_form_instance() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm_Unified(NewSettings(csvAutoModeOnOpen: false), tmp);
+            int shown = 0;
+            form.Shown += (_, _) => shown++; // 初回発火は購読前に済んでいる
+
+            form.Hide();
+            form.Show();
+            PumpUntilShown();
+            form.ShowInTaskbar = true; // ハンドル再生成
+            PumpUntilShown();
+
+            Assert.Equal(0, shown);
+        });
+
+    /// <summary>
+    /// <c>Program.Main</c> の配線。<c>[STAThread]</c> + <c>Application.Run</c> のため<b>実行して
+    /// 観測することはできない</b>ので、<c>Main</c> の IL を読んで「どのメソッドを呼んでいるか」
+    /// だけを固定する。
+    /// <para>
+    /// これで殺せるのは <b>Task 8 以前の形へ戻す変異</b>(<c>SettingsStore.Load(..., out _)</c> を
+    /// 直接呼び、破損を無言で捨てる)である。<b>殺せないこと</b>も明示しておく:
+    /// <c>Prepare</c> の戻り値が本当に <c>MainForm</c> へ渡っているか(値の流れ)は IL の
+    /// 呼出集合では観測できない —— 2 引数 ctor を呼んでいることまでしか判らない。
+    /// </para>
+    /// <para>
+    /// 向きに注意: 呼出トークンの走査は<b>偽陽性</b>(オペランドのバイト列がたまたま解決できる)は
+    /// あり得ても<b>偽陰性は無い</b>。実在する呼出のトークンは必ず拾えるので、
+    /// <c>Contains</c> 側の主張は健全である。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProgramMain_prepares_the_settings_and_hands_the_warning_to_MainForm()
+    {
+        var main = typeof(Program).GetMethod(
+            "Main",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(main);
+        var called = CalledMembers(main!);
+
+        // ★ 判定と退避と文言は SettingsStartup.Prepare が持つ(Program.Main はそれを呼ぶだけ)。
+        Assert.Contains(
+            called,
+            m => m.DeclaringType == typeof(SettingsStartup) && m.Name == "Prepare"
+        );
+        // ★ 破損の信号を捨てる旧形(SettingsStore.Load を直接叩く)へ戻っていない。
+        Assert.DoesNotContain(
+            called,
+            m => m.DeclaringType == typeof(SettingsStore) && m.Name == "Load"
+        );
+        // ★ 警告を受け取れる 2 引数 ctor を使っている(1 引数 ctor へ戻す変異が落ちる)。
+        Assert.Contains(
+            called,
+            m =>
+                m is ConstructorInfo
+                && m.DeclaringType == typeof(MainForm)
+                && m.GetParameters().Length == 2
+        );
+    }
+
+    /// <summary>
+    /// メソッド本体の IL から <c>call</c>(0x28)/ <c>newobj</c>(0x73)/ <c>callvirt</c>(0x6F)の
+    /// オペランドをメタデータトークンとして解決し、解決できたものを返す。
+    /// <para>
+    /// 完全な IL デコーダではない(オペランドのバイト列を命令と読み違える可能性がある)ので、
+    /// <b>「含む」向きの主張にだけ使う</b>。実在する呼出は必ず拾えるため偽陰性は無く、
+    /// 偽陽性は決定的(同じアセンブリなら毎回同じ結果)なのでフレークにもならない。
+    /// </para>
+    /// </summary>
+    private static List<MethodBase> CalledMembers(MethodInfo method)
+    {
+        byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;
+        var module = method.Module;
+        var genericTypeArgs = method.DeclaringType?.GetGenericArguments();
+        var result = new List<MethodBase>();
+        for (int i = 0; i + 4 < il.Length; i++)
+        {
+            if (il[i] is not (0x28 or 0x6F or 0x73))
+                continue;
+            int token = BitConverter.ToInt32(il, i + 1);
+            try
+            {
+                var resolved = module.ResolveMethod(token, genericTypeArgs, null);
+                if (resolved is not null)
+                    result.Add(resolved);
+            }
+            catch (ArgumentException)
+            { /* 命令ではなくオペランドを読んだ = 解決できないだけ。走査を続ける */
+            }
+        }
+        return result;
+    }
 
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
 

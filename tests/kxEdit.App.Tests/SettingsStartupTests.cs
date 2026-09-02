@@ -281,4 +281,63 @@ public class SettingsStartupTests
         Assert.Equal(SettingsLoadStatus.Ok, afterUnlock);
         Assert.Equal("BIZ UDゴシック", reread.FontName);
     }
+
+    /// <summary>
+    /// L-3(設計 §10.17 指摘 2 = Task 9 への申し送り)の回収。<b>多重起動の後着</b>は、先着が
+    /// 改名し終えた後に <c>File.Move</c> を呼ぶので <c>FileNotFound</c> で <c>false</c> を受け取る。
+    /// このとき<b>原本はもう存在しない</b>ので、退避失敗側の文言(「先に次のファイルをコピー
+    /// してください: &lt;原本&gt;」)は<b>実在しない場所を案内する</b>——設計 §10.6 (c) が潰した
+    /// のと同型の欠陥である。
+    /// <para>
+    /// <b>弁別は <c>File.Exists</c> 一本</b>にしてある。例外の型(<c>FileNotFoundException</c>)で
+    /// 分けると、同じ結果に至る別の事由(先着が消した・外部ツールが消した・親ごと消えた)を
+    /// 取りこぼす —— 本ブランチが一貫して守っている「前置の列挙は原理的に漏れる」。
+    /// </para>
+    /// <para>
+    /// <b>seam で注入するのは、この状態が実ファイルでは決定的に作れないから。</b>
+    /// <c>Corrupt</c> は <c>ReadAllText</c> が成功した後にしか出ないので、「読めた・退避に失敗した・
+    /// 原本も無い」を単一スレッドの <c>Prepare</c> 内で並べるには競合そのものが要る。
+    /// 注入する動作は後着が見る世界と同じ(<b>原本を改名してから false を返す</b>)。
+    /// </para>
+    /// <para>
+    /// 対照は <c>Prepare_does_not_point_at_a_quarantine_that_was_never_created</c>(原本が残る
+    /// 退避失敗)。そちらは原本を案内し、こちらは案内しない = <b>「常に案内しない」実装では
+    /// 対照が赤くなる</b>ので、この網は退化した実装で緑にならない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Prepare_does_not_point_at_the_source_file_when_it_is_already_gone()
+    {
+        using var tmp = new TempDir();
+        string path = tmp.File(Leaf);
+        string quarantined = path + BadSuffix;
+        File.WriteAllText(path, CorruptJson);
+
+        var (settings, warning) = SettingsStartup.Prepare(
+            path,
+            p =>
+            {
+                File.Move(p, p + BadSuffix); // 先着の退避が済んだ世界
+                return (false, p + BadSuffix); // 後着の File.Move は FileNotFound=false
+            }
+        );
+
+        Assert.NotNull(warning);
+        Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行するのは同じ
+        // 前提の検算: 原本は本当に消えていて、中身は先着の .bad にある。
+        Assert.False(File.Exists(path));
+        Assert.Equal(CorruptJson, File.ReadAllText(quarantined));
+
+        // ★ 実在しない場所をひとつも案内しない。原本(path)は退避先(path + ".bad")の
+        //   prefix なので、原本を落とせば退避先も自動的に落ちる。
+        Assert.DoesNotContain(path, warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(BadSuffix, warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("退避しました", warning, StringComparison.Ordinal); // 成功側でもない
+        // 起きた事実は伝える(既定値で起動したことを黙らせない = M-11 が直しに来た無音リセット)。
+        Assert.Contains("既定の設定で起動しました", warning, StringComparison.Ordinal);
+        Assert.Contains("設定し直して", warning, StringComparison.Ordinal);
+        // 「コピーしてください」は案内先があるときの文言。案内先が無い枝に残っていたら誤誘導。
+        Assert.DoesNotContain("コピーしてください", warning, StringComparison.Ordinal);
+    }
 }

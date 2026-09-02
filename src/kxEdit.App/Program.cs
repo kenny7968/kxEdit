@@ -16,10 +16,12 @@ static class Program
         // 早い段階に出しておく (WinForms init 失敗時にも記録が残る)。
         var markdigVersion = typeof(Markdig.Markdown).Assembly.GetName().Version;
         Trace.TraceInformation($"kxEdit deps: Markdig={markdigVersion}");
-        // 設定は起動で1回だけ読む（起動時確定方針）。
-        // TODO(Task 8): status を受けて Corrupt の退避と Corrupt / Unreadable の通知へ配線する
-        // (設計 2026-09-02 §5.4)。ここが `out _` である間は、破損しても無言で既定値へ戻る。
-        var settings = SettingsStore.Load(SettingsStore.DefaultPath, out _);
+        // 設定は起動で1回だけ読む（起動時確定方針）。壊れていれば退避し、起動後に 1 回出す
+        // 警告文言を受け取って MainForm へ渡す(M-11・設計 2026-09-02 §5.4)。
+        // 判定・退避・文言は SettingsStartup が持つ —— ここ(Main)は STAThread +
+        // Application.Run のため自動テストから叩けないので、テストできる場所へ出してある。
+        // ここで通知しないのは、この時点では通知手段が無いため(MainForm 生成より前)。
+        var (settings, settingsWarning) = SettingsStartup.Prepare(SettingsStore.DefaultPath);
         // M-V1(2026-08-29 最終レビュー 脆弱性パス): M-1 の Environment.Exit はフォームの
         // Dispose を走らせないため、プレビューを開いたままクラッシュすると
         // WebView2 のプロファイルが残る。起動時に回収する(自分だけのときに限る)。
@@ -31,7 +33,9 @@ static class Program
         // あるため MainForm の生成より前に置く。
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
-        var form = new MainForm(settings);
+        // 名前付きで渡す: 2 引数の位置指定は public MainForm(AppSettings, string?) へ束縛されるが、
+        // internal MainForm(AppSettings, string settingsPath, ...) と紛らわしいため明示する。
+        var form = new MainForm(settings, settingsWarning: settingsWarning);
         var crash = new CrashHandler(new UiCrashSink(new MainFormCrashHost(form)));
         // Application.ThreadException の add は WinForms 内部で「代入」かつスレッド固有。
         // 2 箇所目の購読を足すとここが黙って消えるので、配線は 1 箇所に保つこと。
