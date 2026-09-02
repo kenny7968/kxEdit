@@ -101,6 +101,10 @@ V-2 は「マッピングを張らない状態を作らない」ことで消え�
 3. `new Uri(PreviewBase, "..%2f..%2fsecret.txt").AbsoluteUri` が `%2f` を**エスケープのまま**
    保つか(V-3 のガードが機能する前提)。
 
+**→ §13.1 で実測(2026-09-03)。結果: 1 は偽・2 は偽・3 は真。**
+1 と 2 が偽だったので、**本節を前提にしている §4 は作り直しになる**(§13.1)。
+上の 3 項目は策定時の記述としてそのまま残す。
+
 ### 3.4 推定のまま扱うもの
 
 監査 §9 は V-2 の「実 DNS 解決 + HTTPS 接続」を**推定**としている。本設計は
@@ -345,3 +349,79 @@ CLAUDE.md §3 のフロー。傘設計書 §8 が **B6 をタスク時の脆弱�
   (CLAUDE.md §8 のスナップショット原則)。
 - B6 の完了をもって傘設計書は役目を終える。残る v0.2 作業は傘設計書 §6(コード変更を
   伴わない 5 件。**GHSA 4 件を含む**)と §7 の L5 一括実施。
+
+## 13. 実施記録
+
+### 13.1 Task 0 スパイクの実測(2026-09-03)
+
+**結論: §3.3 の 1(不存在フォルダーで例外を投げない)と 2(不達 UNC でブロックしない)は
+どちらも偽。§4「マッピングは常に張る(存在確認を廃止する)」は、この 2 つに依存しているので
+成立しない。** 3(`%2f` 保持)のみ真。
+
+環境: WebView2 Runtime `152.0.4191.53` / `Microsoft.Web.WebView2` 1.0.4022.49
+(App と同版)/ .NET 9 WinForms。プローブはスクラッチパッドの使い捨てプロジェクトで、
+リポジトリ外・実行後に削除。ログは `<TEMP>\wv2probe.log`。
+
+#### 生ログ
+
+```
+WebView2 runtime: 152.0.4191.53
+AbsoluteUri : https://kxedit.preview/..%2f..%2fsecret.txt
+AbsolutePath: /..%2f..%2fsecret.txt
+probe0.invalid -> OK (0 ms) [C:\Windows]
+probe1.invalid -> System.IO.DirectoryNotFoundException: 指定されたパスが見つかりません。 (0x80070003) (2 ms)
+probe2.invalid -> System.IO.DirectoryNotFoundException: 指定されたパスが見つかりません。 (0x80070003) (21004 ms)
+probe3.invalid -> System.IO.DirectoryNotFoundException: 指定されたパスが見つかりません。 (0x80070003) (0 ms)
+control Directory.Exists -> False (21002 ms) [\\198.51.100.9\share\nosuch]
+background-thread call -> System.InvalidOperationException: CoreWebView2 members can only be accessed from the UI thread. (18 ms)
+```
+
+`probe0` = 実在フォルダー(陽性対照)/ `probe1` = `C:\no\such\folder\kxedit-probe`(①)/
+`probe2` = `\\198.51.100.7\share\nosuch`(②。RFC 5737 の経路無し IP)/
+`probe3` = `C:\` + `a` × 300(④)。
+
+計画には無い 3 つ(`probe0` / `control` / `background-thread call`)は、
+**測定が空虚でないことを確かめるために足した**もの(下記)。
+
+#### 判定
+
+| 観測 | 期待 | 実測 | 判定 |
+|------|------|------|------|
+| ① 不存在フォルダー | `OK` | `DirectoryNotFoundException` (2 ms) | **外れた** |
+| ② 不達 UNC | `OK` かつ 1000 ms 未満 | `DirectoryNotFoundException` (**21,004 ms**) | **外れた**(例外・ブロックの両方) |
+| ③ `Uri` の `%2f` | `AbsolutePath` が `/..%2f..%2fsecret.txt` | 同左 | 期待どおり |
+| ④ MAX_PATH 超 | 何らかの例外(型を記録) | `System.IO.DirectoryNotFoundException` (0 ms) | 期待どおり(型を記録) |
+
+#### 対照群 — 「例外が出た」が測定不良でないことの確認
+
+1. **陽性対照 `probe0`**: 実在フォルダー `C:\Windows` は **OK (0 ms)**。
+   API 自体は同じハーネス・同じホスト名形式で成功する。よって ①②④ の例外は
+   「プローブが壊れている」ではなく**フォルダーの側の性質**に由来する。
+2. **`control Directory.Exists`**: ② とは**別の**不達 IP(`198.51.100.9`)を使い、
+   負のキャッシュが載っていない冷えた状態で `Directory.Exists` を測ると **21,002 ms**。
+   `RemoteAwareDirectory` の doc にある 21,002 ms と一致する。
+   ② の 21,004 ms はこれと同じ TCP 再送タイムアウトであり、
+   **`SetVirtualHostNameToFolderMapping` が内部でフォルダーの実在確認をしている**ことを示す。
+
+#### 分かったこと(§4 以降への含意。差し替え設計は本記録では決めない)
+
+- **`Directory.Exists` を消してもブロックは消えない。** 21 秒の待ちは `Directory.Exists`
+  固有ではなく、`SetVirtualHostNameToFolderMapping` 自身が同じ待ちを持つ。
+  §2.1 の「`Directory.Exists` が UI スレッドで無境界に走る」は、
+  **その次の行も同じ性質だった**というのが実態。
+- **「存在確認せずに `_baseDir` を渡す」は成立しない。** 不存在なら例外になるので、
+  §4.1 の表の 1 行目(存在確認しない)はそのままでは書けない。
+  一方 **fail-safe 側(実在する空フォルダーへ倒す)は `probe0` のとおり成立する**ので、
+  「マッピングは常に在る」という不変条件自体は保てる。壊れたのは*到達手段*であって*目標*ではない。
+- **計画が挙げていた代替案「登録を `Task.Run` へ逃がす」は使えない。**
+  背景スレッドからの呼び出しは
+  `InvalidOperationException: CoreWebView2 members can only be accessed from the UI thread.`
+  で弾かれる。**UI スレッド以外から呼ぶ選択肢は無い**ので、
+  「先に境界付きで実在を確定してから、UI スレッドで実在するフォルダーだけを渡す」形しか残らない
+  (`RemoteAwareDirectory` / `IReachabilityProbe` が既にその形の 5 秒契約を持つ)。
+- **④ の例外型は ① と同じ `DirectoryNotFoundException`。** catch フィルタで
+  「MAX_PATH 超」と「不存在」を型で弁別することはできない。
+  ドキュメントが `folderPath` の制約を MAX_PATH 長のみと書いている(§3.1)のに対し、
+  実際には**不存在でも投げる**。§3.1 の読みは「例外の記載が無い = 投げない」ではなかった。
+- ③ が真なので、**V-3 のガードの前提(`%2f` がデコードされない)は保たれる**。
+  §5 は本実測の影響を受けない。
