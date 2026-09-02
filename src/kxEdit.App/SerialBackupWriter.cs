@@ -9,8 +9,8 @@ namespace kxEdit.App;
 /// 単一の背景スレッドで投入順に実行する。各ジョブの失敗は致命でないため握り潰す(無音)が、
 /// 書込(Write)だけは結果を通知する: 失敗は OnWriteFailed に record.Id を渡して
 /// 次 Reconcile での強制再書込を促し(Stage 5 で IBackupWriter を実装)、成功は
-/// M-20(B5)で足した OnWriteSucceeded に record.Id を渡す(B5 Task 4 の「復旧した」判定の
-/// 材料になる)。どちらも背景スレッドから同期発火するため、スレッド越えの吸収は受け手責務。
+/// M-20(B5)で足した OnWriteSucceeded に record.Id を渡す。どちらも背景スレッドから同期発火する
+/// (通知フックの契約は IBackupWriter 側の xmldoc が正)。
 /// Dispose で投入を締め切り、保留ジョブをドレインしてから戻る。
 /// BK-M-2: <c>_dir</c> は base backup directory ではなく **自セッション用 subdirectory** を保持する
 /// (<c>%APPDATA%\kxEdit\backups\session-{Guid.N}\</c>)。<see cref="Write"/> / <see cref="Delete"/> は

@@ -60,6 +60,21 @@ public class SerialBackupWriterTests
             TimestampUtc: new DateTime(2026, 07, 15, 12, 0, 0, DateTimeKind.Utc)
         );
 
+    /// <summary><paramref name="label"/> への書込を<b>決定的に失敗させる</b>下ごしらえ。
+    /// 書込先 <c>&lt;HashId(label)&gt;.json</c> と<b>同名のディレクトリ</b>を先に作っておくと、
+    /// <see cref="BackupStore.Write"/> → <c>AtomicFile.Write</c> の <c>File.Move</c>(新規書込=
+    /// File.Exists=false 分岐)が IOException を投げる
+    /// (実測=「既に存在するファイルを作成することはできません」)。
+    ///
+    /// この方法を採る理由: 計画書は当初「一時フォルダごと削除して I/O 失敗を起こす」を提案していたが
+    /// (引用は当時の名前。現在の同等物は <see cref="SbwTempDir"/>)、<see cref="BackupStore.Write"/> は
+    /// 先頭で <see cref="Directory.CreateDirectory(string)"/> を呼ぶため<b>dir 削除では失敗しない</b>
+    /// (=書込が成功してしまう)。権限/ディスクフルは環境依存で不安定。同名ディレクトリで
+    /// File.Move を塞ぐ経路が、この 3 択のうち唯一 deterministic。
+    /// (HIGH-1 導入後は Id が GUID N になるため、ファイル名も <see cref="HashId"/> 経由で組み立てる。)</summary>
+    private static void BlockWriteTarget(string root, string label) =>
+        Directory.CreateDirectory(Path.Combine(root, HashId(label) + ".json"));
+
     // ===== ドレイン契約(CompleteAdding+Join で保留ジョブがディスクに現れる) =====
 
     /// <summary>
@@ -137,11 +152,7 @@ public class SerialBackupWriterTests
     /// (=Run の内側 catch=`try { job(); } catch { }` により、失敗ジョブの後も worker が生存して
     /// 後続ジョブを実行できる)ことを固定する。
     ///
-    /// 失敗経路の設計: BackupStore.Write は AtomicFile.Write を呼び、tmp を書いてから
-    /// File.Move(tmp, "&lt;id&gt;.json") する(初回書込=File.Exists=false 分岐)。ターゲットの
-    /// "&lt;id&gt;.json" が既にディレクトリとして存在すると File.Move は決定的に IOException を
-    /// 投げる(実測=「既に存在するファイルを作成することはできません」)。他の失敗経路
-    /// (権限/ディスクフル)は環境依存で不安定なため、これが最も deterministic。
+    /// 失敗経路の作り方は <see cref="BlockWriteTarget"/> を参照(同名ディレクトリで File.Move を塞ぐ)。
     ///
     /// ワーカー生存検証: 失敗ジョブの後に Delete("harmless") を投入し、Dispose のドレインが
     /// 15s 以内に戻る(=worker が生きていて CompleteAdding 後に foreach を抜けた)ことを暗黙に確認。
@@ -156,9 +167,7 @@ public class SerialBackupWriterTests
     public void WriteFailure_InvokesOnWriteFailed_AndWorkerSurvives()
     {
         using var tmp = new SbwTempDir();
-        // "<HashId(will-fail)>.json" と同名のディレクトリを事前作成 → File.Move が決定的に失敗する経路
-        // (HIGH-1 導入後は Id が GUID N になるためファイル名も HashId 経由で組み立てる)。
-        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("will-fail") + ".json"));
+        BlockWriteTarget(tmp.Root, "will-fail"); // この Id の書込を決定的に失敗させる
 
         var failures = new List<string>();
         var lockObj = new object();
@@ -215,22 +224,14 @@ public class SerialBackupWriterTests
     /// `OnWriteFailed?.Invoke(record.Id)` を null 差替/削除に変異させれば、本テストが red
     /// 化することを実測確認済み。
     ///
-    /// 失敗機構の注記: 計画書は「TempDir を削除して I/O 失敗を起こす」を提案していたが
-    /// (引用は当時の名前。現在の同等物は SbwTempDir)、
-    /// <see cref="BackupStore.Write"/> は先頭で <see cref="Directory.CreateDirectory(string)"/>
-    /// を呼ぶため dir 削除では失敗しない(=書込は成功してしまう)。決定的に失敗を起こせるのは
-    /// <c>&lt;id&gt;.json</c> 同名ディレクトリで File.Move をブロックする経路(複合テストと
-    /// 同じ)なので、そちらを流用する。タイムアウト 15s は Dispose の Join 上限と揃えた完全な
-    /// 保険値(実測では ms オーダーで発火)。
+    /// 失敗機構は <see cref="BlockWriteTarget"/>(なぜその作り方かはヘルパー側に集約)。
+    /// タイムアウト 15s は Dispose の Join 上限と揃えた完全な保険値(実測では ms オーダーで発火)。
     /// </summary>
     [Fact]
     public void Write_Failure_Invokes_OnWriteFailed_WithRecordId()
     {
         using var tmp = new SbwTempDir();
-        // 対象パス "<HashId(id-mre)>.json" と同名のディレクトリを事前作成 → BackupStore.Write の
-        // 新規経路(AtomicFile.Write 内の File.Move)が決定的に IOException を投げる
-        // (HIGH-1 導入後は Id が GUID N になるためファイル名も HashId 経由で組み立てる)。
-        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("id-mre") + ".json"));
+        BlockWriteTarget(tmp.Root, "id-mre"); // この Id の書込を決定的に失敗させる
 
         string? capturedId = null;
         var doneEvent = new ManualResetEventSlim(initialState: false);
@@ -257,12 +258,9 @@ public class SerialBackupWriterTests
 
     // ===== M-20(B5): 書込成功の観測面(OnWriteSucceeded) =====
 
-    /// <summary>M-20(B5): 書込が成功したら Id を通知する。
-    /// <c>OnWriteFailed</c> の対であり、Coordinator が「復旧した」を、毎 tick の I/O を UI スレッドへ
-    /// 持ち込まずに判定<b>できる</b>唯一の観測面(B5 Task 4 の遷移発声がこれに乗る予定で、
-    /// 本タスク時点ではまだ誰も購読していない)。これが無いと「失敗が来ない」を復旧と読むしかなく、
-    /// <b>書込を一度も投入していない</b>場合(dirty でない・署名一致で <c>BackupAction.None</c>)と
-    /// 区別できない = 虚偽の復旧発声になる。
+    /// <summary>M-20(B5): 書込が成功したら record.Id を通知する(<c>OnWriteFailed</c> の対)。
+    /// この seam が要る理由は <see cref="IBackupWriter.OnWriteSucceeded"/> の xmldoc が正
+    /// (要旨: 「失敗が来ない」だけでは、書けたのか<b>そもそも投入していない</b>のかを区別できない)。
     ///
     /// 観測の流儀は失敗側の <see cref="Write_Failure_Invokes_OnWriteFailed_WithRecordId"/> に
     /// 揃える(<see cref="ManualResetEventSlim"/> で「発火その場」を捉える・sleep/リトライ 0)。
@@ -293,9 +291,9 @@ public class SerialBackupWriterTests
         Assert.Equal(HashId("id-ok"), capturedId);
     }
 
-    /// <summary>M-20: 失敗したときは成功を通知しない。両方鳴ると Task 4 の遷移判定
-    /// (同一 pass に両方あれば失敗が勝つ)が意味を失う=1 文書も書けていないのに
-    /// 「復旧した」と言い得る。
+    /// <summary>M-20: 失敗したときは成功を通知しない。これは <c>OnWriteFailed</c> との排他性
+    /// (<see cref="IBackupWriter.OnWriteSucceeded"/> の契約「1 件の Write で両方鳴ることはない」)を
+    /// 実物側で固定するもの。両方鳴る writer は、書込結果から状態を組み立てる消費者を必ず誤らせる。
     ///
     /// no-change 側(成功が来ないこと)を空虚にしないため、<b>失敗通知が来たことと対で</b>
     /// 観測する:成功側だけを見て null を主張すると「書込ジョブがそもそも走らなかった」場合と
@@ -305,19 +303,14 @@ public class SerialBackupWriterTests
     /// - MRE = 失敗通知が「発火その場」で来たことの観測(=ジョブが走った証拠)。
     /// - <see cref="SerialBackupWriter.WaitForPendingJobs"/> = 書込ジョブが<b>最後まで</b>
     ///   走り終えたことの確定。MRE の Set とジョブ末尾の間には実装上まだコードが入り得る
-    ///   (catch の early return を落とす変異は、まさにそこへ成功通知を足す)ため、MRE だけで
-    ///   打ち切ると no-change の assert が背景スレッドとの競り合いに依存する。実測では
-    ///   バリア無しでも当該変異を 8/8 で捕まえたが、捕まえたのは main 側が競り負けたからで
-    ///   あって保証ではない。直列ワーカーは FIFO なので後から積んだバリアが書込ジョブを
-    ///   追い越すことはない=バリアは競合そのものを消す。</summary>
+    ///   (catch の early return を落とすと、まさにそこへ成功通知が入る)ため、MRE だけで
+    ///   打ち切ると no-change の assert が背景スレッドとの競り合いに依存する。直列ワーカーは
+    ///   FIFO で、後から積んだバリアが書込ジョブを追い越すことはない=バリアは競合そのものを消す。</summary>
     [Fact]
     public void Write_Failure_DoesNotInvoke_OnWriteSucceeded()
     {
         using var tmp = new SbwTempDir();
-        // "<HashId(id-fail-only)>.json" と同名のディレクトリで AtomicFile.Write 内の File.Move を
-        // 決定的に IOException で落とす(既存の失敗注入と同型。SbwTempDir 削除では
-        // BackupStore.Write 冒頭の Directory.CreateDirectory に負けて失敗しない)。
-        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("id-fail-only") + ".json"));
+        BlockWriteTarget(tmp.Root, "id-fail-only"); // この Id の書込を決定的に失敗させる
 
         string? succeededId = null;
         string? failedId = null;
@@ -343,11 +336,10 @@ public class SerialBackupWriterTests
         Assert.Null(succeededId); // その上で成功は来ていない
     }
 
-    /// <summary>M-20: 成功通知は try の<b>外</b>で撃つ、という実装上の位置決めを固定する。
-    /// 中(<c>BackupStore.Write</c> の直後)へ移すと、<b>フック自身が投げた場合</b>に隣の catch が
-    /// 拾って <c>OnWriteFailed</c> を鳴らす=書けているのに「書込が失敗した」と報告する経路を
-    /// 新設する(B5 が潰そうとしている虚偽通知そのもの)。実測: この網が無いと当該変異は
-    /// 他 2 本を全緑のまま通過した。
+    /// <summary>M-20: 成功通知を try の<b>外</b>で撃つ、という実装上の位置決めを固定する
+    /// (なぜ外かは <see cref="SerialBackupWriter.Write"/> のインラインコメントが正)。中へ移すと
+    /// <b>フック自身が投げた場合</b>に隣の catch が拾い、書けているのに「書込が失敗した」と報告する。
+    /// 実測: この網が無いと当該変異は他 2 本を全緑のまま通過した。
     ///
     /// <b>投げるフックを正当化するテストではない</b>(<see cref="IBackupWriter.OnWriteSucceeded"/> の
     /// 契約は「投げない前提」)。固定するのは「万一投げても<b>失敗報告に化けない</b>」ことと、
@@ -484,7 +476,7 @@ public class SerialBackupWriterTests
     {
         using var tmp = new SbwTempDir();
         // 書込を決定的に失敗させ、その失敗コールバックの中でワーカーを塞ぐ。
-        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("wait-block") + ".json"));
+        BlockWriteTarget(tmp.Root, "wait-block");
         using var gate = new ManualResetEventSlim(initialState: false);
         var writer = new SerialBackupWriter(tmp.Root)
         {

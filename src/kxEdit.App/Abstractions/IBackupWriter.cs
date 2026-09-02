@@ -4,32 +4,40 @@ namespace kxEdit.App;
 
 /// <summary>
 /// バックアップの背景書込ジョブ受け(Phase 2 Stage 5・上位文書 §2.1 の精密化)。
-/// Coordinator が BackupStore への静的参照を持たないよう、Action 束ではなく型付きの
-/// 3 メソッドで表面を切る。SerialBackupWriter が既存の BlockingCollection 直列実行で
-/// 実装し、Fake は in-memory Dictionary で完全に I/O から独立する。
+/// 表面は**方向**で切り分ける: 呼び出し方向(ジョブの投入・待ち合わせ)は型付きメソッド、
+/// 通知方向(書込結果・レイアウト書込失敗)は Action フック。呼び出し方向を型付きにするのは、
+/// 書込・削除の投入について Coordinator が BackupStore を静的に呼ばずに済ませるため。
+/// SerialBackupWriter が既存の BlockingCollection 直列実行で実装し、Fake は in-memory
+/// Dictionary で完全に I/O から独立する。
 /// </summary>
 public interface IBackupWriter : IDisposable
 {
     /// <summary>書込失敗を UI スレッド側に通知するためのフック。
-    /// Coordinator が ctor で失敗回復用の Enqueue を登録する(null なら握り潰す)。</summary>
+    /// Coordinator が ctor で失敗回復用の Enqueue を登録する(null なら握り潰す)。
+    /// スレッド・例外・所要時間の扱いは対の <see cref="OnWriteSucceeded"/> と同じ契約
+    /// (とくに<b>背景ワーカーを占有する</b>点は本フックにも等しく効く)。</summary>
     Action<string>? OnWriteFailed { get; set; }
 
     /// <summary>M-20(B5): 書込<b>成功</b>の通知フック(<see cref="OnWriteFailed"/> の対)。
     /// 引数は書けた <c>BackupRecord.Id</c>。
     ///
-    /// Coordinator が「バックアップが復旧した」を、<b>毎 tick の I/O を UI スレッドへ持ち込まずに</b>
-    /// 判定できる唯一の観測面である(B5 Task 4 の遷移発声がこれに乗る) ——
-    /// 失敗が来なくなったことだけでは、書込が成功したのか<b>そもそも投入していないのか</b>
-    /// (dirty でない・署名一致で <c>BackupAction.None</c> になり <see cref="Write"/> 自体を
-    /// 呼んでいない)を区別できず、後者を復旧と読むと「一度も書けていないのに再開した」という
-    /// 虚偽の発声になる。
+    /// <b>なぜ成功側が要るか(本 seam の存在理由・正はここ)</b>: 失敗が来なくなったことだけでは、
+    /// 書込が成功したのか<b>そもそも投入していないのか</b>(dirty でない・署名一致で
+    /// <c>BackupAction.None</c> になり <see cref="Write"/> 自体を呼んでいない)を区別できない。
+    /// 後者を「復旧した」と読むと「一度も書けていないのに再開した」という虚偽の通知になるため、
+    /// 消費者が<b>書込結果そのもの</b>を writer から受け取れる面が要る。毎 tick の I/O を
+    /// UI スレッドへ持ち込まずに書込結果を知る手段は、他に用意されていない。
     ///
     /// 契約:
     /// - <see cref="Write"/> 1 件につき、本フックと <see cref="OnWriteFailed"/> が<b>両方鳴ることはない</b>
     ///   (実行されたジョブは成功か失敗のどちらか一方だけを通知する)。
     /// - 逆は成り立たない ——<b>鳴らないことは「成功しなかった」を意味しない</b>。投入自体が
-    ///   捨てられた場合(締切済み/破棄済み)や、投入は受理されたがジョブが実行されないまま
-    ///   終わる場合(<c>SerialBackupWriter</c> の Dispose が Join 上限で諦めた等)はどちらも鳴らない。
+    ///   捨てられた場合(締切済み/破棄済み)や、投入は受理されたが<b>ジョブが実行されないまま
+    ///   終わる</b>場合(背景ワーカーは IsBackground=true なので、プロセス終了時の走り残しは
+    ///   捨てられる)は鳴らない。
+    /// - <b>遅れて鳴ることがある。</b><c>SerialBackupWriter</c> の Dispose は Join が満了しても
+    ///   ワーカーを止めない(<c>_queue.Dispose</c> をスキップして戻るだけ)ので、<b>Dispose が
+    ///   戻った後に発火しうる</b>。「Dispose したからもう鳴らない」を前提にしないこと。
     /// - 引数の Id は<b>その record が書けた</b>ことを意味する。BK-M-3 の path-only fallback
     ///   (本文長が <c>BackupCoordinator.MaxBackupChars</c> 超のとき <c>Content=null</c> の record を
     ///   書く)でも書込は成功して本フックが鳴るので、<b>本文が退避された保証ではない</b>
@@ -37,6 +45,10 @@ public interface IBackupWriter : IDisposable
     ///   書けるかどうか」に閉じる)。
     /// - 呼び出しスレッドは実装依存で、<see cref="OnWriteFailed"/> と同じ扱いでよい
     ///   (<c>SerialBackupWriter</c> は背景スレッドから同期発火する)。スレッド越えの吸収は受け手責務。
+    /// - <b>フックは軽く・ブロックせず・再入しないこと。</b>フックは背景ワーカーを<b>占有する</b>ため、
+    ///   中で待つと後続の書込/削除ジョブが全部止まり、Dispose のドレイン(Join)もそのぶん食う
+    ///   (<c>SerialBackupWriterTests.WaitForPendingJobs_ReturnsFalse_WhenWorkerIsBlocked</c> は
+    ///   この性質を逆用してワーカーを止めている)。
     /// - フックは投げない前提。投げたときの扱いも <see cref="OnWriteFailed"/> と同じで実装依存
     ///   (<c>SerialBackupWriter</c> はジョブ単位の catch で握り潰し、ワーカーは次のジョブへ進む)。
     /// - null なら何もしない(=本フックを配線しない実装・テストの挙動は不変)。</summary>
