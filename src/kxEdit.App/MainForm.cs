@@ -89,6 +89,31 @@ public sealed partial class MainForm : Form
     /// Coordinator 全体を露出せず観測点 1 個に絞る(レビュー M-3)。</summary>
     internal bool StartupRestoreGateOpenForTest => _backup.StartupRestoreDoneForTest;
 
+    /// <summary>M-11(設計 2026-09-02 §5.4): 起動時に 1 回だけ出す設定の警告文言
+    /// (<c>SettingsStartup.Prepare</c> が組み立て済み)。null=警告なし。</summary>
+    private readonly string? _settingsWarning;
+
+    // M-11 テスト用: 設定警告に到達した回数(抑止中でも数える)。MessageBox は blocking で
+    // 観測できないため、陳腐化警告と同じく到達数だけを見る。
+    private int _settingsWarningCountForTest;
+    internal int SettingsWarningCountForTest => _settingsWarningCountForTest;
+
+    /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
+    /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
+    /// 陳腐化警告より後ろへ動かしても、どちらの到達数も 1 のままだからである。そこで
+    /// 到達した瞬間の周囲の状態を写し取る:
+    /// <list type="bullet">
+    /// <item><c>RestoreGateOpen</c> … 復元ブロックの <c>finally</c>
+    /// (<see cref="BackupCoordinator.MarkStartupRestoreComplete"/>)を抜けた後か。
+    /// false へ倒れる = モーダルを復元より前で出す = A-8 と同型の再入経路を開く。</item>
+    /// <item><c>StaleWarningCount</c> … 陳腐化警告より前か。1 になる = 順序が入れ替わっている。</item>
+    /// </list>
+    /// 代入はテスト観測専用で、実挙動には影響しない。</summary>
+    private (bool RestoreGateOpen, int StaleWarningCount)? _settingsWarningReachedAtForTest;
+
+    internal (bool RestoreGateOpen, int StaleWarningCount)? SettingsWarningReachedAtForTest =>
+        _settingsWarningReachedAtForTest;
+
     // A-8 / H-1(設計 2026-08-24 §10.7): OnFormClosing 実行中フラグ(再入ガード)。
     // 最終 flush の完了待ちが UI スレッドをブロックしている最中に SENT メッセージ経由で
     // クローズが再入しうるため。機構と対処の根拠は OnFormClosing 冒頭のコメント参照。
@@ -131,16 +156,25 @@ public sealed partial class MainForm : Form
     /// (既存の public コンストラクタ経路は不変=Program.Main は DefaultPath へチェーン)。
     /// hot exit 統合(設計 2026-07-23 統合 §3.1-§3.3): backupDirectory / sessionLayoutPath も
     /// 同様にテスト隔離用(null=既定 %APPDATA% パス)。
+    /// <para>
+    /// <paramref name="settingsWarning"/> = 起動時に 1 回だけ出す設定の警告(M-11・設計
+    /// 2026-09-02 §5.4)。null=警告なし。<c>Program.CreateMainForm</c> が
+    /// <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。<b>public ctor には足していない</b>
+    /// —— 足すと 2 引数の位置指定呼出が <c>(settings, settingsPath)</c> ではなくそちらへ
+    /// 黙って束縛される(省略した任意引数が少ない方が優先される)。
+    /// </para>
     /// </summary>
     internal MainForm(
         AppSettings settings,
         string settingsPath,
         string? backupDirectory = null,
-        string? sessionLayoutPath = null
+        string? sessionLayoutPath = null,
+        string? settingsWarning = null
     )
     {
         _settingsPath = settingsPath;
         _settings = settings; // Program.Main が読込済み
+        _settingsWarning = settingsWarning;
 
         Text = "kxEdit";
         Width = _settings.WindowWidth;
@@ -288,6 +322,30 @@ public sealed partial class MainForm : Form
             _backup.MarkStartupRestoreComplete();
         }
 
+        // M-11(設計 2026-09-02 §5.4): 設定が壊れていた / 読めなかったことを起動時に 1 回だけ伝える。
+        // 文言の組み立て(退避先か原本か・無害化・語順)は SettingsStartup.Prepare が済ませており、
+        // ここは出すだけ。位置には理由が 2 つある。
+        //  (1) 復元より「後」: MessageBox はメッセージをポンプするので、復元ブロックの finally
+        //      (MarkStartupRestoreComplete)より前でモーダルを出すと、ゲートが開く前に再入経路を
+        //      開くことになる(A-8 と同型)。既存の陳腐化警告が復元の後に居るのも同じ理由。
+        //  (2) 陳腐化警告より「前」: 設定が既定値へ戻っている事実は、復元が ON / OFF どちらで
+        //      動いたかの説明にもなる(RestoreOpenFilesOnStartup / ConfirmRestoreOnStartup が
+        //      既定へ戻っているため)。理由を先に渡してから結果の警告を読ませる。
+        // 1 回だけなのは上の _restoreOffered による early return による(Shown はフォーム 1 個に
+        // つき 1 回しか上がらないため、そもそも 2 周しない。MainFormSmokeTests で実測)。
+        if (_settingsWarning is not null)
+        {
+            _settingsWarningCountForTest++;
+            // 到達「位置」の観測点(テスト専用・実挙動には影響しない)。到達数だけでは順序を
+            // 入れ替える変異が殺せないため、到達した瞬間の周囲の状態を写し取る。
+            _settingsWarningReachedAtForTest = (
+                _backup.StartupRestoreDoneForTest,
+                _staleBackupWarningCountForTest
+            );
+            if (!_suppressRestoreDialogsForTest)
+                ShowSettingsStartupWarning(_settingsWarning);
+        }
+
         // A-1 第 2 層(設計 2026-08-22 §4.2): 復元したタブのうちディスク側が新しかったものを
         // 1 個の警告にまとめて通知する。ON / OFF どちらの復元経路も FileController を通るため
         // 回収点は 1 つでよい。
@@ -421,6 +479,19 @@ public sealed partial class MainForm : Form
     /// 表示規約(最大 10 件・<see cref="SanitizeForDisplay.OneLine"/>)は
     /// <see cref="ShowFailedRestoreDialog"/> と揃える。
     /// </remarks>
+    /// <summary>M-11(設計 2026-09-02 §5.4): 起動時の設定警告。<b>文言は組み立て済みで渡ってくる</b>
+    /// (<c>SettingsStartup.Prepare</c>)——パスの無害化も「切り詰めない」判断もそちらの担当なので、
+    /// ここで加工しない。<b>本文をログ・クリップボード・例外へ流さないこと</b>(Task 8 の申し送り 2:
+    /// 長さに上限が無い上、%APPDATA% 配下のパスを含む)。</summary>
+    private void ShowSettingsStartupWarning(string body) =>
+        MessageBox.Show(
+            this,
+            body,
+            "設定を読み込めませんでした",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning
+        );
+
     private void ShowStaleBackupWarning(IReadOnlyList<string> paths)
     {
         const int Cap = 10;

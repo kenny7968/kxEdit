@@ -31,7 +31,22 @@ internal static class IlCallees
     /// 「呼んでいない」の assert が偽陽性で<b>緑になることはない</b>
     /// (逆に、将来の本体変更で偽陽性が当たれば赤で気付ける)。
     /// </summary>
-    public static List<MethodBase> Of(MethodBase method)
+    public static List<MethodBase> Of(MethodBase method) => Scan(method, includeNewobj: false);
+
+    /// <summary>
+    /// <see cref="Of"/> に <c>newobj</c>(オブジェクト生成)を加えたもの。
+    /// 「この経路は<b>この型を直接組み立てない</b>」を固定したいときに使う
+    /// (例: <c>Program.Main</c> が <c>MainForm</c> を合成点を通さず直に作っていないこと)。
+    /// <para>
+    /// <see cref="Of"/> と<b>別入口</b>にしてあるのは、既存の呼出側(<c>DocumentManagerTests</c> /
+    /// <c>FileControllerTests</c> / <c>GrepControllerTests</c>)が集合へ ctor が混ざることを
+    /// 想定していないため。走査本体は <see cref="Scan"/> 1 本で、分岐するのは拾う命令だけ。
+    /// </para>
+    /// </summary>
+    public static List<MethodBase> OfIncludingNewobj(MethodBase method) =>
+        Scan(method, includeNewobj: true);
+
+    private static List<MethodBase> Scan(MethodBase method, bool includeNewobj)
     {
         byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;
         var typeArgs = method.DeclaringType!.GetGenericArguments();
@@ -39,7 +54,9 @@ internal static class IlCallees
         var result = new List<MethodBase>();
         for (int i = 0; i + 4 < il.Length; i++)
         {
-            if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt(いずれも 4 バイトのトークンを伴う)
+            // call / callvirt / (任意で) newobj。いずれも 4 バイトのトークンを伴う。
+            bool isCall = il[i] == 0x28 || il[i] == 0x6F;
+            if (!isCall && !(includeNewobj && il[i] == 0x73))
                 continue;
             int token = BitConverter.ToInt32(il, i + 1);
             byte table = (byte)((uint)token >> 24);

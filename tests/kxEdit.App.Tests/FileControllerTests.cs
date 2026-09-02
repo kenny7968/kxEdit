@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
+using kxEdit.Core.IO;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
@@ -1638,6 +1639,284 @@ public class FileControllerTests
                 // TempDir の再帰削除が ReadOnly 属性で失敗するのを避け、テスト成否に関わらず属性を戻す。
                 File2.SetAttributes(path, System.IO.FileAttributes.Normal);
             }
+        });
+
+    // ===== M-12: 差替に失敗して原本まで失われたときの案内(設計 2026-09-02 §3 / §10.6) =====
+    //
+    // AtomicFile は「差替に失敗し、かつ原本が消えた」ときだけ tmp を掃除せず残し、
+    // AtomicReplaceFailedException(TargetPath / PreservedTempPath)で場所を伝える。
+    // **残しても伝わらなければ M-12 の修正は意味を持たない**ので、WriteToPath の catch が
+    // その場所をユーザーへ届けることをここで固定する。
+    //
+    // 失敗の作り方: File.Replace の部分失敗は実環境で決定的に起こせないため、Core の差替段 seam
+    // (AtomicFile.OverrideReplaceStepForTest)へ偽装を注入する(Core.Tests の
+    // AtomicFileRecoveryTests と同じ形)。App.Tests から internal を触るために
+    // kxEdit.Core.csproj へ InternalsVisibleTo を足してある。
+    //
+    // ★ フックを張るテストは必ず scope.Invocations を assert すること(設計 §10.4 I-2)。
+    //   seam は [ThreadStatic] なので、張ったスレッドと Write が走るスレッドがずれると黙って
+    //   既定実装が走り、事後状態だけを見るテストは不発に気付けない。
+
+    /// <summary>
+    /// <paramref name="minLength"/> 以上の長さを持つ保存先パスを作る(親ディレクトリも作成する)。
+    /// 一時ディレクトリ名の長さは実行環境(ユーザー名等)で変わるため、足りない分を 1 段の
+    /// ディレクトリ名で詰める。退避先パスは これ+17 文字になるので、MAX_PATH(260)に収まるよう
+    /// <c>minLength + 17 &lt; 260</c> の範囲で使うこと(240 程度までは取れる)。
+    /// <para>
+    /// 詰め物の末尾側に<b>連続空白</b>を 1 か所埋め込む。Windows のパス構成要素に CR/LF/TAB は
+    /// 入れられないが、<b>途中の連続空白は正当で、実際に作成できる</b>(実測で確認)。
+    /// <see cref="SanitizeForDisplay.OneLine"/> はこれを 1 個へ畳むが
+    /// <see cref="SanitizeForDisplay.MultiLine"/> は畳まないので、<b>無害化を MultiLine へ
+    /// 格下げする変異を殺せる唯一の観測点</b>になる(設計 §10.7)。位置を末尾寄りにするのは、
+    /// 原本パス側の丸め(80 字)に掛からない場所に置いて、丸めの網と混線させないため。
+    /// </para>
+    /// </summary>
+    private static string MakeLongTargetPath(TempDir tmp, string fileName, int minLength)
+    {
+        // 区切り 2 個(Root\seg\fileName)を差し引いて必要なセグメント長を出す。
+        int segLen = Math.Max(8, minLength - tmp.Root.Length - 2 - fileName.Length);
+        string segment = new string('d', segLen - 4) + "  dd"; // 末尾寄りに連続空白 1 か所
+        string dir = System.IO.Path.Combine(tmp.Root, segment);
+        System.IO.Directory.CreateDirectory(dir);
+        return System.IO.Path.Combine(dir, fileName);
+    }
+
+    /// <summary>Save 失敗で Modified が立ったままの文書を用意する(Text セッター直後は非 dirty)。</summary>
+    private static Document NewDirtyDocAt(Host host, string path)
+    {
+        var doc = host.Docs.CreateNew();
+        doc.Editor.Text = "changed";
+        doc.State.Path = path;
+        doc.Editor.ReplaceCharRange(0, 0, "z"); // 保存点からずらす=Modified=true
+        Assert.True(doc.Editor.Modified); // 前提(false のままだと最後の assert が空振りする)
+        return doc;
+    }
+
+    /// <summary>
+    /// 退避先が<b>実在する</b>とき: 退避先パスが<b>完全な形</b>で載り、削除を促し、
+    /// <b>最短の復旧手段が長いパスより前に出る</b>。原本パス側は<b>丸められる</b>。
+    /// <para>
+    /// ★ <b>長いパスで検証するのが本質</b>。短いパスだと共通文言(<c>ex.Message</c> を 200 字で切る)
+    /// でも退避先が丸ごと収まってしまい、「丸めない」修正の有無を弁別できない(既定状態から始める
+    /// no-change テストと同型の罠)。fixture がその領域に入っていることは、下の legacy プローブで
+    /// <b>実際に検算</b>する。さらに<b>退避先パス単体でも 200 字を超える</b>長さにしてあるので、
+    /// 「共通文言はやめたが退避先に 200 字の上限を付け直す」形の退行も落ちる。
+    /// </para>
+    /// <para>
+    /// レビュー指摘 1(2026-09-02): 当初 <c>minLength: 190</c> だったため<b>原本パス側が丸ごと無網</b>
+    /// だった —— 無害化後 189 文字で、当時の 200 字上限に 11 文字届いていなかった。そのため
+    /// 「原本の丸めを撤廃する」「原本をファイル名だけに縮退させる」の 2 変異がどちらも生存した
+    /// (実測・設計 §10.7)。220 へ上げ、<b>丸めた形が載っていること</b>を assert して塞いだ。
+    /// </para>
+    /// <para>
+    /// 無害化(<see cref="SanitizeForDisplay"/> = ダイアログ偽装を防ぐ既存のセキュリティ制御)が
+    /// 外れていないことも 2 系統で固定する。「丸めない」を実装するときに一緒に外されやすい。
+    /// <list type="bullet">
+    /// <item>ファイル名の U+202E(RLO)が<b>除去</b>されること。U+202E は
+    /// <c>UnicodeCategory.Format</c> のため culture-sensitive な <c>Contains</c> は常に
+    /// 「見つかる」側に倒れる。以下の文字列比較はすべて <c>StringComparison.Ordinal</c> を
+    /// 明示する(CSV-L-5 系テストと同旨)。</item>
+    /// <item>ディレクトリ名の<b>連続空白</b>(<see cref="MakeLongTargetPath"/> が埋め込む)が
+    /// 1 個へ<b>畳まれる</b>こと。<c>OneLine</c> → <c>MultiLine</c> の格下げ変異はこれでしか
+    /// 殺せない(パス構成要素に CR/LF/TAB は入れられないため)。</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = MakeLongTargetPath(tmp, "no\u202Etes.txt", minLength: 220);
+            File2.WriteAllText(path, "orig"); // 原本を実在させる(=destExists=true で差替経路へ)
+            var doc = NewDirtyDocAt(host, path);
+
+            string? preserved = null;
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    (stagedTmp, dest, destExists) =>
+                    {
+                        preserved = stagedTmp;
+                        File2.Delete(dest); // 原本を消す = tmp が唯一のコピー
+                        // 復旧の File.Move(tmp, dest) を決定的に失敗させる(同名ディレクトリ)。
+                        System.IO.Directory.CreateDirectory(dest);
+                        throw new System.IO.IOException(
+                            $"simulated partial replace failure (destExists={destExists})"
+                        );
+                    }
+                )
+            )
+            {
+                Assert.False(host.File.Save()); // 保存できていない
+                Assert.Equal(1, scope.Invocations); // ★フックが実際に発火した(不発ガード)
+            }
+
+            Assert.NotNull(preserved);
+            Assert.True(File2.Exists(preserved!)); // 前提: 退避先は実在する(=案内してよい状態)
+
+            // 案内に載るべき形 = 無害化済み(RLO が落ち、連続空白が畳まれる)・切り詰め無しの退避先パス。
+            string preservedShown = SanitizeForDisplay.OneLine(preserved!);
+            // 前提: 退避先だけで 200 字を超える(=退避先に 200 字上限を付け直す退行も落とせる)。
+            Assert.True(preservedShown.Length > 200, $"len={preservedShown.Length}");
+            // 前提: 連続空白が「生には有り・無害化後には無い」= MultiLine への格下げ変異を弁別できる。
+            // どちらか一方でも崩れると、その網は黙って無力化する。
+            Assert.Contains("  ", preserved!, StringComparison.Ordinal);
+            Assert.DoesNotContain("  ", preservedShown, StringComparison.Ordinal);
+
+            // 原本パス側は 80 字で丸める。丸めた形を組み立てておく。
+            string targetShown = SanitizeForDisplay.OneLine(path, 80);
+            // 前提: 実際に丸めが起きる長さである(80 字ちょうど+末尾は省略記号)。
+            // ここが崩れると「丸めが効いている」の網が既定値と区別できなくなる
+            // (レビュー指摘 1 で踏んだ当のもの: minLength 190 では上限に届いていなかった)。
+            Assert.Equal(80, targetShown.Length);
+            Assert.EndsWith("…", targetShown, StringComparison.Ordinal);
+
+            // ★fixture 検算: 旧実装の形(ex.Message を丸ごと 200 字で切る)では、この退避先パスは
+            // 末尾から落ちる。ここが DoesNotContain にならない fixture だと、下の Contains は
+            // 修正前でも PASS してしまい弁別力がゼロになる。
+            var legacy = new AtomicReplaceFailedException(
+                path,
+                preserved!,
+                new System.IO.IOException("replace"),
+                new System.IO.IOException("recovery")
+            );
+            Assert.DoesNotContain(
+                preservedShown,
+                SanitizeForDisplay.OneLine(legacy.Message, 200),
+                StringComparison.Ordinal
+            );
+
+            var error = Assert.Single(host.Prompt.Log, e => e.Kind == "Error");
+            Assert.StartsWith("保存できませんでした", error.Text, StringComparison.Ordinal);
+            // (a) 退避先は丸めない。連続空白が畳まれた形で載ることで、無害化を MultiLine へ
+            // 格下げする変異も落ちる(MultiLine は畳まないのでこの Contains が外れる)。
+            Assert.Contains(preservedShown, error.Text, StringComparison.Ordinal);
+            // (a') 無害化は外れていない(生の RLO がダイアログへ載らない)
+            Assert.DoesNotContain("\u202E", error.Text, StringComparison.Ordinal);
+            // (a'') 原本パス側は<b>丸める</b>。丸めた形(79 字+"…")がそのまま載ることで、
+            // 「丸めを撤廃する」変異も「ファイル名だけに縮退させる」変異も落ちる
+            // (どちらも 79 字の直後に "…" が来ないため)。
+            //
+            // ★レビュー指摘 1 の提案「DoesNotContain(原本パス全体)」は<b>そのままでは成立しない</b>:
+            //   退避先パスは原本パスを prefix として含む(直下の StartsWith が実測で示す)ので、
+            //   正しい実装でも原本パス全体はダイアログに現れる。弁別は「丸めた形が載っていること」
+            //   の側で行う。
+            Assert.StartsWith(path, preserved!, StringComparison.Ordinal);
+            Assert.Contains(targetShown, error.Text, StringComparison.Ordinal);
+            // (b) 掃除する者が誰もいないので削除を促す(自動削除は足さない=M-12 の目的を潰すため)
+            Assert.Contains("削除してください", error.Text, StringComparison.Ordinal);
+            // ★最短の復旧手段(「名前を付けて保存」)が、長い退避先パスより<b>前</b>に出る。
+            // 失われたのは元ファイルの方で、退避先はエディタが今も持っている内容の複製でしかない
+            // ——最短の復旧は tmp を探すことではない。SR は線形に読むので、案内を後ろに置くと
+            // 数百文字のパス朗読を聞き終えるまで到達できない(レビュー指摘 3)。
+            // 存在だけでなく<b>順序</b>を固定する。
+            int guideAt = error.Text.IndexOf("名前を付けて保存", StringComparison.Ordinal);
+            int tempAt = error.Text.IndexOf(preservedShown, StringComparison.Ordinal);
+            Assert.True(guideAt >= 0, "復旧手段の案内が無い");
+            Assert.True(guideAt < tempAt, $"guideAt={guideAt} tempAt={tempAt}");
+            // 保存できていないので dirty のまま(終了時の確認が効く)
+            Assert.True(doc.Editor.Modified);
+        });
+
+    /// <summary>
+    /// (c) 退避先が<b>実在しない</b>とき(復旧の <c>File.Move</c> が「tmp まで失われていた」で
+    /// 落ちた場合)は「残してあります」と<b>言わない</b>。実在しない退避先を案内するのは、
+    /// 単なる保存失敗より悪い。
+    /// <para>
+    /// ここは<b>短いパス</b>で検証する。長いパスだと、共通文言へ素通ししたときも 200 字の
+    /// 切り詰めで「残してあります」と tmp パスが末尾から落ち、素通しと修正済みを区別できない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Save_ReplaceLosesOriginalAndTemp_DoesNotPointAtAMissingFile() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt"); // 短いパス(上の xmldoc の理由)
+            File2.WriteAllText(path, "orig");
+            var doc = NewDirtyDocAt(host, path);
+
+            string? staged = null;
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    (stagedTmp, dest, destExists) =>
+                    {
+                        staged = stagedTmp;
+                        File2.Delete(dest); // 原本を消す
+                        File2.Delete(stagedTmp); // tmp まで失う = 復旧の File.Move も落ちる
+                        throw new System.IO.IOException(
+                            $"simulated partial replace failure losing the staged copy (destExists={destExists})"
+                        );
+                    }
+                )
+            )
+            {
+                Assert.False(host.File.Save());
+                Assert.Equal(1, scope.Invocations); // ★不発ガード
+            }
+
+            Assert.NotNull(staged);
+            Assert.False(File2.Exists(staged!)); // 前提: 退避先は実在しない
+
+            // 前提の裏取り: 共通文言(200 字切り)へ素通しすると、この短いパスでは
+            // 「残してあります」も tmp パスも丸ごと載る = 下の DoesNotContain が弁別する。
+            var legacy = new AtomicReplaceFailedException(
+                path,
+                staged!,
+                new System.IO.IOException("replace"),
+                new System.IO.IOException("recovery")
+            );
+            string legacyText = SanitizeForDisplay.OneLine(legacy.Message, 200);
+            Assert.Contains("残してあります", legacyText, StringComparison.Ordinal);
+            Assert.Contains(staged!, legacyText, StringComparison.Ordinal);
+
+            var error = Assert.Single(host.Prompt.Log, e => e.Kind == "Error");
+            Assert.StartsWith("保存できませんでした", error.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("残してあります", error.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(staged!, error.Text, StringComparison.Ordinal);
+            // 内容が失われたことと、次に何をすればよいかは伝える
+            Assert.Contains("残せませんでした", error.Text, StringComparison.Ordinal);
+            Assert.Contains("名前を付けて保存", error.Text, StringComparison.Ordinal);
+            Assert.True(doc.Editor.Modified);
+        });
+
+    /// <summary>
+    /// 退行の確認: <b>一般的な</b>保存失敗の文言は変わっていない(共通文言のまま・200 字で切る)。
+    /// 新分岐の条件を <c>ex is IOException</c> 等へ広げると、ここが別文言に化けて赤くなる。
+    /// <para>
+    /// 実失敗経路(ReadOnly 属性 → UnauthorizedAccessException)側の文言は既存の
+    /// <see cref="Save_ReadOnlyDocument_WriteFailure_StillRestoresReadOnly"/> ほかが押さえている。
+    /// こちらは OS 由来ではない<b>既知の</b>メッセージを注入して、切り詰めまで含めて完全一致で
+    /// 固定する(OS のメッセージはロケール依存で完全一致に使えない)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Save_OrdinaryIoFailure_KeepsGenericMessageTruncatedAt200() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "changed";
+            doc.State.Path = path;
+
+            // 200 字上限に確実に当たる長さの既知メッセージ。IOException なので
+            // AtomicReplaceFailedException の分岐に入ってはいけない(=共通文言のまま)。
+            string longMessage = new string('あ', 300);
+            host.MetaChangedThrow = () => throw new System.IO.IOException(longMessage);
+
+            Assert.False(host.File.Save());
+
+            var error = Assert.Single(host.Prompt.Log, e => e.Kind == "Error");
+            Assert.Equal(
+                $"保存できませんでした: {SanitizeForDisplay.OneLine(longMessage, 200)}",
+                error.Text
+            );
+            Assert.DoesNotContain("残してあります", error.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("削除してください", error.Text, StringComparison.Ordinal);
         });
 
     // ===== 符号化劣化警告(CanEncodeBuffer 経由) =====

@@ -14,5 +14,11 @@
     <!-- ViewportLayout/FrameBuilder は internal のまま。EditorControl(kxEdit.Editor)は
          これを直接消費するため本アセンブリの internal を可視化する。 -->
     <InternalsVisibleTo Include="kxEdit.Editor" />
+    <!-- 設計 2026-09-02 §6.1: AtomicFile.OverrideReplaceStepForTest を App.Tests から使う。
+         File.Replace の部分失敗は実環境で決定的に起こせないため、FileController →
+         TextFileService → AtomicFile の end-to-end 経路を固定するには App.Tests 側から
+         差替段を差し替える必要がある。kxEdit.Editor が既に App.Tests へ internal を
+         可視化しているのと同じ扱い。 -->
+    <InternalsVisibleTo Include="kxEdit.App.Tests" />
   </ItemGroup>
 </Project>

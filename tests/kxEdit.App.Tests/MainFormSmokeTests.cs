@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Search;
@@ -75,13 +76,18 @@ public class MainFormSmokeTests
     /// 実 %APPDATA% に落ち、close 時の Shutdown(keepForRestore:false) 等が開発機の実ファイルを
     /// 消してしまうため、全テスト共通で 4 引数 ctor+seam により TempDir へ隔離する。
     /// </summary>
-    private static MainForm ShowMainForm(AppSettings settings, TempDir tmp)
+    private static MainForm ShowMainForm(
+        AppSettings settings,
+        TempDir tmp,
+        string? settingsWarning = null
+    )
     {
         var form = new MainForm(
             settings,
             tmp.SettingsPath,
             backupDirectory: tmp.BackupDir,
-            sessionLayoutPath: tmp.LayoutPath
+            sessionLayoutPath: tmp.LayoutPath,
+            settingsWarning: settingsWarning
         );
         form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
         form.StartPosition = FormStartPosition.Manual;
@@ -113,9 +119,13 @@ public class MainFormSmokeTests
     /// pump で発火させる。失敗パスの集約 Warn は既定で抑止
     /// (MessageBox がテストをブロックしないように。実運用経路では出る)。
     /// </summary>
-    private static MainForm ShowMainForm_Unified(AppSettings settings, TempDir tmp)
+    private static MainForm ShowMainForm_Unified(
+        AppSettings settings,
+        TempDir tmp,
+        string? settingsWarning = null
+    )
     {
-        var form = ShowMainForm(settings, tmp);
+        var form = ShowMainForm(settings, tmp, settingsWarning);
         form.SetSuppressRestoreDialogsForTest(true);
         PumpUntilShown();
         return form;
@@ -877,6 +887,323 @@ public class MainFormSmokeTests
             Assert.Equal("backup-newer", doc.Editor.SnapshotText);
         });
 
+    // ===== M-11(設計 2026-09-02 §5.4): 設定の破損 / 読取不能を起動時に 1 回知らせる =====
+
+    /// <summary>文言そのものは <see cref="SettingsStartupTests"/> が固定する。ここは配線=
+    /// 「渡した文言が起動時に 1 回だけ回収される」ことだけを見るので、中身は何でもよい。</summary>
+    private const string WarningForTest =
+        "設定ファイルが壊れていたため、既定の設定で起動しました。";
+
+    /// <summary>
+    /// 警告があるとき、<c>OnShown</c> が<b>1 回だけ</b>到達する。加えて<b>到達位置</b>を固定する:
+    /// ①復元ブロックの <c>finally</c>(<c>MarkStartupRestoreComplete</c>)を抜けた後
+    /// ②陳腐化警告より前。
+    /// <para>
+    /// 到達<b>数</b>だけでは位置は固定できない —— 復元より前へ動かしても、陳腐化警告より後ろへ
+    /// 動かしても、どちらの到達数も 1 のままである。そこで <c>MainForm</c> 側に到達した瞬間の
+    /// スナップショット(<c>SettingsWarningReachedAtForTest</c>)を持たせ、
+    /// <b>周囲の状態で位置を観測する</b>。
+    /// </para>
+    /// <para>
+    /// ①が守る不変条件: <c>MessageBox</c> はメッセージをポンプするので、ゲートが開く前に
+    /// モーダルを出すと復元の最中に再入経路を開く(A-8 と同型)。既存の陳腐化警告が
+    /// 復元の<b>後</b>に居るのも同じ理由。
+    /// </para>
+    /// <para>
+    /// fixture は<b>陳腐化警告も同時に出る</b>状態にしてある(ディスクがバックアップより新しい)。
+    /// 片方しか出ない fixture では ② の観測面が常に 0 で、順序を入れ替える変異が生存する。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void OnShown_SettingsWarning_ReachesOnce_AfterRestoreGate_AndBeforeStaleWarning() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("stale.txt");
+            var backupTime = DateTime.UtcNow.AddMinutes(-10);
+            File2.WriteAllText(p1, "disk-newer");
+            var bk = Rec(NewId(), p1, 0, "backup-older") with { TimestampUtc = backupTime };
+            PlantBackup(tmp, bk);
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0));
+
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp, WarningForTest);
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            // fixture の検算: 対になる陳腐化警告も実際に出ている(= ② の観測面が生きている)。
+            Assert.Equal(1, form.StaleBackupWarningCountForTest);
+
+            var reachedAt = form.SettingsWarningReachedAtForTest;
+            Assert.NotNull(reachedAt);
+            Assert.True(
+                reachedAt!.Value.RestoreGateOpen,
+                "設定警告は復元ブロックの finally(MarkStartupRestoreComplete)より後で出すこと"
+            );
+            Assert.Equal(0, reachedAt.Value.StaleWarningCount); // 陳腐化警告より前
+        });
+
+    /// <summary>
+    /// 対照: 警告が無ければ<b>1 回も</b>到達しない(初回起動=<c>Missing</c> で警告を読まされない)。
+    /// <c>OnShown</c> が実際に走ったことを <c>StartupRestoreGateOpenForTest</c> で併せて固定する
+    /// —— これが無いと「OnShown が動かなくなった」実装でも 0 件で緑になる。
+    /// </summary>
+    [Fact]
+    public void OnShown_NoSettingsWarning_NeverReaches() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true;
+
+            using var form = ShowMainForm_Unified(settings, tmp); // settingsWarning: null
+
+            Assert.Equal(0, form.SettingsWarningCountForTest);
+            Assert.Null(form.SettingsWarningReachedAtForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest); // OnShown は実際に走った
+        });
+
+    /// <summary>
+    /// <b>環境仮定の記録</b>(kxEdit 側の網ではない)。<see cref="Form.Shown"/> は 1 つのフォーム
+    /// インスタンスにつき 1 回しか上がらない —— <c>Hide()</c>→<c>Show()</c> も
+    /// <see cref="Form.ShowInTaskbar"/> の切替によるハンドル再生成も、追加の <c>Shown</c> を
+    /// 1 件も起こさない(実測)。
+    /// <para>
+    /// <b>この事実は「2 回目が出ないことを観測できない」を意味しない。</b> 観測は
+    /// <c>OnShown</c> を直接呼べばよく、それは下の
+    /// <see cref="OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain"/> がやっている。
+    /// ここが固定しているのは<b>WinForms 側の前提</b>だけで、kxEdit のどの変異でも赤にならない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Shown_never_fires_twice_for_the_same_form_instance() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm_Unified(NewSettings(csvAutoModeOnOpen: false), tmp);
+            int shown = 0;
+            form.Shown += (_, _) => shown++; // 初回発火は購読前に済んでいる
+
+            form.Hide();
+            form.Show();
+            PumpUntilShown();
+            form.ShowInTaskbar = true; // ハンドル再生成
+            PumpUntilShown();
+
+            Assert.Equal(0, shown);
+        });
+
+    /// <summary>
+    /// 警告は<b>起動時に 1 回だけ</b>。<c>OnShown</c> をもう 2 回呼んでも到達数は増えない。
+    /// <para>
+    /// <see cref="Form.Shown"/> が 1 度しか上がらないので<b>WinForms 経由では 2 周させられない</b>が、
+    /// <c>OnShown</c> は <c>protected override</c> で、このアセンブリは <c>InternalsVisibleTo</c> を
+    /// 持つ。リフレクションで直接呼べば観測できる(このファイルは既に <c>Program.Main</c> の IL 走査で
+    /// リフレクションを使っている)。
+    /// </para>
+    /// <para>
+    /// <b>空振りではない</b>: 冪等性は完全に <c>MainForm.OnShown</c> 冒頭の
+    /// <c>_restoreOffered = true;</c> に依っており、<b>その 1 行を落とす変異は他の 750 本を 1 本も
+    /// 落とさなかった</b>(実測・§10.19)。この網だけが「到達数 3」で赤くなる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm_Unified(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp,
+                WarningForTest
+            );
+            Assert.Equal(1, form.SettingsWarningCountForTest); // 前提: 起動で 1 回出た
+
+            var onShown = typeof(MainForm).GetMethod(
+                "OnShown",
+                BindingFlags.Instance | BindingFlags.NonPublic
+            );
+            Assert.NotNull(onShown);
+            onShown!.Invoke(form, new object[] { EventArgs.Empty });
+            onShown.Invoke(form, new object[] { EventArgs.Empty });
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            // 同じガードが陳腐化警告と復元も守っている(道連れで壊れていないことの併記)。
+            Assert.Equal(0, form.StaleBackupWarningCountForTest);
+        });
+
+    /// <summary>
+    /// 起動経路の<b>端から端まで</b>。壊れた settings.json を置いて実際の合成点
+    /// (<c>Program.CreateMainForm</c>)からフォームを作り、<c>OnShown</c> が警告へ到達すること
+    /// を観測する。これが <c>Prepare</c> → 文言 → ctor → <c>OnShown</c> の値の流れを固定する
+    /// 唯一の網である(下の IL テストでは<b>流れは観測できない</b>)。
+    /// <para>
+    /// 退避が実際に起きた(<c>.bad</c> に元の中身がある)ことも併せて見る —— 警告だけ出して
+    /// 退避しない実装と区別が付く。
+    /// </para>
+    /// <para>
+    /// <c>backupDirectory</c> / <c>sessionLayoutPath</c> を渡すのは必須。破損 settings.json から
+    /// 作られる既定設定は <c>BackupEnabled=true</c> なので、渡さないと実 <c>%APPDATA%</c> の
+    /// バックアップを走査・削除しうる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_warns_once_when_the_settings_file_is_corrupt() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            File2.WriteAllText(tmp.SettingsPath, "{ これは JSON ではない");
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest); // OnShown は実際に走った
+            // 退避も実際に起きている(Prepare の副作用まで通っている)。
+            Assert.False(File2.Exists(tmp.SettingsPath));
+            Assert.Equal("{ これは JSON ではない", File2.ReadAllText(tmp.SettingsPath + ".bad"));
+        });
+
+    /// <summary>
+    /// 対照: 正常な settings.json では同じ経路で<b>1 回も</b>警告に到達しない。
+    /// 「常に警告する」実装が上のテストだけでは緑になるため、こちらが必要。
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_does_not_warn_for_a_valid_settings_file() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(tmp.SettingsPath, new AppSettings { BackupEnabled = false });
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            Assert.Equal(0, form.SettingsWarningCountForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest);
+        });
+
+    /// <summary>
+    /// <see cref="Program.CreateMainForm"/> の<b>隔離引数が実際に効いている</b>こと。
+    /// <para>
+    /// これが無いと、<c>backupDirectory</c> / <c>sessionLayoutPath</c> の配線が将来切れても
+    /// CI は緑のままで、<b>開発機の実 <c>%APPDATA%\kxEdit\backups</c> を走査・削除しうる</b>
+    /// —— 破損 settings.json から作られる既定設定は <c>BackupEnabled=true</c> だからである。
+    /// 実際、この網を張る前は「隔離引数を無視して別のディレクトリを使う」変異が App 750 全 PASS で
+    /// 生存していた(実測・§10.19)。<b>xmldoc だけが防御という状態</b>だった。
+    /// </para>
+    /// <para>
+    /// 観測は<b>復元の中身</b>で行う。<c>tmp</c> にレイアウトとバックアップを植て、
+    /// 「植えたバックアップの本文で復元される」ことを見る —— 引数がどこか別の場所を指していれば
+    /// レイアウトもバックアップも見つからず、復元は 0 件になる。
+    /// </para>
+    /// <para>
+    /// <b><c>settingsPath</c> も同じ網に入れる</b>(最終レビュー(品質パス)M-3)。§10.19 指摘 F は
+    /// 隔離引数 3 本のうち 2 本しか塞いでおらず、<b>実 <c>%APPDATA%\kxEdit\settings.json</c> に
+    /// 書き込む当の引数</b>(<c>MainForm._settingsPath</c> → <c>SaveSettingsSafe</c> →
+    /// <c>SettingsStore.Save</c>)だけが非対称に開いていた。復元だけでは観測できない ——
+    /// 読込は <c>Prepare(settingsPath)</c> が別に受け取るので、<b>ctor へ渡す側だけ</b>を
+    /// 差し替える変異は復元を 1 ビットも変えない。書込を実際に起こして観測面を作る。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_routes_the_isolation_paths_into_the_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("planted.txt");
+            File2.WriteAllText(p1, "disk-body");
+            var bk = Rec(NewId(), p1, 0, "backup-body") with
+            {
+                TimestampUtc = DateTime.UtcNow.AddMinutes(10),
+            };
+            PlantBackup(tmp, bk); // ← backupDirectory が効いていなければ見つからない
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0)); // ← 同 sessionLayoutPath
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = true, RestoreOpenFilesOnStartup = true }
+            );
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal(p1, doc.State.Path); // sessionLayoutPath 経由でタブが復元された
+            Assert.Equal("backup-body", doc.Editor.SnapshotText); // backupDirectory 経由で本文が来た
+
+            // ★ settingsPath。前提: この時点ではまだ書かれていない(恒真 assertion 除け)。
+            Assert.Empty(SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
+            // 既存タブの再アクティブ化 = RegisterRecent → SaveSettingsSafe → SettingsStore.Save。
+            // ShowCreatedMainForm は Close() しない(= OnFormClosing 経由の保存は走らない)ので、
+            // 書込は自分で起こす必要がある。
+            form.FileForTest.TryOpenOrActivate(p1);
+            // 書込先が form へ渡した settingsPath であること。別の場所を指す変異では
+            // ここが空のまま = 赤(実 %APPDATA% を代理する空ディレクトリで実測・§10.21)。
+            Assert.Contains(p1, SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
+        });
+
+    /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
+    /// <c>OnShown</c> まで進める。隔離は <see cref="ShowMainForm"/> と同じ 4 点
+    /// (settings / backups / session-state / last-session-buffers)。</summary>
+    private static MainForm ShowCreatedMainForm(TempDir tmp)
+    {
+        var form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+        form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
+        form.SetSuppressRestoreDialogsForTest(true);
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new System.Drawing.Point(-32000, -32000);
+        form.ShowInTaskbar = false;
+        form.Show();
+        PumpUntilShown();
+        return form;
+    }
+
+    /// <summary>
+    /// 残る 1 ホップ(<c>Main</c> → <c>CreateMainForm</c>)。<c>Main</c> は <c>[STAThread]</c> +
+    /// <c>Application.Run</c> のため<b>実行して観測することはできない</b>ので、IL を読んで
+    /// 「どのメソッドを呼んでいるか」だけを固定する。
+    /// <para>
+    /// これで殺せるのは <b>Task 8 以前の形へ戻す変異</b>(<c>SettingsStore.Load(..., out _)</c> を
+    /// 直接呼び、破損を無言で捨てる)である。<b>殺せないこと</b>も明示しておく:
+    /// 値の流れ(どの引数を渡したか)は呼出集合では観測できない。だから合成点そのものを
+    /// <c>CreateMainForm</c> へ切り出し、上の 2 本で<b>実行して</b>固定してある ——
+    /// この IL テストが守るのは「その合成点を通っていること」だけである。
+    /// </para>
+    /// <para>
+    /// 向きに注意(<see cref="IlCallees"/> の xmldoc と同じ話): 走査に残るのは<b>偽陽性</b>
+    /// (オペランドのバイト列がたまたまメソッドトークンとして解決できる)だけで、<b>偽陰性は無い</b>。
+    /// 偽陽性は集合へ「呼んでいないもの」を足す向きにしか働かないので、健全なのは
+    /// <b><c>DoesNotContain</c> の側</b>である(偽陽性で緑になることはない)。逆に
+    /// <c>Contains</c> は偽陽性で緑になりうるので、下の 1 本は変異
+    /// (合成点を迂回する M-E')を当てて実際に赤くなることを確認してある。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProgramMain_builds_the_form_through_the_tested_composition_point()
+    {
+        var main = typeof(Program).GetMethod(
+            "Main",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(main);
+        // newobj まで拾う入口を使う: 下の「MainForm を直に組み立てない」は ctor を見る主張。
+        var called = IlCallees.OfIncludingNewobj(main!);
+
+        Assert.Contains(
+            called,
+            m => m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
+        );
+        // ★ 破損の信号を捨てる旧形(SettingsStore.Load を直接叩く)へ戻っていない。
+        Assert.DoesNotContain(
+            called,
+            m => m.DeclaringType == typeof(SettingsStore) && m.Name == "Load"
+        );
+        // ★ MainForm を Main から直接組み立てる形(= CreateMainForm を迂回する)へ戻っていない。
+        Assert.DoesNotContain(
+            called,
+            m => m is ConstructorInfo && m.DeclaringType == typeof(MainForm)
+        );
+    }
+
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
 
     // ON×BackupON+dirty → 確認なし(silent close)+FinalFlush が本文バックアップとレイアウトを
@@ -917,7 +1244,7 @@ public class MainFormSmokeTests
             var records = BackupStore.LoadAll(tmp.BackupDir);
             Assert.Contains(records, r => r.Id == tab.BackupId && r.Content == "dirty-body");
 
-            var loaded = SettingsStore.Load(tmp.SettingsPath);
+            var loaded = SettingsStore.Load(tmp.SettingsPath, out _);
             Assert.Null(loaded.LastSession); // 統合後は旧形式を書かない
         });
 
@@ -1300,7 +1627,7 @@ public class MainFormSmokeTests
                 form.Close();
             }
 
-            var loaded = SettingsStore.Load(tmp.SettingsPath);
+            var loaded = SettingsStore.Load(tmp.SettingsPath, out _);
             Assert.False(loaded.RestoreOpenFilesOnStartup);
             Assert.Null(loaded.LastSession);
             Assert.False(File2.Exists(tmp.BuffersPath)); // OFF 終了で orphan 掃除(Task 7)
