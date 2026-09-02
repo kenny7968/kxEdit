@@ -924,7 +924,14 @@ Actual:   "tgt=190 tmp=206 raw=431 at=214 shown=0 cut=206 act=212"
 
 Core の差替段 seam(`AtomicFile.OverrideReplaceStepForTest`)へ偽装を注入し、
 `FileController` → `TextFileService` → `AtomicFile` の end-to-end で固定した。
-**3 本とも `Assert.Equal(1, scope.Invocations)` を置いている**(§10.4 I-2 の不発ガード)。
+**seam を張る 2 本(下記 1・2)には `Assert.Equal(1, scope.Invocations)` を置いている**
+(§10.4 I-2 の不発ガード)。3 本目は seam を使わない(`Host.MetaChangedThrow` で
+既知の `IOException` を注入する)ので、この assert は無い。
+
+> 訂正: commit `0a5b9d9` のメッセージと、本節の初稿は「網 3 本はいずれも seam を張り
+> `Invocations` を assert する」と書いていたが**偽**である(3 本目は seam を使わない)。
+> commit は書き換えずここに補正を残す。§10.1 以来の「結論は正しいが理由節が偽」の再発で、
+> しかも**自分が同じ節で数えた本数**を確かめずに書いた。
 
 1. `Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull` —— 原本を消し、宛先に同名ディレクトリを
    作って復旧の `File.Move` も落とす。退避先は**実在する**。原本パス 190 文字。観測点は
