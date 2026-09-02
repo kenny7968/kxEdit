@@ -466,6 +466,11 @@ M-3 は `-warnaserror` でも 0 warning で通ることを確認済み(アナラ
 
 M-2 の網は Stream 側だけを赤にし、byte[] 側は緑のまま = 網が経路を弁別できている。
 
+> **訂正(§10.9・印は最終レビュー(品質パス)M-4 で追加)**: この弁別は**委譲後は成り立たない**。
+> Task 5 追補で byte[] 版を Stream 版へ委譲したため、ステージングは 1 か所しか無く、
+> 「byte[] 側だけ緑」という対照そのものが作れない(§10.9 の M-C が「式として存在しない」に
+> なったのと同じ理由)。当時の記録なので本文は書き換えない。
+
 > 上の変異名・テスト名・出力は**当時のもの**(証跡なので書き換えない)。その後 §10.4 の M-1 で
 > 改名しており、現在の名前は `CommitOverrideScope` → `ReplaceStepOverrideScope` /
 > `SetCommitOverride` → `SetReplaceStepOverride` /
@@ -508,6 +513,12 @@ M-1 / M-2 の網はフックに**差替先を消させない**形にしてある
 さらにバックアップ側は、残した tmp を**次回起動の `BackupStore.SweepTempFiles`(`BackupStore.cs:426`)
 が `*.tmp` を無差別削除して回収する**(`:151` / `:257` から呼ばれる)。つまり M-12 が tmp を残しても
 バックアップ経路では「静かに消える」。
+
+> **訂正(§10.5・印は最終レビュー(品質パス)M-4 で追加)**: 「(`:151` / `:257` から呼ばれる)」は
+> `DeleteAll` / `DeleteSessionDir` 経由の呼出であって、**起動時の掃除は
+> `BackupCoordinator.cs:346-347` の 2 呼出**である。また上の表は layout 経路に何も書いて
+> いないため 2 経路とも消えるように読めるが、**`SessionLayoutStore` の tmp は掃除対象外
+> (恒久残留する)**。どちらも §10.5 を参照。当時の記録なので本文は書き換えない。
 
 **コード変更はしない**(本ブランチの射程外)。握り潰しの解消は B5 の M-20 が担当する。
 **Task 6(設定の原子化)でも同じ判断が要る**——`SettingsStore` の保存が握り潰し側か通知側かを
@@ -1327,6 +1338,18 @@ flush の有無すら網が無い(M-C が生存)。**「fsync の網がある」
 > 「網が無い」と書くのは一貫しない。また上の「4 案を試した」は**閉じた論証へ差し替えられる**。
 > どちらも §10.10 を参照。
 
+> **再訂正(最終レビュー(品質パス)I-2)**: 直前の「範囲の訂正」は**誤り**。`FileShare.None` は
+> **網が張れる**(`Staging_handle_denies_a_concurrent_open`・実測は §10.21)。「ステージング段に
+> 観測面が無い」は `CreateNew` の話であって `FileShare` の話ではない —— 差が出るのは
+> **ハンドルが開いている間に別ハンドルから開けるか**で、そのハンドルは `writer(fs)` の実行中
+> ずっと開いている。**上の 4 案の 3 つ目(`FileStream.Name` から tmp パスを採る)が、そのまま
+> `FileShare` 側の鍵だった** —— あそこで「その時点でファイルは既に作られている」と退けたのは
+> `CreateNew` にとっての話で、`FileShare.None` にとっては<b>ちょうど観測したい状態</b>である。
+> **`CreateNew` が無網であることは変わらない**(M-A は今も生存する)。
+
+> **訂正の訂正(同上)**: 「無網なのは 2 つ」ではなく **`CreateNew` の 1 つ**が正しい。
+> 「1 つの原因から出た 2 つの穴」という括り自体が偽で、原因は 1 つではなかった。
+
 **張れた網(挙動不変ネット 3 本 + 契約 1 本)**。既存の byte[] 版テストは 1〜3 バイトしか
 書いておらず、書き手を `File.WriteAllBytes` から `FileStream.Write` へ替えたときの
 **空 payload / null payload / 部分書込が丸ごと無網**だった。M-D / M-E が実際に生存→死亡したのが
@@ -1604,6 +1627,10 @@ Stream 版が既に本番で使っている形である。むしろ「AV や同�
 片方にだけ「網が無い」と明記して他方に与えないのは、**同じ原因から出た 2 つの穴のうち
 1 つだけを可視化する**ことになり一貫しない。
 
+> **訂正(最終レビュー(品質パス)I-2)**: 「理由は `CreateNew` とまったく同じ」が**偽**。
+> **生存していたのは事実だが、それは網が張れないからではなく、張っていなかったからである。**
+> `FileShare.None` の網は張れる(§10.21・実測)。範囲を広げるのではなく、**塞ぐのが正しかった**。
+
 #### 指摘 5(推奨)—— `CreateNew` の「張れない」を閉じた論証にする
 
 **採用した。** §10.8 は「4 案を試して駄目だった」という**列挙**で終わっており、
@@ -1619,9 +1646,21 @@ Stream 版が既に本番で使っている形である。むしろ「AV や同�
 (ctor は名前決定と作成を原子的に行うので窓が無い)/ ディレクトリ ACL 細工(両 disposition とも
 同じ権限を要求する)/ 特殊名前空間。**同じ論証が `FileShare.None`(N-5)にもそのまま当たる。**
 
+> **訂正(最終レビュー(品質パス)I-2)**: 最後の 1 文が**偽**。`CreateNew` 側の閉じた論証
+> (引用ブロック)は**成立する**が、`FileShare.None` には**当たらない**。論証が依拠するのは
+> 「**ctor より前**に tmp 名を知る」連鎖の切断であり、`FileShare` の差は ctor 前ではなく
+> **ハンドルが開いている最中**にしか現れないので、その連鎖を必要としない。writer は
+> `((FileStream)stream).Name` で tmp パスを知れ、そのとき目的のハンドルはまだ開いている。
+> **production に seam を 1 つも足さずに網が張れる**(§10.21・実測)。
+> 「4 案試して駄目」を閉じた論証へ差し替えた判断自体は正しかったが、**その論証の適用範囲を
+> 1 つ広げすぎた**。
+
 **「4 案試して駄目」より「ctor 前に名前を知る手段が production に無い以上、seam なしでは
 原理的に不可能」の方が、将来の再検討を正しく打ち切れる**(逆に、**ステージング名の seam を
 足せば両方とも網が張れる**ことも同時に言えている ——それを足すかどうかは別の判断)。
+
+> **訂正(同上)**: `FileShare.None` は **seam 無しで既に張れている**(§10.21)。
+> seam を足す議論が残るのは `CreateNew` **だけ**。
 
 #### 申し送り(対応せず記録に留める)
 
@@ -2141,6 +2180,16 @@ xmldoc と §10.13 が引く `Program.cs:20`(Load)/ `:30`(`SetUnhandledException
 **同じ commit が足した TODO コメント 2 行で 2 行ずれ**、実際は `:22` / `:32`
 (`CrashHandler` は `:35`)だった。**順序の主張(`Load` が先)は事実**なので行番号だけ直した。
 [[stale-commit-hashes-before-github-flow]] と同型 —— **自分の変更が自分の引用を陳腐化させる**。
+
+> **訂正(最終レビュー(品質パス)I-1)**: ここで「事実」と認定した**順序の主張が、2 タスク後に
+> 同じブランチによって偽になった**。Task 9 で `Program.Main` から読込が `CreateMainForm`
+> (`Program.cs:30`)へ移り、`Application.SetUnhandledExceptionMode` は `:28` = **読込より前**に
+> なった。訂正した行番号 3 つ(`:22` / `:32` / `:35`)も全部動いている。
+> **catch-all を残す結論は変わらない** —— 依拠すべきは順序ではなく「`Application.Run` より前の
+> 例外を拾う配線がまだ無い」ことで、`CrashHandler`(`:31`)より前である点も不変だから。
+> 理由節は `SettingsStore.Load` の xmldoc 側で実物へ合わせ直した。当時の記録なので本文は
+> 書き換えない。**この節自身が名指しした「自分の変更が自分の引用を陳腐化させる」の再発**であり、
+> 本ブランチで「結論は正しいが理由節が偽」を数えた 6 件目である(§10.21)。
 
 #### 指摘 3 —— OOM の保証が `ReadAllText` 段にしか当たらない
 
@@ -3009,6 +3058,11 @@ dotnet csharpier check src tests  →  Checked 370 files (EXIT=0)
 3. **M-13 の fsync が届いたこと** —— 電源を落とせない(設計 §6.2)。項目 8 が見るのは副作用の体感だけ。
 4. **`CreateNew` / `FileShare.None`** —— ステージング段に観測面が無く、seam 無しでは原理的に不可能
    (§10.10 指摘 5 の閉じた論証)。実機でも同じ。
+
+   > **訂正(最終レビュー(品質パス)I-2)**: `FileShare.None` は誤って併記していた。L1 で
+   > 網が張れる(§10.21)。L5 対象外である結論は変わらない(実機で見るものではない)が、
+   > 理由は「原理的に不可能」ではなく「**L1 が押さえている**」。
+   > チェックリスト §6 の該当行も同じ形で訂正した。
 5. **`Unreadable` のまま終了すると案内した当のファイルが上書きされる** —— 挙動は再現できるが、
    **止めないのが本ブランチの判断**(設計 §5.5)。B5(M-22)への申し送り済みで B4 の合否ではない。
 6. **`{"FontSize":1e400}`** —— `Normalize` は無変更 = 既存バグ(設計 §9)。射程外。
@@ -3044,3 +3098,173 @@ CRLF・BOM なし・見出し構成(§0 なぜ L5 が必要か → §1 ノウハ
              = pre-commit の no-local-paths を通る(初回はこの検証行自体が引っかかって直した)
 %APPDATA%\kxEdit\ の実ファイル: 本タスクでは一切触っていない(手順を書いただけで実行していない)
 ```
+
+### 10.21 最終ブランチレビュー 第 1 パス(コード品質)の反映
+
+Critical 0 / Important 2 / Minor 5。**src の挙動変更はゼロ**(変えたのは xmldoc・記録・網 1 本と
+assertion 1 行)。以下は指摘ごとの反映。
+
+#### ★ I-2 —— 「`FileShare.None` の網は張れない」が誤りだった(同一ブランチ 3 度目)
+
+§10.10 指摘 5 は `CreateNew` について**閉じた論証**を立て、最後に
+「**同じ論証が `FileShare.None`(N-5)にもそのまま当たる**」と 1 行で拡張していた。
+**この拡張が偽**である。
+
+- `CreateNew` の論証が切っているのは「差を観測する → **ctor 前に**同名を置く → ctor 前に名前を
+  知る」という連鎖。production が tmp 名を外へ出すのは ctor が走った**後**だけなので、
+  seam 無しでは切れる —— **これは今も成立する**(M-A は生存したまま)。
+- `FileShare` の差は**ctor 前には現れない**。現れるのは「**ハンドルが開いている間に別ハンドルから
+  開けるか**」であり、そのハンドルは `writer(fs)` の実行中ずっと開いている。writer は
+  `((FileStream)stream).Name` で tmp パスを知れる。**ctor 前に名前を知る必要が無い**ので、
+  論証はここへ及ばない。
+
+**張った網**: `AtomicFileStreamWriteTests.Staging_handle_denies_a_concurrent_open`。
+writer の中で tmp パスを採り、`FileShare.ReadWrite` で開き直して**共有違反になること**を要求する。
+**production への seam 追加はゼロ。** byte[] 版は Stream 版へ委譲済み(§10.9)なので 1 本で両経路。
+
+```
+# 網を張る前(N-5: FileShare.None → FileShare.ReadWrite)
+成功!   -失敗:     0、合格:  1427、スキップ:     0、合計:  1427          (生存)
+
+# 網を張った後(無変異)
+成功!   -失敗:     0、合格:  1428、スキップ:     0、合計:  1428
+
+# 網を張った後(同じ N-5 を再度当てる)
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Staging_handle_denies_a_concurrent_open
+   Assert.False() Failure
+失敗!   -失敗:     1、合格:  1427、スキップ:     0、合計:  1428          (kill)
+```
+
+**訂正した 4 か所**(§8 に従い本文は書き換えず `> 訂正` を追記):
+§10.8 の「範囲の訂正」/ §10.10 指摘 4 / §10.10 指摘 5 / §10.20 の対象外リスト 4、
+および L5 チェックリスト §6 の該当行(こちらは表の 1 行なのでセル内に注記)。
+
+**[[net-absence-claims-are-also-verifiable]] に正面から当たる 3 度目である。**
+§10.16 指摘 1(切り詰めの網)・§10.19 指摘 A(2 回目の警告)に続き、**同一ブランチで 3 回**、
+「観測できない/張れない」と書いた主張が実際には張れた。3 回とも**結論ではなく根拠の側**が偽で、
+3 回とも**レビュアーが 20〜30 行の使い捨てテストで反証**している。
+教訓の運用形を 1 段強くする: **「張れない」と書く前に、使い捨てで 1 回書いてみて落ちることを
+確かめる。**書けてしまったらそれが網である。
+
+#### ★ I-1 —— `Load` の catch-all の理由節が、同じブランチの Task 9 によって偽になった
+
+`SettingsStore.Load` の xmldoc は「`Load` の呼出(`Program.cs:22`)は
+`SetUnhandledExceptionMode`(`:32`)と `CrashHandler`(`:35`)の配線**より前**」と書いていた。
+HEAD の実物とは 4 点食い違う:
+
+| 記述 | 現行 |
+|---|---|
+| `Load` の呼出 = `Program.cs:22` | `:22` は `PreviewUserDataSweeper.SweepIfSoleInstance()`。**`Load` は `Main` から消えた**(`:30` の `CreateMainForm` → `SettingsStartup.Prepare` 経由) |
+| `SetUnhandledExceptionMode`(`:32`) | `Program.cs:28` |
+| `CrashHandler`(`:35`) | `Program.cs:31` |
+| 「`SetUnhandledExceptionMode` **より前**」 | **偽**。読込は `:30` = **後ろ**へ移った |
+
+**catch-all を残す結論は正しいまま。** `CrashHandler`(`:31`)より前であることは変わらず、
+そもそも `Application.Run`(`:61`)より前の例外は `SetUnhandledExceptionMode` の管轄外
+(効くのは `Application.ThreadException` = メッセージループ内)なので、抜ければ記録も
+ダイアログも無いまま落ちる。**理由節を実物へ合わせ、依拠先を「順序」から
+「まだ受け皿が無い」へ移した**(行番号が動いても偽にならない形)。
+
+これが Important なのは、**§10.14 指摘 2 がこの行番号をわざわざ訂正して「順序の主張は事実」と
+認定していた**からである。その認定を 2 タスク後に同じブランチが無効化し、どの節も回収して
+いなかった。§10.14 指摘 2 自身が名指しした「**自分の変更が自分の引用を陳腐化させる**」の再発。
+§10.14 側にも訂正注記を置いた。
+
+**本ブランチで「結論は正しいが理由節が偽」はこれで 6 件目**(レビュアーの数え。既出 5 件は
+§10.5 の sweeper・§10.10 指摘 1 の測定設計・§10.12 指摘 1 / 指摘 2・§10.19 指摘 E が該当する)。
+**5 件目まで数えていた当のブランチで 6 件目が出た**という事実自体が、
+「結論が合っているうちは根拠を読み返さない」傾向の強さを示す。
+
+#### M-1 —— `MainForm.cs:594` の陳腐化がソースとテストに残っていた
+
+現行は `MainForm.cs:665`(`OnFormClosing` → `SaveSettingsSafe()`)。
+§10.20 は「手順書には現行値を書いた」と明記しているのに、**L5 チェックリストだけ更新され、
+実際に人が読むソース側 2 か所が取り残されていた** —— `src/kxEdit.App/SettingsStartup.cs`
+(`RewriteReason` の xmldoc)と `tests/kxEdit.App.Tests/SettingsStartupTests.cs`。両方 `:665` へ。
+同じ文中の `FileController.cs:1575`(`_saveSettings()`)/ `:276`(fast-path の `RegisterRecent`)は
+**現行と一致**していたので触っていない(当てて確認済み)。
+
+#### M-2 —— `SettingsStartupTests` で xmldoc が孤児化していた
+
+`AssertSanitizationIsObservable` の上に `<summary>` が 2 つ積まれ、1 つ目
+(「いつ上書きされるかを実物どおりに述べていることの網」)は明らかに
+`AssertNamesTheRealRewriteTrigger` の説明だった。**そのメソッドは doc ゼロ**。
+§10.19 指摘 B の fixup が両者の間に新ヘルパを挿入したときに孤児化したもので、
+**doc 生成が無いため `CS1571`(重複 param)も `CS1587` も出ずビルドは通り続ける**。
+「無害化の検算ヘルパ」が「文言の網」と説明されている形なので、正しい相手へ戻した。
+
+**ゲートが拾わない種類の陳腐化である。** 0 warning は「doc が対象を説明していること」を
+1 ビットも保証しない。ヘルパの**間に**別のヘルパを挿す fixup は、この事故を必ず起こしうる。
+
+#### M-3 —— 隔離引数 3 本のうち `settingsPath` だけ無網だった
+
+§10.19 指摘 F は `backupDirectory` / `sessionLayoutPath` に網を張ったが、
+**実 `%APPDATA%\kxEdit\settings.json` に書き込む当の引数**
+(`Program.cs:91` → `MainForm._settingsPath` → `SaveSettingsSafe` → `SettingsStore.Save`)は
+開いたままだった。**守ろうとした性質のうち最も被害が大きい 1 本だけが非対称に開いていた。**
+
+**復元では観測できない**のがこの引数の難しさ。読込は `Prepare(settingsPath)` が別に受け取るので、
+**ctor へ渡す側だけ**を差し替える変異は復元を 1 ビットも変えない。書込を実際に起こす必要がある。
+既存テスト `CreateMainForm_routes_the_isolation_paths_into_the_form` に、
+既存タブの再アクティブ化(`RegisterRecent` → `SaveSettingsSafe`)を挟んで
+`tmp.SettingsPath` 側の `RecentFiles` を見る形で 3 行足した(**新規テストは作っていない**)。
+
+```
+# 網を張る前(M-S: CreateMainForm が ctor へ別の空パスを渡す)
+成功!   -失敗:     0、合格:   752、スキップ:     0、合計:   752          (生存)
+
+# 網を張った後(同じ M-S)
+失敗 kxEdit.App.Tests.MainFormSmokeTests.CreateMainForm_routes_the_isolation_paths_into_the_form
+   Assert.Contains() Failure: Item not found in collection
+失敗!   -失敗:     1、合格:   751、スキップ:     0、合計:   752          (kill)
+```
+
+**変異に `null`(= 実 `%APPDATA%`)は使っていない**(§10.19 指摘 F と同じ理由)。代わりに
+`%TEMP%` 配下の空パスを代理に使い、検証後に消えていないことを確認して削除した ——
+**実測では M-S 実行中に代理ディレクトリは 1 度も作られなかった**。これは
+「現時点で実害はない」(`ShowCreatedMainForm` は `Dispose` するだけで `Close()` しないため
+`OnFormClosing` が走らない)を**そのまま裏付けている**。網が要るのは今の実害ではなく、
+**配線が切れても緑のままである**ことのほう。
+
+#### M-4 —— §10.2 / §10.3 だけ、後続節の訂正が原文側に印されていなかった
+
+§10.6 以降は「原文に `> 訂正(…)` を置き、本文は書き換えない」が徹底されている
+(実際に当たったところ §10.6 に 1 本 / §10.8 に 3 本 / §10.11 に 1 本 / §10.15 に 3 本。
+§10.18 だけは blockquote ではなく本文中の注記だが、印そのものは付いている)。
+**最初期の 2 節だけ印が無く**、§10 を頭から読む読者は偽の記述を訂正なしに受け取る形だった。
+
+| 原文 | 訂正の所在 |
+|---|---|
+| §10.2「M-2 の網は Stream 側だけを赤にし、byte[] 側は緑のまま」 | §10.9(委譲後は成り立たない) |
+| §10.3「(`:151` / `:257` から呼ばれる)」 | §10.5(起動時の掃除は `BackupCoordinator.cs:346-347`) |
+
+**様式が確立するのは §10.8 から**で、それ以前の節は遡って印を付ける対象になっていなかった。
+以後この様式を採るときは、**確立時点で既存節を 1 回ざっと当たる**こと。
+
+#### M-5(記録のみ)—— `public MainForm(AppSettings settings)` が無参照になった
+
+Task 9 で `Program.Main` の組み立てが `CreateMainForm` へ移り、**この public ctor の呼出は
+src / tests のどこにも無くなった**(`new MainForm(` の全ヒットを当たって確認。
+`src/kxEdit.App/Program.cs:91` と `tests/kxEdit.App.Tests/MainFormSmokeTests.cs:85` はどちらも
+多引数の internal ctor、`tests/kxEdit.Editor.Smoke/Program.cs` の `MainForm` は**別型**)。
+
+§10.18 は「任意引数の束縛事故を避けるため 1 引数へ戻した」判断を記録しているが、
+**無参照になったことは記録していなかった**。exe 内の public 型なので実害はほぼ無く、
+**削除は本ブランチの射程外**と判断する(挙動不変の原則・§2)。
+`MainFormSmokeTests` のクラス xmldoc が今も「public ctor 経路は internal ctor へチェーンする」と
+前提を書いているので、**消すなら doc と併せて**扱うこと。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  0 個の警告 / 0 エラー (EXITCODE=0)
+kxEdit.Core.Tests    成功!  合格: 1428 / 合計: 1428   (+1 = I-2 の網)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (変化なし)
+kxEdit.App.Tests     成功!  合格:  752 / 合計:  752   (M-3 は既存テストへの assertion 追加=本数不変)
+tools/pre-merge-check.ps1  →  EXIT 0
+```
+
+変異 2 件(N-5 / M-S)はいずれも Edit ツールで当てて Edit ツールで戻し、
+`git diff -- src` が空に戻ることを毎回確認している(`git checkout --` は使っていない ——
+§10.11 の事故と同じ形を避けるため)。`%APPDATA%\kxEdit\` の実ファイルは本タスクでも一切
+触っていない(最終確認: `settings.json` の `LastWriteTime` が作業開始前のまま)。

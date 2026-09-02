@@ -38,10 +38,24 @@ public static class SettingsStore
     /// <para>
     /// <b>catch は両方とも catch-all のまま残す。</b>握ってよい例外を前置で列挙するのは
     /// 監査 §9 V-7 の「前置の列挙は原理的に漏れる」に触れる上、ここで例外を素通しすると
-    /// <c>Program.Main</c> が壊れる —— <c>Load</c> の呼出(<c>Program.cs:22</c>)は
-    /// <c>Application.SetUnhandledExceptionMode</c>(<c>:32</c>)と <c>CrashHandler</c>(<c>:35</c>)
-    /// の配線<b>より前</b>にあり、抜けた例外はハンドラも記録もダイアログも無いまま起動を落とす。
+    /// <c>Program.Main</c> が壊れる —— 起動時の <c>Load</c> は
+    /// <c>Program.CreateMainForm</c>(<c>Program.cs:30</c>)から
+    /// <c>SettingsStartup.Prepare</c> 経由で 1 回だけ呼ばれ、そこは
+    /// <c>CrashHandler</c> の配線(<c>Program.cs:31</c>)<b>より前</b>である。
+    /// <b>そして <c>Application.Run</c>(<c>:61</c>)より前でもある</b> ——
+    /// <c>Application.SetUnhandledExceptionMode</c>(<c>:28</c>)は<b>この呼出より手前</b>に
+    /// あるが、それが効くのは <c>Application.ThreadException</c>
+    /// = メッセージループ内の例外だけなので、<b>ここを抜けた例外はその管轄外</b>である。
+    /// つまり抜ければハンドラも記録もダイアログも無いまま起動を落とす。
     /// <c>OutOfMemoryException</c> のような「握ってはいけない例外」も同じ理由でここでは握る。
+    /// <para>
+    /// <b>順序ではなく「まだ受け皿が無い」が理由である。</b>行番号は動く ——
+    /// 実際 §10.14 指摘 2 は「<c>Load</c> は <c>SetUnhandledExceptionMode</c> より前」を
+    /// 事実として認定したが、同じブランチの Task 9(<c>CreateMainForm</c> の切り出し)が
+    /// 読込を後ろへ移して<b>その順序を偽にした</b>(最終レビュー(品質パス)I-1・§10.21)。
+    /// 結論が変わらないのは、依拠しているのが順序ではなく
+    /// <b>「<c>Application.Run</c> 前に投げた例外を拾う配線がまだ 1 つも無い」</b>ことだからである。
+    /// </para>
     /// </para>
     /// <para>
     /// <b>ただし OOM の落ち先は段によって違う。</b><c>File.ReadAllText</c> 段(try #1)の OOM は

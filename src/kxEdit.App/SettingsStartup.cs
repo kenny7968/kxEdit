@@ -23,7 +23,7 @@ internal static class SettingsStartup
     /// <summary>
     /// 「設定を変更すると上書きされる」では<b>弱すぎる</b>ため、実際の書込契機を書く。
     /// <c>MainForm.OnFormClosing</c> は終了のたびに <c>SaveSettingsSafe</c> を呼び
-    /// (<c>MainForm.cs:594</c>)、<c>FileController.RegisterRecent</c> はファイルを開く/保存する
+    /// (<c>MainForm.cs:665</c>)、<c>FileController.RegisterRecent</c> はファイルを開く/保存する
     /// たびに呼ぶ(<c>FileController.cs:1575</c>)。つまり<b>ユーザーが設定を何も変えなくても</b>
     /// 上書きされる。設計 §5.4 の文言案(「設定を変更すると上書きされます」)はここが実物と
     /// 食い違っていた(§10.15)。

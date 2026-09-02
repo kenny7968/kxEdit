@@ -219,4 +219,74 @@ public class AtomicFileStreamWriteTests
                 File.Delete(path);
         }
     }
+
+    /// <summary>
+    /// ステージング中の tmp は <c>FileShare.None</c> で開かれている = <b>書いている間、他の誰も
+    /// 開けない</b>(最終レビュー(品質パス)I-2)。
+    /// <para>
+    /// <b>この網が張れることは、§10.8 /§10.10 が「原理的に不可能」と書いていた主張の反例である。</b>
+    /// あちらの論証は <c>CreateNew</c> のもので、「<c>FileStream</c> ctor <b>より前</b>に tmp 名を
+    /// 知る手段が production に無い」ことに依拠していた。<c>FileShare</c> の差はそこには出ない ——
+    /// 出るのは<b>ハンドルが開いている間に別ハンドルから開けるか</b>であり、そのハンドルは
+    /// <c>writer(fs)</c> の実行中ずっと開いていて、writer は <c>((FileStream)stream).Name</c> で
+    /// tmp パスを知れる。<b>ctor 前に名前を知る連鎖は要らない</b>ので、論証はここへは及ばない。
+    /// production への seam 追加もゼロである。
+    /// </para>
+    /// <para>
+    /// 網を張る前は <c>FileShare.None</c> → <c>FileShare.ReadWrite</c> の変異が
+    /// <b>Core 1427 全 PASS で生存</b>していた(実測・§10.21)。
+    /// </para>
+    /// <para>
+    /// byte[] 版は Stream 版へ委譲している(§10.9)ので、この 1 本が両経路のステージングを押さえる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Staging_handle_denies_a_concurrent_open()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            string? stagingPath = null;
+            bool? openedWhileStaging = null;
+
+            AtomicFile.Write(
+                path,
+                stream =>
+                {
+                    // production へ seam を足さずに tmp 名を採れる唯一の場所(writer の中)。
+                    stagingPath = ((FileStream)stream).Name;
+                    try
+                    {
+                        // 共有を要求する側 = FileShare.None なら必ず弾かれる。
+                        using var probe = new FileStream(
+                            stagingPath,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.ReadWrite
+                        );
+                        openedWhileStaging = true;
+                    }
+                    catch (IOException ex) when (AtomicFile.IsShareOrLockViolation(ex))
+                    {
+                        openedWhileStaging = false;
+                    }
+                    // 「開けなかった」が tmp 不在に由来していないことの検算。FileNotFoundException は
+                    // IOException だが共有違反ではないので上の when を通らず、ここへ来る前に伝播する。
+                    stream.WriteByte(0x39);
+                }
+            );
+
+            Assert.NotNull(stagingPath);
+            Assert.EndsWith(".tmp", stagingPath, StringComparison.Ordinal);
+            // ★ 本体。true(= 共有が緩んだ)なら赤。null は writer 未実行 = やはり赤。
+            Assert.False(openedWhileStaging);
+            // 差替まで通っていること(ステージングだけ見て終わる網にしない)。
+            Assert.Equal(new byte[] { 0x39 }, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
 }

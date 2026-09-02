@@ -50,22 +50,6 @@ public class SettingsStartupTests
     }
 
     /// <summary>
-    /// 「いつ上書きされるか」を<b>実物どおりに</b>述べていることの網(設計 §10.15 (1) / §10.16)。
-    /// <para>
-    /// 計画案の文言は「設定を変更すると上書きされます」だったが、実物は違う ——
-    /// <c>MainForm.OnFormClosing</c>(<c>MainForm.cs:594</c>)が<b>終了のたび</b>に、
-    /// <c>FileController.RegisterRecent</c>(<c>FileController.cs:1575</c> / <c>:276</c>)が
-    /// <b>ファイルを開く・切り替える・保存するたび</b>に設定を書き直す。つまり
-    /// <b>ユーザーが何も操作しなくても</b>上書きされる。
-    /// </para>
-    /// <para>
-    /// 計画案へ戻すと「設定を変えなければ大丈夫」と読める = <b>案内文の側で、より静かな喪失を
-    /// 作る</b>ことになる。<b>この網が無い間、文言を計画案へ戻す変異は App 743 全 PASS のまま
-    /// 生存していた</b>(実測・§10.16 指摘 2)——「計画の文言は事実として弱かった」という
-    /// Task 8 最大の主張が、緑では 1 ビットも守られていなかった。
-    /// </para>
-    /// </summary>
-    /// <summary>
     /// <b>fixture 検算</b>: このパスに対して無害化(<c>OneLine</c>)が<b>実際に何かを変える</b>こと。
     /// <para>
     /// これが成り立たない短いパスでは <c>Assert.Contains(OneLine(path), warning)</c> が
@@ -82,6 +66,22 @@ public class SettingsStartupTests
         Assert.NotEqual(path, shown); // ★ 恒真 assertion にならない
     }
 
+    /// <summary>
+    /// 「いつ上書きされるか」を<b>実物どおりに</b>述べていることの網(設計 §10.15 (1) / §10.16)。
+    /// <para>
+    /// 計画案の文言は「設定を変更すると上書きされます」だったが、実物は違う ——
+    /// <c>MainForm.OnFormClosing</c>(<c>MainForm.cs:665</c>)が<b>終了のたび</b>に、
+    /// <c>FileController.RegisterRecent</c>(<c>FileController.cs:1575</c> / <c>:276</c>)が
+    /// <b>ファイルを開く・切り替える・保存するたび</b>に設定を書き直す。つまり
+    /// <b>ユーザーが何も操作しなくても</b>上書きされる。
+    /// </para>
+    /// <para>
+    /// 計画案へ戻すと「設定を変えなければ大丈夫」と読める = <b>案内文の側で、より静かな喪失を
+    /// 作る</b>ことになる。<b>この網が無い間、文言を計画案へ戻す変異は App 743 全 PASS のまま
+    /// 生存していた</b>(実測・§10.16 指摘 2)——「計画の文言は事実として弱かった」という
+    /// Task 8 最大の主張が、緑では 1 ビットも守られていなかった。
+    /// </para>
+    /// </summary>
     private static void AssertNamesTheRealRewriteTrigger(string warning)
     {
         Assert.Contains("終了するとき", warning, StringComparison.Ordinal);

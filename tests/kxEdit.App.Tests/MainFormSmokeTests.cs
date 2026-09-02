@@ -1097,6 +1097,14 @@ public class MainFormSmokeTests
     /// 「植えたバックアップの本文で復元される」ことを見る —— 引数がどこか別の場所を指していれば
     /// レイアウトもバックアップも見つからず、復元は 0 件になる。
     /// </para>
+    /// <para>
+    /// <b><c>settingsPath</c> も同じ網に入れる</b>(最終レビュー(品質パス)M-3)。§10.19 指摘 F は
+    /// 隔離引数 3 本のうち 2 本しか塞いでおらず、<b>実 <c>%APPDATA%\kxEdit\settings.json</c> に
+    /// 書き込む当の引数</b>(<c>MainForm._settingsPath</c> → <c>SaveSettingsSafe</c> →
+    /// <c>SettingsStore.Save</c>)だけが非対称に開いていた。復元だけでは観測できない ——
+    /// 読込は <c>Prepare(settingsPath)</c> が別に受け取るので、<b>ctor へ渡す側だけ</b>を
+    /// 差し替える変異は復元を 1 ビットも変えない。書込を実際に起こして観測面を作る。
+    /// </para>
     /// </summary>
     [Fact]
     public void CreateMainForm_routes_the_isolation_paths_into_the_form() =>
@@ -1121,6 +1129,16 @@ public class MainFormSmokeTests
             var doc = Assert.Single(form.FileForTest.DocsForTest);
             Assert.Equal(p1, doc.State.Path); // sessionLayoutPath 経由でタブが復元された
             Assert.Equal("backup-body", doc.Editor.SnapshotText); // backupDirectory 経由で本文が来た
+
+            // ★ settingsPath。前提: この時点ではまだ書かれていない(恒真 assertion 除け)。
+            Assert.Empty(SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
+            // 既存タブの再アクティブ化 = RegisterRecent → SaveSettingsSafe → SettingsStore.Save。
+            // ShowCreatedMainForm は Close() しない(= OnFormClosing 経由の保存は走らない)ので、
+            // 書込は自分で起こす必要がある。
+            form.FileForTest.TryOpenOrActivate(p1);
+            // 書込先が form へ渡した settingsPath であること。別の場所を指す変異では
+            // ここが空のまま = 赤(実 %APPDATA% を代理する空ディレクトリで実測・§10.21)。
+            Assert.Contains(p1, SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
         });
 
     /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
