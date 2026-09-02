@@ -596,9 +596,13 @@ public class SettingsStoreTests
     /// (<c>File.WriteAllText(path, JsonSerializer.Serialize(settings, Options))</c>)を毎回
     /// 実際に走らせて突き合わせる。
     /// <para>
-    /// 期待バイト列をハードコードした snapshot にしないのは、<c>SettingsStore.Options</c> を
-    /// 将来変えたときに「意図した書式変更」と「書き手を替えた副作用」を弁別できなくなるため。
-    /// レシピ比較なら Options の変更は両辺に等しく効き、書き手だけが変わったときに落ちる。
+    /// <b>レシピ比較は「<c>Options</c> の変更」と「書き手の変更」を弁別できない。</b>
+    /// このテストは <c>SettingsStore.Options</c>(private)には届かず複製 <c>LegacyOptions</c> を
+    /// 持つので、<c>Options</c> を変えると<b>左辺だけが動いて赤くなる</b> —— snapshot と同じ
+    /// 壊れ方をする(実測: <c>Options</c> に <c>Encoder = UnsafeRelaxedJsonEscaping</c> を足すと
+    /// <c>Assert.Equal() Failure: Collections differ</c>)。それでも snapshot を採らない利点は、
+    /// 失敗したときに<b>差分の由来が両辺の生成過程から読める</b>ことと、期待値の更新が
+    /// 「レシピの再実行」で済むこと。
     /// </para>
     /// <para>
     /// 実測(Task 6): 既定の <c>JavaScriptEncoder</c> が非 ASCII を <c>\uXXXX</c> へ逃がすため、
@@ -607,16 +611,31 @@ public class SettingsStoreTests
     /// (実測: 先頭バイトは <c>0x7B</c> = <c>{</c>・BOM なし)。ASCII のみであること自体は
     /// Options 次第で変わるので assert しない。
     /// </para>
+    /// <para>
+    /// <b>fixture が兼ねる網 2 本</b>(仕様レビュー指摘 3 / 4)。
+    /// <list type="bullet">
+    /// <item><b>親ディレクトリが存在しない</b>ところから始める。<c>AtomicFile</c> はディレクトリを
+    /// 作らないので、<c>Save</c> の <c>Directory.CreateDirectory</c> を落とすと死ぬ
+    /// (落としても全緑だった = 初回起動で <c>%APPDATA%\kxEdit\</c> が無い経路が無網だった)。</item>
+    /// <item><b><c>Save</c> を 2 回呼ぶ。</b>1 回目は新規作成(<c>File.Move</c> 枝)、2 回目は
+    /// 既存の上書き(<c>File.Replace</c> 枝)。本番の settings.json は通常「既存」なので、
+    /// 最も踏まれる枝がここまで無網だった。1 回目を<b>別内容</b>(既定値)で書くので、
+    /// 差替が実際に起きていなければバイト列比較が落ちる。</item>
+    /// </list>
+    /// </para>
     /// </summary>
     [Fact]
     public void Save_writes_the_same_bytes_as_the_previous_writer()
     {
-        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        // 未作成の親ディレクトリから始める(Save 側の Directory.CreateDirectory を網に掛ける)。
+        string dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        string path = Path.Combine(dir, "settings.json");
         string legacyPath = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
         try
         {
             var s = JapaneseHeavySettings();
-            SettingsStore.Save(path, s);
+            SettingsStore.Save(path, new AppSettings()); // 1 回目: 新規作成 = File.Move 枝
+            SettingsStore.Save(path, s); // 2 回目: 既存の上書き = File.Replace 枝
 
             // 旧実装そのもの(string へ直列化 → File.WriteAllText)。
             File.WriteAllText(legacyPath, JsonSerializer.Serialize(s, LegacyOptions));
@@ -639,8 +658,8 @@ public class SettingsStoreTests
         }
         finally
         {
-            if (File.Exists(path))
-                File.Delete(path);
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
             if (File.Exists(legacyPath))
                 File.Delete(legacyPath);
         }

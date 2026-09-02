@@ -1687,10 +1687,16 @@ IDENTICAL=True
 - 新実装: `SettingsStore.Save(path, s)`
 - 旧実装のレシピ: `File.WriteAllText(legacyPath, JsonSerializer.Serialize(s, LegacyOptions))`
 
-を**両方その場で走らせて** `File.ReadAllBytes` 同士を比べる。期待値をハードコードすると、将来
-`SettingsStore.Options` を変えたときに「意図した書式変更」と「書き手を替えた副作用」を
-弁別できなくなる(snapshot は両方まとめて赤くなる)。レシピ比較なら `Options` の変更は両辺に
-等しく効き、**書き手だけが変わったときに落ちる**。加えて相対比較では捕まらない絶対条件——
+を**両方その場で走らせて** `File.ReadAllBytes` 同士を比べる。
+
+> **訂正(§10.12 指摘 1)**: ここには当初「レシピ比較なら `Options` の変更は両辺に等しく効き、
+> 書き手だけが変わったときに落ちる」と書いていた。**偽である。** テストは
+> `SettingsStore.Options`(private)に届かず複製 `LegacyOptions` を持つため、`Options` を変えると
+> **左辺だけが動いて赤くなる = snapshot と同じ壊れ方をする**(実測)。レシピ比較を採る理由は
+> 弁別能力ではなく、**失敗時に差分の由来が両辺の生成過程から読める**ことと、期待値の更新が
+> 「レシピの再実行」で済むことである。結論(レシピ比較を採る)は変えていない。
+
+加えて相対比較では捕まらない絶対条件——
 BOM が無いこと・`File.ReadAllText` のデコード結果と一致すること・`Load` で読み戻せること——を
 別に置いている。
 
@@ -1781,6 +1787,12 @@ BOM 変異を戻すのに `git checkout -- src/kxEdit.Core/Settings/SettingsStor
 
 - **fsync が 1 回増える。** `SaveSettingsSafe` の呼出は「設定ダイアログ OK」と「終了時」の
   2 か所だけ・約 1.5 KB なので体感差は無い(M-13 の測定では 1 MB でも分解能以下)。
+  > **訂正(§10.12 指摘 2)**: 「2 か所だけ」は**偽**。`MainForm.cs:173` が
+  > `saveSettings: SaveSettingsSafe` を `FileController` へ渡しており、
+  > `FileController.RegisterRecent`(`:1571-1576`)経由で**ファイルを開くたび**(`:276` / `:405`)と
+  > **「名前を付けて保存」のたび**(`:736`)にも走る。正しくは「**ファイルを開くたびに UI スレッドで
+  > `FlushFileBuffers` が 1 回増える**」。受容の結論は変えないが、根拠は頻度ではなくサイズ
+  > (約 1.5 KB)である。
 - **`%APPDATA%` がフォルダーリダイレクトで UNC 上にある場合**、`File.Replace` の可否は
   `File.WriteAllText` と異なり得る。ただし同じディレクトリの `session-state.json` が既に
   `AtomicFile` 経由であり、失敗したときの観測(= 保存されない・無言)は修正前と同じ
@@ -1814,3 +1826,125 @@ dotnet csharpier check src/kxEdit.Core/Settings/SettingsStore.cs
 ```
 
 grep は `-E " (error|warning) [A-Za-z]+[0-9]+"` を使い、終了コードで判定している。
+
+### 10.12 Task 6 — 仕様レビューの反映(根拠 2 件が偽・生存変異 1 件・無網の枝 1 本)
+
+仕様レビューは**実装本体(`src` 側)は要求どおり**・`Load` 無変更も diff で確認、と裁定した。
+**バイト列不変はレビュアーが独立に 23 入力で検証し全一致**——こちらが試していない入力(空設定 /
+明示 null / 孤立サロゲート / 非文字 / BiDi 制御 / `RecentFiles` 1 万件 = 1.86 MB /
+禁則 100 万文字 = 6 MB 出力 / `int.MinValue` / `float.Epsilon`)でも崩れず、`NaN` / `+∞` は
+**新旧とも同型の `ArgumentException`** で挙動一致。「非 ASCII バイトが 0」も全 23 ケースで再現し、
+さらに `UnsafeRelaxedJsonEscaping` に替えると非 ASCII が 110 バイト出ることまで測って
+「これは `Options` 依存の性質」と裏取りされている(§10.11 の結論を独立に補強)。
+
+以下は同レビューの 4 指摘の反映。**結論はどれも変わらず、直したのは根拠と網である。**
+
+#### 指摘 1 —— 「レシピ比較なら `Options` の変更を弁別できる」は成立しない
+
+§10.11 とテストの xmldoc に「レシピ比較なら `Options` の変更は両辺に等しく効き、書き手だけが
+変わったときに落ちる」と書いていた。**偽である。** テストは `SettingsStore.Options`(private)に
+**届いていない** —— `SettingsStoreTests` は複製 `LegacyOptions` を独立に持ち、右辺はそちらを使う。
+したがって `Options` を変えると**左辺だけが動く**。
+
+レビュアーの実測(`SettingsStore.Options` へ `Encoder = UnsafeRelaxedJsonEscaping` を追加 =
+意図した書式変更・書き手は不変):
+
+```
+失敗 Save_writes_the_same_bytes_as_the_previous_writer
+  Assert.Equal() Failure: Collections differ
+失敗! -失敗: 1、合格: 24、合計: 25
+```
+
+**snapshot とまったく同じ壊れ方をする。**
+
+**レシピ比較を採る結論は維持する**が、理由を実態へ合わせた——**失敗時に差分の由来が両辺の
+生成過程から読める**こと、期待値の更新が「レシピの再実行」で済むこと。テストの xmldoc と
+§10.11 の当該箇所(訂正注記)を直した。**本プロジェクトが繰り返し踏んでいる
+「結論は正しいが根拠が偽」の型**(§10.1 / §10.10 指摘 2 と同じ)。
+
+#### 指摘 2 —— `SaveSettingsSafe` は 2 か所ではない(頻度の前提が偽)
+
+§10.11 の懸念節に「`SaveSettingsSafe` の呼出は『設定ダイアログ OK』と『終了時』の 2 か所だけ」と
+書いていた。**3 つ目の経路がある**(自分でも実コードで確認した):
+
+`MainForm.cs:173` が `saveSettings: SaveSettingsSafe` を `FileController` へ渡し、
+`FileController.RegisterRecent`(`:1571-1576`)が `_saveSettings()` を呼ぶ。その呼出元は
+
+- `FileController.cs:276` / `:405` —— **ファイルを開くたび**
+- `FileController.cs:736` —— **「名前を付けて保存」のたび**
+
+(`_suppressRegisterRecent` で抑止されるのはセッション復元経路のみ。)
+
+**受容の結論は変えない**が、根拠は「頻度が 2 回だから」ではなく「**約 1.5 KB だから**」である。
+実態は「**ファイルを開くたびに UI スレッドで `FlushFileBuffers` が 1 回増える**」で、同じ節が
+挙げているもう 1 つの懸念(リダイレクトされた `%APPDATA%`)では効き方が変わる。§10.11 に訂正注記。
+
+なお **`SettingsStore.cs` の xmldoc「唯一の呼出側 `MainForm.SaveSettingsSafe`」は正しい**
+(`SettingsStore.Save` の production 呼出元は 1 か所)。偽だったのは
+「`SaveSettingsSafe` 自体がどれだけ走るか」の方だけなので、xmldoc は触っていない。
+
+#### ★ 指摘 3 —— `Directory.CreateDirectory` の削除が生存する(自分で当てて確認した)
+
+**修正前(生存)。** `Save` から `Directory.CreateDirectory(dir)` を削除しても全緑だった:
+
+```
+dotnet build kxEdit.sln --no-incremental   →  警告 0 / エラー 0 (BUILD=0)
+kxEdit.Core.Tests   成功! -失敗: 0、合格: 1406、合計: 1406   (CORE=0)
+kxEdit.App.Tests    成功! -失敗: 0、合格:  737、合計:  737   (APP=0)
+```
+
+計 2143 テストが 1 本も落ちない。原因は fixture の入力設計で、`SettingsStoreTests` の全 25 本が
+`Path.GetTempPath()`(常に存在)を使い、seam テストだけが `Directory.CreateDirectory` を
+**自分で先に呼んでいた**。つまり「**親ディレクトリが存在しない状態で `Save` する**」テストが
+リポジトリに 1 本も無く、**初回起動(`%APPDATA%\kxEdit\` 不在)で設定が保存できなくなる経路が
+無網**だった。
+
+変更前も同じ穴なので**新規劣化ではない**。しかし本 commit は
+「AtomicFile はディレクトリを作らないので、ここは残す」という**新しい主張**を足しており、
+**その主張だけが網に支えられていない**状態だった。
+
+**修正後(赤)。** byte テストの `path` を未作成の親配下
+(`Path.Combine(Path.GetTempPath(), Path.GetRandomFileName(), "settings.json")`)へ変え、
+**変異を当てたまま**走らせた:
+
+```
+失敗 Save_writes_the_same_bytes_as_the_previous_writer
+  System.IO.DirectoryNotFoundException : Could not find a part of the path
+    '...\Temp\1j5zqo4w.jbo\settings.json.c4w10ugr.obe.tmp'
+    at kxEdit.Core.IO.AtomicFile.Write(String path, Action`1 writer)   AtomicFile.cs(98)
+    at kxEdit.Core.Settings.SettingsStore.Save(String path, AppSettings settings)  SettingsStore.cs(161)
+失敗! -失敗: 1、合格: 24、合計: 25
+```
+
+変異は `git checkout -- src/kxEdit.Core/Settings/SettingsStore.cs` で戻した(**今回は commit 済み
+なので安全** —— §10.11 の事故はこれが未 commit だったことに起因する)。
+
+#### 指摘 4 —— `File.Replace` 成功枝(`destExists == true`)が `SettingsStore` 側で無網
+
+byte テストの `path` は存在しないランダム名なので `File.Move` 枝、seam テストはフックが投げる。
+**本番の settings.json は通常「既存」なので、最も踏まれる枝を 1 本も通っていなかった**
+(`AtomicFileTests` / `MainFormSmokeTests` が間接的に踏むので実害は低い)。
+
+byte テストで `Save` を 2 回呼ぶ形にした。**1 回目は別内容(既定値)**で書くので、
+2 回目の差替が実際に起きていなければバイト列比較が落ちる(「2 回呼んだだけ」にならない)。
+指摘 3 の fixture 変更と同じテストで両方回収している。
+
+#### 申し送り(Task 7 で意識すること)
+
+- **`Options` は `Save` と `Load` で共有されている**(`SettingsStore.cs:10` を `:26` の
+  `JsonSerializer.Deserialize` も使う)。分離すると将来 Save / Load が黙って乖離し得るが、
+  **この結合を固定する網は無い**。Task 7 は `Load` を触るので、`Options` を Load 専用に
+  分けたくなったときはここを思い出すこと(round-trip テストは同じ `Options` を通る限り
+  乖離を検出しない)。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln --no-incremental        →  警告 0 / エラー 0 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1406 / 合計: 1406
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737
+dotnet csharpier check <変更 2 ファイル>  →  EXIT=0
+```
+
+テスト本数は変わっていない(既存 1 本の fixture を強化しただけ)。変異 1 件は復帰を確認済み。

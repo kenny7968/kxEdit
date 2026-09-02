@@ -158,7 +158,10 @@ public static class SettingsStore
     /// </summary>
     public static void Save(string path, AppSettings settings)
     {
-        // AtomicFile はディレクトリを作らないので、ここは残す。
+        // AtomicFile はディレクトリを作らないので、ここは残す(初回起動 = %APPDATA%\kxEdit\ が
+        // 無い状態で保存できなくなる)。この 1 行を落とすと
+        // SettingsStoreTests.Save_writes_the_same_bytes_as_the_previous_writer が
+        // DirectoryNotFoundException で落ちる —— 網が無い間は落としても全緑だった(§10.12 指摘 3)。
         string dir = Path.GetDirectoryName(path)!;
         Directory.CreateDirectory(dir);
         IO.AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(settings, Options));
