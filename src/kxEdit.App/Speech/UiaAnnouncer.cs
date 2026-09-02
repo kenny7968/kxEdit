@@ -12,6 +12,8 @@ namespace kxEdit.App.Speech;
 /// UIA-M-4 (v0.11): 50 ms throttle + trailing timer。連打の Raise を絞り、SR キューの詰まりを防ぐ。
 /// ただし dedupe (直前と同一なら skip) は意図的に行わない=同一セルの読み直しは SR の基本操作で
 /// 沈黙させてはならない。trailing で最後の 1 件を必ず Raise し「今どこにいるか」を SR に伝え続ける。
+/// M-8: 「最後に Raise されるのは常に最後に Say されたメッセージ」が throttle 契約の不変条件。
+/// このため保留中の trailing は、後続の Say(empty) と窓外 Say(即 Raise) の双方で取り消す。
 /// </summary>
 internal class UiaAnnouncer : IAnnouncer
 {
@@ -84,6 +86,16 @@ internal class UiaAnnouncer : IAnnouncer
             }
             // 窓外: 即 Raise。lock 内で timestamp を更新し、Raise 自体は lock 外で行う
             // (RaiseAutomationNotification の I/O を lock で長時間握らないため)。
+            //
+            // M-8: armed 済みの trailing も同時に潰す。窓外の即時 Raise は「今このメッセージが
+            // 最新である」という宣言であり、それより古い pending を後から鳴らす理由が無い。
+            // 潰さないと T=0 Say("a") / T=20 Say("b")(pending) / T=60 Say("c")(窓外・即 Raise)
+            // の後、T=70 の trailing が "b" を Raise して「1 つ前が最後に読まれる」。
+            // 空文字列分岐(上の IsNullOrEmpty ガード)が同じ危険を名指しして既に潰しており、
+            // ここはその対称化。
+            _pendingMessage = null;
+            _trailingTimer?.Dispose();
+            _trailingTimer = null;
             _lastSaidUtc = now;
         }
         Raise(message);
