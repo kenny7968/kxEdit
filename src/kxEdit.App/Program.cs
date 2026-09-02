@@ -87,13 +87,16 @@ static class Program
         string? sessionLayoutPath = null
     )
     {
-        var (settings, settingsWarning) = SettingsStartup.Prepare(settingsPath);
+        var (settings, settingsWarning, quarantineBeforeFirstSave) = SettingsStartup.Prepare(
+            settingsPath
+        );
         return new MainForm(
             settings,
             settingsPath,
             backupDirectory,
             sessionLayoutPath,
-            settingsWarning
+            settingsWarning,
+            quarantineBeforeFirstSave
         );
     }
 }

@@ -1143,6 +1143,184 @@ public class MainFormSmokeTests
             Assert.Contains(p1, SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
         });
 
+    // ===== B5(B4 申し送りの回収): 読み取れなかった設定を上書きの直前に退避する =====
+
+    /// <summary>
+    /// 起動時に読めなかった settings.json を、<b>最初の保存の直前に</b> <c>.bak</c> へ退避すること。
+    /// <para>
+    /// 起動時の警告は「先に次のファイルをコピーしてください」と案内するが、ユーザーが対処する前に
+    /// <c>OnFormClosing</c> / <c>RegisterRecent</c> が既定値で上書きしてしまう ——
+    /// <b>案内した当のファイルが、案内を読んでいる間に消える</b>(B4 設計 §10.15 の申し送り)。
+    /// </para>
+    /// <para>
+    /// <b>テスト seam を足していない。</b>実ファイルで <c>Unreadable</c> を作れる
+    /// (<c>FileShare.Delete</c> のロック = 読めないが改名はできる)ので、
+    /// <c>Program.CreateMainForm</c> → <c>MainForm</c> ctor → <c>TrySaveSettings</c> の
+    /// <b>実経路をそのまま</b>走らせ、ディスク上の <c>.bak</c> を観測面にできる。seam を挟むと
+    /// 「実経路が本当に通ったか」の観測が 1 段遠くなる(<c>SettingsStartupTests</c> の
+    /// <c>quarantineOverrideForTest</c> は「実ファイルでは決定的に作れない状態」のためのもので、
+    /// ここはその条件に当たらない)。
+    /// </para>
+    /// <para>
+    /// <b>「2 度目は退避しない」の観測面は <c>.bak</c> の<i>中身</i>である。</b>存在だけを見ると、
+    /// 毎回退避する変異(フラグを落とさない)が<b>緑のまま生存する</b> —— 2 度目の退避は
+    /// 1 度目の保存が書いた既定寄りの設定を <c>.bak</c> へ上書きするので、ファイルは在り続ける。
+    /// 非既定の <c>FontName</c> を目印にして、退避先が<b>以前の設定のまま</b>であることを見る。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_quarantines_the_unreadable_settings_file_exactly_once() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string original = File2.ReadAllText(tmp.SettingsPath);
+            string bak = tmp.SettingsPath + ".bak";
+
+            MainForm form;
+            using (
+                new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.Delete)
+            )
+            {
+                // 前提の検算: fixture が本当に Unreadable を作れている(Ok のまま素通りしていない)。
+                SettingsStore.Load(tmp.SettingsPath, out var status);
+                Assert.Equal(SettingsLoadStatus.Unreadable, status);
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+            }
+
+            using (form)
+            {
+                PrepareCreatedFormForSaveTest(form, tmp);
+                Assert.False(File2.Exists(bak)); // 起動時点では改名していない(B4 §5.2)
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                Assert.True(File2.Exists(bak)); // ★ 上書きの直前に退避された
+                Assert.Equal(original, File2.ReadAllText(bak)); // 中身は以前の設定
+                // 保存も進んでいる(退避は保存を止めない・B4 §5.5)。
+                Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+
+                // ★ 2 度目は退避しない。毎回退避する変異ではここが "MS ゴシック" の設定へ化ける。
+                Assert.Equal(original, File2.ReadAllText(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+            }
+        });
+
+    /// <summary>
+    /// 対照: 読めた settings.json は<b>退避しない</b>。ここが退避側へ倒れると、正常な設定を
+    /// <c>.bak</c> へ改名して既定値で上書きすることになり、M-11 が直しに来た無音リセットを
+    /// <b>より強い形で</b>新設する。
+    /// <para>
+    /// <b>末尾の 2 行が「呼ばない」と「呼んでも失敗する」を弁別する。</b>この環境では改名は
+    /// 実際に通るので、<c>.bak</c> の不在は<b>呼んでいないこと</b>を意味する ——
+    /// <c>SettingsStartupTests</c> の <c>Missing</c> 枝の xmldoc が名指ししている罠
+    /// (どのみち失敗する状況で不在を主張しても網にならない)の、こちら側での回避。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_does_not_quarantine_a_readable_settings_file() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string bak = tmp.SettingsPath + ".bak";
+
+            using var form = Program.CreateMainForm(
+                tmp.SettingsPath,
+                tmp.BackupDir,
+                tmp.LayoutPath
+            );
+            PrepareCreatedFormForSaveTest(form, tmp);
+
+            form.ApplySettingsForTest(
+                new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+            );
+
+            Assert.False(File2.Exists(bak)); // ★ 退避していない
+            Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+
+            // ★ 非 vacuous: 同じ状態で改名を実際に呼べば通る = 上の不在は「呼んでいない」。
+            Assert.True(SettingsStore.TryQuarantineUnreadable(tmp.SettingsPath, out string proof));
+            Assert.True(File2.Exists(proof));
+        });
+
+    /// <summary>
+    /// 退避に失敗しても<b>保存は進む</b>(B4 §5.5 の維持)。止めると「設定を適用しました」が
+    /// 虚偽になり、M-22 で潰した欠陥をここで新設することになる。
+    /// <para>
+    /// 失敗の作り方は<b>宛先をディレクトリにする</b> —— <c>File.Move(overwrite: true)</c> は
+    /// ディレクトリを置き換えられないので決定的で、しかも<b>退避だけ</b>が落ちる。ロックで
+    /// 失敗させると保存側(<c>AtomicFile</c> の差替)まで道連れになり、「保存が進んだ」の
+    /// 観測ができなくなる。
+    /// </para>
+    /// <para>
+    /// <c>TryQuarantineUnreadable</c> が例外を漏らす変異(catch-all を外す)もここで落ちる ——
+    /// <c>ApplySettings</c> ごと例外で抜けるため、保存も発声も起きない。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_proceeds_even_when_the_quarantine_fails() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+
+            MainForm form;
+            using (
+                new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.Delete)
+            )
+            {
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+            }
+
+            using (form)
+            {
+                PrepareCreatedFormForSaveTest(form, tmp);
+                string bak = tmp.SettingsPath + ".bak";
+                Directory.CreateDirectory(bak); // 退避を決定的に失敗させる
+                string marker = Path.Combine(bak, "keep.txt");
+                File2.WriteAllText(marker, "別物");
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                // ★ 保存は進み、発声も成功のまま(退避の失敗をユーザーの用件にしない)。
+                Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+                Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+                // 退避の失敗が破壊に化けていない(overwrite: true が同名の別物を消さない)。
+                Assert.True(Directory.Exists(bak));
+                Assert.Equal("別物", File2.ReadAllText(marker));
+            }
+        });
+
+    /// <summary><see cref="Program.CreateMainForm"/> で作ったフォームを保存経路のテストへ渡す前の
+    /// 共通処理。<b><c>Show</c> しない</b> —— B5 の退避は <c>OnShown</c> ではなく保存経路に乗るので
+    /// 表示は要らず、表示すると起動警告の <c>MessageBox</c> まで面倒を見ることになる。
+    /// 残り 2 つの隔離(last-session-buffers)と抑止(保存失敗ダイアログ)はここで揃える
+    /// —— 抑止を落とすと、退行時にテストが<b>赤ではなくハング</b>する(<see cref="Sta"/> の xmldoc)。</summary>
+    private static void PrepareCreatedFormForSaveTest(MainForm form, TempDir tmp)
+    {
+        form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
+        form.SetSuppressRestoreDialogsForTest(true);
+        form.SetSuppressSettingsSaveFailedDialogForTest(true);
+    }
+
     /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
     /// <c>OnShown</c> まで進める。隔離は <see cref="ShowMainForm"/> と同じ 4 点
     /// (settings / backups / session-state / last-session-buffers)。</summary>

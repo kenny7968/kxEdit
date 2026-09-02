@@ -89,6 +89,20 @@ public class SettingsStartupTests
     }
 
     /// <summary>
+    /// B5(B4 申し送りの回収): <c>Prepare</c> の第 3 要素 = 「最初の保存の直前に原本を退避するか」。
+    /// <para>
+    /// <b>ここが <c>Unreadable</c> 以外で立ってはならない理由は枝ごとに違う。</b>
+    /// <c>Corrupt</c> は起動時に既に <c>.bad</c> へ改名済みなので、立てても
+    /// <b>MainForm 側では観測できないまま失敗する</b>(原本がもう無い)= 上位の網では
+    /// 「呼ばない」と「呼んでも失敗する」を弁別できない。<c>Ok</c> は<b>正常な設定を
+    /// <c>.bak</c> へ改名して既定値で上書きする</b>ことになり、M-11 が直しに来た無音リセットを
+    /// 新設する。だから<b>取り違えの網はここに置く</b> —— 分岐と戻り値が同じ場所にある唯一の点。
+    /// </para>
+    /// </summary>
+    private static void AssertQuarantineOnFirstSave(bool actual, bool expected) =>
+        Assert.Equal(expected, actual);
+
+    /// <summary>
     /// ファイルが無い = 初回起動。<b>警告を出さない</b>(設計 §5.2 の <c>Missing</c>)。
     /// ここが警告側へ倒れると、全ユーザーが初回起動で警告を読まされる。
     /// <para>
@@ -108,9 +122,10 @@ public class SettingsStartupTests
         string path = tmp.File(Leaf);
         Assert.False(File.Exists(path)); // 前提: 「無い」状態そのもの
 
-        var (settings, warning) = SettingsStartup.Prepare(path);
+        var (settings, warning, quarantine) = SettingsStartup.Prepare(path);
 
         Assert.Null(warning);
+        AssertQuarantineOnFirstSave(quarantine, expected: false);
         Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行
         Assert.False(File.Exists(path)); // 読むだけ(生成しない)
         // .bad が生えないことは「退避を呼ばない」の網ではない(呼んでも失敗するため。上の xmldoc)。
@@ -134,9 +149,11 @@ public class SettingsStartupTests
         );
         string original = File.ReadAllText(path);
 
-        var (settings, warning) = SettingsStartup.Prepare(path);
+        var (settings, warning, quarantine) = SettingsStartup.Prepare(path);
 
         Assert.Null(warning);
+        // ★ 正常なファイルを最初の保存で .bak へ改名する変異が、ここで落ちる。
+        AssertQuarantineOnFirstSave(quarantine, expected: false);
         Assert.Equal("BIZ UDゴシック", settings.FontName);
         Assert.Equal(1234, settings.WindowWidth);
         Assert.Equal(original, File.ReadAllText(path)); // 正常なファイルは動かさない
@@ -160,9 +177,11 @@ public class SettingsStartupTests
         string quarantined = path + BadSuffix;
         File.WriteAllText(path, CorruptJson);
 
-        var (settings, warning) = SettingsStartup.Prepare(path);
+        var (settings, warning, quarantine) = SettingsStartup.Prepare(path);
 
         Assert.NotNull(warning);
+        // Corrupt はここで退避済み = 保存直前の退避は要らない(呼べば原本不在で失敗するだけ)。
+        AssertQuarantineOnFirstSave(quarantine, expected: false);
         Assert.False(File.Exists(path)); // ①原本は退避された
         Assert.Equal(CorruptJson, File.ReadAllText(quarantined));
         Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行
@@ -217,9 +236,12 @@ public class SettingsStartupTests
         string marker = Path.Combine(quarantined, "keep.txt");
         File.WriteAllText(marker, "別物");
 
-        var (_, warning) = SettingsStartup.Prepare(path);
+        var (_, warning, quarantine) = SettingsStartup.Prepare(path);
 
         Assert.NotNull(warning);
+        // 退避に失敗した Corrupt でも保存直前の退避へは倒さない。ここで立てると、上書きの直前に
+        // <b>壊れた内容</b>を .bak へ落として「読めなかった以前の設定」の名前を汚す。
+        AssertQuarantineOnFirstSave(quarantine, expected: false);
         // 実在しない場所を案内しない。生と無害化後の<b>両方</b>を見る —— 片方だけだと、
         // もう一方の形で出力する実装が素通りする。
         Assert.DoesNotContain(quarantined, warning, StringComparison.Ordinal);
@@ -297,14 +319,30 @@ public class SettingsStartupTests
             var prepared = SettingsStartup.Prepare(path);
             warning = prepared.Warning;
             Assert.Equal(new AppSettings().FontName, prepared.Settings.FontName); // 既定で続行
+            // ★ B5: 起動時は改名しないが、<b>最初の保存の直前には退避する</b>ことを予約する。
+            //   ここが false へ倒れると、下の文言(「上書きの直前に退避しようとします」)が
+            //   実物と食い違う = B5 が潰しに来た「実際と違うことを言う」を新設する。
+            AssertQuarantineOnFirstSave(prepared.QuarantineBeforeFirstSave, expected: true);
         }
 
         Assert.NotNull(warning);
         Assert.False(File.Exists(path + BadSuffix)); // ★ 改名していない
         Assert.True(File.Exists(path)); // ★ 原本がそのまま残っている
         Assert.Equal(original, File.ReadAllText(path)); // ★ 中身も無傷
-        Assert.DoesNotContain(BadSuffix, warning, StringComparison.Ordinal); // 退避を案内しない
+        Assert.DoesNotContain(BadSuffix, warning, StringComparison.Ordinal); // .bad は案内しない
         Assert.DoesNotContain("壊れて", warning, StringComparison.Ordinal); // Corrupt の文言ではない
+        // ★ B5: 保存直前の退避先(.bak)は伝えるが、<b>成功は約束しない</b>。実測(2026-09-03)で
+        //   退避が落ちる事由は実在する((R)/(GR) の DENY ACE・FileShare.None のロック)ので、
+        //   「退避しました」と書けば到達しうる状態で偽になる。
+        Assert.Contains(".bak", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("退避しました", warning, StringComparison.Ordinal);
+        // 掃除しないこと(設計 §6.4 / B4 §9)は文言で伝える。ただし<b>条件付き</b>で ——
+        // 無条件に「削除してください」と書くと、退避が落ちたユーザーへ実在しないファイルの
+        // 後始末を指示することになる(Corrupt 側の退避失敗枝で潰したのと同型の誤誘導)。
+        Assert.Contains("退避できた場合", warning, StringComparison.Ordinal);
+        Assert.Contains("削除してください", warning, StringComparison.Ordinal);
+        // 即時の行動指針は残す —— 退避が効かない事由では、これが唯一の手段になる。
+        Assert.Contains("コピーしてください", warning, StringComparison.Ordinal);
         // ★ 無害化を通っている(fixture が長いので恒真にならない)。
         Assert.Contains(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
         Assert.DoesNotContain(path, warning, StringComparison.Ordinal); // 生のパスは載せない
@@ -350,7 +388,7 @@ public class SettingsStartupTests
         AssertSanitizationIsObservable(path);
         File.WriteAllText(path, CorruptJson);
 
-        var (settings, warning) = SettingsStartup.Prepare(
+        var (settings, warning, quarantine) = SettingsStartup.Prepare(
             path,
             p =>
             {
@@ -360,6 +398,7 @@ public class SettingsStartupTests
         );
 
         Assert.NotNull(warning);
+        AssertQuarantineOnFirstSave(quarantine, expected: false);
         Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行するのは同じ
         // 前提の検算: 原本は本当に消えていて、中身は先着の .bad にある。
         Assert.False(File.Exists(path));

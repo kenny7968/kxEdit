@@ -47,8 +47,15 @@ internal static class SettingsStartup
 
     /// <summary>設定を読み、必要なら破損ファイルを退避し、起動後に出す警告文言を返す
     /// (警告不要なら null)。<paramref name="quarantineOverrideForTest"/> は上記 seam
-    /// (null=実物)。</summary>
-    internal static (AppSettings Settings, string? Warning) Prepare(
+    /// (null=実物)。
+    /// <para>
+    /// <c>QuarantineBeforeFirstSave</c> = <b>このセッションの最初の設定保存の直前に、原本を
+    /// <c>.bak</c> へ退避するか</b>(B5・設計 §6.3 = B4 申し送りの回収)。立つのは
+    /// <see cref="SettingsLoadStatus.Unreadable"/> の枝<b>だけ</b>で、実行するのは
+    /// <c>MainForm.TrySaveSettings</c> —— ここで改名しないのは、<b>この時点では上書きするか
+    /// どうかまだ分からない</b>からである(B4 §5.2)。
+    /// </para></summary>
+    internal static (AppSettings Settings, string? Warning, bool QuarantineBeforeFirstSave) Prepare(
         string path,
         Func<string, (bool Moved, string QuarantinePath)>? quarantineOverrideForTest = null
     )
@@ -70,7 +77,9 @@ internal static class SettingsStartup
                             // 退避先は切り詰めない。ユーザーがこの場所を他所から知る手段は無く、
                             // 切れば案内そのものが失われる(設計 §10.6 の「切ってよい側と
                             // いけない側」の非対称)。無害化(OneLine)は外さない。
-                            + SanitizeForDisplay.OneLine(quarantined)
+                            + SanitizeForDisplay.OneLine(quarantined),
+                        // Corrupt はここで退避済み = 保存直前の退避は要らない。
+                        QuarantineBeforeFirstSave: false
                     );
 
                 // L-3(設計 §10.17 指摘 2)の回収。退避に失敗したうえ原本も消えている場合がある
@@ -88,7 +97,8 @@ internal static class SettingsStartup
                         settings,
                         CorruptHead
                             + "\n\n壊れたファイルは退避できず、元の場所にも残っていません。"
-                            + "壊れた内容の在りかは分かりません。"
+                            + "壊れた内容の在りかは分かりません。",
+                        QuarantineBeforeFirstSave: false
                     );
 
                 return (
@@ -100,14 +110,23 @@ internal static class SettingsStartup
                         + "壊れた内容を残しておきたい場合は、先に次のファイルをコピーしてください:\n  "
                         // 案内するのは「実在しない退避先」ではなく原本。これから上書きされる
                         // 当のファイルであり、%APPDATA% 配下なのでユーザーには判らない。
-                        + SanitizeForDisplay.OneLine(path)
+                        + SanitizeForDisplay.OneLine(path),
+                    // 退避に失敗した Corrupt でも、保存直前の退避へは倒さない。倒すと上書きの直前に
+                    // <壊れた内容>が .bak へ落ち、「読めなかっただけの以前の設定」を意味する
+                    // 名前を汚す(.bad と .bak を分けた理由そのものが消える)。
+                    QuarantineBeforeFirstSave: false
                 );
             }
 
             case SettingsLoadStatus.Unreadable:
-                // 退避しない: 中身が正常なファイルを改名してしまうため(設計 §5.2)。
-                // 保存も止めない: 止めると「設定を適用しました」が虚偽になり、B5 が潰す欠陥を
-                // ここで新設することになる(設計 §5.5)。先に伝えることで代える。
+                // 起動時は退避しない: 中身が正常なファイルを改名してしまうため(B4 設計 §5.2)。
+                // 代わりに<b>最初の保存の直前</b>へ予約する(QuarantineBeforeFirstSave・B5 設計 §6.3)
+                // —— そこまで来れば中身はどのみち失われるので、退避は厳密に増える側にしか働かない。
+                // B4 の申し送りはここの回収である: 下の「先にコピーしてください」は、ユーザーが
+                // 対処する前に OnFormClosing / RegisterRecent が上書きすると<案内した当のファイル>を
+                // 失わせていた。
+                // 保存は止めない: 止めると「設定を適用しました」が虚偽になり、B5 が潰す欠陥を
+                // ここで新設することになる(B4 設計 §5.5)。
                 //
                 // L-3 の File.Exists ガードは<b>ここには入れていない</b>(設計 §10.19 指摘 E)。
                 // 残余は実在する —— 多重起動の後着が File.Exists→true と ReadAllText の間に
@@ -125,8 +144,21 @@ internal static class SettingsStartup
                     "設定ファイルを読み取れなかったため、既定の設定で起動しました。\n\n"
                         + RewriteReason
                         + "このまま使うと、読み取れなかったファイルは既定の設定で上書きされます。"
+                        // 退避の<b>成功は約束しない</b>。改名が落ちる事由は実在する ——
+                        // (R) / (GR) のようにまとめて拒否する DENY ACE と FileShare.None の
+                        // ロックでは File.Move も落ちる(2026-09-03 実測。読み取り権だけを拒否する
+                        // ACE や FileShare.Delete のロックでは通る)。「退避しました」と書けば
+                        // 到達しうる状態で偽になる = B5 が潰しに来た欠陥そのものになる。
+                        + "上書きの直前に、元のファイルを '.bak' を付けた名前へ退避しようとしますが、"
+                        + "読み取れない原因によっては退避もできません。"
+                        // .bak は掃除しない(設計 §6.4 / B4 §9: 消すのはユーザーの判断)。
+                        // ただし「退避できた場合」に掛ける —— 無条件に書くと、退避が落ちた
+                        // ユーザーへ実在しないファイルの後始末を指示することになる。
+                        + "退避できた場合、そのファイルは自動では消さないので、不要になったら削除してください。"
+                        // 即時の行動指針は残す。退避が効かない事由では、これが唯一の手段になる。
                         + "以前の設定を残したい場合は、先に次のファイルをコピーしてください:\n  "
-                        + SanitizeForDisplay.OneLine(path)
+                        + SanitizeForDisplay.OneLine(path),
+                    QuarantineBeforeFirstSave: true
                 );
 
             case SettingsLoadStatus.Ok:
@@ -134,7 +166,9 @@ internal static class SettingsStartup
             default:
                 // Missing = 初回起動。ここで警告すると全ユーザーが初回に読まされる(設計 §5.2)。
                 // 将来 status が増えたときもここへ落ちる = 退避も通知もしない安全側。
-                return (settings, null);
+                // Ok を退避側へ倒すと<正常な設定>を .bak へ改名して既定値で上書きすることになり、
+                // M-11 が直しに来た無音リセットをより強い形で新設する。
+                return (settings, null, QuarantineBeforeFirstSave: false);
         }
     }
 }

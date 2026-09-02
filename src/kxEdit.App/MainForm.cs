@@ -94,6 +94,13 @@ public sealed partial class MainForm : Form
     /// (<c>SettingsStartup.Prepare</c> が組み立て済み)。null=警告なし。</summary>
     private readonly string? _settingsWarning;
 
+    /// <summary>B5(設計 2026-09-02 §6.3 = B4 申し送りの回収): 読み取れなかった設定ファイルを、
+    /// <b>このセッションの最初の保存の直前に</b> <c>.bak</c> へ退避するか。
+    /// <c>SettingsStartup.Prepare</c> が <c>Unreadable</c> の枝でだけ立てる。
+    /// <b>readonly ではない</b> —— 退避は 1 回きりで、実行した時点で落とす
+    /// (<see cref="TrySaveSettings"/>)。</summary>
+    private bool _quarantineSettingsBeforeFirstSave;
+
     // M-11 テスト用: 設定警告に到達した回数(抑止中でも数える)。MessageBox は blocking で
     // 観測できないため、陳腐化警告と同じく到達数だけを見る。
     private int _settingsWarningCountForTest;
@@ -213,8 +220,10 @@ public sealed partial class MainForm : Form
     /// 同様にテスト隔離用(null=既定 %APPDATA% パス)。
     /// <para>
     /// <paramref name="settingsWarning"/> = 起動時に 1 回だけ出す設定の警告(M-11・設計
-    /// 2026-09-02 §5.4)。null=警告なし。<c>Program.CreateMainForm</c> が
-    /// <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。<b>public ctor には足していない</b>
+    /// 2026-09-02 §5.4)。null=警告なし。<paramref name="quarantineSettingsBeforeFirstSave"/> =
+    /// 最初の保存の直前に読み取れなかった原本を退避するか(B5・設計 §6.3)。どちらも
+    /// <c>Program.CreateMainForm</c> が <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。
+    /// <b>public ctor には足していない</b>
     /// —— 足すと 2 引数の位置指定呼出が <c>(settings, settingsPath)</c> ではなくそちらへ
     /// 黙って束縛される(省略した任意引数が少ない方が優先される)。
     /// </para>
@@ -224,12 +233,14 @@ public sealed partial class MainForm : Form
         string settingsPath,
         string? backupDirectory = null,
         string? sessionLayoutPath = null,
-        string? settingsWarning = null
+        string? settingsWarning = null,
+        bool quarantineSettingsBeforeFirstSave = false
     )
     {
         _settingsPath = settingsPath;
         _settings = settings; // Program.Main が読込済み
         _settingsWarning = settingsWarning;
+        _quarantineSettingsBeforeFirstSave = quarantineSettingsBeforeFirstSave;
 
         Text = "kxEdit";
         Width = _settings.WindowWidth;
@@ -1206,9 +1217,33 @@ public sealed partial class MainForm : Form
     /// M-22(B5・設計 2026-09-02 §4.2): 握り潰しをここで止め、<b>伝えるかどうかは呼び出し側に
     /// 決めさせる</b>。3 つの呼出のうち発声を伴うのは <see cref="ApplySettings"/> だけで、
     /// 残る 2 つ(<c>OnFormClosing</c> / <see cref="FileController"/> の最近ファイル更新)は
-    /// 設計 §8 の判断により現行どおり握る(= <see cref="SaveSettingsSafe"/> を通る)。</summary>
+    /// 設計 §8 の判断により現行どおり握る(= <see cref="SaveSettingsSafe"/> を通る)。
+    /// <para>
+    /// B5(設計 §6.3 = B4 申し送りの回収): 読み取れなかった設定を上書きする直前の退避も
+    /// <b>ここ</b>で行う。3 つの呼出すべてに効かせるためで、<see cref="ApplySettings"/> だけに
+    /// 置くと<b>設定ダイアログを一度も開かないユーザーには効かない</b> ——
+    /// 上書きは <c>OnFormClosing</c>(終了のたび)と <c>FileController.RegisterRecent</c>
+    /// (ファイルを開く・保存するたび)からも来る。
+    /// </para></summary>
     private Exception? TrySaveSettings()
     {
+        // 起動時の警告は「先に次のファイルをコピーしてください」と案内するが、ユーザーが対処する
+        // 前に上書きが走る = 案内した当のファイルが消える。ここで先回りして退避する。
+        // フラグを先に落とす = 退避が失敗しても<b>再試行しない</b>(毎回の保存で失敗し続ける
+        // リネームを試みても得るものが無いうえ、成功した .bak を後の保存内容で塗り替えうる)。
+        // 残余(多重起動): 2 つ目のインスタンスも Unreadable で起動していると、そちらの最初の
+        // 保存が<先着が書き直した settings.json>を .bak へ落とし、先着が退避した本物の原本を
+        // 上書きしうる。.bad と同じ「最新のコピーだけを残す」を採った結果で、窓は<b>両方が同じ
+        // 起動時に読めなかった</b>ときだけ。逆(overwrite: false)にすると、過去の .bak が 1 つでも
+        // 残っている限り退避が二度と効かなくなる。
+        if (_quarantineSettingsBeforeFirstSave)
+        {
+            _quarantineSettingsBeforeFirstSave = false;
+            // 退避の失敗で保存を止めない(B4 §5.5)。止めると「設定を適用しました」が虚偽になり、
+            // M-22 で潰した欠陥をここで新設することになる。
+            _ = SettingsStore.TryQuarantineUnreadable(_settingsPath, out _);
+        }
+
         try
         {
             SettingsStore.Save(_settingsPath, _settings);

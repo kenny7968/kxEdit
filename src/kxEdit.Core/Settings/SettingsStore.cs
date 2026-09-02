@@ -159,9 +159,67 @@ public static class SettingsStore
     /// 消すのはユーザーの判断。
     /// </para>
     /// </summary>
-    public static bool TryQuarantineCorrupt(string path, out string quarantinePath)
+    public static bool TryQuarantineCorrupt(string path, out string quarantinePath) =>
+        TryRenameAside(path, ".bad", out quarantinePath);
+
+    /// <summary>
+    /// 読み取れなかった settings.json を、既定値で<b>上書きする直前</b>に
+    /// <c>&lt;path&gt;.bak</c> へ退避する(B5・設計 2026-09-02 §6.3 = B4 申し送りの回収)。
+    /// <para>
+    /// <b><see cref="TryQuarantineCorrupt"/> とは呼ぶ時点が違う。</b>あちらは起動時に
+    /// 「壊れている」と判った内容を退避する。こちらは<b>中身が正常かもしれない</b>ファイルを
+    /// 扱うため<b>起動時には改名できない</b> —— 一過性のロックなら次回起動で普通に読めたはずの
+    /// ものを壊すことになる(B4 設計 §5.2 が退避を却下した理由)。<b>上書きの直前</b>なら中身は
+    /// どのみち失われるので、退避は<b>厳密に増える側</b>にしか働かない。
+    /// </para>
+    /// <para>
+    /// <b>読み取りを拒否された相手にも効きうるのが、<c>File.Copy</c> を採らなかった理由。</b>
+    /// コピーは <c>File.ReadAllText</c> と同じ読み取りを行うので、<c>Unreadable</c> にした事由が
+    /// そのままコピーも落とす。改名は<b>読み取り権を要さない</b>。
+    /// <b>ただし「読み取りを拒否する ACL なら必ず通る」ではない</b>(2026-09-03 実測・.NET 9):
+    /// <list type="bullet">
+    /// <item>読み取り権<b>だけ</b>を拒否する ACE(<c>icacls /deny "user:(RD)"</c> /
+    /// <c>(RD,RA,REA)</c> / <c>(RD,RA,REA,RC)</c>)—— <c>ReadAllText</c> は
+    /// <c>UnauthorizedAccessException</c>、<c>File.Move</c> は<b>成功する</b>。</item>
+    /// <item>まとめて拒否する ACE(<c>(R)</c> / <c>(GR)</c>)—— <b>改名も落ちる</b>。
+    /// これらは <c>SYNCHRONIZE</c> まで拒否し、それは改名側も要求するため
+    /// (<c>(S)</c> 単独の deny でも <c>File.Move</c> が落ちることを実測)。</item>
+    /// <item>他プロセスのロック —— <c>FileShare.Delete</c> を許すロックでは成功、
+    /// <c>FileShare.None</c> では落ちる。</item>
+    /// </list>
+    /// つまりこれは<b>belt であって保証ではない</b>。起動時の警告が「先にコピーしてください」を
+    /// 落とさないのはこのためで、文言も退避の成功を約束しない
+    /// (<c>SettingsStartup.Prepare</c> の <c>Unreadable</c> 枝)。
+    /// </para>
+    /// <para>
+    /// 呼出はソリューション中 <c>MainForm.TrySaveSettings</c> の 1 か所だけ。
+    /// <see cref="TryQuarantineCorrupt"/> と suffix 引数 1 本へまとめないのは、
+    /// <b>それぞれの呼出が 1 か所である</b>という構造的な主張(あちらの xmldoc)を保つため
+    /// —— まとめると「<c>Corrupt</c> のときだけ改名する」を位置で保っている根拠が消える。
+    /// </para>
+    /// <para>
+    /// <c>.bak</c> は掃除しない。<c>%APPDATA%\kxEdit\</c> 直下でどの sweeper の視野にも入らない
+    /// (<see cref="Save"/> の tmp・<c>.bad</c> と同じ性質)が、<b>消すのはユーザーの判断</b>という
+    /// B4 §9 の方針を踏襲する。
+    /// </para>
+    /// </summary>
+    public static bool TryQuarantineUnreadable(string path, out string quarantinePath) =>
+        TryRenameAside(path, ".bak", out quarantinePath);
+
+    /// <summary>
+    /// 2 つの退避(<see cref="TryQuarantineCorrupt"/> / <see cref="TryQuarantineUnreadable"/>)が
+    /// 共有する改名。宛先の性質(同じ親に落ちること・決め打ちの 1 名しか消さないこと)は
+    /// <b><see cref="TryQuarantineCorrupt"/> の xmldoc が正</b>で、両者で変わらない ——
+    /// 違うのは <paramref name="suffix"/> と<b>呼ぶ時点</b>だけである。
+    /// <para>
+    /// <b>catch-all のまま残す。</b>握ってよい例外を前置で列挙するのは原理的に漏れる(監査 §9 V-7)。
+    /// 退避の失敗は<b>起動も保存も止める理由にならない</b>ので、成否だけ返して呼出側に判断させる
+    /// (設計 §10.13 / B4 §5.5)。
+    /// </para>
+    /// </summary>
+    private static bool TryRenameAside(string path, string suffix, out string quarantinePath)
     {
-        quarantinePath = path + ".bad";
+        quarantinePath = path + suffix;
         try
         {
             File.Move(path, quarantinePath, overwrite: true);
@@ -169,7 +227,6 @@ public static class SettingsStore
         }
         catch
         {
-            // 退避の失敗で起動を落とさない(catch-all の理由は Load と同じ。設計 §10.13)。
             return false;
         }
     }
