@@ -12,8 +12,12 @@ namespace kxEdit.App.Speech;
 /// UIA-M-4 (v0.11): 50 ms throttle + trailing timer。連打の Raise を絞り、SR キューの詰まりを防ぐ。
 /// ただし dedupe (直前と同一なら skip) は意図的に行わない=同一セルの読み直しは SR の基本操作で
 /// 沈黙させてはならない。trailing で最後の 1 件を必ず Raise し「今どこにいるか」を SR に伝え続ける。
-/// M-8: 「最後に Raise されるのは常に最後に Say されたメッセージ」が throttle 契約の不変条件。
-/// このため保留中の trailing は、後続の Say(empty) と窓外 Say(即 Raise) の双方で取り消す。
+/// M-8: 非空 Say のうち Raise されるのは最後の 1 件までで、古い pending を後から鳴らすことはしない
+/// (空 Say は発声契約の外=pending を落とすだけで何も Raise しない)。このため保留中の trailing は
+/// 後続の Say(empty) と窓外 Say(即 Raise) の双方で取り消す。RaiseCore が UIA へ宣言している
+/// <see cref="AutomationNotificationProcessing.MostRecent"/> とも向きが揃う。
+/// なお本不変条件が保証されるのは単一スレッドから Say を呼ぶ限りで、in-flight の trailing callback
+/// との race までは閉じていない (Say の窓外分岐のコメントを参照)。
 /// </summary>
 internal class UiaAnnouncer : IAnnouncer
 {
@@ -93,6 +97,13 @@ internal class UiaAnnouncer : IAnnouncer
             // の後、T=70 の trailing が "b" を Raise して「1 つ前が最後に読まれる」。
             // 空文字列分岐(上の IsNullOrEmpty ガード)が同じ危険を名指しして既に潰しており、
             // ここはその対称化。
+            //
+            // 次の 1 行 (_pendingMessage = null) は単一スレッドでは効果を観測できない
+            // (timer を Dispose した時点で TrailingCallback は走らず、次に arm する窓内 Say は
+            //  必ず _pendingMessage を上書きしてから timer を張るため)。この行が実際に効くのは
+            // 「timer が発火済みで TrailingCallback が _sync 待ちの間に、窓外 Say が先にロックを
+            //  取る」interleaving だけで、そこは timer の Dispose では閉じられない。
+            // 効果が観測できないからといって削らないこと (決定的な網は張れていない=受容済み)。
             _pendingMessage = null;
             _trailingTimer?.Dispose();
             _trailingTimer = null;

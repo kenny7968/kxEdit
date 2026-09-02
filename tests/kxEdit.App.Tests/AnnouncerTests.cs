@@ -208,12 +208,15 @@ public class AnnouncerTests
             clock.Advance(TimeSpan.FromMilliseconds(100));
             // 修正前は ["a", "c", "b"] になる = 最後に読まれるのが 1 つ前の "b"。
             Assert.Equal(new[] { "a", "c" }, announcer.Spoken);
+            // 視覚 (Label.Text) は throttle 対象外=最新を反映する(晴眼/弱視も第一級)。
+            // Say("b") が arming だけで何も観測面に残さないケースと区別するためにも見ておく。
+            Assert.Equal("c", label.Text);
         });
 
     /// <summary>M-8: 窓外 Say は pending を捨てるだけでなく <b>timer 自体を Dispose</b> しなければならない。
-    /// <c>TrailingCallback</c> は pending が null でも <c>_lastSaidUtc</c> を発火時刻へ更新するため、
-    /// 孤児 timer を残すと「窓外 Say の時刻」ではなく「孤児発火の時刻」を起点に次回の throttle が
-    /// 判定され、即 Raise されるべき Say が黙って遅延させられる。
+    /// <c>TrailingCallback</c> は pending が null でも <c>_lastSaidUtc</c> を「自分が走った時刻」へ
+    /// 無条件で更新するため、孤児 timer を残すと窓外 Say の時刻ではなく孤児発火の時刻を起点に
+    /// 次回の throttle が判定され、即 Raise されるべき Say が黙って遅延させられる。
     /// (pending を null にするだけでは発声順は正しくなるので、この面は本テストでしか落ちない。)</summary>
     [Fact]
     public void Say_OutsideWindow_DisposesOrphanTrailingTimer_SoNextSayIsNotThrottled() =>
@@ -227,11 +230,20 @@ public class AnnouncerTests
             announcer.Say("b"); // T=20: 窓内 → pending="b"、trailing を T=70 へ armed
             clock.Advance(TimeSpan.FromMilliseconds(40));
             announcer.Say("c"); // T=60: 窓外 → 即 Raise。_lastSaidUtc=60、armed 済み timer は破棄されるべき
-            // T=70(孤児 timer の発火時刻)を越えてから、"c" の Raise 時刻 T=60 の窓外へ進める。
+            // 孤児 timer の due 時刻 T=70 を越えてから、"c" の Raise 時刻 T=60 の窓外へ進める。
             clock.Advance(TimeSpan.FromMilliseconds(55)); // T=115: 115-60=55 ≧ 50 → 即 Raise のはず
             announcer.Say("d");
-            // timer を破棄していないと T=70 の孤児発火が _lastSaidUtc を 70 へ進め、
-            // 115-70=45 < 50 で "d" が throttle され、この時点の Spoken は ["a","c"] に留まる。
+            // timer を破棄していないと孤児が発火して _lastSaidUtc を上書きし、"d" が throttle されて
+            // この時点の Spoken は ["a","c"] に留まる。
+            //
+            // 上書きされる値は本番とテストで異なるが、どちらでも "d" は throttle される:
+            //  - 本番 (TimeProvider.System): 孤児は実時刻 ≒T=70 で発火し _lastSaidUtc=70。115-70=45 < 50。
+            //  - 本テスト (FakeTimeProvider): Advance は _now を先に進めてから callback を呼ぶため、
+            //    callback 内の GetUtcNow() は due 時刻 70 ではなく Advance 後の 115 を返す
+            //    (Microsoft.Extensions.TimeProvider.Testing 9.5.0 で実測)。
+            //    よって _lastSaidUtc=115 で 115-115=0 < 50。
+            // このため Advance(55) の 55 に意味は無く、due の 70 を越えれば任意の値で赤になる
+            // (「45<50 に収める」ような 5 ms マージンの脆さは実在しない)。
             Assert.Equal(new[] { "a", "c", "d" }, announcer.Spoken);
         });
 
