@@ -104,6 +104,62 @@ public static class SettingsStore
     }
 
     /// <summary>
+    /// 壊れた settings.json を <c>&lt;path&gt;.bad</c> へ退避する(M-11・設計 2026-09-02 §5.4)。
+    /// <b><see cref="Load"/> には副作用を持たせず、退避は呼出側が明示的に行う。</b>
+    /// 既存の <c>.bad</c> は上書きする(最新の破損コピーだけを残す)。
+    /// <b>退避できなくても投げない</b> —— 起動を止める理由にはならないので、成否を返して
+    /// 呼出側に判断させる。<b><c>.bad</c> の掃除はしない</b>(自動削除すると「壊れた設定を
+    /// 後から見る」という退避の目的を自分で潰す。設計 §9)。
+    /// <para>
+    /// <b><paramref name="quarantinePath"/> は失敗時も「試みた宛先」として返る</b>(実在は
+    /// 意味しない)。<c>false</c> のときにこれをユーザーへ案内すると、実在しない場所を
+    /// 案内することになる(設計 §10.6 (c) で潰した欠陥と同型)。
+    /// </para>
+    /// <para>
+    /// <b>この API 自体は <see cref="SettingsLoadStatus"/> を見ない。</b>「<c>Corrupt</c> のときだけ
+    /// 退避する」を守るのは呼出側(<c>SettingsStartup.Prepare</c> の <c>Corrupt</c> 分岐が
+    /// ソリューション唯一の呼出)であり、<b>ここに status 引数を足して構造的に封じる案は採らない</b>
+    /// —— App 層の判定を Core の API 形状へ持ち込むうえ、「status 違いの no-op」と「退避の失敗」が
+    /// どちらも <c>false</c> になって区別できなくなる。<c>Unreadable</c> を退避しないことは
+    /// <c>SettingsStartupTests.Prepare_warns_but_never_renames_an_unreadable_file</c> で固定してある。
+    /// </para>
+    /// <para>
+    /// <b>宛先はどんな <paramref name="path"/> でも同じディレクトリに落ちる</b> ——
+    /// 区切り文字を挟まない suffix 連結なので、<c>path</c> が <c>..</c> を含んでいても
+    /// 解決先は <c>path</c> と同じ親である。加えて <c>Corrupt</c> は
+    /// <c>File.ReadAllText(path)</c> が成功した後にしか出ないので、到達時点の <c>path</c> は
+    /// <b>実在する読めるファイル</b>を指していた(末尾が区切り文字・ディレクトリ・予約デバイス名の
+    /// パスは <see cref="Load"/> の存在判定か読込で <c>Missing</c> / <c>Unreadable</c> へ落ちる)。
+    /// 長すぎるパス(<c>+".bad"</c> で MAX_PATH を越える等)は <c>File.Move</c> が投げて
+    /// <c>false</c> になるだけで、原本は動かない。
+    /// </para>
+    /// <para>
+    /// <c>overwrite: true</c> が消しうるのは <c>&lt;path&gt;.bad</c> という<b>決め打ちの 1 名</b>だけで、
+    /// 名前は入力から生成されない。その名前がディレクトリだった場合は <c>File.Move</c> が失敗して
+    /// <c>false</c> を返す(消さない)。
+    /// </para>
+    /// <para>
+    /// 退避した <c>.bad</c> は <c>%APPDATA%\kxEdit\</c> 直下に残り、どの sweeper の視野にも入らない
+    /// (<see cref="Save"/> の tmp と同じ性質・設計 §10.11)。これは仕様である ——
+    /// 消すのはユーザーの判断。
+    /// </para>
+    /// </summary>
+    public static bool TryQuarantineCorrupt(string path, out string quarantinePath)
+    {
+        quarantinePath = path + ".bad";
+        try
+        {
+            File.Move(path, quarantinePath, overwrite: true);
+            return true;
+        }
+        catch
+        {
+            // 退避の失敗で起動を落とさない(catch-all の理由は Load と同じ。設計 §10.13)。
+            return false;
+        }
+    }
+
+    /// <summary>
     /// JSON で明示的に null が入った参照型フィールドを既定へ補正する（"RecentFiles": null 等でも
     /// 後段の NRE を起こさないため）。System.Text.Json は欠落キーは初期化子を残すが、明示 null は上書きする。
     /// </summary>

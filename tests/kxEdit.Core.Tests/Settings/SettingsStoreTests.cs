@@ -966,4 +966,115 @@ public class SettingsStoreTests
                 File.Delete(path);
         }
     }
+
+    // ---- M-11: 壊れた設定ファイルの退避(設計 2026-09-02 §5.4・Task 8) ----
+
+    /// <summary>
+    /// 退避 = <c>&lt;path&gt;.bad</c> への<b>改名</b>。原本のパスからは消え、<b>中身はそのまま
+    /// <c>.bad</c> 側に残る</b>ことまで見る —— 「消して既定値で作り直す」実装との弁別であり、
+    /// 退避の目的(壊れた設定を後から見られるようにする)はここが崩れると成立しない。
+    /// <para>
+    /// 併せて<b>宛先が必ず同じディレクトリに落ちる</b>ことを固定する。<c>path + ".bad"</c> は
+    /// 区切り文字を挟まない suffix 連結なので、<c>path</c> が何であっても親ディレクトリの外は
+    /// 指さない(設計 §5.4 のセキュリティ観点)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void TryQuarantineCorrupt_renames_to_bad_and_keeps_the_original_content()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "settings.json");
+            const string original = "{ これは JSON ではない —— 壊れた設定";
+            File.WriteAllText(path, original);
+
+            bool moved = SettingsStore.TryQuarantineCorrupt(path, out string quarantined);
+
+            Assert.True(moved);
+            Assert.Equal(path + ".bad", quarantined);
+            Assert.False(File.Exists(path)); // 原本のパスからは消える
+            Assert.Equal(original, File.ReadAllText(quarantined)); // 中身は失われていない
+            Assert.Equal(dir, Path.GetDirectoryName(quarantined)); // 親の外は指さない
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// 2 回目の退避は既存の <c>.bad</c> を<b>上書きする</b>(設計 §5.4「最新の破損コピーだけを
+    /// 残す」)。世代が増えないこと —— ディレクトリ内のファイルが <c>.bad</c> 1 個だけであること ——
+    /// まで見る。<c>&lt;path&gt;.bad.bad</c> のように積む実装や、既存があると失敗する実装が落ちる。
+    /// </summary>
+    [Fact]
+    public void TryQuarantineCorrupt_overwrites_the_previous_bad_file()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "settings.json");
+            File.WriteAllText(path, "1 回目の破損");
+            Assert.True(SettingsStore.TryQuarantineCorrupt(path, out string firstBad));
+
+            File.WriteAllText(path, "2 回目の破損");
+            bool moved = SettingsStore.TryQuarantineCorrupt(path, out string secondBad);
+
+            Assert.True(moved);
+            Assert.Equal(firstBad, secondBad); // 宛先は毎回同じ 1 名
+            Assert.Equal("2 回目の破損", File.ReadAllText(secondBad)); // 最新の破損コピーが残る
+            Assert.False(File.Exists(path));
+            Assert.Single(Directory.GetFiles(dir)); // 世代が増えない(.bad が 1 個だけ)
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// 退避できなくても<b>投げない</b>。起動を止める理由にはならないので、成否を返して呼出側に
+    /// 判断させる(設計 §5.4)。例外が漏れればこのテストは例外で落ちるので、「投げないこと」自体が
+    /// 観測点である。
+    /// <para>
+    /// fixture は原本を <c>FileShare.None</c> で掴んだままにする(<c>File.Move</c> は原本を
+    /// DELETE 共有で開く必要があるため失敗する)。失敗しても<b>原本が無傷</b>であること、
+    /// <c>.bad</c> が作られないことも併せて固定する —— 退避の失敗が破壊に化けないこと。
+    /// </para>
+    /// <para>
+    /// 失敗時の <c>out</c> は「<b>試みた宛先</b>」であって実在を意味しない。呼出側がこれを
+    /// ユーザーへ案内すると実在しない場所を案内することになるので、値そのものも押さえておく。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void TryQuarantineCorrupt_returns_false_without_throwing_when_the_move_fails()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "settings.json");
+            const string original = "{ これは JSON ではない";
+            File.WriteAllText(path, original);
+
+            bool moved;
+            string quarantined;
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                moved = SettingsStore.TryQuarantineCorrupt(path, out quarantined);
+            }
+
+            Assert.False(moved);
+            Assert.Equal(path + ".bad", quarantined); // 実在は意味しない「試みた宛先」
+            Assert.False(File.Exists(quarantined)); // 退避先は作られていない
+            Assert.Equal(original, File.ReadAllText(path)); // 原本は無傷
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
 }
