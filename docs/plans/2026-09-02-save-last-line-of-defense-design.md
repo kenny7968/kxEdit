@@ -2189,3 +2189,198 @@ dotnet csharpier check <変更 2 ファイル>  →  EXIT=0
 ```
 
 テスト本数は変わっていない(既存 3 本へ副作用の網を足しただけ)。変異 3 件は復帰を確認済み。
+
+### 10.15 Task 8 — 退避と文言。計画の文言が「弱すぎた」理由
+
+`SettingsStore.TryQuarantineCorrupt`(Core)と `SettingsStartup.Prepare`(App)を足した。
+`Program.cs` は無変更(配線は Task 9)。**`Load` には副作用を足していない** ——
+退避の呼出は `Prepare` の `Corrupt` 分岐 1 か所だけである。
+
+#### 採った文言(実物)
+
+```
+[Corrupt・退避に成功]
+設定ファイルが壊れていたため、既定の設定で起動しました。以前の設定は失われているので、必要な項目は設定し直してください。
+
+壊れたファイルは次の場所へ退避しました。不要になったら削除してください:
+  <退避先パス>
+
+[Corrupt・退避に失敗]
+設定ファイルが壊れていたため、既定の設定で起動しました。以前の設定は失われているので、必要な項目は設定し直してください。
+
+壊れたファイルは退避できませんでした。kxEdit はファイルを開いたときや終了するときに設定を書き直すので、このまま使うと上書きされます。壊れた内容を残しておきたい場合は、先に次のファイルをコピーしてください:
+  <原本パス>
+
+[Unreadable]
+設定ファイルを読み取れなかったため、既定の設定で起動しました。
+
+kxEdit はファイルを開いたときや終了するときに設定を書き直すので、このまま使うと、読み取れなかったファイルは既定の設定で上書きされます。以前の設定を残したい場合は、先に次のファイルをコピーしてください:
+  <原本パス>
+```
+
+パスはいずれも `SanitizeForDisplay.OneLine(path)` = **無害化はするが切り詰めない**。
+
+#### 計画から変えた 4 点と、その理由
+
+**(1) 「設定を変更すると上書きされます」は実物より弱かった(最重要)。**
+§5.4 の文言案は「設定を変更すると上書きされる」だったが、実物はそうではない。
+
+| 上書きの契機 | 場所 |
+|---|---|
+| **終了するたび**(キャンセルされなかった `OnFormClosing`) | `MainForm.cs:594` → `SaveSettingsSafe` |
+| **ファイルを開く / 保存するたび**(最近のファイル更新) | `FileController.cs:1575` `RegisterRecent` → `_saveSettings` |
+
+つまり**ユーザーが設定を 1 つも変えなくても** settings.json は書き直される。計画の文言を採ると、
+「設定を変えなければ大丈夫」と読ませたうえで実際には終了だけで消える —— *より静かな*喪失を
+案内文で作ることになる。文言を「kxEdit はファイルを開いたときや終了するときに設定を書き直すので」
+= **実際の契機**に変えた。
+
+**(2) 退避先パスを切り詰めない(計画の `260` を外した)。** §10.6 / §10.7 の「切ってよい側と
+いけない側」をこの文言に当てると、**切ってはいけないのはパスの方**である。原本パス側を丸めてよかった
+Task 4 と違い、ここでは原本も退避先も `%APPDATA%` 配下で、**ユーザーが他所から知る手段が無い**。
+`260` は MAX_PATH に由来する数で、この文言が何を守るかとは無関係だった。
+
+**(3) 退避に失敗した側と `Unreadable` 側でも「どのファイルか」を案内する。** 計画はどちらも
+パスを載せない案だったが、「先にコピーしてください」は場所が判らなければ実行できない ——
+§10.7 指摘 3(一番役に立つ事実が文言に入っていない)と同型である。案内するのは**原本**で、
+**実在しない退避先は案内しない**(§10.6 (c))。`Corrupt` は `File.ReadAllText(path)` が成功した
+後にしか出ないので、この原本は直前まで実在していた。
+
+**(4) 語順**: 「次に何をすればよいか」を長いパスより前に置いた(§10.7 指摘 3)。
+網 `Assert.InRange(guideAt, 0, pathAt - 1)` で固定してある。
+
+#### `Unreadable` を退避しないことは、コード上どう保証されているか
+
+**構造的な強制ではなく、位置と網の 2 つで保っている。**正直に書くと次のとおり。
+
+1. `TryQuarantineCorrupt` の呼出は **`Prepare` の `case Corrupt:` の中 1 か所だけ**(production 全体を
+   grep して確認)。`Unreadable` の分岐は `return` するだけで、退避の呼出を持たない。
+2. `SettingsStore.Load` は副作用を持たない(§10.14 の網)。したがって「読んだだけで改名される」
+   経路は存在しない。
+3. `Prepare_warns_but_never_renames_an_unreadable_file` が観測面を押さえる。
+
+**`TryQuarantineCorrupt(path, status, …)` にして構造的に封じる案は採らなかった。** App 層の判定を
+Core の API 形状へ持ち込むうえ、「status 違いの no-op」と「退避の失敗」がどちらも `false` になって
+呼出側から区別できなくなる。理由は xmldoc に残した。**この判断は脆弱性パスへ回す。**
+
+#### 自分で見つけて直した fixture の欠陥 —— 網が別のことを見ていた
+
+最初に書いた `Unreadable` の fixture は `FileShare.None` で原本を掴んでいた。**この形だと
+`File.Move` 自身も共有違反で失敗する**ので、「`Unreadable` でも退避を呼ぶ」変異は
+**「どのみち失敗するから」で素通しする** —— 網は「呼ばないこと」ではなく「呼んでも失敗すること」
+しか見ていなかった。本タスクで最重要と指定された観測点が、そのままでは無網だった。
+
+`FileShare.Delete`(読み取りは拒否するが改名は許す)へ変え、**その性質自体を実測で固定する**
+fixture 検算テスト `A_delete_shared_lock_blocks_reading_but_not_renaming` を足した。
+`Load` 側の `Load_reports_Unreadable_when_the_file_is_locked`(Task 7)は `FileShare.None` のままで
+よい —— あちらの観測点は `status` であって改名の可否ではない。
+
+#### 変異の実測(5 件・1 件生存)
+
+CLAUDE.md §4-A はファイル I/O へのミューテーション検証を禁止しているが、本ブランチが §10.2 /
+§6.4 で既に使っている例外条件(「厳密な挙動を保証する必要がある場合」)を適用した。適用範囲は
+**「どの状態で改名するか」と「案内文がどのパスを指すか」に限り**、`Load` / `Save` / `AtomicFile` へは
+広げていない。いずれも `--no-incremental` ビルドの終了コード 0 を確認してから実行し、
+5 件とも sha256 で復帰を確認済み。
+
+| # | 変異 | 結果 |
+|---|------|------|
+| M1 | `case Unreadable:` でも `TryQuarantineCorrupt` を呼ぶ | **殺** App 6 中 1 失敗 |
+| M2 | `Corrupt`(成功)の語順を入れ替え、パスを案内より前へ | **殺** App 6 中 1 失敗 |
+| M3a | `OneLine(quarantined)` → `OneLine(quarantined, 200)` | **殺** App 6 中 1 失敗 |
+| M3b | `OneLine(quarantined)` → `OneLine(quarantined, 260)`(計画案の値) | **生存** App 6 全 PASS |
+| M4 | 退避失敗側の案内を原本 → 退避先へ | **殺** App 6 中 1 失敗 |
+| M5 | `File.Move(..., overwrite: true)` → `overwrite: false` | **殺** Core 3 中 1 失敗 |
+
+```
+# M1
+失敗 …SettingsStartupTests.Prepare_warns_but_never_renames_an_unreadable_file
+   Assert.False() Failure
+# M2
+失敗 …SettingsStartupTests.Prepare_quarantines_a_corrupt_file_and_points_at_it_in_full
+   Assert.InRange() Failure: Value not in range
+# M3a
+失敗 …SettingsStartupTests.Prepare_quarantines_a_corrupt_file_and_points_at_it_in_full
+   Assert.Contains() Failure: Sub-string not found
+# M3b
+成功!   -失敗:     0、合格:     6、スキップ:     0、合計:     6
+# M4
+失敗 …SettingsStartupTests.Prepare_does_not_point_at_a_quarantine_that_was_never_created
+   Assert.DoesNotContain() Failure: Sub-string found
+# M5
+失敗 …SettingsStoreTests.TryQuarantineCorrupt_overwrites_the_previous_bad_file
+   Assert.True() Failure
+```
+
+#### 網にできなかったもの —— 上限 260 の切り詰め(M3b)
+
+**張れなかった。**この網を張るには退避先パスを 260 文字超にする必要があり、そのためには
+MAX_PATH を越えるパスにファイルを作らなければならない。一時プローブで実測したところ、
+**この開発機では 275 文字のパスを作成できた**(= 長パスが有効)。しかし同じことが CI の
+ランナーで成立する保証が無く、成立しなければ fixture 作成の時点でテストが落ちる。
+**「ローカルでだけ通る網」を足すのは、緑を根拠に使えなくする**ので採らなかった。
+
+したがって fixture は退避先 250 文字(MAX_PATH 内)に留めてあり、**殺せるのは上限 249 未満まで**。
+250〜260 の上限を付け直す変異は生存する。実害は小さい
+(`%APPDATA%\kxEdit\settings.json` が 250 文字を越えるには `%APPDATA%` が 230 文字級である必要がある)
+が、**「上限を外した」ことの網は上限 249 未満にしか効いていない**のが実態である。
+[[net-absence-claims-are-also-verifiable]] の作法に従い、張れなかったことをここに書く。
+
+#### 計画と実物が食い違った点
+
+1. **文言 4 点**(上記)。とくに (1) は計画の文言が**事実として弱かった**もので、好みの問題ではない。
+2. **テスト本数**: タスク本文の観測点は 8 個だが、実装は **9 本**になった
+   (Core 3 / App 6)。増えた 1 本は fixture 検算の
+   `A_delete_shared_lock_blocks_reading_but_not_renaming`。
+3. **`case Ok: case Missing: default:` を 1 本のアームにまとめた**。計画は `default:` だけだったが、
+   「警告しないのは Ok と Missing」という意図がコードから読めなくなる。将来 status が増えたときも
+   ここへ落ちる(退避も通知もしない安全側)ことをコメントに書いた。
+4. **計画のコードはアナライザに弾かれなかった**(本ブランチで初めて 2 回連続)。`switch` + 三項 +
+   bare `catch` のいずれにも Sonar / Roslynator は何も言わなかった。
+
+#### セキュリティ観点(実装時の自己確認・レビューは別エージェント)
+
+- **`path + ".bad"` は危険な位置を指さない。**区切り文字を挟まない suffix 連結なので、`path` が
+  `..` を含んでいても解決先は `path` と同じ親である。加えて `Corrupt` は
+  `File.ReadAllText(path)` が成功した後にしか出ないので、到達時点の `path` は**実在する読める
+  ファイル**を指していた —— 末尾が区切り文字・ディレクトリ・予約デバイス名のパスは `Load` の
+  `File.Exists` か読込で `Missing` / `Unreadable` へ落ち、`Corrupt` には**到達しない**。
+  長すぎるパスは `File.Move` が投げて `false` になるだけで、原本は動かない。
+  「同じディレクトリに落ちる」は網でも押さえた(`Assert.Equal(dir, Path.GetDirectoryName(quarantined))`)。
+- **`overwrite: true` が消しうるのは `<path>.bad` という決め打ちの 1 名だけ。**名前は入力から
+  生成されない。**その名前が kxEdit の置いた `.bad` とは限らない**(ユーザーや他プログラムが
+  同名ファイルを置いていれば消える)—— これは §5.4 の「最新の破損コピーだけを残す」を採った
+  結果として受容する。宛先がディレクトリだった場合は `File.Move` が失敗して `false` を返す
+  (消さない)ことは網で固定した。
+- **退避が `Corrupt` とだけ結び付いていること**は上記のとおり「位置 + 網」で、構造的な強制ではない。
+
+#### 申し送り(B4 の射程外・実装しない)
+
+- **`Unreadable` のまま終了すると、案内した当のファイルが上書きされる。**§5.5 の判断
+  (保存を止めない)は「設定を適用しました」の虚偽発声を避けるためのもので、**発声を伴わない
+  `OnFormClosing` の保存だけを `Unreadable` のとき飛ばす**案はその理由に触れない。
+  B5(M-22 = 設定保存失敗の通知)を触るときに併せて検討する価値がある。本タスクでは
+  設計 §5.5 の決定どおり保存経路に一切触れていない。
+- **`.bad` は掃除しない**(§9 のまま)。`%APPDATA%\kxEdit\` 直下なのでどの sweeper の視野にも
+  入らない(§10.11 の tmp と同じ性質)。これは仕様であり、消すのはユーザーの判断。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  0 エラー / 0 個の警告 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1427 / 合計: 1427   (1424 → +3)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
+kxEdit.App.Tests     成功!  合格:  743 / 合計:  743   (737 → +6)
+dotnet csharpier check <変更 4 ファイル>  →  EXIT=0
+```
+
+赤の確認は 2 段。(1) テストだけ先に書いた時点で **18 個の CS0117 / CS0103 / CS8130**
+(`SettingsStore.TryQuarantineCorrupt` 未定義・`SettingsStartup` 不在):
+
+```
+…SettingsStoreTests.cs(992,40): error CS0117: 'SettingsStore' に 'TryQuarantineCorrupt' の定義がありません
+…SettingsStartupTests.cs(58,35): error CS0103: 現在のコンテキストに 'SettingsStartup' という名前は存在しません
+BUILD_EXIT=1
+```
+
+(2) 実装後に上表の変異 5 件を当て、4 件が赤になることを実測(M3b は生存)。
