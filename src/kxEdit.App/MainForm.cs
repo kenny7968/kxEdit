@@ -122,6 +122,15 @@ public sealed partial class MainForm : Form
     /// <see cref="StartupRestoreGateOpenForTest"/> と同じ方針。</summary>
     internal int BackupTimerIntervalMsForTest => _backup.TimerIntervalMs;
 
+    /// <summary>M-20 テスト用: <see cref="BackupCoordinator.OnBackupHealthChanged"/> に
+    /// <b>実際に配線されたもの</b>を読んで撃つ。配線の 1 行が消えればフックは null になり、
+    /// 発声が起きない=<see cref="LastAnnouncementForTest"/> の網が落ちる。
+    /// <para>遷移の<b>判定</b>そのものは Coordinator 側のテストが固定する。実 <see cref="MainForm"/> で
+    /// 本物の書込失敗を起こすには背景ライターと壊れた書込先と tick(既定 300 秒)が要り、
+    /// L3 では再現が脆いため、ここは<b>配線と文言</b>だけを引き受ける。</para></summary>
+    internal void InvokeBackupHealthChangedForTest(bool healthy) =>
+        _backup.OnBackupHealthChanged?.Invoke(healthy);
+
     /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
     /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
     /// 陳腐化警告より後ろへ動かしても、どちらの到達数も 1 のままだからである。そこで
@@ -264,6 +273,22 @@ public sealed partial class MainForm : Form
             restoreSessionEnabled: settings.RestoreOpenFilesOnStartup,
             sessionLayoutPath: sessionLayoutPath
         );
+        // M-20(B5): バックアップ書込の健全性が遷移したときだけ知らせる。修正前は書込が失敗しても
+        // ユーザーへ出る面が一つも無く、既定 tick 300 秒のまま「守られている」と信じて編集が続いた。
+        // 一過性の失敗では「失敗」「復旧」の 2 回鳴りうるが、その間バックアップは実際に効いて
+        // いなかったので、黙る側ではなく言う側へ倒す(設計 §5.5 (b) で受容)。
+        //
+        // 文言は 3 つに割る —— 起きた事実(書込が失敗した)は断定し、帰結(復元できるか)は
+        // possibility に留め、行動(手で保存する)を添える。帰結を断定できないのは、
+        // 直前までの成功で取れた古いバックアップが残っている場合があるうえ、報告が届く時点で
+        // ユーザーが既に保存を済ませていることもあるため(M-22 と同じ規律)。
+        _backup.OnBackupHealthChanged = healthy =>
+            _announcer.Say(
+                healthy
+                    ? "バックアップの保存を再開しました"
+                    : "バックアップを保存できませんでした。"
+                        + "未保存の内容は復元できない可能性があるため、ファイルを保存してください"
+            );
         _csv = new CsvController(
             docs: _docs,
             announcer: _announcer,

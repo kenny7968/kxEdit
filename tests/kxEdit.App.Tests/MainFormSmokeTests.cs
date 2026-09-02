@@ -2442,4 +2442,70 @@ public class MainFormSmokeTests
                 StringComparison.Ordinal
             );
         });
+
+    // ===== M-20 (B5): バックアップ書込の健全性を遷移で伝える(配線と文言) =====
+
+    /// <summary>M-20 の配線: 失敗の遷移が実 <see cref="MainForm"/> で発声になること。
+    /// <para>
+    /// 遷移の<b>判定</b>は <c>BackupCoordinatorTests</c> が固定するが、あちらは Coordinator を
+    /// 直接叩くため <c>_backup.OnBackupHealthChanged = ...</c> の 1 行を消しても緑のままだった
+    /// (実測)。ここは<b>その 1 行と文言</b>だけを見る。
+    /// </para>
+    /// <para>
+    /// 実バックアップの失敗を実 <see cref="MainForm"/> で起こすには背景ライターと壊れた書込先と
+    /// tick(既定 300 秒)が要り、L3 では再現が脆い。<c>InvokeBackupHealthChangedForTest</c> は
+    /// <b>Coordinator に配線済みのフックを読んで撃つ</b>ので、配線が切れればフックが null になり
+    /// 発声も起きない=この網は配線の有無を見ている。
+    /// </para>
+    /// <para>
+    /// 文言は B5 の主題(実際と違うことを言わない)に沿って 3 つに割れている:
+    /// <b>起きた事実</b>(書込が失敗した)は断定し、<b>帰結</b>(復元できるか)は possibility に
+    /// 留め、<b>行動</b>(保存)を添える。断定へ倒す変異・帰結を落とす変異のどちらも kill する。
+    /// </para></summary>
+    [Fact]
+    public void Backup_health_failure_is_announced_by_the_running_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            Assert.Empty(form.LastAnnouncementForTest); // 前提: まだ何も言っていない
+
+            form.InvokeBackupHealthChangedForTest(healthy: false);
+
+            string said = form.LastAnnouncementForTest;
+            Assert.Contains("バックアップを保存できませんでした", said, StringComparison.Ordinal);
+            // 帰結は possibility のまま(「復元できません」と断定すると、既存の古いバックアップが
+            // 残っている場合や、ユーザーが保存した場合に嘘になる)。
+            Assert.Contains("復元できない可能性", said, StringComparison.Ordinal);
+            // 行動指針(自動の網が落ちたので手で保存する)。
+            Assert.Contains("保存してください", said, StringComparison.Ordinal);
+            // 復旧側の文言へ倒す変異を kill する。
+            Assert.DoesNotContain("再開", said, StringComparison.Ordinal);
+        });
+
+    /// <summary>M-20 の配線: 復旧の遷移が実 <see cref="MainForm"/> で発声になること。
+    /// 失敗側と 2 本に割るのは、三項演算子を片側へ潰す変異(常に失敗文言 / 常に復旧文言)を
+    /// どちらの向きでも kill するため。</summary>
+    [Fact]
+    public void Backup_health_recovery_is_announced_by_the_running_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            Assert.Empty(form.LastAnnouncementForTest); // 前提: まだ何も言っていない
+
+            form.InvokeBackupHealthChangedForTest(healthy: true);
+
+            Assert.Equal("バックアップの保存を再開しました", form.LastAnnouncementForTest);
+        });
 }

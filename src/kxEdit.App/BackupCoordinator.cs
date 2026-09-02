@@ -71,6 +71,21 @@ public sealed class BackupCoordinator : IDisposable
     /// 復元対象に破棄意図を silent 復活させない。</summary>
     private readonly HashSet<Document> _discarded = new();
     private readonly ConcurrentQueue<string> _failed = new(); // 背景書込が失敗した Id(UI スレッドで回収)
+
+    /// <summary>M-20(B5): 背景書込が成功したか(0/1)。失敗側と違い <b>id は使わない</b>
+    /// (復旧の判定に要るのは「1 件でも書けたか」だけ)ので、<see cref="_layoutWriteFailed"/> と
+    /// 同じ <see cref="Interlocked"/> フラグで受ける。
+    /// <para>キューにしないのは設計判断である。設計書 §11 は「<c>_succeeded</c> を無制限に積む」
+    /// (drain は <see cref="ReconcileContent"/> 冒頭 1 箇所だけなので、<c>_enabled == false</c> の
+    /// レイアウトのみモードへ切り替えたまま長時間動かすと <see cref="ReconcileMapMaintenance"/> 側へ
+    /// 分岐して drain が走らず伸び続ける)を実装時の判断事項として残していた。0/1 フラグなら
+    /// <b>その問題が構造的に消える</b> —— 読まれなくても大きくならない。</para></summary>
+    private int _writeSucceeded;
+
+    /// <summary>M-20: バックアップ書込が健全か。<b>遷移したときだけ</b>
+    /// <see cref="OnBackupHealthChanged"/> を撃つための状態。初期 true = 最初の失敗も報告される。</summary>
+    private bool _backupHealthy = true;
+
     private bool _shutDown;
 
     /// <summary>起動時復元(MainForm.OnShown)が完了したか。完了までは保存点/クローズの
@@ -155,6 +170,24 @@ public sealed class BackupCoordinator : IDisposable
         _timer.Start();
     }
 
+    /// <summary>M-20(B5): バックアップ書込の健全性が<b>遷移した</b>ときだけ呼ばれる
+    /// (true=復旧 / false=失敗)。失敗が続く間は鳴らない。
+    /// <para><b>UI スレッドから呼ばれる</b>ので、受け手はスレッド越えを吸収しなくてよい。
+    /// 根拠は経路の数え上げではなく <see cref="BackupCoordinator"/> が <c>_map</c> を非スレッド
+    /// セーフな Dictionary で持つ UI スレッド専有クラスであること —— 本フックを撃つのは
+    /// <see cref="ReconcileContent"/> 冒頭の drain 1 箇所で、そこへ来るのは <c>Timer.Tick</c> /
+    /// <c>ActiveDocumentChanged</c> / <see cref="UpdateSettings"/>(設定ダイアログ OK 直後)/
+    /// <see cref="FinalFlushForRestore"/>(終了時)である。<b>tick 以外でも鳴る</b> ——
+    /// とくに終了時の最終 flush で失敗すればそこでも 1 回鳴る。</para>
+    /// <para>発声手段そのものは注入しない —— 上の専有クラスが <c>IAnnouncer</c> を知る必要は
+    /// 無いので、何と言うかは配線側(<c>MainForm</c>)の担当にする。
+    /// <see cref="IBackupWriter.OnWriteFailed"/> と同じ Action プロパティの idiom に揃えてある。</para>
+    /// <para><b>本文バックアップ(<c>Write</c>)の成否だけを載せる。</b> レイアウト
+    /// (<c>session-state.json</c>)の書込失敗は <see cref="_layoutWriteFailed"/> 側で扱い、ここには
+    /// 来ない —— レイアウトが書けなくても次回起動の復元は <c>BackupStore.LoadAll</c> が本体を直接
+    /// 読むので、失うのはタブ順とアクティブタブだけ(設計 §5.5 (a) で受容)。</para></summary>
+    public Action<bool>? OnBackupHealthChanged { get; set; }
+
     /// <summary>writer を factory で生成し、失敗通知フックを配線する(遅延生成の意味論を保存)。
     /// BK-M-2: factory シグニチャは <c>Func&lt;string, IBackupWriter&gt;</c>=書込先の session dir を
     /// 明示的に渡す(base dir と混同するミスを compile-time で防ぐ seam)。</summary>
@@ -162,6 +195,8 @@ public sealed class BackupCoordinator : IDisposable
     {
         var w = _writerFactory(_sessionDir);
         w.OnWriteFailed = OnBackgroundWriteFailed;
+        // M-20: 成功は id を使わないのでフラグを立てるだけ(_layoutWriteFailed と同型)。
+        w.OnWriteSucceeded = _ => Interlocked.Exchange(ref _writeSucceeded, 1);
         // レイアウト書込失敗(背景スレッド)→ 次 Reconcile で強制再書込(設計 E13)。
         w.OnLayoutWriteFailed = () => Interlocked.Exchange(ref _layoutWriteFailed, 1);
         return w;
@@ -497,10 +532,19 @@ public sealed class BackupCoordinator : IDisposable
     private void ReconcileContent()
     {
         // 背景書込が失敗した文書を強制再書込対象にする(楽観更新で欠落・陳腐化しないように)。
+        bool anyFailed = false;
         while (_failed.TryDequeue(out var failedId))
+        {
+            anyFailed = true;
             foreach (var v in _map.Values)
                 if (v.Id == failedId)
                     v.ForceWrite = true;
+        }
+        // M-20: 成功フラグは<b>健全なときも必ず読み捨てる</b>(Exchange の第 2 引数が 0 なのは
+        // そのため)。残すと、後で失敗して unhealthy になった次の drain が、失敗より前に届いて
+        // いた古い成功を今回の成功と読んで「復旧した」と報告する。
+        bool anySucceeded = Interlocked.Exchange(ref _writeSucceeded, 0) == 1;
+        ReportBackupHealth(anyFailed, anySucceeded);
 
         // 閉じた文書(map にあるが現存しない)→ バックアップ削除。
         var current = new HashSet<Document>(_docs.Documents);
@@ -550,6 +594,43 @@ public sealed class BackupCoordinator : IDisposable
                 case BackupAction.None:
                     break;
             }
+        }
+    }
+
+    /// <summary>M-20(B5): 書込の健全性が遷移したときだけ報告する。
+    /// <para><b>同一 pass に失敗と成功が両方あれば失敗が勝つ。</b> 複数文書のうち 1 つだけ
+    /// 書けている状態を「復旧」と呼ばないため。</para>
+    /// <para><b>成功の観測が必須である理由</b>: 「失敗が来ない」だけでは、書込が成功したのか
+    /// <b>そもそも投入していない</b>のか(dirty でない・署名一致で <c>BackupAction.None</c>)を
+    /// 区別できない。後者を復旧と読むと、一度も書けていないのに「再開しました」と言うことに
+    /// なる(<see cref="IBackupWriter.OnWriteSucceeded"/> がある理由そのもの)。</para>
+    /// <para><b>early return であって else-if ではない。</b> else-if で書くと、既に unhealthy の
+    /// ときに第 1 分岐が <c>anyFailed &amp;&amp; false</c> で落ち、第 2 分岐
+    /// (<c>anySucceeded &amp;&amp; !_backupHealthy</c>)が成立して<b>誤って復旧を報告する</b>。
+    /// 文書 A の書込先が恒久的に塞がれ文書 B は正常、という構成で毎 drain が
+    /// 「失敗 A + 成功 B」になり、tick ごとに失敗と復旧を交互に言い続ける。
+    /// 上の「失敗が勝つ」が健全なときにしか効かない形になるということ。</para>
+    /// <para><c>_enabled == false</c>(レイアウトのみモード)では <see cref="Reconcile"/> も
+    /// <see cref="FinalFlushForRestore"/> も <see cref="ReconcileMapMaintenance"/> 側へ分岐して
+    /// 本メソッドが走らない = 報告も起きない。<b>バックアップを書いていないのだから正しい</b>。
+    /// ただしその間 <see cref="_failed"/> は溜まったままなので(drain がここ 1 箇所しかない)、
+    /// 後で ON へ戻した最初の pass が<b>切替より前の失敗</b>を報告しうる。文言が過去形の断定に
+    /// 留めてあるぶん嘘にはならないが、鳴る時点が実際の失敗より遅れることはある。</para></summary>
+    private void ReportBackupHealth(bool anyFailed, bool anySucceeded)
+    {
+        if (anyFailed)
+        {
+            if (_backupHealthy)
+            {
+                _backupHealthy = false;
+                OnBackupHealthChanged?.Invoke(false);
+            }
+            return; // 失敗がある pass では復旧の判定に入らない
+        }
+        if (anySucceeded && !_backupHealthy)
+        {
+            _backupHealthy = true;
+            OnBackupHealthChanged?.Invoke(true);
         }
     }
 
