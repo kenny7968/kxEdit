@@ -24,6 +24,17 @@ internal static class PreviewVirtualHostMapping
     /// <summary>
     /// マッピング先を決めて <paramref name="map"/> へ渡す。<paramref name="map"/> が
     /// I/O 系の例外で失敗しても<b>未マップにはしない</b>。
+    /// <para>
+    /// 捕まえる型は <see cref="IOException"/> / <see cref="UnauthorizedAccessException"/> /
+    /// <see cref="System.Runtime.InteropServices.COMException"/> / <see cref="ArgumentException"/>。
+    /// <b>このうち実測があるのは <see cref="DirectoryNotFoundException"/> だけ</b>(設計書 §13.1)。
+    /// 残り 3 型は<b>推測であって実測ではない</b> ——
+    /// <c>SetVirtualHostNameToFolderMapping</c> は COM 相互運用呼び出しなので
+    /// <c>E_FAIL</c> / <c>RPC_E_DISCONNECTED</c>(直前にブラウザプロセスが落ちた等)は
+    /// <c>COMException</c>、不正パス系は <c>ArgumentException</c> で出る<b>はず</b>、
+    /// という想定で広げてある。狙いは設計書 §4.3 が避けたかった回帰
+    /// (「画像が出ない」で済む話が「プレビューが開かない」になる) の防止。
+    /// </para>
     /// </summary>
     /// <param name="baseDir">.md のフォルダー。未保存タブでは null。</param>
     /// <param name="baseDirExists">
@@ -54,10 +65,20 @@ internal static class PreviewVirtualHostMapping
         {
             map(baseDir);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
+            when (ex
+                    is IOException
+                        or UnauthorizedAccessException
+                        or System.Runtime.InteropServices.COMException
+                        or ArgumentException
+            )
         {
             // 未マップへ戻さない。ここで諦めると V-2 の状態が復活する。
             // 実在確認と登録の間に共有が落ちる競合が主な経路 (DirectoryNotFoundException)。
+            // ただしその競合が起きたとき、ここへ来る前の map(baseDir) 自体が
+            // UI スレッドで最大 21 秒返らない (SetVirtualHostNameToFolderMapping 内蔵の
+            // 実在確認が不達共有で 21 秒かかる・§13.1 の実測)。この窓は塞げないので
+            // 設計書 §13.2 に「受容する残余リスク」として記録してある。
             System.Diagnostics.Trace.TraceWarning(
                 $"プレビュー仮想ホストのマッピングに失敗したので空フォルダーへ倒す: {ex.Message} ({baseDir})"
             );

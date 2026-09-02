@@ -953,36 +953,6 @@ public class GrepControllerTests
             Assert.Equal(0, probe.DirectoryCallCount);
         });
 
-    /// <summary>
-    /// <see cref="GrepController"/> のような <c>async</c> メソッドは、本体が
-    /// コンパイラ生成の状態機械の <c>MoveNext</c> に入っている。元のメソッドを
-    /// <see cref="IlCallees"/> に掛けても状態機械の起動しか見えないので、走査対象を
-    /// <c>MoveNext</c> へ解決する。<c>[AsyncStateMachine]</c> 属性の欠落や改名は
-    /// <c>Assert.NotNull</c> で止める(走査ゼロ件が「呼んでいない」と読める形にしない)。
-    /// </summary>
-    private static System.Reflection.MethodInfo AsyncBodyOf(Type type, string name)
-    {
-        var m = type.GetMethod(
-            name,
-            System.Reflection.BindingFlags.Instance
-                | System.Reflection.BindingFlags.NonPublic
-                | System.Reflection.BindingFlags.Public
-        );
-        Assert.NotNull(m);
-        var attr = (System.Runtime.CompilerServices.AsyncStateMachineAttribute?)
-            System.Attribute.GetCustomAttribute(
-                m!,
-                typeof(System.Runtime.CompilerServices.AsyncStateMachineAttribute)
-            );
-        Assert.NotNull(attr);
-        var move = attr!.StateMachineType.GetMethod(
-            "MoveNext",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-        );
-        Assert.NotNull(move);
-        return move!;
-    }
-
     private static System.Reflection.MethodInfo GrepDialogMethod(string name)
     {
         var m = typeof(GrepDialog).GetMethod(
@@ -1023,7 +993,7 @@ public class GrepControllerTests
     [Fact]
     public void FolderCheckEntryPoints_DoNotTouchFileSystemOutsideTheSeam()
     {
-        var runCallees = IlCallees.Of(AsyncBodyOf(typeof(GrepController), "RunAsync"));
+        var runCallees = IlCallees.Of(IlCallees.AsyncBodyOf(typeof(GrepController), "RunAsync"));
         var browseCallees = IlCallees.Of(GrepDialogMethod("BrowseFolder"));
         var initialCallees = IlCallees.Of(GrepDialogMethod("InitialBrowsePath"));
 

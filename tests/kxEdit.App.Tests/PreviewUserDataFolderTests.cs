@@ -125,6 +125,12 @@ public class PreviewUserDataFolderTests
     {
         // V-2: baseDir が使えないときのマッピング先。空であることが契約 (ここに何か置くと
         // プレビューへ露出する)。
+        //
+        // NotEqual / GetFileName の 2 行は「return path; を return Path; へ退化させる」変異を
+        // 殺すためにある。テストでは WebView2 を作らないので Path 直下も空のままであり、
+        // Exists / Empty / StartsWith は 3 本とも緑を保ってしまう。だが実行時の Path 直下には
+        // WebView2 プロファイル (Cookies / Local State 等) が出来るので、そこを
+        // https://kxedit.preview/ のルートにするのは実害のある退行。
         var sut = new PreviewUserDataFolder();
         try
         {
@@ -132,6 +138,8 @@ public class PreviewUserDataFolderTests
             Assert.True(System.IO.Directory.Exists(empty));
             Assert.Empty(System.IO.Directory.GetFileSystemEntries(empty));
             Assert.StartsWith(sut.Path, empty, StringComparison.OrdinalIgnoreCase);
+            Assert.NotEqual(sut.Path, empty, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal("empty-base", System.IO.Path.GetFileName(empty));
         }
         finally
         {

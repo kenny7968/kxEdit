@@ -90,6 +90,11 @@ public class PreviewVirtualHostMappingTests
     [InlineData(typeof(DirectoryNotFoundException))]
     // 未実測の想定: アクセス拒否。プレビュー自体を失敗させるより空フォルダーへ倒す。
     [InlineData(typeof(UnauthorizedAccessException))]
+    // 未実測の想定: SetVirtualHostNameToFolderMapping は COM 相互運用呼び出しなので
+    // E_FAIL / RPC_E_DISCONNECTED (直前にブラウザプロセスが落ちた等) は COMException、
+    // 不正パス系は ArgumentException で出る「はず」。実測はしていない。
+    [InlineData(typeof(System.Runtime.InteropServices.COMException))]
+    [InlineData(typeof(ArgumentException))]
     public void MapFailure_FallsBackInsteadOfLeavingUnmapped(Type exceptionType)
     {
         // 登録が失敗しても未マップへ戻さない網 (1 回目 baseDir → 2 回目 fallback の順序も固定)。
@@ -132,13 +137,30 @@ public class PreviewVirtualHostMappingTests
     public void UnexpectedException_IsNotSwallowed()
     {
         // 想定外の例外型までフォールバックへ倒すと、原因不明の「画像が出ない」に化ける。
+        //
+        // 例外型だけを見る網では catch フィルタの型限定を外す変異 (catch (Exception ex) when
+        // (true) 相当) を殺せない: 1 回目を捕まえてフォールバックへ倒しても、2 回目の map が
+        // 同じ InvalidOperationException を投げるので Assert.Throws の型は一致してしまう。
+        // だから「フォールバックが呼ばれていないこと」= map が 1 回しか来ていないことを見る。
+        var calls = new List<string>();
+        int fallbackCalls = 0;
         Assert.Throws<InvalidOperationException>(() =>
             PreviewVirtualHostMapping.Apply(
                 BaseDir,
                 baseDirExists: true,
-                () => Fallback,
-                _ => throw new InvalidOperationException("boom")
+                () =>
+                {
+                    fallbackCalls++;
+                    return Fallback;
+                },
+                folder =>
+                {
+                    calls.Add(folder);
+                    throw new InvalidOperationException("boom");
+                }
             )
         );
+        Assert.Equal(new[] { BaseDir }, calls);
+        Assert.Equal(0, fallbackCalls);
     }
 }
