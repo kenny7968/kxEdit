@@ -334,6 +334,11 @@ CLAUDE.md §4-A により、本ブランチは**原則対象外**(ファイル I
   適用範囲(§4.2)の再判断材料になる。
 - `settings.json.bad` は**掃除しない**(ユーザーが手で消す)。自動削除を足すと、
   「壊れた設定を後から見る」という退避の目的を自分で潰す。
+- **【Task 7 の仕様レビューで判明・B4 射程外】`{"FontSize":1e400}` が `Ok` かつ
+  `FontSize = +∞` で通る。** `Normalize` のガード `if (s.FontSize <= 0f)` が Infinity を
+  素通しするため、破損 settings.json から起動時のフォント生成が失敗しうる。`Normalize` は
+  本ブランチで無変更なので**既存バグ**。B4 は「失敗しても失わない」側だけを扱うので触らず、
+  将来タスクとして回収すること(詳細は §10.14)。
 
 ## 10. 実施記録
 
@@ -1953,7 +1958,7 @@ dotnet csharpier check <変更 2 ファイル>  →  EXIT=0
 
 `Load` の catch-all を割り、`SettingsLoadStatus`(`Ok` / `Missing` / `Corrupt` / `Unreadable`)を
 `out` で返すようにした。**このタスクは状態を返せるようにするところまで**で、退避(`.bad` への改名)と
-通知は Task 8 / Task 9 の担当。`Program.cs:20` も含め既存の呼出は**全 25 か所を `out _`** にした
+通知は Task 8 / Task 9 の担当。`Program.cs` も含め既存の呼出は**全 25 か所を `out _`** にした
 (計画は 23 か所と見積もっていた。実数は Core.Tests 22 / App.Tests 2 / production 1)。
 
 `Save` は触っていない(Task 6 で完了済み)。**`Options` の Save / Load 共有(§10.12 の申し送り)は
@@ -2042,11 +2047,14 @@ Task 8 の退避は `Corrupt` でだけ走り、`settings.json` を `.bad` へ**
 `File.ReadAllText` 側・`Deserialize` + `Normalize` 側とも catch-all を維持した。
 `OutOfMemoryException` のような「握ってはいけない例外」まで握る形だが、**ここでは握る方が安全**:
 
-- **例外を素通しすると `Program.Main` が落ちる。** `SettingsStore.Load` の呼出(`Program.cs:20`)は
-  `Application.SetUnhandledExceptionMode`(`:30`)と `CrashHandler` の配線**より前**にある。
+- **例外を素通しすると `Program.Main` が落ちる。** `SettingsStore.Load` の呼出(`Program.cs:22`
+  —— **訂正**: 当初 `:20` と書いたが、本 commit が足した TODO 2 行で 2 行ずれた。§10.14 指摘 2)は
+  `Application.SetUnhandledExceptionMode`(`:32`)と `CrashHandler`(`:35`)の配線**より前**にある。
   ここを抜けた例外は、ハンドラもクラッシュ記録もダイアログも無いまま起動を殺す。
-- 巨大な settings.json での OOM は `Unreadable` 側に落ちる = **退避しない**ので、
-  「読めなかっただけのファイルを改名する」事故にはならない。
+- ~~巨大な settings.json での OOM は `Unreadable` 側に落ちる = **退避しない**ので、
+  「読めなかっただけのファイルを改名する」事故にはならない。~~
+  **訂正(§10.14 指摘 3): この保証は `ReadAllText` 段の OOM にしか当たらない。**
+  `Deserialize` 段の OOM は `Corrupt` = **退避対象**へ落ちる。
 - 握ってよい例外を前置で列挙する形は、§2.1 / 監査 §9 V-7 の「前置の列挙は原理的に漏れる」に触れる。
 
 #### 計画と実物が食い違った点
@@ -2054,6 +2062,9 @@ Task 8 の退避は `Corrupt` でだけ走り、`settings.json` を `.bad` へ**
 1. **呼出数**: 計画 23 → 実数 **25**(Core.Tests 22 / App.Tests 2 / production 1)。
 2. **`File.Exists` は失敗理由を返さない。** 親ディレクトリの ACL で拒否されても `false` を返すため、
    「権限が無くて読めない」は `Unreadable` ではなく **`Missing`(通知しない)** へ落ちる。
+   **訂正(§10.14 指摘 4): これは「1 ケース」ではない。`File.Exists` が `false` を返す事由
+   すべて**が同じ穴に落ちる(レビュアー実測: パスがディレクトリ / 長すぎるパス / 不正なパス文字 /
+   空文字列パスの 4 例がすべて `Missing`)。
    安全側(退避も通知もしないので原本は動かない)だが、ユーザーには何も伝わらない。
    ACL で設定を扱えない件は**本ブランチ対象外の M-14** の担当なので、`ReadAllText` の例外種別へ
    判定を移して分類を先取りすることはせず、設計 §5.2 の形(存在判定 → 読込)のまま残した。
@@ -2074,3 +2085,107 @@ dotnet csharpier check <変更 5 ファイル>  →  EXIT=0
 
 赤の確認は 2 段:(1)テストだけ先に書いた時点で **14 個の CS1501 / CS0103**(新 API 未実装)、
 (2)素朴な移植で **`Corrupt` の 2 本が失敗**(上記)。緑は上のとおり。
+
+### 10.14 Task 7 — 仕様レビューの反映(副作用の網が 1 枝しか無く、根拠 4 件が広すぎた)
+
+仕様レビューは**要求 1〜8 すべて充足**と裁定した。レビュアーは境界入力 **38 種**を独立に実測し、
+「素朴な移植」も再現して**§10.13 と逐語一致**の 2 失敗を得ている。§10.13 の主張はいずれも裏付けられた:
+
+- **`Unreadable` が `Corrupt` に化ける入力は無い** —— 読込が try #1 に完全に閉じているため
+  **構造的に交差しない**(§10.13 は「テストで区別できた」までしか言えていなかった。より強い根拠)。
+- **`Normalize` が投げる入力はレビュアーも見つけられなかった** —— `Truncate` は null 耐性、
+  `ClampColumns` は min/max が定数なので `ArgumentException` 不可能、`IsSelectableCodePage` は
+  静的配列走査で `Encoding.GetEncoding` を呼ばない、`SessionTabRecord` は検証なしの positional record。
+  §10.13 の「到達不能」は全枝追跡で追認された。
+- 良い側の意外: **UTF-16LE/BE・UTF-32 の BOM 付き**正常 JSON は `Ok`(`ReadAllText` の BOM 自動検出)。
+  **BOM なし UTF-16 は `Corrupt`**(UTF-8 復号で NUL 混じり = 実際に使えない)。分類は妥当と評価。
+
+以下は 5 指摘の反映。**分類の判断はどれも変わらず、直したのは網 1 本と根拠 4 件である。**
+
+#### ★ 指摘 1 —— 「副作用を持たない」が `Missing` 枝でしか張られていなかった
+
+xmldoc と設計 §5.4 は「**判定して返すだけで、ディスクは書き換えない**」と宣言していたのに、
+実際に張っていたのは `Missing` 枝の `Assert.False(File.Exists(path))` だけだった。
+**Task 8 はまさに「`Corrupt` のとき原本を改名する」を足すタスク**なので、この不在は
+**次のタスクで最も実害になる位置**にあった。
+
+**修正前(生存)。** 3 枝すべてに `File.Delete(path)` を当てて全緑になることを自分で確認した
+(`Corrupt` の null 枝 / `Ok` 枝 / `Corrupt` の catch 枝 = unparsable が通る道):
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental   →  エラー 0 (BUILD_EXIT=0)
+kxEdit.Core.Tests   成功! -失敗: 0、合格: 1424、合計: 1424   (EXIT=0)
+kxEdit.App.Tests    成功! -失敗: 0、合格:  737、合計:  737   (EXIT=0)
+```
+
+**`Load` が読んだ設定ファイルを毎回削除しても、2161 テストが 1 本も落ちなかった。**
+
+**修正後(撃墜)。** 3 本のテストに `Assert.Equal(original, File.ReadAllText(path))` を足し、
+変異を当てたまま再実行:
+
+```
+失敗 Load_reports_Corrupt_when_the_content_is_the_json_null_literal
+失敗 Load_reports_Corrupt_for_unparsable_json
+失敗 Load_reports_Ok_and_reads_the_values_for_a_valid_file
+  System.IO.FileNotFoundException : Could not find file '%TEMP%\....json'
+    at System.IO.File.ReadAllText(String path, Encoding encoding)
+失敗! -失敗: 3、合格: 40、合計: 43
+```
+
+変異を戻して全緑を確認済み(`git diff` で `SettingsStore.cs` が commit 状態と一致することも確認)。
+この網は「消す」だけでなく「**中身を書き換える**」副作用も撃つ(その場合は `Assert.Equal` 失敗になる)。
+
+#### 指摘 2 —— 行番号が**この commit 自身のせい**で陳腐化していた
+
+xmldoc と §10.13 が引く `Program.cs:20`(Load)/ `:30`(`SetUnhandledExceptionMode`)は、
+**同じ commit が足した TODO コメント 2 行で 2 行ずれ**、実際は `:22` / `:32`
+(`CrashHandler` は `:35`)だった。**順序の主張(`Load` が先)は事実**なので行番号だけ直した。
+[[stale-commit-hashes-before-github-flow]] と同型 —— **自分の変更が自分の引用を陳腐化させる**。
+
+#### 指摘 3 —— OOM の保証が `ReadAllText` 段にしか当たらない
+
+「巨大な settings.json は `Unreadable` = 退避しない側へ落ちるので原本を改名する事故にはならない」は
+**無条件には成立しない**。第 2 catch も bare `catch` なので、`JsonSerializer.Deserialize`
+(文字列 → UTF-8 トランスコード + オブジェクトグラフ構築)で OOM が出れば **`Corrupt` = 退避対象**へ
+落ちる。`ReadAllText` は約 1GB 未満なら成功するため、**読めたがその先で落ちる帯は原理的に存在する**
+(多 GB の fixture が要るので未実測・コード構造から確定できる事実)。
+
+実害は低い(そのサイズの settings.json は壊れている扱いで構わない)ので**分岐は足さない**が、
+xmldoc と §10.13 を「`ReadAllText` 段の OOM は `Unreadable` へ落ちる」に狭めた。
+**catch-all を残す判断そのものはレビューでも妥当と評価**されている。
+
+#### 指摘 4 —— 「区別しきれない 1 ケース」が 1 ケースではなかった
+
+`File.Exists` が `false` を返す事由**すべて**が `Missing`(通知しない)へ落ちる。
+レビュアー実測: **パスがディレクトリ / パスが長すぎる / 不正なパス文字 / 空文字列パス**の 4 例が
+すべて `Missing`。いずれも安全側(原本を動かさない)なので判定は変えず、文言だけ事実へ合わせた。
+
+#### 指摘 5 —— テストの rationale が成立していなかった(等価変異)
+
+`Load_reports_Ok_when_the_values_only_needed_normalizing` の xmldoc に
+「status を先に確定して補正前を返す実装で落ちる」と書いていた。**偽である。**
+`Normalize` は `s` を **in-place で変異させて同じ参照を返す**ので「補正前を返す実装」が書けない。
+レビュアー実測でも status 確定を前に出す変異・`return s` にする変異は**どちらも生存**(等価変異)。
+
+このテストが実際に殺すのは「**`Normalize` の呼出そのものを消す**」変異(補正系 10 本が落ちる)。
+文言をそちらへ直した。**§10.12 指摘 1 / §10.1 / §10.10 指摘 2 と同じ「結論は正しいが根拠が偽」の型**で、
+本ブランチ 4 度目。
+
+#### 申し送り(B4 の射程外・修正しない)
+
+- **`{"FontSize":1e400}` が `Ok` かつ `FontSize = +∞` になる。** `Normalize` のガードは
+  `if (s.FontSize <= 0f)` で **Infinity を通す**。破損 settings.json から起動時のフォント生成が
+  失敗しうる経路。`Normalize` は Task 7 で無変更なので**既存バグ**であり、B4(保存の最終防衛線)の
+  射程外。§9 の申し送りへ回した。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  警告 0 / エラー 0 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1424 / 合計: 1424   (不変)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737   (不変)
+dotnet csharpier check <変更 2 ファイル>  →  EXIT=0
+```
+
+テスト本数は変わっていない(既存 3 本へ副作用の網を足しただけ)。変異 3 件は復帰を確認済み。

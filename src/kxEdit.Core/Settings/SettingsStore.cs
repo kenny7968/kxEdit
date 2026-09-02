@@ -38,16 +38,25 @@ public static class SettingsStore
     /// <para>
     /// <b>catch は両方とも catch-all のまま残す。</b>握ってよい例外を前置で列挙するのは
     /// 監査 §9 V-7 の「前置の列挙は原理的に漏れる」に触れる上、ここで例外を素通しすると
-    /// <c>Program.Main</c> が壊れる —— <c>Load</c> の呼出(<c>Program.cs:20</c>)は
-    /// <c>Application.SetUnhandledExceptionMode</c> と <c>CrashHandler</c> の配線<b>より前</b>にあり、
-    /// 抜けた例外はハンドラも記録もダイアログも無いまま起動を落とす。<c>OutOfMemoryException</c>
-    /// のような「握ってはいけない例外」も同じ理由でここでは握る(巨大な settings.json は
-    /// <c>Unreadable</c> = <b>退避しない</b>側へ落ちるので、原本を改名する事故にはならない)。
+    /// <c>Program.Main</c> が壊れる —— <c>Load</c> の呼出(<c>Program.cs:22</c>)は
+    /// <c>Application.SetUnhandledExceptionMode</c>(<c>:32</c>)と <c>CrashHandler</c>(<c>:35</c>)
+    /// の配線<b>より前</b>にあり、抜けた例外はハンドラも記録もダイアログも無いまま起動を落とす。
+    /// <c>OutOfMemoryException</c> のような「握ってはいけない例外」も同じ理由でここでは握る。
     /// </para>
     /// <para>
-    /// <b>区別しきれない 1 ケース</b>: <c>File.Exists</c> は失敗理由を返さず、親ディレクトリの ACL で
-    /// 拒否された場合も <c>false</c> を返す。したがって「読めないほど権限が無い」は <c>Missing</c>
-    /// (通知しない)へ落ちる。<b>安全側</b>ではある(退避も通知もしないので原本は動かない)が、
+    /// <b>ただし OOM の落ち先は段によって違う。</b><c>File.ReadAllText</c> 段(try #1)の OOM は
+    /// <c>Unreadable</c> = <b>退避しない</b>側へ落ちるので原本を改名する事故にならないが、
+    /// <c>Deserialize</c> 段(try #2)の OOM は <c>Corrupt</c> = <b>退避対象</b>へ落ちる。
+    /// <c>ReadAllText</c> は約 1GB 未満なら成功するため、<b>読めたがトランスコード/グラフ構築で
+    /// 落ちる帯は原理的に存在する</b>(多 GB の fixture が要るので未実測・コード構造からの確定)。
+    /// そのサイズの settings.json を「壊れている」扱いにするのは受容できるので分岐は足さないが、
+    /// <b>「OOM なら退避しない」は無条件には成立しない</b>。
+    /// </para>
+    /// <para>
+    /// <b>区別しきれないケース</b>: <c>File.Exists</c> は失敗理由を返さないので、
+    /// <b>それが <c>false</c> を返す事由すべて</b>が <c>Missing</c>(通知しない)へ落ちる ——
+    /// 親ディレクトリの ACL 拒否・パスがディレクトリ・パスが長すぎる・不正なパス文字・空文字列パス
+    /// (レビュアー実測の 4 例を含む)。<b>安全側</b>ではある(退避も通知もしないので原本は動かない)が、
     /// ユーザーには何も伝わらない —— ACL で設定を扱えない件は本ブランチ対象外の M-14 の担当で、
     /// ここで <c>ReadAllText</c> の例外種別に判定を移すと、その分類を先取りすることになるので
     /// 設計 §5.2 の形(存在判定 → 読込)のまま残した。

@@ -765,12 +765,16 @@ public class SettingsStoreTests
         string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
         try
         {
-            File.WriteAllText(path, "{ this is not json");
+            const string original = "{ this is not json";
+            File.WriteAllText(path, original);
 
             var s = SettingsStore.Load(path, out var status);
 
             Assert.Equal(SettingsLoadStatus.Corrupt, status);
             Assert.Equal(new AppSettings().FontName, s.FontName); // 起動は止めず既定で続行
+            // 副作用ゼロ(設計 §5.4)。退避=改名は Task 8 の呼出側に明示的に書かせる方針なので、
+            // ここで原本を消す/動かすと、その判断ごと Load に密輸されたことになる。
+            Assert.Equal(original, File.ReadAllText(path));
         }
         finally
         {
@@ -791,12 +795,16 @@ public class SettingsStoreTests
         string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
         try
         {
-            File.WriteAllText(path, "null");
+            const string original = "null";
+            File.WriteAllText(path, original);
 
             var s = SettingsStore.Load(path, out var status);
 
             Assert.Equal(SettingsLoadStatus.Corrupt, status);
             Assert.Equal(new AppSettings().FontName, s.FontName);
+            // 副作用ゼロ(設計 §5.4)。ここは Task 8 が退避=改名を足す枝そのものなので、
+            // 「Load 側が先に触っていない」ことをこの網で押さえておく。
+            Assert.Equal(original, File.ReadAllText(path));
         }
         finally
         {
@@ -855,12 +863,15 @@ public class SettingsStoreTests
                 path,
                 new AppSettings { FontName = "BIZ UDゴシック", WindowWidth = 1000 }
             );
+            string original = File.ReadAllText(path);
 
             var s = SettingsStore.Load(path, out var status);
 
             Assert.Equal(SettingsLoadStatus.Ok, status);
             Assert.Equal("BIZ UDゴシック", s.FontName);
             Assert.Equal(1000, s.WindowWidth);
+            // 副作用ゼロ(設計 §5.4)。正常に読めた場合こそ、原本を触る理由が 1 つも無い。
+            Assert.Equal(original, File.ReadAllText(path));
         }
         finally
         {
@@ -925,7 +936,14 @@ public class SettingsStoreTests
     /// <summary>
     /// <c>Normalize</c> が値を補正しただけのファイルは <c>Ok</c>。「補正が要った」を「破損」と
     /// 混同すると、Task 8 が<b>正常なファイルを退避</b>してしまう。
-    /// 返り値が<b>補正後</b>であることも併せて見る(status を先に確定して補正前を返す実装で落ちる)。
+    /// <para>
+    /// 返り値が<b>補正後</b>であることも併せて見る。ここが殺すのは
+    /// <b><c>Normalize</c> の呼出そのものを落とす</b>変異(このファイルの補正系テスト 10 本が落ちる)。
+    /// <b>「status を先に確定して補正前を返す実装で落ちる」とは書けない</b>(仕様レビュー指摘 5)——
+    /// <c>Normalize</c> は <c>s</c> を in-place で変異させて<b>同じ参照</b>を返すので「補正前を返す」
+    /// 実装が書けず、<c>status</c> の確定を前に出す変異も <c>return s</c> にする変異も
+    /// <b>等価変異</b>で生存する(レビュアー実測)。
+    /// </para>
     /// </summary>
     [Fact]
     public void Load_reports_Ok_when_the_values_only_needed_normalizing()
