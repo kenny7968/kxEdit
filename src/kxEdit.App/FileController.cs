@@ -924,6 +924,41 @@ public sealed class FileController
                 );
                 return false;
             }
+            // M-12(設計 2026-09-02 §3 / §10.5 申し送り 1・3 / §10.6): 差替に失敗し、かつ<b>原本まで
+            // 失われた</b>とき、AtomicFile は書き込んだ本文を tmp として残す(消すと内容が完全に
+            // 失われるため)。**その場所が伝わらなければ tmp を残した意味は無い** —— 誰も掃除しない
+            // 本文の完全なコピーが、原本と同じディレクトリ(Documents / 共有 / クラウド同期フォルダー)に
+            // 残るだけになる(*.tmp を掃除するコードは %APPDATA%\kxEdit\backups 配下しか見ない)。
+            // 下の共通文言に任せると、その唯一の案内が末尾から落ちる: メッセージは
+            // 「固定部 36 + 原本パス L + tmp パス L+17」= 53+2L で、L≧74 で 200 を超える。
+            // 実測(§10.6): L=120 なら tmp パス 137 文字のうち 54 文字しか残らず(83 文字が欠落)、
+            // L=190 なら tmp パスは 1 文字も残らない(網の fixture は後者)。
+            //
+            // (a) tmp パスは別引数として組み立て、<b>切り詰めない</b>(無害化は外さない —— ダイアログ
+            //     偽装を防ぐ既存のセキュリティ制御)。丸めるのは原本パス側だけにする: 原本はユーザーが
+            //     今まさに保存しようとした先で既知だが、tmp の名前は kxEdit がその場で作った乱数入りで、
+            //     ユーザーが他所から知る手段が無い。
+            // (b) 「削除してください」を入れる。<b>自動削除は足さない</b>(M-12 の目的そのものを潰す)。
+            // (c) File.Exists で<b>実在を確かめてから</b>案内する。復旧の File.Move が「tmp まで
+            //     失われていた」で落ちた場合も同じ例外になり、実在しない退避先を案内するのは単なる
+            //     保存失敗より悪い。弁別は File.Exists 一本にする —— RecoveryError の型で分けると、
+            //     tmp 喪失が FileNotFoundException だけでなく DirectoryNotFoundException(親ディレクトリ
+            //     ごと消えて道連れ)でも起こるため<b>原理的に漏れる</b>(監査 §9 V-7・本ブランチが
+            //     一貫して守っている「前置の列挙は漏れる。事後条件で検査する」)。
+            if (ex is AtomicReplaceFailedException replaceFailed)
+            {
+                string target = SanitizeForDisplay.OneLine(replaceFailed.TargetPath, 200);
+                // File.Exists は読めない/不正なパスでも例外を投げず false を返す。倒れる向きは
+                // 「残っているのに『残せなかった』と言う」側で、逆(無い場所を案内する)より安全。
+                string message = System.IO.File.Exists(replaceFailed.PreservedTempPath)
+                    ? $"保存できませんでした: 保存先 '{target}' が失われました。"
+                        + $"書き込んだ内容は '{SanitizeForDisplay.OneLine(replaceFailed.PreservedTempPath)}' に残してあります。"
+                        + "内容を復旧したら、このファイルを削除してください。"
+                    : $"保存できませんでした: 保存先 '{target}' が失われ、書き込んだ内容も残せませんでした。"
+                        + "編集中の内容はまだ開いたままです。「名前を付けて保存」で別の場所へ保存してください。";
+                _prompt.Error(message, "エラー");
+                return false;
+            }
             // CSV-L-5: ex.Message にファイル名 (path) が混入し得るため、SanitizeForDisplay で無害化。
             _prompt.Error(
                 $"保存できませんでした: {SanitizeForDisplay.OneLine(ex.Message, 200)}",
