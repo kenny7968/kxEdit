@@ -105,28 +105,25 @@ internal static class PreviewUrlResolver
     }
 
     /// <summary>
-    /// URL のホストが preview 仮想ホストを指すかどうかを、ブラウザ側の解釈に寄せて判定する。
+    /// URL が「<b>明確に外部</b>と分かる」ホストを指すかどうか。ホスト判定そのものは
+    /// <see cref="MarkdownRenderer.TryIsPreviewHost"/> (Core 内 1 箇所・D) が持ち、
+    /// ここが決めるのは<b>判断がつかないときにどちらへ倒すか</b>だけ。
     /// <para>
-    /// <see cref="Uri.Host"/> ではなく <see cref="Uri.IdnHost"/> を見るのが要点。
-    /// <c>Host</c> は Unicode をそのまま保つので <c>https://kxedit。preview/</c> (U+3002) や
-    /// <c>https://ｋxedit.preview/</c> (全角 k) が一致せず素通りするが、Markdig の
-    /// <c>WriteEscapeUrl</c> は出力時に <c>IdnHost</c> で ASCII 化するため、
-    /// 最終的な HTML は本物の preview ホスト宛になる (F-1・実測)。
-    /// <c>IdnHost</c> は IDNA 正規化後の値 = 出力に載る値なので、こちらで比べる。
+    /// <b>倒す向き: 判断がつかない = 外部ではない = 無害化する</b> (default-deny)。
+    /// <c>NeutralizeEncodedSeparators</c> の doc にあるとおり、parse 不能な形
+    /// (<c>https://%6bxedit.preview/…</c>) は WHATWG (Chromium) 側では
+    /// <c>kxedit.preview</c> に解決されるので「外部だから触らない」に倒してはならない。
+    /// IDNA 変換に失敗する形 (<c>https://xn--あ/…</c> / ホストに U+200B・U+FFFD) も同じ扱いで、
+    /// 無害化しても実害は「区切りを含まない 1 ファイル名への要求になる」だけ。
     /// </para>
     /// <para>
-    /// 末尾ドットを落とすのは <c>https://kxedit.preview./x</c> 形のため (F-3・実測)。
-    /// <c>Host</c> / <c>IdnHost</c> のいずれも末尾ドットを保持するので、明示的に削る。
-    /// ドット 2 個以上 (<c>kxedit.preview../x</c>) は <c>Uri.TryCreate</c> 自体が失敗するので
-    /// 呼び出し側の default-deny に落ちる (実測)。
+    /// <b>App 層の <c>PreviewNavigationPolicy</c> とは倒す向きの意味が逆</b>である点に注意。
+    /// あちらは「判断がつかない = Block」(safe by default)。共通化したのはホスト一致判定で
+    /// あって、判断不能時の扱いではない。
     /// </para>
     /// </summary>
-    private static bool PointsAtPreviewHost(Uri uri) =>
-        string.Equals(
-            uri.IdnHost.TrimEnd('.'),
-            PreviewBase.IdnHost,
-            StringComparison.OrdinalIgnoreCase
-        );
+    private static bool IsClearlyExternalHost(Uri uri) =>
+        MarkdownRenderer.TryIsPreviewHost(uri, out bool isPreviewHost) && !isPreviewHost;
 
     /// <summary>
     /// V-3 (監査 §9): preview 仮想ホスト宛の URL に残った区切り文字の密輸形
@@ -155,8 +152,9 @@ internal static class PreviewUrlResolver
     /// <c>https://kxedit%2epreview/…</c>) が素通りする一方、WHATWG (Chromium) のホスト解析は
     /// 「percent-decode → domain-to-ASCII」なので同じ URL が <c>kxedit.preview</c> に解決される
     /// (F-2・Node/Ada で実測)。よって<b>明確に外部と分かるものだけ除外</b>し、
-    /// 判断がつかないもの (parse 不能・相対) は無害化側へ倒す。
+    /// 判断がつかないもの (parse 不能・相対・<b>IDNA 変換に失敗する形</b>) は無害化側へ倒す。
     /// <c>mailto:</c> 等は「parse できてホストが preview でない」に該当して除外される (実測)。
+    /// 倒す向きの根拠は <see cref="IsClearlyExternalHost"/> の doc を参照。
     /// </para>
     /// <para>
     /// <c>System.Uri</c> はこれらのエスケープを復号しない (<c>AbsoluteUri</c> /
@@ -192,8 +190,9 @@ internal static class PreviewUrlResolver
         {
             return url;
         }
-        // 明確に外部と分かるものだけ除外する。parse 不能・相対は下の無害化へ落ちる (default-deny)。
-        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) && !PointsAtPreviewHost(parsed))
+        // 明確に外部と分かるものだけ除外する。parse 不能・相対・IDNA 変換不能は
+        // 下の無害化へ落ちる (default-deny)。
+        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) && IsClearlyExternalHost(parsed))
         {
             return url;
         }

@@ -119,6 +119,16 @@ internal sealed class PreviewCspHeaderInjector
     ///   <item>path 完全一致 (case-insensitive) → true</item>
     ///   <item>query / fragment は無視 (<see cref="Uri.AbsolutePath"/> が既に落とすため)</item>
     /// </list>
+    /// <para>
+    /// D (最終レビュー): host 判定は <see cref="MarkdownRenderer.TryIsPreviewHost"/> へ寄せた。
+    /// 以前はここだけ <see cref="Uri.Host"/> の直比較で、同じ判断がリポジトリ内に 3 本あった。
+    /// <b>判断がつかないとき (IDNA 変換に失敗するホスト) はここでは false へ倒す</b> ——
+    /// 他 2 箇所 (無害化 / Block) と違い、ここで取りこぼしても起きるのは
+    /// 「CSS を差し替えず passthrough する」= 見た目が素の HTML になるだけで、
+    /// 誤った Response を装着する方が危険だから (このクラスの既存契約と同じ向き)。
+    /// なお <see cref="Attach"/> の filter は URL 完全一致なので、実運用でこのホスト分岐に
+    /// preview 以外が来ることは無い (防御的な二重確認)。
+    /// </para>
     /// </summary>
     internal static bool IsPreviewStylesheetRequest(string? requestUrl)
     {
@@ -134,13 +144,8 @@ internal sealed class PreviewCspHeaderInjector
         {
             return false;
         }
-        if (
-            !string.Equals(
-                parsed.Host,
-                MarkdownRenderer.PreviewVirtualHost,
-                StringComparison.OrdinalIgnoreCase
-            )
-        )
+        // 判断不能 (TryIsPreviewHost が false) は「我々の CSS ではない」へ倒す。
+        if (!MarkdownRenderer.TryIsPreviewHost(parsed, out bool isPreviewHost) || !isPreviewHost)
         {
             return false;
         }

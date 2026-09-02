@@ -24,6 +24,62 @@ public static class MarkdownRenderer
     public const string PreviewBaseHref = "https://" + PreviewVirtualHost + "/";
 
     /// <summary>
+    /// D (最終レビュー): URI のホストが preview 仮想ホストを指すかを、ブラウザ側の解釈に
+    /// 寄せて判定する<b>唯一の実装</b>。以前は <c>PreviewUrlResolver</c> と App 層の
+    /// <c>PreviewNavigationPolicy</c> に同じ判断が逐語コピーされており、実際に
+    /// 「片方だけ直す」事故 (F-7 → F-3) を踏んだため Core の 1 箇所へ集約した。
+    /// App 層から見える必要があるので <c>public</c> (Core の <c>InternalsVisibleTo</c> は
+    /// <c>kxEdit.App.Tests</c> であって <c>kxEdit.App</c> ではない)。
+    /// <para>
+    /// 判定は <see cref="Uri.Host"/> ではなく <see cref="Uri.IdnHost"/> の末尾ドット除去。
+    /// <c>Host</c> は Unicode をそのまま保つので <c>https://kxedit。preview/</c> (U+3002) や
+    /// <c>https://ｋxedit.preview/</c> (全角 k) が一致せず素通りするが、Markdig の
+    /// <c>WriteEscapeUrl</c> も WebView2 も出力/解決時に IDNA 正規化するため、最終的には
+    /// 本物の preview ホスト宛になる (F-1・実測)。末尾ドット (<c>kxedit.preview.</c>) は
+    /// <c>Host</c> / <c>IdnHost</c> のいずれも保持するので明示的に削る (F-3・実測)。
+    /// </para>
+    /// <para>
+    /// <b>戻り値が Try パターンなのが要点 (A・最終レビュー)。</b>
+    /// <see cref="Uri.IdnHost"/> は <c>Uri.TryCreate(..., Absolute)</c> が<b>成功した</b>
+    /// URI に対してすら <see cref="UriFormatException"/> を投げる ——
+    /// <c>https://xn--あ/x</c> / ホストに U+200B や U+FFFD を含む形で実測。
+    /// 例外を握らないと <c>MarkdownRenderer.Render</c> から抜けて未捕捉になり、
+    /// crafted な .md でプレビューを押しただけでアプリが落ちた (本ブランチが作った退行)。
+    /// U+FFFD は文字コード誤検出でも混入しうるので攻撃者不在でも踏む。
+    /// </para>
+    /// <para>
+    /// <b>「判断がつかない」ときにどちらへ倒すかは呼び出し側の責務</b>にしてある。
+    /// 2 つの呼び出し側で倒す向きが逆だから (<c>PreviewUrlResolver</c> は「無害化する」側 =
+    /// default-deny、<c>PreviewNavigationPolicy</c> は <c>Block</c> 側 = safe by default)。
+    /// 呼び出し側はこの述語を直接使わず、倒す向きを名前に持つ private ヘルパー越しに使う。
+    /// </para>
+    /// </summary>
+    /// <param name="uri">絶対 URI。相対 URI を渡すのは呼び出し側のバグなので
+    /// <see cref="Uri.IdnHost"/> の <see cref="InvalidOperationException"/> をそのまま通す。</param>
+    /// <param name="isPreviewHost">判定できた場合の結果。できなかった場合は false。</param>
+    /// <returns>判定できたら true。IDNA 変換に失敗して判断がつかないときは false。</returns>
+    public static bool TryIsPreviewHost(Uri uri, out bool isPreviewHost)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        try
+        {
+            isPreviewHost = string.Equals(
+                uri.IdnHost.TrimEnd('.'),
+                PreviewVirtualHost,
+                StringComparison.OrdinalIgnoreCase
+            );
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            // IDNA 標準で不正な文字を含むホスト。ここで「preview ではない」と即断すると
+            // 呼び出し側が安全でない向きへ倒れるので、判定不能であることを返す。
+            isPreviewHost = false;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// MD-M-2: プレビュー CSS を供給する仮想パス。App 層の
     /// <c>PreviewCspHeaderInjector</c> が <c>WebResourceRequested</c> でこのパスの
     /// GET を intercept し <see cref="PreviewStylesheet"/> を返す (実 file は無い)。

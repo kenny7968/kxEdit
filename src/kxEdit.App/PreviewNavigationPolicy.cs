@@ -50,34 +50,38 @@ public static class PreviewNavigationPolicy
         /// 阻止 (preview 仮想ホスト宛の http(s), file://, ftp://, data:, javascript:, vbscript:,
         /// parse 不能, その他 unknown)。preview 仮想ホスト宛には末尾ドット形
         /// (<c>kxedit.preview.</c>) と非 ASCII 表記 (<c>kxedit。preview</c>) も含む。
+        /// ホストの IDNA 変換自体に失敗する形 (<c>https://xn--あ/x</c> 等) も
+        /// 「判断がつかない」として Block へ倒す (A・<see cref="PointsAtPreviewHostOrUndecidable"/>)。
         /// </summary>
         Block,
     }
 
     /// <summary>
-    /// preview 仮想ホスト。この host への top-level ナビゲーションは Block する (MD-H-1)。
-    /// MarkdownRenderer 側の VirtualHost マッピング (App の SetVirtualHostNameToFolderMapping)
-    /// と単一の source of truth を共有し、host 名の判定基準がずれないようにする。
-    /// </summary>
-    private static readonly string PreviewHost = MarkdownRenderer.PreviewVirtualHost;
-
-    /// <summary>
-    /// URI のホストが preview 仮想ホストを指すかを、ブラウザ側の解釈に寄せて判定する。
+    /// URI のホストが preview 仮想ホストを指すか、<b>または判断がつかない</b>か。
+    /// ホスト一致判定そのものは <see cref="MarkdownRenderer.TryIsPreviewHost"/>
+    /// (Core 内 1 箇所・D) が持ち、ここが決めるのは判断不能時にどちらへ倒すかだけ。
     /// <para>
-    /// <see cref="Uri.Host"/> ではなく <see cref="Uri.IdnHost"/> を末尾ドット除去つきで見る。
-    /// <c>Host</c> のままだと <c>http://kxedit.preview./leak</c> が「preview ではない」と
-    /// 判定されて <see cref="Classification.LaunchExternal"/> に落ち、既定ブラウザが
-    /// <c>kxedit.preview</c> を実 DNS 解決してしまう (F-3・実測)。
-    /// <c>IdnHost</c> は非 ASCII ホスト (<c>kxedit。preview</c> 等) も IDNA 正規化して
-    /// 同じ土俵に載せる。
+    /// <b>倒す向き: 判断がつかない = <see cref="Classification.Block"/></b>。
+    /// <c>Uri.TryCreate</c> の失敗を Block へ倒している「malformed = safe by default」と同じ
+    /// 向きで、外部起動 (実 DNS 解決) へ落ちる形を作らないためのもの。
+    /// <see cref="Uri.IdnHost"/> は <c>TryCreate</c> が成功した URI に対してすら
+    /// <see cref="UriFormatException"/> を投げる (<c>https://xn--あ/x</c> 等・実測) ので、
+    /// この経路は実在する (A・本ブランチが作った退行)。
     /// </para>
     /// <para>
-    /// parse 自体に失敗する形 (<c>http://%6bxedit.preview/</c> 等) はここへ来る前の
-    /// <c>Uri.TryCreate</c> 失敗で既定 <see cref="Classification.Block"/> に落ちる。
+    /// <b>Core 側の <c>PreviewUrlResolver</c> とは倒す向きの意味が逆</b>である点に注意。
+    /// あちらは「判断がつかない = 無害化する」(default-deny)。共通化したのはホスト一致判定で
+    /// あって、判断不能時の扱いではない。
+    /// </para>
+    /// <para>
+    /// 一致判定を <see cref="Uri.Host"/> 直比較でやると <c>http://kxedit.preview./leak</c> が
+    /// 「preview ではない」と判定されて <see cref="Classification.LaunchExternal"/> に落ちる
+    /// (F-3・実測)。<see cref="MarkdownRenderer.TryIsPreviewHost"/> は末尾ドットを削り、
+    /// 非 ASCII ホスト (<c>kxedit。preview</c> 等) も IDNA 正規化して同じ土俵に載せる。
     /// </para>
     /// </summary>
-    private static bool PointsAtPreviewHost(Uri uri) =>
-        string.Equals(uri.IdnHost.TrimEnd('.'), PreviewHost, StringComparison.OrdinalIgnoreCase);
+    private static bool PointsAtPreviewHostOrUndecidable(Uri uri) =>
+        !MarkdownRenderer.TryIsPreviewHost(uri, out bool isPreviewHost) || isPreviewHost;
 
     /// <summary>
     /// WebView2 の navigation 対象 URI を 3 クラスに分類する。
@@ -123,7 +127,7 @@ public static class PreviewNavigationPolicy
             // 無意味」と書いていたが、無意味ではない —— 既定ブラウザが実 DNS 解決を行い、
             // 企業 DNS の search suffix 等で「どの URL を踏ませたか」が外部へ漏れる
             // (監査 §9 V-2 と同じ経路。2026-09-03・F-7)。
-            "http" or "https" when PointsAtPreviewHost(parsed) => Classification.Block,
+            "http" or "https" when PointsAtPreviewHostOrUndecidable(parsed) => Classification.Block,
             "http" or "https" => Classification.LaunchExternal,
             "mailto" => Classification.LaunchExternal,
             // file:// UNC は Windows が SMB で NTLM 認証を通してしまうため全面 Block (MD-M-5)。

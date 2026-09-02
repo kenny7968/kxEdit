@@ -811,6 +811,86 @@ public class MarkdownRendererTests
             .ToArray();
     }
 
+    /// <summary>
+    /// A (最終レビュー): ホストの IDNA 変換に失敗する URL で <see cref="MarkdownRenderer.Render"/>
+    /// が<b>投げないこと</b>。
+    /// <para>
+    /// <c>Uri.TryCreate(..., Absolute)</c> は成功するのに <see cref="Uri.IdnHost"/> だけが
+    /// <see cref="UriFormatException"/> を投げる形が実在する (実測)。本ブランチの F-1 / F-3 で
+    /// ホスト判定を <c>Uri.Host</c> から <c>IdnHost</c> へ変えた際、この例外が
+    /// <c>Render</c> から抜けて <c>MainForm.ShowMarkdownPreview</c> の
+    /// <c>DocumentTooLargeException</c> だけの catch をすり抜け、
+    /// <c>Application.ThreadException</c> → <c>CrashHandler</c> → <b>アプリ終了</b>になっていた。
+    /// U+FFFD は文字コード誤検出でも本文へ混入しうるので、攻撃者不在でも踏む。
+    /// </para>
+    /// <para>
+    /// あわせて「例外を潰したせいで preview 宛へ化ける」退行も止める: これらは preview 宛では
+    /// ないので、出力 URL に preview 仮想ホストが現れてはならない。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("![x](https://xn--あ/pic.png)")] // 不正な punycode ラベル
+    [InlineData("[a](https://xn--あ/pic.png)")]
+    [InlineData("<https://xn--あ/x>")] // autolink 経路 (LinkRewriter のみが通る)
+    // 次の 2 本のホストラベルは目に見えない / 化けて見える文字そのものを含む
+    // (エディタ上は "https://.example/…" に見える)。読めないので codepoint を併記する。
+    [InlineData("![x](https://\U0000200B.example/pic.png)")] // U+200B ZERO WIDTH SPACE
+    [InlineData("![x](https://\U0000FFFD.example/pic.png)")] // U+FFFD REPLACEMENT CHARACTER
+    public void Preview_IdnaUnconvertibleHost_DoesNotThrowAndStaysExternal(string markdown)
+    {
+        string html = MarkdownRenderer.Render(markdown, Base); // ここが投げないことが主眼
+        string[] urls = BodyUrlAttributes(html);
+        Assert.NotEmpty(urls); // 網が空振りしていないこと
+        Assert.All(
+            urls,
+            url =>
+                Assert.DoesNotContain(
+                    MarkdownRenderer.PreviewVirtualHost,
+                    url,
+                    StringComparison.OrdinalIgnoreCase
+                )
+        );
+    }
+
+    /// <summary>
+    /// A の非退化対照: 正常な外部ホストは従来どおり素通しで、preview 宛にも
+    /// 無害化対象にもならない (例外安全化が全部を「判断不能」に倒していないこと)。
+    /// </summary>
+    [Fact]
+    public void Preview_NormalExternalHost_IsUntouched()
+    {
+        string html = MarkdownRenderer.Render("![x](https://example.com/pic.png)", Base);
+        Assert.Contains("src=\"https://example.com/pic.png\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// D (最終レビュー): ホスト一致判定の唯一の実装。倒す向き (判断不能時) は呼び出し側の
+    /// 責務なので、ここで固定するのは「判定できたか」と「一致したか」の 2 値だけ。
+    /// </summary>
+    [Theory]
+    [InlineData("https://kxedit.preview/x", true, true)]
+    [InlineData("http://kxedit.preview/x", true, true)] // scheme は判定に含めない
+    [InlineData("https://KXEDIT.PREVIEW/x", true, true)]
+    [InlineData("https://kxedit.preview./x", true, true)] // F-3: 末尾ドット
+    [InlineData("https://kxedit。preview/x", true, true)] // F-1: U+3002
+    [InlineData("https://ｋxedit.preview/x", true, true)] // F-1: 全角 k
+    [InlineData("https://example.com/x", true, false)]
+    [InlineData("https://kxedit.preview.evil.com/x", true, false)]
+    [InlineData("https://example.com./x", true, false)] // 末尾ドット除去は preview 側だけに効く
+    // A: TryCreate は成功するのに IdnHost が投げる形 = 判定不能 (false, false)。
+    [InlineData("https://xn--あ/x", false, false)]
+    [InlineData("https://\U0000200B.example/x", false, false)] // U+200B
+    [InlineData("https://\U0000FFFD.example/x", false, false)] // U+FFFD
+    public void TryIsPreviewHost_Cases(string uri, bool expectedDecided, bool expectedIsPreview)
+    {
+        Assert.True(Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed)); // 前提の明示
+        Assert.Equal(
+            expectedDecided,
+            MarkdownRenderer.TryIsPreviewHost(parsed!, out bool isPreviewHost)
+        );
+        Assert.Equal(expectedIsPreview, isPreviewHost);
+    }
+
     [Theory]
     // 非退化の対照: 他の percent-escape と通常の相対パスは従来どおり絶対化される。
     [InlineData("![x](my%20file.png)", "https://kxedit.preview/my%20file.png")]

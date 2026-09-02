@@ -177,6 +177,40 @@ public class PreviewNavigationPolicyTests
         );
 
     /// <summary>
+    /// A (最終レビュー): ホストの IDNA 変換に<b>失敗する</b>形は Block へ倒す。
+    /// <para>
+    /// <c>Uri.TryCreate(..., Absolute)</c> は成功するのに <see cref="Uri.IdnHost"/> だけが
+    /// <see cref="UriFormatException"/> を投げる形が実在する (実測)。F-1 / F-3 でホスト判定を
+    /// <c>IdnHost</c> へ変えた時点では例外が <see cref="PreviewNavigationPolicy.Classify"/> から
+    /// 抜けており、WebView2 の <c>NavigationStarting</c> ハンドラ経由で未捕捉になっていた。
+    /// 倒す向きは「malformed = safe by default」と同じ Block
+    /// (Core の <c>PreviewUrlResolver</c> は逆に「無害化する」側へ倒す)。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("https://xn--あ/x")] // 不正な punycode ラベル
+    [InlineData("http://xn--あ/x")]
+    // 次の 2 本のホストラベルは目に見えない / 化けて見える文字そのもの。codepoint を併記する。
+    [InlineData("https://\U0000200B.example/x")] // U+200B ZERO WIDTH SPACE
+    [InlineData("https://\U0000FFFD.example/x")] // U+FFFD REPLACEMENT CHARACTER
+    public void Classify_IdnaUnconvertibleHost_ReturnsBlock(string uri) =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.Block,
+            PreviewNavigationPolicy.Classify(uri)
+        );
+
+    /// <summary>
+    /// A の非退化対照: 正常な外部ホストは従来どおり LaunchExternal。
+    /// 例外安全化が「全部 Block」へ退化していないことを固定する。
+    /// </summary>
+    [Fact]
+    public void Classify_NormalExternalHost_ReturnsLaunchExternal() =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.LaunchExternal,
+            PreviewNavigationPolicy.Classify("https://example.com/x")
+        );
+
+    /// <summary>
     /// 非退化の対照: 末尾ドット付きの<b>外部</b>ホストは従来どおり LaunchExternal。
     /// <c>TrimEnd('.')</c> が preview 判定を広げすぎて外部 URL まで Block していないことを固定する。
     /// </summary>
