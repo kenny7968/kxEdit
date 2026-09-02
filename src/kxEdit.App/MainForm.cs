@@ -148,25 +148,21 @@ public sealed partial class MainForm : Form
     internal void SetConfirmDiscardOverrideForTest(Func<Document, bool>? overrideFunc) =>
         _confirmDiscardOverrideForTest = overrideFunc;
 
-    /// <summary>
-    /// <paramref name="settingsWarning"/> = 起動時に 1 回だけ出す設定の警告(M-11・設計
-    /// 2026-09-02 §5.4)。null=警告なし。<c>Program.Main</c> が
-    /// <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。
-    /// <para>
-    /// <b>2 引数の位置指定呼出はこちらへ束縛される</b>(省略した任意引数が少ない方が
-    /// 優先されるため、下の internal ctor には行かない)。テスト隔離用の settingsPath を
-    /// 渡したいときは名前付き引数か 4 引数以上で呼ぶこと
-    /// (<c>MainFormSmokeTests.ShowMainForm</c> がその形)。
-    /// </para>
-    /// </summary>
-    public MainForm(AppSettings settings, string? settingsWarning = null)
-        : this(settings, SettingsStore.DefaultPath, settingsWarning: settingsWarning) { }
+    public MainForm(AppSettings settings)
+        : this(settings, SettingsStore.DefaultPath) { }
 
     /// <summary>
     /// テストで実設定ファイルを汚さないため internal 経由で settingsPath を注入可能に
     /// (既存の public コンストラクタ経路は不変=Program.Main は DefaultPath へチェーン)。
     /// hot exit 統合(設計 2026-07-23 統合 §3.1-§3.3): backupDirectory / sessionLayoutPath も
     /// 同様にテスト隔離用(null=既定 %APPDATA% パス)。
+    /// <para>
+    /// <paramref name="settingsWarning"/> = 起動時に 1 回だけ出す設定の警告(M-11・設計
+    /// 2026-09-02 §5.4)。null=警告なし。<c>Program.CreateMainForm</c> が
+    /// <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。<b>public ctor には足していない</b>
+    /// —— 足すと 2 引数の位置指定呼出が <c>(settings, settingsPath)</c> ではなくそちらへ
+    /// 黙って束縛される(省略した任意引数が少ない方が優先される)。
+    /// </para>
     /// </summary>
     internal MainForm(
         AppSettings settings,

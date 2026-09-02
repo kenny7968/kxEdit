@@ -998,14 +998,79 @@ public class MainFormSmokeTests
         });
 
     /// <summary>
-    /// <c>Program.Main</c> の配線。<c>[STAThread]</c> + <c>Application.Run</c> のため<b>実行して
-    /// 観測することはできない</b>ので、<c>Main</c> の IL を読んで「どのメソッドを呼んでいるか」
-    /// だけを固定する。
+    /// 起動経路の<b>端から端まで</b>。壊れた settings.json を置いて実際の合成点
+    /// (<c>Program.CreateMainForm</c>)からフォームを作り、<c>OnShown</c> が警告へ到達すること
+    /// を観測する。これが <c>Prepare</c> → 文言 → ctor → <c>OnShown</c> の値の流れを固定する
+    /// 唯一の網である(下の IL テストでは<b>流れは観測できない</b>)。
+    /// <para>
+    /// 退避が実際に起きた(<c>.bad</c> に元の中身がある)ことも併せて見る —— 警告だけ出して
+    /// 退避しない実装と区別が付く。
+    /// </para>
+    /// <para>
+    /// <c>backupDirectory</c> / <c>sessionLayoutPath</c> を渡すのは必須。破損 settings.json から
+    /// 作られる既定設定は <c>BackupEnabled=true</c> なので、渡さないと実 <c>%APPDATA%</c> の
+    /// バックアップを走査・削除しうる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_warns_once_when_the_settings_file_is_corrupt() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            File2.WriteAllText(tmp.SettingsPath, "{ これは JSON ではない");
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest); // OnShown は実際に走った
+            // 退避も実際に起きている(Prepare の副作用まで通っている)。
+            Assert.False(File2.Exists(tmp.SettingsPath));
+            Assert.Equal("{ これは JSON ではない", File2.ReadAllText(tmp.SettingsPath + ".bad"));
+        });
+
+    /// <summary>
+    /// 対照: 正常な settings.json では同じ経路で<b>1 回も</b>警告に到達しない。
+    /// 「常に警告する」実装が上のテストだけでは緑になるため、こちらが必要。
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_does_not_warn_for_a_valid_settings_file() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(tmp.SettingsPath, new AppSettings { BackupEnabled = false });
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            Assert.Equal(0, form.SettingsWarningCountForTest);
+            Assert.True(form.StartupRestoreGateOpenForTest);
+        });
+
+    /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
+    /// <c>OnShown</c> まで進める。隔離は <see cref="ShowMainForm"/> と同じ 4 点
+    /// (settings / backups / session-state / last-session-buffers)。</summary>
+    private static MainForm ShowCreatedMainForm(TempDir tmp)
+    {
+        var form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+        form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
+        form.SetSuppressRestoreDialogsForTest(true);
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new System.Drawing.Point(-32000, -32000);
+        form.ShowInTaskbar = false;
+        form.Show();
+        PumpUntilShown();
+        return form;
+    }
+
+    /// <summary>
+    /// 残る 1 ホップ(<c>Main</c> → <c>CreateMainForm</c>)。<c>Main</c> は <c>[STAThread]</c> +
+    /// <c>Application.Run</c> のため<b>実行して観測することはできない</b>ので、IL を読んで
+    /// 「どのメソッドを呼んでいるか」だけを固定する。
     /// <para>
     /// これで殺せるのは <b>Task 8 以前の形へ戻す変異</b>(<c>SettingsStore.Load(..., out _)</c> を
     /// 直接呼び、破損を無言で捨てる)である。<b>殺せないこと</b>も明示しておく:
-    /// <c>Prepare</c> の戻り値が本当に <c>MainForm</c> へ渡っているか(値の流れ)は IL の
-    /// 呼出集合では観測できない —— 2 引数 ctor を呼んでいることまでしか判らない。
+    /// 値の流れ(どの引数を渡したか)は呼出集合では観測できない。だから合成点そのものを
+    /// <c>CreateMainForm</c> へ切り出し、上の 2 本で<b>実行して</b>固定してある ——
+    /// この IL テストが守るのは「その合成点を通っていること」だけである。
     /// </para>
     /// <para>
     /// 向きに注意: 呼出トークンの走査は<b>偽陽性</b>(オペランドのバイト列がたまたま解決できる)は
@@ -1014,7 +1079,7 @@ public class MainFormSmokeTests
     /// </para>
     /// </summary>
     [Fact]
-    public void ProgramMain_prepares_the_settings_and_hands_the_warning_to_MainForm()
+    public void ProgramMain_builds_the_form_through_the_tested_composition_point()
     {
         var main = typeof(Program).GetMethod(
             "Main",
@@ -1023,23 +1088,19 @@ public class MainFormSmokeTests
         Assert.NotNull(main);
         var called = CalledMembers(main!);
 
-        // ★ 判定と退避と文言は SettingsStartup.Prepare が持つ(Program.Main はそれを呼ぶだけ)。
         Assert.Contains(
             called,
-            m => m.DeclaringType == typeof(SettingsStartup) && m.Name == "Prepare"
+            m => m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
         );
         // ★ 破損の信号を捨てる旧形(SettingsStore.Load を直接叩く)へ戻っていない。
         Assert.DoesNotContain(
             called,
             m => m.DeclaringType == typeof(SettingsStore) && m.Name == "Load"
         );
-        // ★ 警告を受け取れる 2 引数 ctor を使っている(1 引数 ctor へ戻す変異が落ちる)。
-        Assert.Contains(
+        // ★ MainForm を Main から直接組み立てる形(= CreateMainForm を迂回する)へ戻っていない。
+        Assert.DoesNotContain(
             called,
-            m =>
-                m is ConstructorInfo
-                && m.DeclaringType == typeof(MainForm)
-                && m.GetParameters().Length == 2
+            m => m is ConstructorInfo && m.DeclaringType == typeof(MainForm)
         );
     }
 

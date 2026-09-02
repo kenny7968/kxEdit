@@ -16,12 +16,6 @@ static class Program
         // 早い段階に出しておく (WinForms init 失敗時にも記録が残る)。
         var markdigVersion = typeof(Markdig.Markdown).Assembly.GetName().Version;
         Trace.TraceInformation($"kxEdit deps: Markdig={markdigVersion}");
-        // 設定は起動で1回だけ読む（起動時確定方針）。壊れていれば退避し、起動後に 1 回出す
-        // 警告文言を受け取って MainForm へ渡す(M-11・設計 2026-09-02 §5.4)。
-        // 判定・退避・文言は SettingsStartup が持つ —— ここ(Main)は STAThread +
-        // Application.Run のため自動テストから叩けないので、テストできる場所へ出してある。
-        // ここで通知しないのは、この時点では通知手段が無いため(MainForm 生成より前)。
-        var (settings, settingsWarning) = SettingsStartup.Prepare(SettingsStore.DefaultPath);
         // M-V1(2026-08-29 最終レビュー 脆弱性パス): M-1 の Environment.Exit はフォームの
         // Dispose を走らせないため、プレビューを開いたままクラッシュすると
         // WebView2 のプロファイルが残る。起動時に回収する(自分だけのときに限る)。
@@ -33,9 +27,7 @@ static class Program
         // あるため MainForm の生成より前に置く。
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
-        // 名前付きで渡す: 2 引数の位置指定は public MainForm(AppSettings, string?) へ束縛されるが、
-        // internal MainForm(AppSettings, string settingsPath, ...) と紛らわしいため明示する。
-        var form = new MainForm(settings, settingsWarning: settingsWarning);
+        var form = CreateMainForm(SettingsStore.DefaultPath);
         var crash = new CrashHandler(new UiCrashSink(new MainFormCrashHost(form)));
         // Application.ThreadException の add は WinForms 内部で「代入」かつスレッド固有。
         // 2 箇所目の購読を足すとここが黙って消えるので、配線は 1 箇所に保つこと。
@@ -67,5 +59,41 @@ static class Program
         };
 
         Application.Run(form);
+    }
+
+    /// <summary>
+    /// 設定を確定して <see cref="MainForm"/> を作る(M-11・設計 2026-09-02 §5.4)。
+    /// 設定は起動で 1 回だけ読む(起動時確定方針)。壊れていれば退避し、起動後に 1 回出す
+    /// 警告文言を受け取って <see cref="MainForm"/> へ渡す。判定・退避・文言の組み立ては
+    /// <see cref="SettingsStartup.Prepare"/> の担当。<b>ここで通知はしない</b>——この時点では
+    /// 通知手段が無い(フォームがまだ無い)ので、回収点は <c>MainForm.OnShown</c> である。
+    /// <para>
+    /// <b><see cref="Main"/> から切り出してあるのは、ここを自動テストから叩くため。</b>
+    /// <c>Main</c> は <c>[STAThread]</c> + <c>Application.Run</c> で実行できず、その IL を読んでも
+    /// <b>「<c>Prepare</c> の戻り値が本当に <c>MainForm</c> へ渡っているか」は観測できない</b>
+    /// (呼出集合は同じまま、警告を捨てて <c>null</c> を渡す変異が生存する。実測・§10.18)。
+    /// 実行して観測できる形にしないと、配線が黙って切れても緑のままになる。
+    /// </para>
+    /// <para>
+    /// <paramref name="backupDirectory"/> / <paramref name="sessionLayoutPath"/> は
+    /// <b>テストが実 <c>%APPDATA%</c> を触らないための隔離用</b>(null=既定パス=製品の経路)。
+    /// ここを開けていないと、破損 <c>settings.json</c> で作った既定設定は
+    /// <c>BackupEnabled=true</c> なので、テストが実バックアップを走査・削除しうる。
+    /// </para>
+    /// </summary>
+    internal static MainForm CreateMainForm(
+        string settingsPath,
+        string? backupDirectory = null,
+        string? sessionLayoutPath = null
+    )
+    {
+        var (settings, settingsWarning) = SettingsStartup.Prepare(settingsPath);
+        return new MainForm(
+            settings,
+            settingsPath,
+            backupDirectory,
+            sessionLayoutPath,
+            settingsWarning
+        );
     }
 }
