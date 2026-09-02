@@ -192,6 +192,11 @@ internal static void Apply(string? baseDir, Func<string> emptyFallback, Action<s
 
 ## 5. V-3 — 事後条件でエスケープ済み区切りを弾く
 
+> **⚠ 本節のガードは置き場所が間違っている(2026-09-03・§14 で作り直した)。**
+> `PreviewUrlResolver.TryResolve` は絶対 URL に触らないので、
+> `![x](https://kxedit.preview/..%2f..%2fsecret.txt)` と書かれると素通りする(実測)。
+> **§14 が現行設計**。本節は策定時スナップショットとして残す(CLAUDE.md §8)。
+
 ### 5.1 設計
 
 `PreviewUrlResolver.TryResolve` の既存の事後条件(scheme / host / port / userinfo)に 1 条件を足す:
@@ -514,3 +519,99 @@ V-2 を踏む」と警告していた。**その根拠は空フォルダーの f
 - **`MarkdownPreviewForm` の ctor 変更は公開 API の破壊的変更**(クラスが `public`)。
   リポジトリ内の呼び出し元は `MainForm.ShowMarkdownPreview` の 1 か所だけで実害は無いが、
   「挙動不変ではない変更点」として PR description に併記する。
+
+## 14. §5(V-3)の作り直し(2026-09-03・Task 1 の脆弱性レビュー由来)
+
+### 14.1 何が間違っていたか
+
+§5 は V-3 のガードを `PreviewUrlResolver.TryResolve` の事後条件に置く設計だった。
+**このガードは絶対 URL 形を一度も見ない。** `TryResolve` は
+`Uri.TryCreate(url, UriKind.Absolute, out _)` が真の時点で `false` を返す
+(`PreviewUrlResolver.cs:44`)ので、攻撃者が `..%2f...` の前に `https://kxedit.preview/` を
+書き足すだけで迂回できる。しかも**画像は `SafeLinkExtension` も通らない**
+(`SafeLinkExtension.cs:82` = `link.IsImage` は base へ委譲)。
+
+レビュアーがビルド済み `kxEdit.Core.dll` に対して実測した出力:
+
+```
+IN : ![x](..%2f..%2fsecret.txt)                        → <img src="https://kxedit.preview/..%2f..%2fsecret.txt">
+IN : ![x](https://kxedit.preview/..%2f..%2fsecret.txt) → <img src="https://kxedit.preview/..%2f..%2fsecret.txt">  ★同一
+```
+
+§5 のまま実装すると 1 行目だけが塞がり、2 行目は素通りする。**「V-3 を塞いだ」という宣言が
+偽になる**ので作り直す。これはこのリポジトリが繰り返し踏んできた「嘘の安全宣言」の型である。
+
+### 14.2 採る形 —— 全 `LinkInline` に対する事後条件へ移す
+
+ガードを `PreviewRelativeUrlExtension.OnDocumentProcessed` へ移す。ここは**相対も絶対も
+区別せず本文中の全リンク・全画像を通る**唯一の場所である。
+
+```csharp
+foreach (var link in document.Descendants<LinkInline>())
+{
+    if (PreviewUrlResolver.TryResolve(link.Url, out string? absolute))
+    {
+        link.Url = absolute;
+    }
+    // V-3: 相対・絶対の両方をここで覆う。TryResolve は絶対 URL に触らないので、
+    // 事後条件をそちらに置くと絶対 URL 形が素通りする(§14.1 の実測)。
+    link.Url = PreviewUrlResolver.NeutralizeEncodedSeparators(link.Url);
+}
+```
+
+`NeutralizeEncodedSeparators` の契約:
+
+- **preview origin(`kxedit.preview` ホスト)を指す URL だけ**を対象にする。外部 URL は触らない
+  (仮想ホストのマッピングは我々のものだけなので、他所のパス解釈に口を出さない)。
+- パスに `%2f` / `%5c`(大小問わず)が残っていたら、**`%` 自身をエスケープして
+  `%252f` / `%255c` にする**。結果は「区切り文字を含まない 1 つのファイル名」への要求になり、
+  マッピング先で 404 で終わる。**URL を空にする案は採らない** —— `<img src="">` の解決は
+  文書 URL(data:)に対して曖昧で、ブラウザ依存の要求が飛びうるため。
+- 大小は保存する(`%2F` は `%252F`)。**置換対象は `%2f` / `%5c` の並びだけ**で、
+  `%20` など他の percent-escape は触らない(退化させない)。
+
+### 14.3 網(Core.Tests)
+
+**`MarkdownRenderer.Render` の出力**まで見る(単体の関数だけ見ると §14.1 の見落としを繰り返す):
+
+- `![x](..%2f..%2fsecret.txt)` → 出力に `..%2f` が**残らない**
+- `![x](https://kxedit.preview/..%2f..%2fsecret.txt)` → 同上(**これが今回の本命**)
+- `[a](https://kxedit.preview/..%5c..%5cx)` → 同上(リンク側・バックスラッシュ)
+- 大文字 `%2F` / `%5C`
+- **非退化の対照**: `![x](my%20file.png)` と `![x](sub/dir/pic.png)` は従来どおり絶対化され、
+  `[a](https://example.com/a%2fb)` は**外部 URL なので触らない**
+- `NeutralizeEncodedSeparators` 自体の単体テスト(preview origin 判定・大小・非対象)
+
+**ミューテーション(スポット)**: `%2f` / `%5c` の 2 条件と「preview origin だけ」の 1 条件を、
+それぞれ 1 つずつ変異させて落ちることを確認する。
+
+### 14.4 traversal そのものは L5 で確かめる
+
+このガードは「密輸された区切り文字をマッピングへ届かせない」ことを保証するが、
+**WebView2 が `%2f` をパス区切りとしてデコードするかどうかは依然として未実測**である。
+L5 項目 1 を次のとおり拡張する:
+
+1. `![x](..%2f..%2fsecret.txt)`(相対形)
+2. `![x](https://kxedit.preview/..%2f..%2fsecret.txt)`(**絶対形**)
+3. **未保存タブ**(= 空フォルダーへマッピングされる状態)で 2 を実施し、
+   `..%2f..%2fEBWebView/Default/Preferences` が読まれないこと
+   —— 空フォルダーは WebView2 プロファイルの直下 1 階層なので、traversal が成立するなら
+   プロファイルに届く。**ここが成立したら**フォルダーマッピングをやめて
+   `WebResourceRequested` で自前に正規化して返す方式へ切り替える必要がある(次リリース)。
+
+## 15. Task 2b の追加(F-7)—— `http://kxedit.preview/…` が実 DNS へ出る
+
+`PreviewNavigationPolicy.Classify` は `https` + preview ホストだけを Block し、
+`http` は `LaunchExternal`(既定ブラウザ起動)へ落とす(`PreviewNavigationPolicy.cs:89`)。
+本文に `[x](http://kxedit.preview/leak)` を書いてクリックさせると、**既定ブラウザが
+`kxedit.preview` を実 DNS 解決する**。
+
+これは本ブランチが守ろうとしている不変条件(この名前を実 DNS に出さない = V-2)の
+**唯一の残存経路**であり、しかも同ファイルのコメントは
+「kxedit.preview は実ホストではないので LaunchExternal しても無意味」と書いている ——
+**無意味ではなく、DNS 要求が出る**。V-4 / V-6 と同じ「実在しない前提を謳うコメント」の型。
+
+**やること**: `Classify` の `when` を `"http" or "https"` の両方で preview ホストを Block にし、
+コメントを訂正する。既存テスト `Classify_HttpPreviewHost_ReturnsLaunchExternal` の期待値を
+`Block` へ変える(名前も変える)。**B6 の射程外だが、同じ不変条件の穴なので本ブランチで直す**
+(傘設計書からの逸脱として PR description に記載する)。

@@ -52,6 +52,9 @@ internal static class PreviewVirtualHostMapping
         Action<string> map
     )
     {
+        // この 2 本は try の「手前」に置くこと。ArgumentNullException / ArgumentOutOfRangeException は
+        // ArgumentException の派生なので、try の内側へ移すと実装バグ由来の null 引数まで
+        // 「フォールバックへ倒す」に化ける (catch フィルタが ArgumentException を含むため)。
         ArgumentNullException.ThrowIfNull(emptyFallback);
         ArgumentNullException.ThrowIfNull(map);
 

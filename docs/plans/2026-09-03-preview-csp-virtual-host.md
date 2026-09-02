@@ -636,95 +636,219 @@ git commit -m "fix(preview): 仮想ホストのマッピングを常に張り実
 
 ---
 
-## Task 2: V-3 — `%2f` / `%5c` の密輸を事後条件で弾く
+## Task 2: V-3 — 密輸されたエスケープ区切りを全リンクの事後条件で潰す(2026-09-03 改訂)
+
+> **改訂の理由:** Task 1 の脆弱性レビューで、旧 Task 2 のガード(`PreviewUrlResolver.TryResolve` の
+> 事後条件)が**絶対 URL 形を一度も見ない**ことが実測で判明した。`TryResolve` は絶対 URL に
+> 対して `false` を返す(`PreviewUrlResolver.cs:44`)ため、`https://kxedit.preview/` を前置する
+> だけで迂回できる。しかも画像は `SafeLinkExtension` も通らない(`SafeLinkExtension.cs:82`)。
+> **現行設計は設計書 §14。**
 
 **Files:**
-- Modify: `src/kxEdit.Core/Text/PreviewUrlResolver.cs:56-77`(事後条件に 1 条件追加)
+- Modify: `src/kxEdit.Core/Text/PreviewUrlResolver.cs`(`NeutralizeEncodedSeparators` を追加)
+- Modify: `src/kxEdit.Core/Text/PreviewRelativeUrlExtension.cs`(全 `LinkInline` へ適用)
 - Modify: `tests/kxEdit.Core.Tests/Text/PreviewUrlResolverTests.cs`
+- Modify: `tests/kxEdit.Core.Tests/Text/MarkdownRendererTests.cs`(**出力まで見る網**)
 
-**Step 1: 失敗するテストを書く**
+**Step 1: 失敗するテストを書く(まず `Render` の出力を見る網から)**
 
-`NotRewritten` の `[InlineData]` 群の末尾(`[InlineData("https://example.com/")]` の直前)に追加:
+`MarkdownRendererTests` に追加。**単体の関数だけ見ると §14.1 の見落としを繰り返す**ので、
+end-to-end の出力を先に固定する:
 
 ```csharp
-    // V-3: %2f / %5c は「区切り文字をエスケープで密輸する」形。WebView2 が %2F を
-    // パス区切りとしてデコードすると .md フォルダ外を読めうるため、絶対化しない
-    // (絶対化しなければ data: 文書では解決されず要求が飛ばない = A-2 の機構)。
-    [InlineData("..%2f..%2fsecret.txt")]
-    [InlineData("..%2F..%2Fsecret.txt")] // 大文字。ガードは case-insensitive
-    [InlineData("..%5c..%5csecret.txt")] // バックスラッシュ版
-    [InlineData("sub%2f..%2f..%2fsecret.txt")]
+    [Theory]
+    // V-3 (監査 §9): 区切り文字をエスケープで密輸する形。相対・絶対の両方を潰す。
+    // 絶対形は TryResolve が触らない経路なので、ガードを resolver 側に置くと素通りする
+    // (設計書 §14.1 の実測)。ここは Render の出力で固定する。
+    [InlineData("![x](..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2F..%2FEBWebView/Default/Preferences)")]
+    [InlineData("[a](https://kxedit.preview/..%5c..%5cx)")]
+    [InlineData("[a](..%5C..%5Cx)")]
+    public void Preview_EncodedSeparators_NeverReachOutput(string markdown)
+    {
+        string html = MarkdownRenderer.Render(markdown, Base);
+        Assert.DoesNotContain("%2f", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("%5c", html, StringComparison.OrdinalIgnoreCase);
+        // 無害化の形も固定する (URL を空にはしない = <img src=""> の解決はブラウザ依存)。
+        Assert.Contains("%25", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // 非退化の対照: 他の percent-escape と通常の相対パスは従来どおり絶対化される。
+    [InlineData("![x](my%20file.png)", "https://kxedit.preview/my%20file.png")]
+    [InlineData("![x](sub/dir/pic.png)", "https://kxedit.preview/sub/dir/pic.png")]
+    // 外部 URL は我々のマッピングではないので触らない。
+    [InlineData("[a](https://example.com/a%2fb)", "https://example.com/a%2fb")]
+    public void Preview_OtherUrls_AreUntouched(string markdown, string expectedUrl)
+    {
+        Assert.Contains(expectedUrl, MarkdownRenderer.Render(markdown, Base), StringComparison.Ordinal);
+    }
 ```
 
-`Relative_IsResolved` の `[InlineData]` 群の末尾に**非退化の対照**を追加:
+`PreviewUrlResolverTests` には `NeutralizeEncodedSeparators` 自体の網を足す:
 
 ```csharp
-    // 非退化の対照: %2f 以外の percent-escape (空白入りファイル名) は従来どおり絶対化する。
-    // ガードが「% を含むもの全部」を弾く退化になっていないことを示す。
-    [InlineData("my%20file.png", "https://kxedit.preview/my%20file.png")]
+    [Theory]
+    // preview origin のパスに残った %2f / %5c は % 自身をエスケープして無害化する
+    // (区切り文字を含まない 1 つのファイル名への要求になり、マッピング先で 404 で終わる)。
+    [InlineData("https://kxedit.preview/..%2f..%2fx", "https://kxedit.preview/..%252f..%252fx")]
+    [InlineData("https://kxedit.preview/..%2F..%2Fx", "https://kxedit.preview/..%252F..%252Fx")] // 大小保存
+    [InlineData("https://kxedit.preview/a%5cb", "https://kxedit.preview/a%255cb")]
+    // 対象外はそのまま返す (退化していないことの対照)
+    [InlineData("https://kxedit.preview/my%20file.png", "https://kxedit.preview/my%20file.png")]
+    [InlineData("https://example.com/a%2fb", "https://example.com/a%2fb")] // 外部 origin
+    [InlineData("#anchor", "#anchor")]
+    [InlineData("", "")]
+    public void NeutralizeEncodedSeparators_Cases(string input, string expected) =>
+        Assert.Equal(expected, PreviewUrlResolver.NeutralizeEncodedSeparators(input));
 ```
 
 **Step 2: 失敗を確認する**
 
 ```powershell
-dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~PreviewUrlResolverTests"
+dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~PreviewUrlResolverTests|FullyQualifiedName~MarkdownRendererTests"
 ```
 
-期待: `NotRewritten` の新規 4 ケースが FAIL(現在は絶対化されてしまう)。
-`Relative_IsResolved` の対照は PASS(既存挙動)。
+期待: `NeutralizeEncodedSeparators` が無いのでビルドエラー → 実装後、`Preview_EncodedSeparators_NeverReachOutput` の**絶対形 3 ケースが赤**になること(相対形は旧設計でも塞げるので、赤になるのは絶対形。**これが今回の本命**)。
+※ ビルド割れとテスト失敗を混同しない。exit code と件数で判定する。
 
-**Step 3: ガードを実装する**
+**Step 3: 実装する**
 
-`src/kxEdit.Core/Text/PreviewUrlResolver.cs`、origin の事後条件ブロック(`return false;` で
-閉じる `if`)の直後、`absolute = resolved.AbsoluteUri;` の直前に挿入:
+`src/kxEdit.Core/Text/PreviewUrlResolver.cs` に追加:
 
 ```csharp
-            // V-3 (監査 §9): 解決結果のパスに %2f / %5c が残る = 区切り文字をエスケープで
-            // 密輸している形。WebView2 が %2F をパス区切りとしてデコードすると
-            // SetVirtualHostNameToFolderMapping の対象フォルダー外へ出られうる。
-            // Windows のファイル名に / と \ は入らないので、正当な相対リソースは該当しない。
-            // 前置ガードではなく事後条件に置くのは V-7 の教訓 (列挙は原理的に漏れる)。
-            if (
-                resolved.AbsolutePath.Contains("%2f", StringComparison.OrdinalIgnoreCase)
-                || resolved.AbsolutePath.Contains("%5c", StringComparison.OrdinalIgnoreCase)
-            )
+    /// <summary>
+    /// V-3 (監査 §9): preview 仮想ホストを指す URL のパスに残った <c>%2f</c> / <c>%5c</c> を
+    /// 無害化する。<c>%</c> 自身をエスケープして <c>%252f</c> にするので、要求は
+    /// 「区切り文字を含まない 1 つのファイル名」になりマッピング先で 404 で終わる。
+    /// <para>
+    /// <b>置き場所が要点。</b> <see cref="TryResolve"/> は絶対 URL に触らない
+    /// (scheme 付きは早期 return する) ため、そちらの事後条件に置くと
+    /// <c>![x](https://kxedit.preview/..%2f..%2fsecret.txt)</c> が素通りする (設計書 §14.1 の実測)。
+    /// 本メソッドは <see cref="PreviewRelativeUrlExtension"/> が<b>全 LinkInline</b> に対して
+    /// 呼ぶことで、相対・絶対の両方を 1 か所で覆う。
+    /// </para>
+    /// <para>
+    /// 対象は preview ホストを指す URL だけ。外部 URL のパス解釈には口を出さない
+    /// (仮想ホストのマッピングは我々のものだけなので、他所を書き換える理由が無い)。
+    /// URL を空にする案は採らない: <c>&lt;img src=""&gt;</c> の解決は data: 文書に対して曖昧で、
+    /// ブラウザ依存の要求が飛びうるため。
+    /// </para>
+    /// </summary>
+    internal static string? NeutralizeEncodedSeparators(string? url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            return url;
+        }
+        if (
+            !Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed)
+            || !string.Equals(parsed.Host, PreviewBase.Host, StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            return url;
+        }
+        if (
+            !parsed.AbsolutePath.Contains("%2f", StringComparison.OrdinalIgnoreCase)
+            && !parsed.AbsolutePath.Contains("%5c", StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            return url;
+        }
+        // 大小は保存する (%2F → %252F)。%20 など他の escape は触らない。
+        return EncodedSeparator.Replace(url, m => "%25" + m.Value[1..]);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex EncodedSeparator =
+        new("%(2[fF]|5[cC])", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+```
+
+> 実装メモ: ホスト判定は `http` / `https` の両方を通す(`Uri.Host` のみを見る)。F-7 で
+> `http://kxedit.preview/...` は Block になるが、無害化はしておいて損がない。
+
+`src/kxEdit.Core/Text/PreviewRelativeUrlExtension.cs` の `OnDocumentProcessed`:
+
+```csharp
+        foreach (var link in document.Descendants<LinkInline>())
+        {
+            if (PreviewUrlResolver.TryResolve(link.Url, out string? absolute))
             {
-                return false;
+                link.Url = absolute;
             }
+            // V-3: 相対・絶対の両方をここで覆う。TryResolve は絶対 URL に触らないので、
+            // 事後条件を resolver 側だけに置くと絶対 URL 形が素通りする (設計書 §14.1 の実測)。
+            link.Url = PreviewUrlResolver.NeutralizeEncodedSeparators(link.Url);
+        }
 ```
 
 **Step 4: 緑を確認する**
 
 ```powershell
-dotnet test tests/kxEdit.Core.Tests -c Release --filter "FullyQualifiedName~PreviewUrlResolverTests"
+dotnet test tests/kxEdit.Core.Tests -c Release
 ```
 
-期待: 全 PASS。
+期待: 全 PASS(既存 1431 + 新規)。既存の `Relative_IsResolved` / `NotRewritten` が緑のままであること。
 
-**Step 5: ミューテーション検証(スポット・2 条件を 1 つずつ)**
+**Step 5: ミューテーション検証(スポット・3 条件を 1 つずつ)**
 
-OR ガードは条件ごとに 1 行ずつ変異させる(過去に「片方に網が無い」を何度も踏んでいる)。
+1. `%2f` の条件を外す → `..%2f` 系のケースが赤
+2. `%5c` の条件を外す → `..%5c` 系のケースが赤
+3. ホスト判定を外す(全 URL を対象にする)→ **外部 URL の対照(`https://example.com/a%2fb`)が赤**
+4. `StringComparison.OrdinalIgnoreCase` → `Ordinal` → 大文字ケースが赤
 
-1. `%2f` の条件を削除 → `dotnet test ... --filter "...PreviewUrlResolverTests"` →
-   **`..%2f...` と `..%2F...` の 2 ケースが赤**になること
-2. 元に戻し、`%5c` の条件を削除 → **`..%5c...` の 1 ケースが赤**になること
-3. 元に戻し、`StringComparison.OrdinalIgnoreCase` を `Ordinal` へ → **大文字ケースが赤**
-4. 元に戻して全緑を確認
-
-**判定は exit code で行う**(grep 判定は取りこぼす)。3 回とも「落ちたテスト名」を確認し、
-**ビルドが割れていないこと**(テストが 0 件でないこと)も見る。
+各回、**落ちたテスト名と合格件数**を確認する(exit code が唯一確実。ビルドが割れて 0 件実行になっていないか必ず見る)。
 
 **Step 6: commit**
 
 ```powershell
 git add src/kxEdit.Core tests/kxEdit.Core.Tests
-git commit -m "fix(preview): エスケープ済み区切り(%2f/%5c)を含む相対 URL を絶対化しない(V-3)"
+git commit -m "fix(preview): 密輸されたエスケープ区切りを全リンクの事後条件で無害化(V-3)"
 ```
 
 **Step 7: 脆弱性レビュー(前倒し)**
 
-別エージェントに「このガードを迂回して `%2f` をマッピングへ届かせる入力があるか」を
-探させる(二重エスケープ `%252f`・Unicode 正規化・`LinkInline` 以外の経路)。
+別エージェントに「このガードを迂回して `%2f` をマッピングへ届かせる入力があるか」を探させる
+(二重エスケープ `%252f` の再デコード・Unicode 正規化・`LinkInline` 以外の経路・
+`GetDynamicUrl` 経由・autolink・生 HTML)。
+
+---
+
+## Task 2b: F-7 — `http://kxedit.preview/…` が実 DNS へ出る(2026-09-03 追加)
+
+> **追加の理由:** Task 1 の脆弱性レビューで発見。B6 の射程外だが**同じ不変条件
+> (この名前を実 DNS に出さない)の唯一の残存経路**なので本ブランチで直す。設計書 §15。
+
+**Files:**
+- Modify: `src/kxEdit.App/PreviewNavigationPolicy.cs:78-90`
+- Modify: `tests/kxEdit.App.Tests/PreviewNavigationPolicyTests.cs`(`Classify_HttpPreviewHost_ReturnsLaunchExternal` の期待値と名前)
+
+**Step 1: 既存テストの期待値を変える(RED)**
+
+`Classify_HttpPreviewHost_ReturnsLaunchExternal` を
+`Classify_HttpPreviewHost_ReturnsBlock` へ改名し、期待を `Classification.Block` にする。
+コメントに「`LaunchExternal` にすると既定ブラウザが `kxedit.preview` を**実 DNS 解決**する
+(監査 V-2 と同じ漏れ方)」と書く。
+
+**Step 2: 失敗を確認 → 実装 → 緑**
+
+```csharp
+            // http / https のどちらでも preview 仮想ホストは全面 Block。
+            // かつてこのコメントは「kxedit.preview は実ホストではないので LaunchExternal しても
+            // 無意味」と書いていたが、無意味ではない —— 既定ブラウザが実 DNS 解決を行い、
+            // 企業 DNS の search suffix 等で「どの URL を踏ませたか」が外部へ漏れる
+            // (監査 §9 V-2 と同じ経路。2026-09-03・F-7)。
+            "http" or "https"
+                when string.Equals(parsed.Host, PreviewHost, StringComparison.OrdinalIgnoreCase) =>
+                Classification.Block,
+```
+
+**Step 3: commit**
+
+```powershell
+git add src/kxEdit.App tests/kxEdit.App.Tests
+git commit -m "fix(preview): http の preview 仮想ホストも Block にする(F-7)"
+```
 
 ---
 
