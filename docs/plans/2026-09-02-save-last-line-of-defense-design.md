@@ -1948,3 +1948,129 @@ dotnet csharpier check <変更 2 ファイル>  →  EXIT=0
 ```
 
 テスト本数は変わっていない(既存 1 本の fixture を強化しただけ)。変異 1 件は復帰を確認済み。
+
+### 10.13 Task 7 — 読込を 4 状態へ割った(M-11 後半)。「壊れている」を「読めない」と分けた理由
+
+`Load` の catch-all を割り、`SettingsLoadStatus`(`Ok` / `Missing` / `Corrupt` / `Unreadable`)を
+`out` で返すようにした。**このタスクは状態を返せるようにするところまで**で、退避(`.bad` への改名)と
+通知は Task 8 / Task 9 の担当。`Program.cs:20` も含め既存の呼出は**全 25 か所を `out _`** にした
+(計画は 23 か所と見積もっていた。実数は Core.Tests 22 / App.Tests 2 / production 1)。
+
+`Save` は触っていない(Task 6 で完了済み)。**`Options` の Save / Load 共有(§10.12 の申し送り)は
+そのまま**にした —— `WriteIndented` は読込に効かないので現時点の乖離は無く、分離すると
+「Load 専用 Options」という新しい未固定点が増えるだけだと判断した。
+
+#### 4 状態の切り分けが実際に効いていることの根拠
+
+**署名が変わっただけで中身が割れていない実装(= 旧 catch-all をそのまま `status` へ写した実装)を
+実際に一度書いて、テストを走らせた。** これが「4 状態のテストが状態を弁別しているのか、
+それとも新 API を呼べているだけなのか」の分かれ目になる。
+
+```csharp
+// 赤の確認用に一度置いた「素朴な移植」(= 旧実装の catch-all をそのまま status にした形)
+try { ... var s = Deserialize(...) ?? new AppSettings(); status = Ok; return Normalize(s); }
+catch { status = Unreadable; return new AppSettings(); }
+```
+
+```
+失敗 Load_reports_Corrupt_when_the_content_is_the_json_null_literal
+  Assert.Equal() Failure: Values differ   Expected: Corrupt   Actual: Ok
+失敗 Load_reports_Corrupt_for_unparsable_json
+  Assert.Equal() Failure: Values differ   Expected: Corrupt   Actual: Unreadable
+失敗! -失敗: 2、合格: 29、合計: 31
+```
+
+**旧実装の 2 つの潰し方が、それぞれ別のテストで別の値として現れた。**
+
+| 観測点 | 弁別するテスト | 何と区別しているか |
+|--------|----------------|--------------------|
+| `Missing` | `Load_reports_Missing_when_the_file_does_not_exist` | 通知しない側。`Load` がファイルを**作らない**ことも同時に見る |
+| `Missing`(初回起動の形) | `..._when_the_parent_directory_does_not_exist` | 親ごと不在 = 本番の初回起動。ここが `Unreadable` へ倒れると**毎回警告が出る** |
+| `Corrupt`(パース不能) | `Load_reports_Corrupt_for_unparsable_json` | 素朴な移植では `Unreadable` になる = **退避が走らない** |
+| `Corrupt`(`null` の 4 文字) | `..._when_the_content_is_the_json_null_literal` | 素朴な移植では `Ok` になる。**現状バグの本体** |
+| `Unreadable` | `Load_reports_Unreadable_when_the_file_is_locked` | `Corrupt` と区別。ロック解除後に `Ok` + 元の `FontName` が読めることまで見て「**退避してはいけないファイルだった**」を示す |
+| `Ok` | `Load_reports_Ok_and_reads_the_values_for_a_valid_file` | 非既定値(`FontName` / `WindowWidth`)なので既定値フォールバックと区別が付く |
+| `Ok`(補正あり) | `Load_reports_Ok_when_the_values_only_needed_normalizing` / `Load_reports_Ok_for_valid_but_hostile_json`(11 入力) | 「補正が要った」を「破損」と混同しない |
+
+`Missing` は指示どおり「非既定値を書いてから消す」ような準備をしていない。観測点は `status` で、
+その既定値(`Ok`)とも他状態とも衝突しないので、**ファイルが無い状態そのもの**を作るだけで足りる。
+
+#### `Unreadable` を `Corrupt` と分ける判断が Task 8 でどう効くか
+
+Task 8 の退避は `Corrupt` でだけ走り、`settings.json` を `.bad` へ**改名**する。
+`Unreadable` の実態は AV / 同期ソフト / 別プロセスによる一時的なロックで、**ファイルの中身は正常**
+であることが多い。ここを `Corrupt` に潰したまま Task 8 を載せると、
+**一時的にロックされただけの健全な設定を毎回 `.bad` へ改名し、既定値の新ファイルで上書きする** ——
+無音リセットを直しに来て、より強い形のリセットを新設することになる。
+
+`Load_reports_Unreadable_when_the_file_is_locked` は fixture に**非既定の `FontName` を持つ正常な
+ファイル**を使い、ロック解除後の再読込で `Ok` + `"BIZ UDゴシック"` が戻ることまで見る。
+「改名してはいけない対象だった」という主張が、`status` の値だけでなく**ファイルの中身**でも立つ。
+
+#### 網にできなかったもの —— `Normalize` の例外経路
+
+**張れなかった。** 直接の網は無い。以下は実際に試したこと。
+
+1. **妥当だが敵対的な JSON を 11 種類**(`{}` / `RecentFiles:[null,null]` / `LastSession` の
+   `null` / `{}` / `Tabs:null` / `Tabs:[null]` / 空白のみ `Path` / `int.MinValue` 混じりの負値群 /
+   参照型を全部 `null` / 数値を全部範囲外 / 未知プロパティ)を投入 → **全 11 件が `Ok`**。
+   `Normalize` は全枝が null 合体・`Math.Max` / `Math.Clamp`・null 要素 skip で書かれており、
+   `Deserialize` が返しうるどのオブジェクトでも投げない。この 11 件は
+   `Load_reports_Ok_for_valid_but_hostile_json` として残した。
+2. **`Normalize` の先頭で強制的に投げるプローブ**を一時的に当てて、第 2 の catch が実際に
+   そこを覆っているかだけ確認した(当てて戻す。ミューテーション検証ではなく到達確認)。
+
+```
+失敗 Load_reports_Ok_and_reads_the_values_for_a_valid_file
+  Assert.Equal() Failure: Values differ   Expected: Ok   Actual: Corrupt
+```
+
+例外が `InvalidOperationException` として抜けず **`Corrupt` に化けた** = 旧 catch-all が持っていた
+保護(破損 JSON 由来の NRE で起動時クラッシュしない)は残っている。ただし
+**これは手で 1 回確かめただけで、恒久の網ではない。** `Normalize` の例外経路は現在の入力空間から
+到達できず、網を張るには `Normalize` に seam を掘る = **仮定のために production の面を増やす**
+ことになるので採らなかった。代わりに固定したのは**逆側**で、実害があるのはこちらである ——
+「補正が要っただけの正常なファイル」を `Corrupt` へ倒すと、Task 8 が健全な設定を `.bad` へ改名する。
+`Normalize` に補正しきれない枝が足された日は、この 11 入力の網が先に落ちる。
+
+**併せて挙動が 1 つ変わっている。** 旧実装では `Normalize` の例外は「既定値を返す」で終わったが、
+新実装では `Corrupt` = **Task 8 の退避対象**になる。現在到達不能なので実害は無いが、
+`Normalize` に例外を投げうる枝を足すときは、それが「ファイルを改名してよい破損か」を考えること。
+
+#### catch をどこまで広げるか —— catch-all のまま残した
+
+`File.ReadAllText` 側・`Deserialize` + `Normalize` 側とも catch-all を維持した。
+`OutOfMemoryException` のような「握ってはいけない例外」まで握る形だが、**ここでは握る方が安全**:
+
+- **例外を素通しすると `Program.Main` が落ちる。** `SettingsStore.Load` の呼出(`Program.cs:20`)は
+  `Application.SetUnhandledExceptionMode`(`:30`)と `CrashHandler` の配線**より前**にある。
+  ここを抜けた例外は、ハンドラもクラッシュ記録もダイアログも無いまま起動を殺す。
+- 巨大な settings.json での OOM は `Unreadable` 側に落ちる = **退避しない**ので、
+  「読めなかっただけのファイルを改名する」事故にはならない。
+- 握ってよい例外を前置で列挙する形は、§2.1 / 監査 §9 V-7 の「前置の列挙は原理的に漏れる」に触れる。
+
+#### 計画と実物が食い違った点
+
+1. **呼出数**: 計画 23 → 実数 **25**(Core.Tests 22 / App.Tests 2 / production 1)。
+2. **`File.Exists` は失敗理由を返さない。** 親ディレクトリの ACL で拒否されても `false` を返すため、
+   「権限が無くて読めない」は `Unreadable` ではなく **`Missing`(通知しない)** へ落ちる。
+   安全側(退避も通知もしないので原本は動かない)だが、ユーザーには何も伝わらない。
+   ACL で設定を扱えない件は**本ブランチ対象外の M-14** の担当なので、`ReadAllText` の例外種別へ
+   判定を移して分類を先取りすることはせず、設計 §5.2 の形(存在判定 → 読込)のまま残した。
+   xmldoc に明記してある。
+3. **新規 `.cs` を Write ツールで作ると LF になり、CSharpier が
+   `The file contained different line endings` で弾く**(`dotnet csharpier format` で解消)。
+   ビルドもテストも通った後に出るので、ゲート前に `csharpier check` を掛けること。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  警告 0 / エラー 0 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1424 / 合計: 1424   (1406 → +18)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737   (不変)
+dotnet csharpier check <変更 5 ファイル>  →  EXIT=0
+```
+
+赤の確認は 2 段:(1)テストだけ先に書いた時点で **14 個の CS1501 / CS0103**(新 API 未実装)、
+(2)素朴な移植で **`Corrupt` の 2 本が失敗**(上記)。緑は上のとおり。

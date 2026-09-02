@@ -4,7 +4,10 @@ using kxEdit.Core.Text;
 
 namespace kxEdit.Core.Settings;
 
-/// <summary>settings.json の読み書き。壊れていれば既定値で続行（握り潰さず既定へ）。</summary>
+/// <summary>
+/// settings.json の読み書き。壊れていれば既定値で続行するが、<b>なぜ既定値なのか</b>は
+/// <see cref="SettingsLoadStatus"/> で呼出側へ返す(退避・通知の判断は呼出側が持つ)。
+/// </summary>
 public static class SettingsStore
 {
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
@@ -17,18 +20,76 @@ public static class SettingsStore
             "settings.json"
         );
 
-    public static AppSettings Load(string path)
+    /// <summary>
+    /// 設定を読む(M-11・設計 2026-09-02 §5.2)。<b>どの状態でも既定値を返して起動は続行する</b>が、
+    /// 「ファイルが無い」「壊れている」「読めない」を <paramref name="status"/> で区別する。
+    /// 旧実装は 1 つの catch-all でこの 3 つを同じ結果へ潰しており、設定が壊れても無言で
+    /// 既定値へ戻り、次の保存で確定していた(= 無音リセット)。
+    /// <para>
+    /// <b>ここでは判定して返すだけで、ディスクは書き換えない</b>(設計 §5.4)。退避
+    /// (<c>settings.json</c> → <c>.bad</c>)と通知は呼出側の担当で、Task 8 / Task 9 で配線する。
+    /// </para>
+    /// <para>
+    /// <b>status を落とせるオーバーロードは置かない</b>(設計 §5.3)。置くと、将来の呼出側が
+    /// 黙って破損の信号を捨てられる状態が復活する —— CLAUDE.md §6 / Issue #48 の教訓
+    /// 「網に見えるがゲート上は無効」と同型の<b>嘘の安全宣言</b>である。status を見ない呼出は
+    /// <c>out _</c> と書くことで、見ていないことがコード上に残る。
+    /// </para>
+    /// <para>
+    /// <b>catch は両方とも catch-all のまま残す。</b>握ってよい例外を前置で列挙するのは
+    /// 監査 §9 V-7 の「前置の列挙は原理的に漏れる」に触れる上、ここで例外を素通しすると
+    /// <c>Program.Main</c> が壊れる —— <c>Load</c> の呼出(<c>Program.cs:20</c>)は
+    /// <c>Application.SetUnhandledExceptionMode</c> と <c>CrashHandler</c> の配線<b>より前</b>にあり、
+    /// 抜けた例外はハンドラも記録もダイアログも無いまま起動を落とす。<c>OutOfMemoryException</c>
+    /// のような「握ってはいけない例外」も同じ理由でここでは握る(巨大な settings.json は
+    /// <c>Unreadable</c> = <b>退避しない</b>側へ落ちるので、原本を改名する事故にはならない)。
+    /// </para>
+    /// <para>
+    /// <b>区別しきれない 1 ケース</b>: <c>File.Exists</c> は失敗理由を返さず、親ディレクトリの ACL で
+    /// 拒否された場合も <c>false</c> を返す。したがって「読めないほど権限が無い」は <c>Missing</c>
+    /// (通知しない)へ落ちる。<b>安全側</b>ではある(退避も通知もしないので原本は動かない)が、
+    /// ユーザーには何も伝わらない —— ACL で設定を扱えない件は本ブランチ対象外の M-14 の担当で、
+    /// ここで <c>ReadAllText</c> の例外種別に判定を移すと、その分類を先取りすることになるので
+    /// 設計 §5.2 の形(存在判定 → 読込)のまま残した。
+    /// </para>
+    /// </summary>
+    public static AppSettings Load(string path, out SettingsLoadStatus status)
     {
+        string json;
         try
         {
             if (!File.Exists(path))
+            {
+                status = SettingsLoadStatus.Missing;
                 return new AppSettings();
-            string json = File.ReadAllText(path);
-            var s = JsonSerializer.Deserialize<AppSettings>(json, Options) ?? new AppSettings();
-            return Normalize(s);
+            }
+            json = File.ReadAllText(path);
         }
         catch
         {
+            // 読めなかっただけ。中身は正常かもしれないので Corrupt と区別する(退避しない)。
+            status = SettingsLoadStatus.Unreadable;
+            return new AppSettings();
+        }
+
+        try
+        {
+            var s = JsonSerializer.Deserialize<AppSettings>(json, Options);
+            if (s is null)
+            {
+                // 内容が "null" の 4 文字。JSON としては妥当だが設定は失われている。
+                status = SettingsLoadStatus.Corrupt;
+                return new AppSettings();
+            }
+            var normalized = Normalize(s);
+            status = SettingsLoadStatus.Ok;
+            return normalized;
+        }
+        catch
+        {
+            // パース失敗に加えて Normalize 中の例外もここへ来る。旧実装の catch-all が
+            // 持っていた保護(破損 JSON 由来の NRE で起動時クラッシュしない)をそのまま残す。
+            status = SettingsLoadStatus.Corrupt;
             return new AppSettings();
         }
     }

@@ -17,7 +17,9 @@ static class Program
         var markdigVersion = typeof(Markdig.Markdown).Assembly.GetName().Version;
         Trace.TraceInformation($"kxEdit deps: Markdig={markdigVersion}");
         // 設定は起動で1回だけ読む（起動時確定方針）。
-        var settings = SettingsStore.Load(SettingsStore.DefaultPath);
+        // TODO(Task 8): status を受けて Corrupt の退避と Corrupt / Unreadable の通知へ配線する
+        // (設計 2026-09-02 §5.4)。ここが `out _` である間は、破損しても無言で既定値へ戻る。
+        var settings = SettingsStore.Load(SettingsStore.DefaultPath, out _);
         // M-V1(2026-08-29 最終レビュー 脆弱性パス): M-1 の Environment.Exit はフォームの
         // Dispose を走らせないため、プレビューを開いたままクラッシュすると
         // WebView2 のプロファイルが残る。起動時に回収する(自分だけのときに限る)。

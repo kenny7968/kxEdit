@@ -917,7 +917,7 @@ public class MainFormSmokeTests
             var records = BackupStore.LoadAll(tmp.BackupDir);
             Assert.Contains(records, r => r.Id == tab.BackupId && r.Content == "dirty-body");
 
-            var loaded = SettingsStore.Load(tmp.SettingsPath);
+            var loaded = SettingsStore.Load(tmp.SettingsPath, out _);
             Assert.Null(loaded.LastSession); // 統合後は旧形式を書かない
         });
 
@@ -1300,7 +1300,7 @@ public class MainFormSmokeTests
                 form.Close();
             }
 
-            var loaded = SettingsStore.Load(tmp.SettingsPath);
+            var loaded = SettingsStore.Load(tmp.SettingsPath, out _);
             Assert.False(loaded.RestoreOpenFilesOnStartup);
             Assert.Null(loaded.LastSession);
             Assert.False(File2.Exists(tmp.BuffersPath)); // OFF 終了で orphan 掃除(Task 7)

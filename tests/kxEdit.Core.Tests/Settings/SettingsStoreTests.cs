@@ -15,7 +15,7 @@ public class SettingsStoreTests
     public void Missing_file_returns_defaults()
     {
         string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
-        var s = SettingsStore.Load(path);
+        var s = SettingsStore.Load(path, out _);
         Assert.Equal(new AppSettings().FontName, s.FontName);
     }
 
@@ -32,7 +32,7 @@ public class SettingsStoreTests
                 WindowWidth = 1000,
             };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.Equal("BIZ UDゴシック", loaded.FontName);
             Assert.Equal(14, loaded.FontSize);
             Assert.Equal(1000, loaded.WindowWidth);
@@ -51,7 +51,7 @@ public class SettingsStoreTests
         try
         {
             File.WriteAllText(path, "{ this is not json");
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal(new AppSettings().FontSize, s.FontSize);
         }
         finally
@@ -72,7 +72,7 @@ public class SettingsStoreTests
                 path,
                 "{\"DefaultCodePage\":99999,\"DefaultLineEnding\":7,\"FontSize\":0,\"WindowWidth\":1,\"RecentFiles\":null,\"Theme\":null}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             var def = new AppSettings();
             Assert.Equal(def.DefaultCodePage, s.DefaultCodePage); // 未対応CP→既定
             Assert.Equal(def.DefaultLineEnding, s.DefaultLineEnding); // 範囲外→既定
@@ -104,7 +104,7 @@ public class SettingsStoreTests
         {
             var s = new AppSettings { WrapColumnEnabled = true, WrapColumn = 60 };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.True(loaded.WrapColumnEnabled);
             Assert.Equal(60, loaded.WrapColumn);
         }
@@ -122,7 +122,7 @@ public class SettingsStoreTests
         try
         {
             File.WriteAllText(path, "{\"WrapColumnEnabled\":true,\"WrapColumn\":99999}");
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal(1000, s.WrapColumn); // 上限へクランプ
         }
         finally
@@ -156,7 +156,7 @@ public class SettingsStoreTests
                 KinsokuHangChars = "。",
             };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.Equal(")】", loaded.KinsokuLineStartChars);
             Assert.Equal("(【", loaded.KinsokuLineEndChars);
             Assert.Equal("。", loaded.KinsokuHangChars);
@@ -178,7 +178,7 @@ public class SettingsStoreTests
                 path,
                 "{\"KinsokuLineStartChars\":null,\"KinsokuLineEndChars\":null,\"KinsokuHangChars\":null}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             var def = new AppSettings();
             Assert.Equal(def.KinsokuLineStartChars, s.KinsokuLineStartChars); // null→既定
             Assert.Equal(def.KinsokuLineEndChars, s.KinsokuLineEndChars);
@@ -201,7 +201,7 @@ public class SettingsStoreTests
                 path,
                 "{\"KinsokuLineStartChars\":\"\",\"KinsokuLineEndChars\":\"\",\"KinsokuHangChars\":\"\"}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal("", s.KinsokuLineStartChars); // 空文字＝そのルール無効。保持する
             Assert.Equal("", s.KinsokuLineEndChars);
             Assert.Equal("", s.KinsokuHangChars);
@@ -220,7 +220,7 @@ public class SettingsStoreTests
         try
         {
             File.WriteAllText(path, "{\"TabWidth\":0,\"CaretWidth\":99}");
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal(4, s.TabWidth); // 範囲外→既定
             Assert.Equal(1, s.CaretWidth); // 範囲外→既定
         }
@@ -240,7 +240,7 @@ public class SettingsStoreTests
         try
         {
             File.WriteAllText(path, "{\"PreferredScreenReader\":\"pctalker\",\"TabWidth\":8}");
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal(8, s.TabWidth); // 既知キーは通常通り反映
         }
         finally
@@ -272,7 +272,7 @@ public class SettingsStoreTests
             sb.Append("]}");
             File.WriteAllText(path, sb.ToString());
 
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.NotNull(s.RecentFiles);
             Assert.Equal(RecentFilesList.MaxItems, s.RecentFiles!.Count);
             Assert.Equal(@"C:\a0.txt", s.RecentFiles[0]);
@@ -297,7 +297,7 @@ public class SettingsStoreTests
                     + "\"CsvAutoModeOnOpen\":true,\"TabsToSpaces\":true,\"ShowLineNumbers\":true,"
                     + "\"HighlightCurrentLine\":true,\"ShowWhitespace\":true,\"ConfirmRestoreOnStartup\":false}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.Equal(8, s.TabWidth);
             Assert.Equal(5, s.CaretWidth);
             Assert.True(s.CsvAutoModeOnOpen);
@@ -330,7 +330,7 @@ public class SettingsStoreTests
                     + "{\"Path\":null,\"UntitledNumber\":-3,\"BufferKey\":\"k2\",\"IsActive\":false,\"CaretLine\":0,\"CaretColumn\":0}"
                     + "]}}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.NotNull(s.LastSession);
             Assert.Equal(3, s.LastSession!.Tabs.Count); // 空白 Path はスキップ
             Assert.Equal(@"C:\a.txt", s.LastSession.Tabs[0].Path);
@@ -360,7 +360,7 @@ public class SettingsStoreTests
                     + "{\"Path\":\"C:\\\\a.txt\",\"UntitledNumber\":0,\"BufferKey\":null,\"IsActive\":true,\"CaretLine\":0,\"CaretColumn\":0}"
                     + "]}}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             // 全設定既定リセットが起きていない=FontName が保持されている
             Assert.Equal("TestFont", s.FontName);
             // null 要素は skip され、有効な 1 件だけ残る
@@ -382,7 +382,7 @@ public class SettingsStoreTests
         try
         {
             File.WriteAllText(path, "{\"LastSession\":{\"Tabs\":null}}");
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.NotNull(s.LastSession);
             Assert.Empty(s.LastSession!.Tabs);
         }
@@ -405,7 +405,7 @@ public class SettingsStoreTests
                 LastSession = null, // opt-in 済み・初回終了前の中間状態
             };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.True(loaded.RestoreOpenFilesOnStartup);
             Assert.Null(loaded.LastSession);
         }
@@ -448,7 +448,7 @@ public class SettingsStoreTests
                 ),
             };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.True(loaded.RestoreOpenFilesOnStartup);
             Assert.NotNull(loaded.LastSession);
             Assert.Equal(2, loaded.LastSession!.Tabs.Count);
@@ -480,7 +480,7 @@ public class SettingsStoreTests
                     + "\"CodePage\":-5,\"HasBom\":true,\"LineEnding\":-1,\"WasModified\":true}"
                     + "]}}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             Assert.NotNull(s.LastSession);
             var r = Assert.Single(s.LastSession!.Tabs);
             Assert.Equal(0, r.CodePage);
@@ -523,7 +523,7 @@ public class SettingsStoreTests
                 ),
             };
             SettingsStore.Save(path, s);
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             var r = loaded.LastSession!.Tabs[0];
             Assert.Equal(65001, r.CodePage);
             Assert.True(r.HasBom);
@@ -550,7 +550,7 @@ public class SettingsStoreTests
                     + "\"IsActive\":true,\"CaretLine\":0,\"CaretColumn\":0}"
                     + "]}}"
             );
-            var s = SettingsStore.Load(path);
+            var s = SettingsStore.Load(path, out _);
             var r = s.LastSession!.Tabs[0];
             Assert.Equal(0, r.CodePage);
             Assert.False(r.HasBom);
@@ -650,7 +650,7 @@ public class SettingsStoreTests
             Assert.Equal(new UTF8Encoding(false).GetString(actual), File.ReadAllText(path));
 
             // バイト列が同じでも読み戻せなければ意味がない。
-            var loaded = SettingsStore.Load(path);
+            var loaded = SettingsStore.Load(path, out _);
             Assert.Equal(s.FontName, loaded.FontName);
             Assert.Equal(s.Theme, loaded.Theme);
             Assert.Equal(s.KinsokuHangChars, loaded.KinsokuHangChars);
@@ -708,6 +708,244 @@ public class SettingsStoreTests
         {
             if (Directory.Exists(dir))
                 Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    // ---- M-11 後半: 読込の 4 状態(設計 2026-09-02 §5.2) ----
+
+    /// <summary>
+    /// ファイルが無い = <see cref="SettingsLoadStatus.Missing"/>(初回起動)。**通知しない側**の網。
+    /// <para>
+    /// 見たいのは status であって設定値ではないので、<b>非既定値を書いてから消す</b>のような
+    /// 準備はしない(CLAUDE.md §4-B の no-change 原則は「既定値と区別が付かない観測点を避けろ」
+    /// であって、ここでの観測点 <c>status</c> は既定値 <c>Ok</c> ではなく <c>Missing</c> なので
+    /// 既定と衝突しない)。併せて <c>Load</c> が副作用を持たない —— 読めなかったからといって
+    /// ファイルを作らない —— ことも押さえる(退避は Task 8 の呼出側が明示的に行う。設計 §5.4)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Load_reports_Missing_when_the_file_does_not_exist()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        Assert.False(File.Exists(path)); // 前提: 「無い」状態そのもの
+
+        var s = SettingsStore.Load(path, out var status);
+
+        Assert.Equal(SettingsLoadStatus.Missing, status);
+        Assert.Equal(new AppSettings().FontName, s.FontName); // 既定で続行する
+        Assert.False(File.Exists(path)); // Load は読むだけ(生成も退避もしない)
+    }
+
+    /// <summary>
+    /// <b>親ディレクトリごと無い</b>初回起動も <see cref="SettingsLoadStatus.Missing"/>。
+    /// 本番の <c>%APPDATA%\kxEdit\settings.json</c> は初回にこの形で不在なので、ここが
+    /// <c>Unreadable</c> へ倒れると<b>初回起動のたびに警告が出る</b>(Task 8 の通知は
+    /// <c>Unreadable</c> でも出る)。
+    /// </summary>
+    [Fact]
+    public void Load_reports_Missing_when_the_parent_directory_does_not_exist()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        string path = Path.Combine(dir, "settings.json");
+        Assert.False(Directory.Exists(dir)); // 前提: 親ごと無い(初回起動の形)
+
+        SettingsStore.Load(path, out var status);
+
+        Assert.Equal(SettingsLoadStatus.Missing, status);
+        Assert.False(Directory.Exists(dir)); // Load はディレクトリも作らない
+    }
+
+    /// <summary>
+    /// JSON として解釈できない = <see cref="SettingsLoadStatus.Corrupt"/>。
+    /// 旧実装はここを <c>Missing</c> / <c>Unreadable</c> と同じ「既定値を返す」に潰していた。
+    /// </summary>
+    [Fact]
+    public void Load_reports_Corrupt_for_unparsable_json()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            File.WriteAllText(path, "{ this is not json");
+
+            var s = SettingsStore.Load(path, out var status);
+
+            Assert.Equal(SettingsLoadStatus.Corrupt, status);
+            Assert.Equal(new AppSettings().FontName, s.FontName); // 起動は止めず既定で続行
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// 内容が <c>null</c> の 4 文字 —— <b>現状バグの本体</b>(設計 §5.2)。
+    /// JSON としては妥当なので <c>Deserialize</c> は例外を投げず <c>null</c> を返し、
+    /// 旧実装の <c>?? new AppSettings()</c> がこれを<b>成功扱い</b>にしていた。
+    /// 設定が失われている点では破損と同じなので <c>Corrupt</c> へ倒す。
+    /// </summary>
+    [Fact]
+    public void Load_reports_Corrupt_when_the_content_is_the_json_null_literal()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            File.WriteAllText(path, "null");
+
+            var s = SettingsStore.Load(path, out var status);
+
+            Assert.Equal(SettingsLoadStatus.Corrupt, status);
+            Assert.Equal(new AppSettings().FontName, s.FontName);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// I/O で読めない = <see cref="SettingsLoadStatus.Unreadable"/>。
+    /// <b><c>Corrupt</c> に落ちてはいけない</b> —— Task 8 の退避(<c>settings.json</c> →
+    /// <c>settings.json.bad</c>)は <c>Corrupt</c> で走るので、ここを取り違えると
+    /// <b>中身が正常なファイルを改名する</b>(設計 §5.2)。
+    /// <para>
+    /// fixture は<b>中身が正常な</b> settings.json を <c>FileShare.None</c> で掴んだままにする
+    /// (非既定の <c>FontName</c> を書いておくので、ロックを外した後の再読込で「原本が無傷」
+    /// であることまで見える —— 既定値のまま書くと Unreadable 時の戻り値と区別が付かない)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Load_reports_Unreadable_when_the_file_is_locked()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            SettingsStore.Save(path, new AppSettings { FontName = "BIZ UDゴシック" });
+
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                var s = SettingsStore.Load(path, out var status);
+
+                Assert.Equal(SettingsLoadStatus.Unreadable, status);
+                Assert.Equal(new AppSettings().FontName, s.FontName); // 読めていないので既定で続行
+            }
+
+            // ロックが外れれば元の設定へ戻れる = 退避してはいけないファイルだった。
+            var reread = SettingsStore.Load(path, out var afterUnlock);
+            Assert.Equal(SettingsLoadStatus.Ok, afterUnlock);
+            Assert.Equal("BIZ UDゴシック", reread.FontName);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>正常なファイル = <see cref="SettingsLoadStatus.Ok"/>。設定値も読めていること。</summary>
+    [Fact]
+    public void Load_reports_Ok_and_reads_the_values_for_a_valid_file()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            SettingsStore.Save(
+                path,
+                new AppSettings { FontName = "BIZ UDゴシック", WindowWidth = 1000 }
+            );
+
+            var s = SettingsStore.Load(path, out var status);
+
+            Assert.Equal(SettingsLoadStatus.Ok, status);
+            Assert.Equal("BIZ UDゴシック", s.FontName);
+            Assert.Equal(1000, s.WindowWidth);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// <b>妥当だが敵対的な JSON は <c>Ok</c> で通る</b> —— <c>Normalize</c> の防御が例外ではなく
+    /// 補正で片付けていることの網。
+    /// <para>
+    /// これは「<c>Normalize</c> が投げたら <c>Corrupt</c>」を<b>直接には張れなかった</b>ことの
+    /// 裏返しでもある(実施記録 §10.13)。<c>Normalize</c> は全枝が null 合体・<c>Math.Max</c>・
+    /// <c>Math.Clamp</c>・null 要素 skip で書かれており、<c>Deserialize</c> が返しうるどの
+    /// オブジェクトでも投げない —— 例外経路は<b>現在の入力空間から到達できない</b>ので、
+    /// 直接の網は <c>Normalize</c> に seam を掘る(仮定のための production 面を増やす)以外に無い。
+    /// </para>
+    /// <para>
+    /// 代わりにここで固定するのは<b>その逆側</b>で、実害があるのはこちらである:
+    /// 「補正が要っただけの正常なファイル」を <c>Corrupt</c> へ倒すと、Task 8 の退避が
+    /// <b>中身が正常な settings.json を <c>.bad</c> へ改名する</b>。<c>Normalize</c> に
+    /// 補正しきれない枝が足された日、この網が先に落ちる。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"RecentFiles\":[null,null]}")]
+    [InlineData("{\"LastSession\":null}")]
+    [InlineData("{\"LastSession\":{}}")]
+    [InlineData("{\"LastSession\":{\"Tabs\":null}}")]
+    [InlineData("{\"LastSession\":{\"Tabs\":[null]}}")]
+    [InlineData("{\"LastSession\":{\"Tabs\":[{\"Path\":\"   \"}]}}")]
+    [InlineData(
+        "{\"LastSession\":{\"Tabs\":[{\"Path\":\"a\",\"UntitledNumber\":-2147483648,\"CaretLine\":-1,\"CaretColumn\":-1,\"CodePage\":-1,\"LineEnding\":-1}]}}"
+    )]
+    [InlineData(
+        "{\"Theme\":null,\"FontName\":null,\"KinsokuLineStartChars\":null,\"KinsokuLineEndChars\":null,\"KinsokuHangChars\":null}"
+    )]
+    [InlineData(
+        "{\"WrapColumn\":-2147483648,\"TabWidth\":0,\"CaretWidth\":0,\"FontSize\":-1,\"WindowWidth\":0,\"WindowHeight\":0,\"BackupIntervalSeconds\":0,\"DefaultCodePage\":-1,\"DefaultLineEnding\":-1}"
+    )]
+    [InlineData("{\"UnknownProperty\":{\"nested\":[1,2,3]}}")]
+    public void Load_reports_Ok_for_valid_but_hostile_json(string json)
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            File.WriteAllText(path, json);
+
+            SettingsStore.Load(path, out var status);
+
+            Assert.Equal(SettingsLoadStatus.Ok, status);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// <c>Normalize</c> が値を補正しただけのファイルは <c>Ok</c>。「補正が要った」を「破損」と
+    /// 混同すると、Task 8 が<b>正常なファイルを退避</b>してしまう。
+    /// 返り値が<b>補正後</b>であることも併せて見る(status を先に確定して補正前を返す実装で落ちる)。
+    /// </summary>
+    [Fact]
+    public void Load_reports_Ok_when_the_values_only_needed_normalizing()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".json");
+        try
+        {
+            File.WriteAllText(path, "{\"WrapColumn\":99999,\"RecentFiles\":null,\"Theme\":null}");
+
+            var s = SettingsStore.Load(path, out var status);
+
+            Assert.Equal(SettingsLoadStatus.Ok, status);
+            Assert.Equal(1000, s.WrapColumn); // 補正後(上限クランプ)が返っている
+            Assert.NotNull(s.RecentFiles);
+            Assert.Equal(new AppSettings().Theme, s.Theme);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
         }
     }
 }
