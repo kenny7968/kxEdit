@@ -1361,3 +1361,132 @@ dotnet csharpier check <変更 3 ファイル>  →  EXITCODE=0
 設計 §7 の項目 5「大きい文書の Ctrl+S で体感で待たされない」は上の実測(全体フローで最大 +1.7 ms)で
 裏付けたが、**実機の体感確認は L5 のまま残す** —— 測ったのは `AtomicFile` 単体で、
 エンコード変換やスナップショット取得は含んでいない。
+
+### 10.9 Task 5 追補 — byte[] 版を Stream 版へ委譲した(M-C の非対称)
+
+§10.8 の懸念「byte[] 版の flush には網が無く(M-C 生存)、Stream 版だけ契約ネット経由で
+間接的に守られている」に対する仮説の検証。**仮説は成立したが、成立の仕方は
+「M-C が死ぬようになる」ではなく「M-C が式として存在しなくなる」である。** この差は重要なので
+下に分けて書く。
+
+#### 採った形
+
+```csharp
+public static void Write(string path, byte[] payload)
+{
+    ArgumentNullException.ThrowIfNull(payload);
+    Write(path, stream => stream.Write(payload, 0, payload.Length));
+}
+```
+
+M-13 の後、2 つの `Write` はステージングの中身以外まったく同じ形になっていた
+(FileStream を作る → 書く → `Flush(true)`)。byte[] 版は「payload を 1 回書く writer を渡した
+Stream 版」そのものなので委譲する。**狙いは重複削減ではなく、ステージングの実装を 1 つに保つこと。**
+`CreateNew` / `FileShare.None` / tmp の命名 / 失敗時ポリシーの決定点も 1 か所になる。
+
+#### 変異の実測 —— 仮説はどこまで成立したか
+
+| # | 変異 | 委譲前 | 委譲後 |
+|---|------|--------|--------|
+| M-A' | `FileMode.CreateNew` → `FileMode.Create` | 生存 | **生存**(変わらず) |
+| M-B' | 唯一の `Flush(flushToDisk: true)` を落とす | 1404 中 1 失敗 | **1404 中 1 失敗**(変わらず) |
+| M-D' | `ArgumentNullException.ThrowIfNull(payload)` を落とす | 1404 中 1 失敗 | **1404 中 1 失敗** |
+| M-E' | ラムダ内で部分書込(`Math.Min(payload.Length, 4096)`) | 1404 中 1 失敗 | **1404 中 1 失敗** |
+| M-F' | `Flush(flushToDisk: true)` → `Flush()` | 生存 | **生存**(変わらず) |
+| **M-C** | **byte[] 版の flush 行だけを落とす** | **生存** | **式として存在しない** |
+| **M-G'** | **委譲を戻し、byte[] 専用のステージングを flush 無しで再インライン**(13 行) | — | **生存** |
+
+```
+# M-B'(委譲後)
+失敗 …AtomicFileStreamWriteTests.Write_Stream_WriterClosesTheStream_FailsSafely
+   Assert.Throws() Failure: No exception was thrown
+   Expected: typeof(System.ObjectDisposedException)
+
+# M-D'(委譲後)
+失敗 …AtomicFileTests.Bytes_rejects_a_null_payload_without_creating_a_tmp
+   Expected: typeof(System.ArgumentNullException) / Actual: typeof(System.NullReferenceException)
+
+# M-E'(委譲後)
+失敗 …AtomicFileTests.Bytes_writes_a_payload_larger_than_the_stream_buffer_completely
+   Assert.Equal() Failure: Values differ / Expected: 1048583 / Actual: 4096
+```
+
+**正確に何が良くなったか**: ステージングの flush は 1 か所しか無くなったので、
+**「1 行消すだけで byte[] 経路だけが静かに fsync を失う」形が作れなくなった**。唯一の flush を
+落とす M-B' は網が殺す。§10.8 で挙げた「Stream 版だけ間接的に守られている」非対称は、
+守る対象が 1 つになったことで消えている。
+
+**何が良くなっていないか(過大に書かないための注記)**: **byte[] 経路の fsync に網が張れたわけではない。**
+M-G'(委譲を戻して flush 無しで再インライン)は**依然として生存する** —— byte[] 版を叩くテストは
+flush を観測できないままだからである。委譲が減らしたのは**「片方だけを落とす」変異の表面積**
+(1 行 → 13 行)であって、**観測面は 1 つも増えていない**。
+[[net-absence-claims-are-also-verifiable]] の逆側: 張れていない網を張ったと書かない。
+
+**M-A' / M-F' は §10.8 のまま受容**(コーディネーターの裁定どおり)。委譲後も生存することを実測で
+確認済みで、生存の理由も §10.8 から変わっていない。
+
+#### 挙動不変であることの確認(潰した懸念)
+
+- **`ArgumentNullException` の paramName**。ガードを委譲先へ落とすと `payload.Length` で
+  `NullReferenceException` になる(あるいは `writer` 側の名前に化ける)。入口に残したうえで、
+  **`Assert.Equal("payload", ex.ParamName)` を網に足した**(実測で "payload" のままであることを確認)。
+- **CS0121(overload の曖昧さ)は変わらない**。2 つの overload のシグネチャを触っていないので、
+  `Write(path, null!)` は引き続き曖昧で、テストの `(byte[])null!` キャストもそのまま。
+- **`TextFileService` の共有違反フォールバックが二重委譲にならないか**。ならない。フォールバックは
+  *TextFileService* の層にあり(`:448` 付近の `catch (IOException ex) when (…)` が
+  `Save(path, text, encoding, hasBom)` へ委譲する)、その先で `AtomicFile.Write(path, payload)` →
+  `AtomicFile.Write(path, Action<Stream>)` と 1 段降りるだけで、`AtomicFile` へ戻る再帰は無い。
+  `SaveTextBuffer_ShareViolation_FallsBackToInPlaceOverwrite` /
+  `Save_falls_back_to_inplace_when_replace_blocked_by_share_lock` /
+  `Save_does_not_truncate_original_when_unrecoverably_locked` はいずれも緑のまま。
+- **`BackupStore` / `SessionLayoutStore`(byte[] 版の利用者)**。委譲は同一スレッド上で 1 段降りるだけ
+  なので、`[ThreadStatic]` の差替段 seam の効き方も、`SerialBackupWriter` の専用ワーカー上で走ることも
+  変わらない。差替段 seam の発火回数(`Invocations`)も 1 のまま(`AtomicFileRecoveryTests` 全緑)。
+- 例外の型・順序・`FileMode.CreateNew`・`FileShare.None`・tmp の命名・失敗時ポリシー
+  (`TryDelete` して伝播)はいずれも委譲先の同じコードなので変わらない。
+
+**§10.2 の記述への補正**: 「M-2 の網は Stream 側だけを赤にし、byte[] 側は緑のまま = 網が経路を
+弁別できている」は**委譲後は成り立たない**(経路が 1 本になったため、Stream 版の差替を
+インラインへ戻す変異は byte[] 側のテストも赤にする)。網が弱くなったのではなく、
+**弁別すべき 2 経路が無くなった**。§10.2 は当時の記録なので書き換えず、ここに補正を残す。
+
+#### 性能 —— 差は出なかった(測定と、その途中で踏んだ罠)
+
+**測定 A(同一プロセス内・順序ランダム化・15 反復の中央値・ms)**。DIRECT = 委譲前の形、
+DELEGATED = 委譲後の形。どちらも FileStream(CreateNew, None) + Write + Flush(true) + `File.Replace`。
+
+| サイズ | DIRECT | DELEGATED |
+|---|---|---|
+| 1 MB | 10.9 | 10.4 |
+| 10 MB | 22.7 | 22.4 |
+| 100 MB | 152.9 | 137.0 |
+
+**測定 B(DLL レベル・修正前後の `kxEdit.Core.dll` を差し替え・3 回の中央値・ms)**
+
+| サイズ | 委譲前 byte[] | 委譲後 byte[] |
+|---|---|---|
+| 10 MB | 22.2 | 22.4 |
+| 100 MB | 153.6 | 152.4 |
+
+**差は無い**(測定 A では委譲後の方が全サイズで速く出ているが、これも差ではなくばらつき)。
+理論上の増分は `Action<Stream>` 1 個のアロケーションと仮想呼出 1 回である。
+
+**踏んだ罠 —— 交互測定が device の周期と歩調を合わせる**。最初は「DIRECT → DELEGATED」の固定順で
+交互に測っており、100 MB で **DIRECT 137.0 / DELEGATED 149.9** と出た(+13 ms)。しかしサンプル列を
+見ると 2 系列が**完全に反相関**しており(片方が ~136 のとき他方が ~152)、同じ測定を繰り返すと
+**順位が入れ替わった**(DIRECT 149.4 / DELEGATED 147.3)。NVMe 側に ~2 反復周期の速い/遅い状態があり、
+固定順の交互測定はそこへ位相ロックする。**反復ごとに順序をランダム化**して解消した。
+§10.8 の settle(直前の I/O を落とす)と併せて、この機械での I/O 測定には両方が要る。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Debug --no-incremental -warnaserror  →  0 個の警告 / 0 エラー (EXITCODE=0)
+kxEdit.Core.Tests    成功!  合格: 1404 / 合計: 1404   (本数は変わらない = 既存網の強化のみ)
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+dotnet csharpier check <変更 2 ファイル>  →  EXITCODE=0
+```
+
+変異 6 件はいずれも `git checkout --` で復帰確認済み(`git status` が空)。今回は §10.8 で踏んだ
+中断事故を避けるため、**revert を `finally` に置いて**変異を回した。
