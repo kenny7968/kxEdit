@@ -1638,3 +1638,179 @@ dotnet csharpier check src/kxEdit.Core/IO/AtomicFile.cs  →  EXITCODE=0
 本 fixup のコード変更はコメント 1 か所のみ(テスト本数は変わらない)。変異 3 件
 (N-5 / `ThrowIfNull(writer)` / 再確認分)は `finally` 付きで回し、`git status` が空に戻ることを
 毎回確認している。
+
+### 10.11 Task 6 — 設定の保存を `AtomicFile` 経由へ(M-11 前半)。仮説の当たりどころが想定とずれていた
+
+`SettingsStore.Save` は全永続化のうち唯一 `AtomicFile` の外(`File.WriteAllText` 直書き)にいた。
+`File.WriteAllText` は `FileMode.Create` = **開いた時点で原本を切り詰める**ので、書込中の失敗
+(ディスクフル・電源断)は「切り詰められた settings.json」を残す。これを差替経由へ移した。
+`Directory.CreateDirectory(dir)` は残している(`AtomicFile` はディレクトリを作らない)。
+
+#### バイト列不変の仮説 —— どう検証したか
+
+§5.1 は「変わらないはず」と書いて「想定のまま進めない」と釘を刺していた。**2 段で確かめた。**
+
+**(1) 修正前後の実バイト列を突き合わせた(想定ではなく実測)。**
+一時的な `[Fact]`(`TempByteDumpProbe`・検証後に削除)で、日本語・エスケープ対象文字
+(`" ' < > & \` ・制御文字 `U+0007`・NBSP・サロゲートペア `U+1F600`)・日本語パスの `RecentFiles`・
+`LastSession` を積んだ設定を `SettingsStore.Save` で書き、`File.ReadAllBytes` の結果を hex で
+ダンプした。**修正前**の実装で 1 回、**修正後**の実装で 1 回。
+
+```
+before.hex  length=1544  SHA256 FB86D256990A13AF9CDDE6A4AAC10FD12197FAC5F813BAE7A7F70007B7B99B6C
+after.hex   length=1544  SHA256 FB86D256990A13AF9CDDE6A4AAC10FD12197FAC5F813BAE7A7F70007B7B99B6C
+IDENTICAL=True
+```
+
+**一致した。1 バイトも変わっていない。**
+
+**(2) その一致が「何のおかげか」を測った。ここで想定が 1 つ外れていた。**
+同じダンプを走査した結果:
+
+| 観測 | 実測値 | 意味 |
+|---|---|---|
+| 先頭 4 バイト | `7B 0D 0A 20` = `{` CRLF SP | **BOM なし**。`File.WriteAllText` の既定は BOM を付けない |
+| 非 ASCII バイト数 | **0** | 既定 `JavaScriptEncoder` が非 ASCII を全部 `\uXXXX` へ逃がす |
+| 改行 | CRLF(`0D 0A`)が存在 | `WriteIndented` の改行は JSON ライタ側が決める。`File.WriteAllText` は改行変換をしない |
+
+つまり **「`File.WriteAllText` と `SerializeToUtf8Bytes` で UTF-8 の符号化が食い違う」余地は
+元から無かった**——出力が全部 ASCII なので、どちらの経路でも同じバイトにしかならない。
+タスク指示が挙げた 3 つの疑いのうち、**実際に危なかったのは BOM の有無だけ**であり、
+エスケープ差と改行差は「同じ `Options` が決めている」ため原理的に生じ得ない側だった。
+**仮説は正しかったが、その理由の重みづけは想定とずれていた。**
+
+#### 恒久ネットは snapshot ではなく「旧実装のレシピを毎回走らせる」形にした
+
+§5.1 は「期待バイト列と一致することを見る」と書いていたが、実物は**期待バイト列を持たない**。
+`Save_writes_the_same_bytes_as_the_previous_writer` は、同じ設定オブジェクトに対して
+
+- 新実装: `SettingsStore.Save(path, s)`
+- 旧実装のレシピ: `File.WriteAllText(legacyPath, JsonSerializer.Serialize(s, LegacyOptions))`
+
+を**両方その場で走らせて** `File.ReadAllBytes` 同士を比べる。期待値をハードコードすると、将来
+`SettingsStore.Options` を変えたときに「意図した書式変更」と「書き手を替えた副作用」を
+弁別できなくなる(snapshot は両方まとめて赤くなる)。レシピ比較なら `Options` の変更は両辺に
+等しく効き、**書き手だけが変わったときに落ちる**。加えて相対比較では捕まらない絶対条件——
+BOM が無いこと・`File.ReadAllText` のデコード結果と一致すること・`Load` で読み戻せること——を
+別に置いている。
+
+**この網が空でないことを変異で確かめた。** `Save` を「BOM 3 バイトを前置してから書く」へ変異
+させると `Save_writes_the_same_bytes_as_the_previous_writer` が落ちる(実測)。
+バイト列不変の網は**修正前後どちらでも緑**になる性質のものなので、変異を当てないと
+「何も見ていない網」と区別が付かない。
+
+#### `AtomicFile` を通っていることの網は修正前に赤を実測した
+
+`Save_goes_through_AtomicFile_and_leaves_the_original_when_the_replace_step_fails` は差替段の
+seam(`AtomicFile.OverrideReplaceStepForTest`)に「原本に触れずに投げる」フックを張り、
+
+- `Assert.Throws<IOException>` —— `Save` が例外を伝えること(`Assert.Throws` は**厳密型一致**なので、
+  復旧枝へ入って `AtomicReplaceFailedException` に化けた場合も落ちる)
+- `Assert.Equal(1, scope.Invocations)` —— seam が**実際に発火した**こと。`[ThreadStatic]` なので
+  張ったスレッドと書込スレッドがずれると黙って既定実装が走る。事後状態(原本が残っている)だけでは
+  不発と区別できない
+- 原本が無傷であること・`*.tmp` が残っていないこと
+
+を見る。**修正前の実装に対して実際に赤を出した**:
+
+```
+Assert.Throws() Failure: No exception was thrown
+  at SettingsStoreTests.Save_goes_through_AtomicFile_and_leaves_the_original_when_the_replace_step_fails()
+```
+
+`File.WriteAllText` は `AtomicFile` を通らないので seam が発火せず、`Save` は素通しで成功する。
+
+#### ★ 残した tmp は恒久残留する(Task 3 の実測をそのまま引き継ぐ)
+
+差替が失敗し復旧も失敗した場合(M-12)、`AtomicFile` は tmp を**掃除せず残す**。settings.json の
+tmp について、その行方は次のとおり:
+
+- `*.tmp` を消すコードは **`BackupStore.SweepTempFiles` しか無い**。実装は
+  `Directory.EnumerateFiles(dir, "*.tmp")` = **再帰なし・1 階層だけ**。
+- 起動時に走るのは `BackupCoordinator.cs:346-347` の 2 呼出だけで、対象は `_sessionDir`
+  (`%APPDATA%\kxEdit\backups\session-*`)と `_dir`(`%APPDATA%\kxEdit\backups`)。
+  他の呼出元(`BackupStore.DeleteAll` / `DeleteSessionDir`)も `backups` 配下しか受け取らない。
+- **`SettingsStore.DefaultPath` = `%APPDATA%\kxEdit\settings.json`** なので、その tmp は
+  `%APPDATA%\kxEdit\` **直下**に落ちる。**どの sweeper の視野にも入らない。**
+
+したがって **settings.json の tmp は恒久残留する**。「静かに消える」ではない。
+`session-state.json`(`SessionLayoutStore`)と同じ性質で、`%APPDATA%\kxEdit\` 直下へ書く経路を
+増やすたびに同じことが起きる。中身は**設定**であり、**最近使ったファイルの一覧(パス)を含む**。
+本文は含まない。この事実は `SettingsStore.Save` の xmldoc にも書いた。
+
+なお脆弱性レビューは同型の `session-state.json` について「`%APPDATA%` の既定 ACL はユーザー専用
+なので実質リスクなし」と判定しているが、**「`%APPDATA%` は常にユーザー専用」と決め打たない**根拠も
+§10.5 に記録されている(検証機には追加 ACE があった)。ここでは**事実の記録に留め**、リスク評価は
+足していない。
+
+#### ★ その保証はユーザーへ届かない
+
+`SettingsStore.Save` の production 呼出側は **`MainForm.SaveSettingsSafe`(`MainForm.cs:987`)
+1 か所だけ**で、`try { ... } catch { }` で例外を握り潰す。したがって
+`AtomicReplaceFailedException.PreservedTempPath`(= 残した tmp の場所)は**誰にも伝わらない**。
+Task 4 で組んだ「退避先を案内する」経路は文書保存(`TextFileService.Save` → `FileController`)に
+しか効いておらず、設定は `BackupStore.Write` / `SessionLayoutStore.Save` と同じ「握り潰される側」に
+並ぶ。本タスクで届くようになったのは**原本を壊さない**ところまでである。
+**握り潰しの解消は B5(M-22)の担当**で、本タスクではコードを変えていない。
+この限界も xmldoc に書いた。
+
+#### 計画と実物が食い違った点
+
+1. **src 側は計画のコードがそのまま通った**(`IO.AtomicFile.Write(path,
+   JsonSerializer.SerializeToUtf8Bytes(settings, Options))`)。逸脱ゼロ。
+2. **テスト側がアナライザに弾かれた —— 本ブランチ 7 件目。** `new JsonSerializerOptions { ... }` を
+   テストメソッド内で組むと **CA1869**(シリアル化ごとに新インスタンスを作るな)。`static readonly`
+   フィールドへ退避した。**テストプロジェクトにも production と同じアナライザ set が効く**ので、
+   一時的な検証用 `[Fact]` も **S2699**(assert が 1 つも無い)と **CA1305**(`StringBuilder.AppendLine`
+   の補間がロケール依存)で 2 回止まった。使い捨てのプローブでも素通りはしない。
+3. **§5.1 の「期待バイト列と一致することを見る」を採らなかった**(上記「恒久ネットは snapshot では
+   なく」)。計画より弱くはならず、`Options` 変更時の弁別能力の分だけ強い。
+4. **§5.1 の「どちらも UTF-8」という根拠は正しいが効いていなかった。** 出力に非 ASCII バイトが
+   1 つも無いため、UTF-8 かどうかは結果を左右しない。効いていたのは BOM の有無だけだった。
+
+#### 事故 —— 変異の revert に `git checkout --` を使って自分の未 commit 実装ごと消した
+
+BOM 変異を戻すのに `git checkout -- src/kxEdit.Core/Settings/SettingsStore.cs` を
+(中断対策として)テスト実行と同じコマンドに繋いで置いた。**HEAD に戻るので、Task 6 の実装
+そのものも一緒に消えた。** CLAUDE.md 環境ノートの「`Copy-Item` で退避せず `git checkout --` で
+戻す」は**変異対象が既に commit 済みである**ことを暗黙の前提にしている。実装直後・未 commit の
+状態で変異を当てるときは、**先に commit する**か、**変異を Edit で逆適用する**。
+実害は再適用のみ(diff から復元・再測定で全緑を再確認)。
+
+#### 懸念(受容・記録に留める)
+
+- **fsync が 1 回増える。** `SaveSettingsSafe` の呼出は「設定ダイアログ OK」と「終了時」の
+  2 か所だけ・約 1.5 KB なので体感差は無い(M-13 の測定では 1 MB でも分解能以下)。
+- **`%APPDATA%` がフォルダーリダイレクトで UNC 上にある場合**、`File.Replace` の可否は
+  `File.WriteAllText` と異なり得る。ただし同じディレクトリの `session-state.json` が既に
+  `AtomicFile` 経由であり、失敗したときの観測(= 保存されない・無言)は修正前と同じ
+  (`SaveSettingsSafe` が握るため)。新しい失敗の見え方は生じない。
+
+#### L5
+
+**不要。** SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / App の Speech 系)に
+触れておらず、発声面・UI 面の変化はゼロ。M-11 が新設する `MessageBox`(§5.4)は Task 7 以降の
+担当で、L5 はそちらで回収する。
+
+#### 検証
+
+```
+（実装前・赤の確認）
+dotnet test tests/kxEdit.Core.Tests --filter FullyQualifiedName~SettingsStoreTests
+  → 失敗! -失敗: 1、合格: 24、合計: 25   (EXIT=1)
+    Save_goes_through_AtomicFile_and_leaves_the_original_when_the_replace_step_fails [FAIL]
+    Assert.Throws() Failure: No exception was thrown
+
+（実装後）
+dotnet build kxEdit.sln --no-incremental        →  警告 0 / エラー 0 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1406 / 合計: 1406   (1404 + 新規 2)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737
+dotnet csharpier check src/kxEdit.Core/Settings/SettingsStore.cs
+                       tests/kxEdit.Core.Tests/Settings/SettingsStoreTests.cs  →  EXIT=0
+
+（変異 1 件・BOM 前置）
+  → Save_writes_the_same_bytes_as_the_previous_writer [FAIL]  (失敗 1 / 合格 24)
+```
+
+grep は `-E " (error|warning) [A-Za-z]+[0-9]+"` を使い、終了コードで判定している。
