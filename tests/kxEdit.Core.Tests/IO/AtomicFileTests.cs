@@ -118,7 +118,12 @@ public class AtomicFileTests
         {
             File.WriteAllText(path, "original");
             // キャストが要る: null リテラルだと byte[] 版と Action<Stream> 版が曖昧になる(CS0121)。
-            Assert.Throws<ArgumentNullException>(() => AtomicFile.Write(path, (byte[])null!));
+            var ex = Assert.Throws<ArgumentNullException>(() =>
+                AtomicFile.Write(path, (byte[])null!)
+            );
+            // byte[] 版は Stream 版へ委譲するので、ガードを委譲先へ落とすと paramName が
+            // "writer" 側の話に化ける(あるいは NRE になる)。呼び手から見える名前を固定する。
+            Assert.Equal("payload", ex.ParamName);
             Assert.Equal("original", File.ReadAllText(path));
             Assert.Empty(
                 Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".*tmp*")

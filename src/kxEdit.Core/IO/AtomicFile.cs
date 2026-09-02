@@ -45,45 +45,23 @@ public static class AtomicFile
     /// payload を path へ原子的に書き込む。失敗時は tmp を掃除して例外を伝播する
     /// (この規則が当てはまらない唯一の場合 = 差替で原本が失われたときは、tmp を掃除せず残す
     /// —— <see cref="CommitStaged"/> を参照)。
+    /// <para>
+    /// <b>実体は <see cref="Write(string, Action{Stream})"/> の薄いラッパである</b>
+    /// (payload を 1 回書くだけの writer を渡している)。ステージングの実装を 1 つに保つのが目的で、
+    /// <b>2 つあると片方だけが <c>Flush(flushToDisk: true)</c> を失っても気付けない</b>
+    /// —— byte[] 版から flush 行を落とす変異が全テスト緑のまま生存していた
+    /// (設計 2026-09-02 §10.8 の M-C / §10.9)。CreateNew・FileShare.None・tmp の命名・
+    /// 失敗時ポリシーはすべて委譲先の 1 か所で決まる。
+    /// </para>
     /// </summary>
     public static void Write(string path, byte[] payload)
     {
         // 旧実装の File.WriteAllBytes は null で ArgumentNullException を投げていた。
-        // FileStream 版は payload.Length で NullReferenceException になるうえ、
-        // 空の tmp を作ってから消すことになるので、入口で同じ型の例外に揃える
-        // （Stream 版の ThrowIfNull(writer) とも形が揃う）。
+        // 委譲先の Stream 版は writer の中で payload.Length に触れるため、ここで止めないと
+        // NullReferenceException になるうえ、空の tmp を作ってから消すことになる。
+        // paramName も "payload" のまま保つ(ここで投げるので "writer" には化けない)。
         ArgumentNullException.ThrowIfNull(payload);
-        string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        string tmp = Path.Combine(
-            dir,
-            Path.GetFileName(path) + "." + Path.GetRandomFileName() + ".tmp"
-        );
-
-        // ① tmp へステージング書き込み。ここで失敗（ディスクフル・権限・パス長等）したら
-        //    原本に一切触れず、tmp 残骸の掃除だけ試みて例外を伝播する。
-        try
-        {
-            // CreateNew: 既存 tmp があれば黙って上書きせず失敗する（乱数名なので衝突は
-            // 事実上起きないが、起きたなら他者の書込中ファイルを潰すより失敗する方が正しい）。
-            // Stream 版と同じ形。
-            using var fs = new FileStream(
-                tmp,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None
-            );
-            fs.Write(payload, 0, payload.Length);
-            // M-13: 差し替える前にディスクへ届かせる。保証の範囲はクラス xmldoc を参照。
-            fs.Flush(flushToDisk: true);
-        }
-        catch
-        {
-            TryDelete(tmp);
-            throw;
-        }
-
-        // ② tmp は完全に書けている。原子的に差し替える。
-        CommitStaged(tmp, path);
+        Write(path, stream => stream.Write(payload, 0, payload.Length));
     }
 
     /// <summary>
