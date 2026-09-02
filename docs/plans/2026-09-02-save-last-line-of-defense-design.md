@@ -2610,3 +2610,195 @@ dotnet csharpier check <変更ファイル>  →  EXIT=0
 ```
 
 **src の実行コードは 1 行も変えていない**(変えたのは xmldoc と設計書のみ)。
+
+### 10.18 Task 9 — 起動経路への配線。表示位置の根拠と、L-3 の回収
+
+`SettingsStartup.Prepare` を起動経路へ繋いだ。`Program.Main` が設定を確定し、
+`MainForm.OnShown` が `MessageBox` を 1 個出す。**これで M-11 の「無音リセット」が塞がる**
+—— Task 6〜8 で用意した部品(原子的な保存・4 状態の読込・退避・文言)が、初めてユーザーへ届く。
+
+#### 表示位置の判断と、その根拠
+
+置いたのは **`OnShown` の復元ブロックの `finally` を抜けた直後・陳腐化警告より前**。
+
+- **復元より「後」**。`MessageBox` はメッセージをポンプするので、`_backup.MarkStartupRestoreComplete()`
+  より前でモーダルを出すと**ゲートが開く前に再入経路を開く**ことになる(A-8 と同型)。
+  既存の陳腐化警告が復元の後に居るのも同じ理由で、新しい判断ではなく既にある形へ合わせた。
+- **陳腐化警告より「前」**。設定が既定値へ戻っている事実は、**復元の挙動そのものの説明**でもある
+  —— `RestoreOpenFilesOnStartup` / `ConfirmRestoreOnStartup` が既定へ戻っているため、
+  ユーザーから見た復元の振る舞いは前回と変わる。理由を先に渡してから結果の警告を読ませる。
+
+**到達数だけではこの位置を固定できない。** 復元より前へ動かしても、陳腐化警告より後ろへ動かしても、
+どちらの到達数も 1 のままである。そこで到達した瞬間の**周囲の状態**を写し取る seam
+(`SettingsWarningReachedAtForTest` = `(RestoreGateOpen, StaleWarningCount)`)を足し、
+`(true, 0)` を固定した。順序を入れ替える変異 2 件を実際に当てて、どちらも殺せることを確認している
+(下記「変異の実測」M-A / M-B)。
+
+#### L-3(§10.17 指摘 2)をどう回収したか
+
+多重起動の後着は、先着が改名し終えた後に `File.Move` を呼ぶので `FileNotFound` で `false` を
+受け取る。このとき退避失敗側の文言が案内する**原本はもう存在しない**。
+
+**弁別は `File.Exists` 一本**にした(申し送りどおり・§10.6 (c) が前例)。例外の型で分けると、
+同じ結果に至る別の事由(外部ツールが消した・親ごと消えた)を取りこぼす —— 前置の列挙は原理的に漏れる。
+
+実際の文言(原本が消えている枝。パスを 1 つも載せない):
+
+```
+設定ファイルが壊れていたため、既定の設定で起動しました。以前の設定は失われているので、
+必要な項目は設定し直してください。
+
+壊れたファイルは退避できず、元の場所にも残っていません。壊れた内容の在りかは分かりません。
+```
+
+- **「上書きされる」の警告(`RewriteReason`)を落としている。** あの一節の役目は「上書きされる前に
+  コピーしてください」であり、コピーすべきファイルが無い枝では意味を失う。残すと、できない行動を
+  促すことになる。
+- **`.bad` があってもそこを案内しない。** 先着が作った `.bad` が実在していても、それが**この破損の
+  コピーである保証は無い**(前回起動の残骸かもしれない)。案内すれば推測になる。
+- **既定値で起動した事実と「設定し直してください」は残す。** ここを黙らせると M-11 が直しに来た
+  無音リセットに戻る。
+
+#### 固定できた観測点と、できなかった観測点
+
+| # | 観測点 | 結果 |
+|---|--------|------|
+| 1 | 警告があるとき `OnShown` で 1 回到達する | **固定した**(到達数=1) |
+| 1' | 「2 回出ない」 | **固定できていない**(下記) |
+| 2 | 警告が無いとき 1 回も到達しない | **固定した**(到達数=0 + ゲート開放で OnShown 実行を併せて固定) |
+| 3 | 陳腐化警告より前・復元より後 | **固定した**(到達時スナップショット・変異 2 件で実測) |
+| 4 | L-3: 原本が無いとき原本パスを案内しない | **固定した**(退避 seam 注入・変異 2 件で実測) |
+| 5 | `Program` の配線 | **固定した**(合成点を切り出して実行で固定 + 残る 1 ホップは IL) |
+
+**1' が固定できていない理由(正直に)**: `Form.Shown` は**フォーム 1 個につき 1 回しか上がらない**。
+`Hide()`→`Show()`、`ShowInTaskbar` 切替によるハンドル再生成、その両方の組合せの **3 通りを実測して
+追加の `Shown` は 1 件も起きなかった**。つまり `OnShown` を 2 周させる手段が無く、
+「2 回目が出ないこと」を動かして観測できない。この事実自体は
+`Shown_never_fires_twice_for_the_same_form_instance` で網にしてある ——
+消すと、後から「Hide/Show で 2 回目を確かめる」**空振りのテスト**(何を変異させても緑)が書かれる。
+1 回だけであることは `_restoreOffered` の early return と、この WinForms の性質の両方に依っている。
+
+#### 観測点 5 —— 「固定できない」を一度受け入れかけた(自己レビューで覆した)
+
+最初の形は `Program.Main` の IL を読み、呼出集合に `SettingsStartup.Prepare` があること・
+`SettingsStore.Load` が無いこと・**2 引数の `MainForm` ctor** を呼んでいることを見ていた。
+`MainForm` の public ctor に任意引数 `settingsWarning` を足す形(実装計画どおり)である。
+
+**この網には変異が生存した**(実測):
+
+```
+# M-F(Prepare は呼ぶが、警告を捨てて MainForm へ渡さない)
+-        var form = new MainForm(settings, settingsWarning: settingsWarning);
++        _ = settingsWarning;
++        var form = new MainForm(settings);
+        →  ProgramMain_... 成功!  合格: 1(生存)
+```
+
+理由は 2 つあり、どちらも「引数の数」では弁別できないことに帰着する。**任意引数の既定値は同じ
+2 引数 ctor の呼出へコンパイルされる**(省略しても `ldnull` が積まれるだけ)ので、`GetParameters().Length == 2`
+は両方で真になる。そして IL の**呼出集合では値の流れが観測できない**。
+
+そこで合成点を `Program.CreateMainForm(settingsPath, backupDirectory, sessionLayoutPath)` として
+切り出し、**実行して観測できる形**にした。`Main` に残るのはそれを呼ぶ 1 ホップだけで、そこは IL が守る。
+隔離用の 2 引数を開けているのは必須で、**破損 `settings.json` から作られる既定設定は
+`BackupEnabled=true`** のため、開けないとテストが実 `%APPDATA%` のバックアップを走査・削除しうる。
+
+あわせて **public ctor は 1 引数のまま(元どおり)へ戻した**。任意引数を足すと、
+`new MainForm(settings, path)` という 2 引数の位置指定呼出が `(settings, settingsPath)` の internal ctor
+ではなく**黙って public 側へ束縛される**(省略した任意引数が少ない方が優先される)。
+現在の呼出側は名前付き / 4 引数以上なので実害は無かったが、地雷を残す理由が無くなった。
+
+#### 変異の実測(6 件・生存 1 → 構造を変えて回収)
+
+```
+# M-A(設定警告を復元ブロックより前へ移す)
+        _restoreOffered = true;
++       if (_settingsWarning is not null) { ...警告ブロック... }
+        try { ...復元... } finally { _backup.MarkStartupRestoreComplete(); }
+  → 失敗 OnShown_SettingsWarning_ReachesOnce_AfterRestoreGate_AndBeforeStaleWarning
+    「設定警告は復元ブロックの finally(MarkStartupRestoreComplete)より後で出すこと」  (kill)
+
+# M-B(設定警告を陳腐化警告より後ろへ移す)
+  → 失敗 同上  Assert.Equal() Expected: 0 / Actual: 1                                  (kill)
+
+# M-C(L-3 のガードを落とす: if (false && !File.Exists(path)))
+  → 失敗 Prepare_does_not_point_at_the_source_file_when_it_is_already_gone
+    Assert.DoesNotContain() Sub-string found: "次のファイルをコピーしてください:\n  ..."  (kill)
+
+# M-D(弁別を反転: if (File.Exists(path)))
+  → 失敗 2 本(Prepare_does_not_point_at_a_quarantine_that_was_never_created も落ちる)   (kill)
+    = ガードは「常に案内しない」への退化でも緑にならない
+
+# M-E'(Main が合成点を迂回し Task 8 以前の形へ戻る)
+-        var form = CreateMainForm(SettingsStore.DefaultPath);
++        var form = new MainForm(SettingsStore.Load(SettingsStore.DefaultPath, out _));
+  → 失敗 ProgramMain_builds_the_form_through_the_tested_composition_point                (kill)
+
+# M-F'(CreateMainForm が Prepare は呼ぶが警告を渡さない: 最後の引数を null へ)
+  → 失敗 CreateMainForm_warns_once_when_the_settings_file_is_corrupt
+    Assert.Equal() Expected: 1 / Actual: 0                                              (kill)
+    ※ 切り出し前の形(M-F)では生存していた変異。これが構造を変えた理由。
+```
+
+#### L-3 の網に seam が要った理由
+
+「退避に失敗し、かつ原本も既に無い」は**実ファイルでは決定的に作れない**。`Corrupt` は
+`File.ReadAllText` が成功した後にしか出ないので、この 3 つを単一スレッドの `Prepare` 内に並べるには
+競合そのものが要る(宛先をディレクトリにする既存の失敗 fixture では、原本は残ったままになる)。
+そこで `Prepare` に退避試行の注入口(既定=実物)を開け、**原本を改名してから `false` を返す** ——
+後着が見る世界と同じもの —— を注入した。設計 §6.1 が `File.Replace` の部分失敗で採ったのと同じ形。
+
+対照(`Prepare_does_not_point_at_a_quarantine_that_was_never_created`= 原本が残る退避失敗)は
+実物の退避を使ったままなので、**seam の側だけが正しく振る舞う実装**では緑にならない。
+
+#### 計画と実物が食い違った点
+
+1. **`MainForm` の public ctor には任意引数を足さなかった**(実装計画は「ctor 2 つに足す」)。
+   上記のとおり 2 引数の位置指定呼出が黙って束縛先を変えるため。internal ctor にだけ足してある。
+2. **`Program.Main` に直書きせず `CreateMainForm` を切り出した**(実装計画は `Main` の 1 行置換)。
+   観測点 5 を「固定できない」で終わらせないため。
+3. **「API だけ足して赤を見る」段が成立しなかった。** 未使用フィールドは `CS0649` / `S3459` / `S4487`
+   で `-warnaserror` に弾かれる(5 件)。赤の確認は `-p:TreatWarningsAsErrors=false` を明示して行った
+   (CLAUDE.md の環境ノートの用法どおり)。
+4. **`SettingsStartup.cs` に `using System.IO;` が要った。** 同プロジェクトの他ファイルは
+   `System.IO.Path` のように完全修飾で書いており、暗黙 using では `File` が解決しない。
+
+#### 赤の確認(実出力・抜粋)
+
+```
+dotnet test ... -p:TreatWarningsAsErrors=false --filter "SettingsStartupTests|MainFormSmokeTests"
+失敗!   -失敗: 5、合格: 56、合計: 61
+  SettingsStartupTests.Prepare_does_not_point_at_the_source_file_when_it_is_already_gone
+      Assert.DoesNotContain() Sub-string found: "次のファイルをコピーしてください:\n  ..."
+  MainFormSmokeTests.OnShown_SettingsWarning_ReachesOnce_...   Expected: 1 / Actual: 0
+  MainFormSmokeTests.ProgramMain_...                           Assert.Contains() Filter not matched
+  (ほか 2 件)
+```
+
+#### L5(実機 SR 検証)への申し送り
+
+**このタスクで初めて SR が読む面(`MessageBox`)が入る。** チェックリストは Task 10 で起こす。
+確認すべき点:
+
+1. **ダイアログのタイトル**「設定を読み込めませんでした」が読まれること(NVDA はタイトル → 本文の順)。
+2. **本文の語順**。SR は線形に読むので、「既定の設定で起動しました / 設定し直してください」が
+   長いパスより前に来ていること(§10.7 指摘 3 の実機確認)。
+3. **パスの読まれ方**。`%APPDATA%` 配下の 100 文字級のパスが 1 行で読まれること
+   (`OneLine` の畳み込みが効いて改行で分断されない)。
+4. **フォーカスの初期位置**が OK ボタンにあり、Enter / Space で閉じられること。
+5. **閉じた後**にフォーカスが編集領域へ戻ること(モーダルの後の復帰は本アプリの弱点だった)。
+6. **陳腐化警告と両方出るケース**での順序 —— 設定の警告 → 陳腐化警告の順に読まれること。
+   両方を同時に起こすには、破損 `settings.json` と「ディスクが新しいバックアップ」を同時に仕込む。
+7. **3 文言すべて**(退避成功 / 退避失敗 / 読取不能)。加えて **L-3 の枝**(パスを載せない文言)も
+   読んで、案内が無いことが不自然に聞こえないか確認する。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  0 エラー / 0 個の警告 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1427 / 合計: 1427   (不変)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
+kxEdit.App.Tests     成功!  合格:  750 / 合計:  750   (743 → +7)
+dotnet csharpier check src/kxEdit.App tests/kxEdit.App.Tests  →  EXIT=0
+%APPDATA%\kxEdit\ の実ファイル: settings.json / backups とも変化なし(.bad は生えていない)
+```
