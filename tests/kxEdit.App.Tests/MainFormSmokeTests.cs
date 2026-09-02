@@ -967,16 +967,15 @@ public class MainFormSmokeTests
         });
 
     /// <summary>
-    /// 「警告が 2 回出ない」を<b>動かして観測することはできない</b>ことの実測。
-    /// <see cref="Form.Shown"/> は 1 つのフォームインスタンスにつき 1 回しか上がらないので、
-    /// <c>OnShown</c> を 2 周させる手段が無い —— <c>Hide()</c>→<c>Show()</c> も、
-    /// <see cref="Form.ShowInTaskbar"/> の切替によるハンドル再生成も、その両方の組合せも、
-    /// 追加の <c>Shown</c> を 1 件も起こさなかった(3 通りとも実測 0 件)。
+    /// <b>環境仮定の記録</b>(kxEdit 側の網ではない)。<see cref="Form.Shown"/> は 1 つのフォーム
+    /// インスタンスにつき 1 回しか上がらない —— <c>Hide()</c>→<c>Show()</c> も
+    /// <see cref="Form.ShowInTaskbar"/> の切替によるハンドル再生成も、追加の <c>Shown</c> を
+    /// 1 件も起こさない(実測)。
     /// <para>
-    /// したがって「1 回だけ」は<b>到達数が 1 であること</b>までしか固定できていない。
-    /// 2 回目が出ないことは <c>_restoreOffered</c> の early return と、この WinForms の性質の
-    /// 両方に依っている。<b>この検算を消すと、後から「Hide/Show で 2 回目を確かめる」空振りの
-    /// テスト(何を変異させても緑)が書かれる。</b>
+    /// <b>この事実は「2 回目が出ないことを観測できない」を意味しない。</b> 観測は
+    /// <c>OnShown</c> を直接呼べばよく、それは下の
+    /// <see cref="OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain"/> がやっている。
+    /// ここが固定しているのは<b>WinForms 側の前提</b>だけで、kxEdit のどの変異でも赤にならない。
     /// </para>
     /// </summary>
     [Fact]
@@ -995,6 +994,45 @@ public class MainFormSmokeTests
             PumpUntilShown();
 
             Assert.Equal(0, shown);
+        });
+
+    /// <summary>
+    /// 警告は<b>起動時に 1 回だけ</b>。<c>OnShown</c> をもう 2 回呼んでも到達数は増えない。
+    /// <para>
+    /// <see cref="Form.Shown"/> が 1 度しか上がらないので<b>WinForms 経由では 2 周させられない</b>が、
+    /// <c>OnShown</c> は <c>protected override</c> で、このアセンブリは <c>InternalsVisibleTo</c> を
+    /// 持つ。リフレクションで直接呼べば観測できる(このファイルは既に <c>Program.Main</c> の IL 走査で
+    /// リフレクションを使っている)。
+    /// </para>
+    /// <para>
+    /// <b>空振りではない</b>: 冪等性は完全に <c>MainForm.OnShown</c> 冒頭の
+    /// <c>_restoreOffered = true;</c> に依っており、<b>その 1 行を落とす変異は他の 750 本を 1 本も
+    /// 落とさなかった</b>(実測・§10.19)。この網だけが「到達数 3」で赤くなる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm_Unified(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp,
+                WarningForTest
+            );
+            Assert.Equal(1, form.SettingsWarningCountForTest); // 前提: 起動で 1 回出た
+
+            var onShown = typeof(MainForm).GetMethod(
+                "OnShown",
+                BindingFlags.Instance | BindingFlags.NonPublic
+            );
+            Assert.NotNull(onShown);
+            onShown!.Invoke(form, new object[] { EventArgs.Empty });
+            onShown.Invoke(form, new object[] { EventArgs.Empty });
+
+            Assert.Equal(1, form.SettingsWarningCountForTest);
+            // 同じガードが陳腐化警告と復元も守っている(道連れで壊れていないことの併記)。
+            Assert.Equal(0, form.StaleBackupWarningCountForTest);
         });
 
     /// <summary>
@@ -1045,6 +1083,46 @@ public class MainFormSmokeTests
             Assert.True(form.StartupRestoreGateOpenForTest);
         });
 
+    /// <summary>
+    /// <see cref="Program.CreateMainForm"/> の<b>隔離引数が実際に効いている</b>こと。
+    /// <para>
+    /// これが無いと、<c>backupDirectory</c> / <c>sessionLayoutPath</c> の配線が将来切れても
+    /// CI は緑のままで、<b>開発機の実 <c>%APPDATA%\kxEdit\backups</c> を走査・削除しうる</b>
+    /// —— 破損 settings.json から作られる既定設定は <c>BackupEnabled=true</c> だからである。
+    /// 実際、この網を張る前は「隔離引数を無視して別のディレクトリを使う」変異が App 750 全 PASS で
+    /// 生存していた(実測・§10.19)。<b>xmldoc だけが防御という状態</b>だった。
+    /// </para>
+    /// <para>
+    /// 観測は<b>復元の中身</b>で行う。<c>tmp</c> にレイアウトとバックアップを植て、
+    /// 「植えたバックアップの本文で復元される」ことを見る —— 引数がどこか別の場所を指していれば
+    /// レイアウトもバックアップも見つからず、復元は 0 件になる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void CreateMainForm_routes_the_isolation_paths_into_the_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string p1 = tmp.File("planted.txt");
+            File2.WriteAllText(p1, "disk-body");
+            var bk = Rec(NewId(), p1, 0, "backup-body") with
+            {
+                TimestampUtc = DateTime.UtcNow.AddMinutes(10),
+            };
+            PlantBackup(tmp, bk); // ← backupDirectory が効いていなければ見つからない
+            PlantLayout(tmp, new SessionLayoutRecord(p1, 0, bk.Id, true, 0, 0, 0)); // ← 同 sessionLayoutPath
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = true, RestoreOpenFilesOnStartup = true }
+            );
+
+            using var form = ShowCreatedMainForm(tmp);
+
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            Assert.Equal(p1, doc.State.Path); // sessionLayoutPath 経由でタブが復元された
+            Assert.Equal("backup-body", doc.Editor.SnapshotText); // backupDirectory 経由で本文が来た
+        });
+
     /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
     /// <c>OnShown</c> まで進める。隔離は <see cref="ShowMainForm"/> と同じ 4 点
     /// (settings / backups / session-state / last-session-buffers)。</summary>
@@ -1073,9 +1151,12 @@ public class MainFormSmokeTests
     /// この IL テストが守るのは「その合成点を通っていること」だけである。
     /// </para>
     /// <para>
-    /// 向きに注意: 呼出トークンの走査は<b>偽陽性</b>(オペランドのバイト列がたまたま解決できる)は
-    /// あり得ても<b>偽陰性は無い</b>。実在する呼出のトークンは必ず拾えるので、
-    /// <c>Contains</c> 側の主張は健全である。
+    /// 向きに注意(<see cref="IlCallees"/> の xmldoc と同じ話): 走査に残るのは<b>偽陽性</b>
+    /// (オペランドのバイト列がたまたまメソッドトークンとして解決できる)だけで、<b>偽陰性は無い</b>。
+    /// 偽陽性は集合へ「呼んでいないもの」を足す向きにしか働かないので、健全なのは
+    /// <b><c>DoesNotContain</c> の側</b>である(偽陽性で緑になることはない)。逆に
+    /// <c>Contains</c> は偽陽性で緑になりうるので、下の 1 本は変異
+    /// (合成点を迂回する M-E')を当てて実際に赤くなることを確認してある。
     /// </para>
     /// </summary>
     [Fact]
@@ -1086,7 +1167,8 @@ public class MainFormSmokeTests
             BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
         );
         Assert.NotNull(main);
-        var called = CalledMembers(main!);
+        // newobj まで拾う入口を使う: 下の「MainForm を直に組み立てない」は ctor を見る主張。
+        var called = IlCallees.OfIncludingNewobj(main!);
 
         Assert.Contains(
             called,
@@ -1102,39 +1184,6 @@ public class MainFormSmokeTests
             called,
             m => m is ConstructorInfo && m.DeclaringType == typeof(MainForm)
         );
-    }
-
-    /// <summary>
-    /// メソッド本体の IL から <c>call</c>(0x28)/ <c>newobj</c>(0x73)/ <c>callvirt</c>(0x6F)の
-    /// オペランドをメタデータトークンとして解決し、解決できたものを返す。
-    /// <para>
-    /// 完全な IL デコーダではない(オペランドのバイト列を命令と読み違える可能性がある)ので、
-    /// <b>「含む」向きの主張にだけ使う</b>。実在する呼出は必ず拾えるため偽陰性は無く、
-    /// 偽陽性は決定的(同じアセンブリなら毎回同じ結果)なのでフレークにもならない。
-    /// </para>
-    /// </summary>
-    private static List<MethodBase> CalledMembers(MethodInfo method)
-    {
-        byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;
-        var module = method.Module;
-        var genericTypeArgs = method.DeclaringType?.GetGenericArguments();
-        var result = new List<MethodBase>();
-        for (int i = 0; i + 4 < il.Length; i++)
-        {
-            if (il[i] is not (0x28 or 0x6F or 0x73))
-                continue;
-            int token = BitConverter.ToInt32(il, i + 1);
-            try
-            {
-                var resolved = module.ResolveMethod(token, genericTypeArgs, null);
-                if (resolved is not null)
-                    result.Add(resolved);
-            }
-            catch (ArgumentException)
-            { /* 命令ではなくオペランドを読んだ = 解決できないだけ。走査を続ける */
-            }
-        }
-        return result;
     }
 
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====

@@ -65,6 +65,23 @@ public class SettingsStartupTests
     /// Task 8 最大の主張が、緑では 1 ビットも守られていなかった。
     /// </para>
     /// </summary>
+    /// <summary>
+    /// <b>fixture 検算</b>: このパスに対して無害化(<c>OneLine</c>)が<b>実際に何かを変える</b>こと。
+    /// <para>
+    /// これが成り立たない短いパスでは <c>Assert.Contains(OneLine(path), warning)</c> が
+    /// <b>恒真</b>になり、<c>OneLine</c> を外す変異がそのまま生存する ——
+    /// §10.16 が退避先の枝で発見して <see cref="MakeLongSettingsPath"/> で潰した罠が、
+    /// 残り 2 枝(Corrupt の退避失敗 / Unreadable)にそのまま残っていた(実測・§10.19)。
+    /// </para>
+    /// </summary>
+    private static void AssertSanitizationIsObservable(string path)
+    {
+        string shown = SanitizeForDisplay.OneLine(path);
+        Assert.Contains("  ", path, StringComparison.Ordinal); // 畳み込む対象がある
+        Assert.DoesNotContain("  ", shown, StringComparison.Ordinal); // 畳み込まれる
+        Assert.NotEqual(path, shown); // ★ 恒真 assertion にならない
+    }
+
     private static void AssertNamesTheRealRewriteTrigger(string warning)
     {
         Assert.Contains("終了するとき", warning, StringComparison.Ordinal);
@@ -190,8 +207,11 @@ public class SettingsStartupTests
     public void Prepare_does_not_point_at_a_quarantine_that_was_never_created()
     {
         using var tmp = new TempDir();
-        string path = tmp.File(Leaf);
+        // 長いパス(連続空白入り)にする理由は AssertSanitizationIsObservable を参照。
+        // 短いパスでは下の Contains(OneLine(path)) が恒真になり、無害化を外す変異が生存する。
+        string path = MakeLongSettingsPath(tmp, quarantineLength: 275);
         string quarantined = path + BadSuffix;
+        AssertSanitizationIsObservable(path);
         File.WriteAllText(path, CorruptJson);
         Directory.CreateDirectory(quarantined); // 退避を確実に失敗させる
         string marker = Path.Combine(quarantined, "keep.txt");
@@ -200,10 +220,20 @@ public class SettingsStartupTests
         var (_, warning) = SettingsStartup.Prepare(path);
 
         Assert.NotNull(warning);
-        Assert.DoesNotContain(quarantined, warning, StringComparison.Ordinal); // 実在しない場所を案内しない
+        // 実在しない場所を案内しない。生と無害化後の<b>両方</b>を見る —— 片方だけだと、
+        // もう一方の形で出力する実装が素通りする。
+        Assert.DoesNotContain(quarantined, warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            SanitizeForDisplay.OneLine(quarantined),
+            warning,
+            StringComparison.Ordinal
+        );
         Assert.DoesNotContain("退避しました", warning, StringComparison.Ordinal); // 成功側の文言ではない
         Assert.Contains("退避できませんでした", warning, StringComparison.Ordinal);
+        // ★ 無害化を通っている。fixture が長い(= OneLine(path) != path)ので、
+        //   OneLine を外す変異はここで落ちる(§10.16 が退避先の枝で潰したのと同じ罠)。
         Assert.Contains(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(path, warning, StringComparison.Ordinal); // 生のパスは載せない
         AssertNamesTheRealRewriteTrigger(warning);
         Assert.Equal(CorruptJson, File.ReadAllText(path)); // 原本は動いていない
         Assert.True(Directory.Exists(quarantined)); // overwrite: true が同名の別物を消していない
@@ -255,7 +285,9 @@ public class SettingsStartupTests
     public void Prepare_warns_but_never_renames_an_unreadable_file()
     {
         using var tmp = new TempDir();
-        string path = tmp.File(Leaf);
+        // 長いパス(連続空白入り)にする理由は AssertSanitizationIsObservable を参照。
+        string path = MakeLongSettingsPath(tmp, quarantineLength: 275);
+        AssertSanitizationIsObservable(path);
         SettingsStore.Save(path, new AppSettings { FontName = "BIZ UDゴシック" });
         string original = File.ReadAllText(path);
 
@@ -273,7 +305,9 @@ public class SettingsStartupTests
         Assert.Equal(original, File.ReadAllText(path)); // ★ 中身も無傷
         Assert.DoesNotContain(BadSuffix, warning, StringComparison.Ordinal); // 退避を案内しない
         Assert.DoesNotContain("壊れて", warning, StringComparison.Ordinal); // Corrupt の文言ではない
+        // ★ 無害化を通っている(fixture が長いので恒真にならない)。
         Assert.Contains(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(path, warning, StringComparison.Ordinal); // 生のパスは載せない
         AssertNamesTheRealRewriteTrigger(warning);
 
         // ロックが外れれば以前の設定へ戻れる = 改名してはいけない対象だった。
@@ -309,8 +343,11 @@ public class SettingsStartupTests
     public void Prepare_does_not_point_at_the_source_file_when_it_is_already_gone()
     {
         using var tmp = new TempDir();
-        string path = tmp.File(Leaf);
+        // 長いパスにすることで、下の 2 本の DoesNotContain(生 / 無害化後)が別々の主張になる。
+        // 短いパスでは両者が同一文字列で、片方の形だけで出力する実装を弁別できない。
+        string path = MakeLongSettingsPath(tmp, quarantineLength: 275);
         string quarantined = path + BadSuffix;
+        AssertSanitizationIsObservable(path);
         File.WriteAllText(path, CorruptJson);
 
         var (settings, warning) = SettingsStartup.Prepare(
