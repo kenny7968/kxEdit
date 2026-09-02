@@ -27,14 +27,22 @@ public class SettingsStartupTests
     /// <c>OneLine</c> の空白畳み込みが効いていることを観測面にする —— Windows のパス構成要素は
     /// 途中に連続空白を持てる(設計 §10.7 で実測)ので、無害化だけ外す変異が落ちる。
     /// </para>
+    /// <para>
+    /// <b>MAX_PATH(260)を越える長さも作れる。</b>.NET ランタイムがパスへ <c>\\?\</c> を自動付与する
+    /// (<c>PathInternal.EnsureExtendedPrefixIfNeeded</c>)ためで、<b>OS の長パス設定に依存しない</b>
+    /// —— レビュアー実測では <c>LongPathsEnabled</c> 未設定のまま 271 文字の作成・<c>File.Exists</c>・
+    /// <c>ReadAllText</c>・<c>File.Move</c> がすべて成功している。同じ .NET ランタイムで走る CI でも
+    /// 成立する(設計 §10.16)。
+    /// </para>
     /// </summary>
     private static string MakeLongSettingsPath(TempDir tmp, int quarantineLength)
     {
         // Root + "\" + dirName + "\" + Leaf + BadSuffix == quarantineLength
         int dirNameLength = quarantineLength - tmp.Root.Length - 2 - Leaf.Length - BadSuffix.Length;
         // fixture が空振りしていないことの検算(一時ディレクトリが極端に深い環境では
-        // 静かに短いパスへ縮退させず、ここで落とす)。
-        Assert.InRange(dirNameLength, 8, 200);
+        // 静かに短いパスへ縮退させず、ここで落とす)。上限は 1 パス構成要素の限界(255)未満で、
+        // TEMP が短い環境(CI)ほど大きくなる ——「短くなって網が緩む」向きには倒れない。
+        Assert.InRange(dirNameLength, 8, 250);
         string dirName = new string('a', dirNameLength - 3) + "  z";
         string dir = Path.Combine(tmp.Root, dirName);
         Directory.CreateDirectory(dir);
@@ -42,10 +50,39 @@ public class SettingsStartupTests
     }
 
     /// <summary>
+    /// 「いつ上書きされるか」を<b>実物どおりに</b>述べていることの網(設計 §10.15 (1) / §10.16)。
+    /// <para>
+    /// 計画案の文言は「設定を変更すると上書きされます」だったが、実物は違う ——
+    /// <c>MainForm.OnFormClosing</c>(<c>MainForm.cs:594</c>)が<b>終了のたび</b>に、
+    /// <c>FileController.RegisterRecent</c>(<c>FileController.cs:1575</c> / <c>:276</c>)が
+    /// <b>ファイルを開く・切り替える・保存するたび</b>に設定を書き直す。つまり
+    /// <b>ユーザーが何も操作しなくても</b>上書きされる。
+    /// </para>
+    /// <para>
+    /// 計画案へ戻すと「設定を変えなければ大丈夫」と読める = <b>案内文の側で、より静かな喪失を
+    /// 作る</b>ことになる。<b>この網が無い間、文言を計画案へ戻す変異は App 743 全 PASS のまま
+    /// 生存していた</b>(実測・§10.16 指摘 2)——「計画の文言は事実として弱かった」という
+    /// Task 8 最大の主張が、緑では 1 ビットも守られていなかった。
+    /// </para>
+    /// </summary>
+    private static void AssertNamesTheRealRewriteTrigger(string warning)
+    {
+        Assert.Contains("終了するとき", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("設定を変更すると", warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// ファイルが無い = 初回起動。<b>警告を出さない</b>(設計 §5.2 の <c>Missing</c>)。
     /// ここが警告側へ倒れると、全ユーザーが初回起動で警告を読まされる。
-    /// 併せて<b>退避が走らない</b>(= <c>.bad</c> が生えない)ことも押さえる —— 退避は
-    /// <c>Corrupt</c> とだけ結び付いているという主張の網。
+    /// <para>
+    /// <b><c>Missing</c> では「退避を呼ばないこと」は観測できない。</b>原本が存在しないので、
+    /// 呼んでも <c>File.Move</c> が落ちて <c>false</c> を返し、<c>.bad</c> は生えない ——
+    /// 下の <c>.bad</c> 不在 assertion が見ているのは「呼ばないこと」ではなく<b>「呼んでも失敗する
+    /// こと」</b>である(<c>FileShare.None</c> の fixture で踏んだ欠陥と同型・§10.16 指摘 3)。
+    /// 退避が <c>Corrupt</c> に限られることの網は <c>Ok</c> 側(原本のバイト列不変)と
+    /// <c>Unreadable</c> 側(改名可能なロックで固定)が持つ。ここでは
+    /// <b><c>Prepare</c> が設定ファイルを作らない</b>ことだけを押さえる。
+    /// </para>
     /// </summary>
     [Fact]
     public void Prepare_warns_nothing_when_the_settings_file_is_missing()
@@ -59,7 +96,9 @@ public class SettingsStartupTests
         Assert.Null(warning);
         Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行
         Assert.False(File.Exists(path)); // 読むだけ(生成しない)
-        Assert.False(File.Exists(path + BadSuffix)); // 退避は走らない
+        // .bad が生えないことは「退避を呼ばない」の網ではない(呼んでも失敗するため。上の xmldoc)。
+        // ここでは「Prepare が余計なファイルを置いていかない」ことだけを見ている。
+        Assert.False(File.Exists(path + BadSuffix));
     }
 
     /// <summary>
@@ -100,7 +139,7 @@ public class SettingsStartupTests
     public void Prepare_quarantines_a_corrupt_file_and_points_at_it_in_full()
     {
         using var tmp = new TempDir();
-        string path = MakeLongSettingsPath(tmp, quarantineLength: 250);
+        string path = MakeLongSettingsPath(tmp, quarantineLength: 275);
         string quarantined = path + BadSuffix;
         File.WriteAllText(path, CorruptJson);
 
@@ -111,17 +150,17 @@ public class SettingsStartupTests
         Assert.Equal(CorruptJson, File.ReadAllText(quarantined));
         Assert.Equal(new AppSettings().FontName, settings.FontName); // 既定で続行
 
-        // fixture の検算: 生のパスは 250 文字で連続空白を含み、無害化後はそれが畳まれて 1 文字短い。
-        // この 2 行が緑にならない fixture では、下の Contains は切り詰め/無害化のどちらも弁別できない。
+        // fixture の検算: 生のパスは 275 文字で連続空白を含み、無害化後はそれが畳まれて 1 文字短い。
+        // この 3 行が緑にならない fixture では、下の Contains は切り詰め/無害化のどちらも弁別できない。
+        // 275 は MAX_PATH(260)超 —— 計画案の上限 260 を付け直す変異まで殺せる長さである
+        // (260 以下の fixture ではその変異が生存する。設計 §10.16)。
         string shown = SanitizeForDisplay.OneLine(quarantined);
-        Assert.Equal(250, quarantined.Length);
+        Assert.Equal(275, quarantined.Length);
         Assert.Contains("  ", quarantined, StringComparison.Ordinal);
         Assert.DoesNotContain("  ", shown, StringComparison.Ordinal);
 
-        // ②③退避先は「丸ごと」「無害化された形で」載る。無害化を外す変異と、249 未満の上限を
-        // 付け直す変異はここで落ちる。ただし<b>計画案の 260 は落ちない</b>(実測・生存)——
-        // 260 超の fixture は MAX_PATH を越えるパスにファイルを作る必要があり、長パス対応の
-        // 有無で CI とローカルの結果が変わる。この限界は設計 §10.15 に記録してある。
+        // ②③退避先は「丸ごと」「無害化された形で」載る。無害化を外す変異と、
+        // 274 未満のあらゆる上限を付け直す変異(計画案の 260 を含む)がここで落ちる。
         Assert.Contains(shown, warning, StringComparison.Ordinal);
 
         // ④語順: 次にすべきこと(設定し直し)が退避先パスより前にある。
@@ -165,6 +204,7 @@ public class SettingsStartupTests
         Assert.DoesNotContain("退避しました", warning, StringComparison.Ordinal); // 成功側の文言ではない
         Assert.Contains("退避できませんでした", warning, StringComparison.Ordinal);
         Assert.Contains(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
+        AssertNamesTheRealRewriteTrigger(warning);
         Assert.Equal(CorruptJson, File.ReadAllText(path)); // 原本は動いていない
         Assert.True(Directory.Exists(quarantined)); // overwrite: true が同名の別物を消していない
         Assert.Equal("別物", File.ReadAllText(marker));
@@ -234,6 +274,7 @@ public class SettingsStartupTests
         Assert.DoesNotContain(BadSuffix, warning, StringComparison.Ordinal); // 退避を案内しない
         Assert.DoesNotContain("壊れて", warning, StringComparison.Ordinal); // Corrupt の文言ではない
         Assert.Contains(SanitizeForDisplay.OneLine(path), warning, StringComparison.Ordinal);
+        AssertNamesTheRealRewriteTrigger(warning);
 
         // ロックが外れれば以前の設定へ戻れる = 改名してはいけない対象だった。
         var reread = SettingsStore.Load(path, out var afterUnlock);
