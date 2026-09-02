@@ -1705,6 +1705,16 @@ public sealed partial class MainForm : Form
             ShowPreviewTooLarge(ex.Message);
             return;
         }
+        catch (MarkdownTooComplexException ex)
+        {
+            // B: Markdig のネスト深度上限 (既定 128) 超過。"> " × 200 = 400 バイトで発火する
+            // ので 4M 文字 cap のはるか下で起きる。翻訳前は未捕捉例外として
+            // Application.ThreadException → CrashHandler → アプリ終了になっていた。
+            // baseHref allow-list 違反 (MD-L-4) の ArgumentException はここへ来ない
+            // (Render 側で型が分かれている) ので、実装バグは引き続き伝播する。
+            ShowPreviewNotRenderable(ex.Message);
+            return;
+        }
 
         using var f = new MarkdownPreviewForm(
             html,
@@ -1726,11 +1736,26 @@ public sealed partial class MainForm : Form
     /// (detail はどちらも <c>MarkdownRenderer.TooLargeDetail</c> 由来)。
     /// </para>
     /// </summary>
-    private void ShowPreviewTooLarge(string detail)
+    private void ShowPreviewTooLarge(string detail) =>
+        ShowPreviewUnavailable("マークダウン本文が大きすぎます。", detail);
+
+    /// <summary>
+    /// B: プレビューが<b>構造の複雑さ</b>で開けないことをユーザへ提示する。
+    /// 「大きすぎます」とは別文言にする —— 400 バイトの .md でも起きるので、
+    /// サイズの話にすると原因を取り違えさせる (実際 <c>"&gt; " × 200</c> で発火する)。
+    /// </summary>
+    private void ShowPreviewNotRenderable(string detail) =>
+        ShowPreviewUnavailable("マークダウンの構造が深すぎて表示できません。", detail);
+
+    /// <summary>
+    /// プレビューを開けなかったことの提示 (文面・タイトル・アイコン・フォーカス復帰を
+    /// 全経路で同一にするための 1 箇所)。
+    /// </summary>
+    private void ShowPreviewUnavailable(string reason, string detail)
     {
         MessageBox.Show(
             this,
-            $"プレビューを表示できません。マークダウン本文が大きすぎます。\n\n詳細: {detail}",
+            $"プレビューを表示できません。{reason}\n\n詳細: {detail}",
             "プレビューを表示できません",
             MessageBoxButtons.OK,
             MessageBoxIcon.Warning

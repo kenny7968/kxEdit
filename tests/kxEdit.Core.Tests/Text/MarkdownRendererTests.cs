@@ -331,6 +331,68 @@ public class MarkdownRendererTests
         Assert.Equal(expected, MarkdownRenderer.ExceedsMaxChars(charCount));
     }
 
+    /// <summary>
+    /// B (最終レビュー): Markdig のネスト深度上限 (既定 128) 超過は
+    /// <see cref="MarkdownTooComplexException"/> になる。
+    /// <para>
+    /// 素の <see cref="ArgumentException"/> のままだと caller (MainForm.ShowMarkdownPreview) は
+    /// <c>DocumentTooLargeException</c> しか捕まえないので未捕捉例外 →
+    /// <c>Application.ThreadException</c> → <c>CrashHandler</c> → アプリ終了になる。
+    /// <b>400 バイト</b>の .md で起きるので 4M 文字 cap では止まらない (実測)。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(200, 0, 0)] // "> " × 200 = 400 バイト
+    [InlineData(0, 20000, 0)] // "[" × 20000
+    [InlineData(0, 0, 200)] // 字下げで入れ子にしたリスト
+    public void Render_DeeplyNested_ThrowsMarkdownTooComplex(
+        int quoteDepth,
+        int brackets,
+        int listDepth
+    )
+    {
+        string md =
+            string.Concat(Enumerable.Repeat("> ", quoteDepth))
+            + new string('[', brackets)
+            + string.Concat(
+                Enumerable.Range(0, listDepth).Select(i => new string(' ', i * 2) + "- x\n")
+            );
+        // 入口の文字数 cap では止まらないことを同時に固定する (止まると理由が入れ替わる)。
+        Assert.False(MarkdownRenderer.ExceedsMaxChars(md.Length));
+        var ex = Assert.Throws<MarkdownTooComplexException>(() =>
+            MarkdownRenderer.Render(md, Base)
+        );
+        Assert.Equal(MarkdownRenderer.TooComplexDetail, ex.Message);
+        // 原因を捨てない (診断のため Markdig 側のメッセージを内側に残す)。
+        Assert.IsType<ArgumentException>(ex.InnerException);
+    }
+
+    /// <summary>
+    /// B の非退化対照: 深さが上限内なら従来どおり描画される。
+    /// (レビュアーが挙げた <c>"- " × 200</c> は<b>投げない</b> —— CommonMark の
+    /// thematic break として解釈されるため。実測で確認した差分。)
+    /// </summary>
+    [Theory]
+    [InlineData("> > > > > 深い引用")]
+    [InlineData("- - - - - - - - - -")] // "- " の繰り返しは <hr /> になる
+    public void Render_ShallowNesting_StillRenders(string md) =>
+        Assert.Contains("<body>", MarkdownRenderer.Render(md, Base), StringComparison.Ordinal);
+
+    /// <summary>
+    /// B: <c>ArgumentException</c> を無差別に捕まえていないことの網。baseHref の
+    /// allow-list 違反 (MD-L-4) は<b>呼び出し側の実装バグ</b>なので、
+    /// <see cref="MarkdownTooComplexException"/> へ翻訳せずそのまま抜けること。
+    /// </summary>
+    [Fact]
+    public void Render_UnknownBaseHref_StillThrowsArgumentException_NotTooComplex()
+    {
+        // Assert.Throws は型が完全一致でないと失敗する = 翻訳された瞬間にここが赤くなる。
+        var ex = Assert.Throws<ArgumentException>(() =>
+            MarkdownRenderer.Render("x", "https://evil.example/")
+        );
+        Assert.Equal("baseHref", ex.ParamName);
+    }
+
     [Fact]
     public void Render_TooLargeMessage_ComesFromTooLargeDetail()
     {

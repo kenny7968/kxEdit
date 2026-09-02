@@ -158,8 +158,20 @@ public static class MarkdownRenderer
 
     /// <summary>
     /// MD-L-3: レンダー入力サイズ上限 (4,000,000 文字 = 8 MB UTF-16 相当)。
-    /// ネスト深度 / テーブルサイズの pre-scan は入れず、入口一箇所の cap で
-    /// パーサ側の pathological な計算量爆発を封じる (設計書: MD-L-3)。
+    /// <para>
+    /// <b>訂正 (B・最終レビュー)</b>: 旧記述は「ネスト深度 / テーブルサイズの pre-scan は
+    /// 入れず、入口一箇所の cap でパーサ側の pathological な計算量爆発を封じる」だったが、
+    /// <b>実態と違う</b>。pre-scan を入れていないのは事実だが、ネスト深度を実際に封じて
+    /// いるのは <b>Markdig 自身の <c>MaximumNestingDepth</c> (既定 128)</b> であり、
+    /// その失敗様式は「例外を投げる」——<c>"&gt; " × 200</c> (<b>400 バイト</b>) で発火する
+    /// (実測)。この cap が担っているのは<b>文字数の壁だけ</b>で、深いネストはここより
+    /// はるか手前で Markdig が止める。
+    /// </para>
+    /// <para>
+    /// その例外は <see cref="Render"/> が <see cref="MarkdownTooComplexException"/> へ
+    /// 翻訳し、caller (<c>MainForm.ShowMarkdownPreview</c>) がダイアログで提示する。
+    /// 翻訳前は未捕捉例外としてアプリが落ちていた (main 既存の欠陥)。
+    /// </para>
     /// </summary>
     public const int MaxMarkdownChars = 4_000_000;
 
@@ -177,6 +189,13 @@ public static class MarkdownRenderer
     /// </summary>
     public static string TooLargeDetail(int charCount) =>
         $"マークダウン本文が上限を超えました({charCount:N0}/{MaxMarkdownChars:N0} 文字)";
+
+    /// <summary>
+    /// B: <see cref="MarkdownTooComplexException"/> の文言 (<see cref="TooLargeDetail"/> と
+    /// 対称に、例外とダイアログで同じ文面を使うための single source of truth)。
+    /// </summary>
+    public const string TooComplexDetail =
+        "マークダウンの入れ子が深すぎます(引用・リスト・表などの深さがパーサの上限を超えました)";
 
     // CommonMark + GFM 拡張（表・チェックリスト・自動リンク等）。スレッドセーフなので使い回す。
     //
@@ -250,6 +269,12 @@ public static class MarkdownRenderer
     /// <exception cref="ArgumentException">
     /// baseHref が空文字でも <see cref="PreviewBaseHref"/> 定数でもない場合。
     /// 単一 caller の防御的ガードで、将来 caller が増えた際の混入を fail-fast で止める。
+    /// <b>これは呼び出し側の実装バグ</b>なので caller は握り潰してはならない。
+    /// </exception>
+    /// <exception cref="MarkdownTooComplexException">
+    /// Markdig のネスト深度上限を超える入力 (B)。<c>"&gt; " × 200</c> = 400 バイトで発火する
+    /// ので、<see cref="MaxMarkdownChars"/> の cap では止まらない。
+    /// caller (MainForm.ShowMarkdownPreview) が捕えてユーザに MessageBox で提示する。
     /// </exception>
     /// <exception cref="DocumentTooLargeException">
     /// markdown が <see cref="MaxMarkdownChars"/> を超える場合 (MD-L-3)。
@@ -271,9 +296,11 @@ public static class MarkdownRenderer
             );
         }
 
-        // MD-L-3: 入力サイズ cap (4M 文字 = 8 MB UTF-16 相当)。ネスト深度 / テーブル
-        // サイズの pre-scan は入れず、入口一箇所で Markdig への pathological な
-        // 入力を封じる。null は既存の ?? string.Empty で吸収されるため対象外。
+        // MD-L-3: 入力サイズ cap (4M 文字 = 8 MB UTF-16 相当)。null は既存の
+        // ?? string.Empty で吸収されるため対象外。
+        // B (訂正): ここが封じるのは文字数だけ。ネスト深度 / テーブルサイズは
+        // pre-scan していないし、この cap でも止まらない (400 バイトで Markdig 側の
+        // 上限に当たる・実測)。それは下の catch が MarkdownTooComplexException へ翻訳する。
         // M-23: caller (MainForm.ShowMarkdownPreview) は全文 string 化の前に
         // ExceedsMaxChars で弾くが、この cap も残す (二重の壁。将来 caller が増えうる)。
         if (markdown != null && ExceedsMaxChars(markdown.Length))
@@ -284,7 +311,20 @@ public static class MarkdownRenderer
 
         // A-2 (案 B): preview 経路だけ相対 URL を絶対化するパイプラインを使う。
         MarkdownPipeline pipeline = baseHref == PreviewBaseHref ? PreviewPipeline : Pipeline;
-        string body = Markdown.ToHtml(markdown ?? string.Empty, pipeline);
+        string body;
+        try
+        {
+            body = Markdown.ToHtml(markdown ?? string.Empty, pipeline);
+        }
+        // B: Markdig は MaximumNestingDepth (既定 128) 超過を素の ArgumentException で
+        // 投げる。上の MD-L-4 ガードも ArgumentException なので、ここで無差別に捕まえると
+        // 「呼び出し側の実装バグ」まで握り潰す。try を ToHtml の 1 行だけに絞って
+        // 構造的に分けてある (ParamName で弁別しない: Markdig 側は null・実測)。
+        // ArgumentNullException は実装バグの伝播原則に従いそのまま抜けさせる。
+        catch (ArgumentException ex) when (ex is not ArgumentNullException)
+        {
+            throw new MarkdownTooComplexException(TooComplexDetail, ex);
+        }
         // MD-M-2: CSP は HTTP header (PreviewCspHeaderInjector) 側が第一防御で、
         // meta http-equiv は WebResourceRequested 未サポート環境および
         // NavigateToString(html) 初回 bootstrap の data:text/html origin (header 注入不可) 用の
