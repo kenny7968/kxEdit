@@ -330,6 +330,8 @@ public class MarkdownRendererTests
     //   - A-2 (2026-08-22・案 B): base-uri は 'none' のまま。文書に <base> を出力せず、
     //     相対 URL は PreviewRelativeUrlExtension が描画前に絶対化する (設計書 §7)
     //   - style-src から 'unsafe-inline' を削除し 'self' https://kxedit.preview のみに
+    //     (V-4・2026-09-03: 'self' も削除した。data: 文書の origin は opaque で
+    //      'self' は何にもマッチせず、防御として機能していなかったため)
     //   - <style>{Css}</style> を <link rel="stylesheet"> へ外部化 (href は A-2 案 B で
     //     絶対 URL https://kxedit.preview/_kxedit/styles.css へ変更・<base> 非依存にするため。
     //     実 file は PreviewCspHeaderInjector が virtual response で供給)
@@ -436,10 +438,29 @@ public class MarkdownRendererTests
         Assert.Contains("connect-src 'none'", csp);
         Assert.Contains("img-src https://kxedit.preview", csp);
         Assert.Contains("media-src https://kxedit.preview", csp);
-        Assert.Contains("style-src 'self' https://kxedit.preview", csp);
+        // V-4: data: 文書の origin は opaque なので 'self' は何にもマッチしない。
+        // <link> を実際に通しているのは https://kxedit.preview の方なので 'self' は置かない。
+        Assert.Contains("style-src https://kxedit.preview", csp);
+        Assert.DoesNotContain("'self'", csp);
         Assert.Contains("font-src https://kxedit.preview data:", csp);
         Assert.DoesNotContain("'unsafe-inline'", csp);
         Assert.DoesNotContain("img-src https://kxedit.preview data:", csp);
+    }
+
+    [Fact]
+    public void StyleSrc_Covers_StylesheetLinkOrigin_WithoutSelf()
+    {
+        // V-4: 'self' を外しても <link rel="stylesheet"> が通ることを、href の origin と
+        // style-src ディレクティブの突き合わせで固定する。data: 文書の origin は opaque なので
+        // 'self' は何にもマッチせず、<link> を実際に通しているのは https://kxedit.preview の側。
+        // directive 全体を切り出すので "style-src https://kxedit.preview 'self'" のような
+        // insertion mutation も落ちる。
+        var m = Regex.Match(MarkdownRenderer.PreviewCspHeader, @"style-src\s+([^;]*)(;|$)");
+        Assert.True(m.Success, "style-src directive が見つからない");
+        string directive = m.Groups[1].Value.Trim();
+        Assert.Equal("https://" + MarkdownRenderer.PreviewVirtualHost, directive);
+        // 実際に読み込む CSS の URL がこの source の配下にある = 防御は落ちていない。
+        Assert.StartsWith(directive + "/", MarkdownRenderer.PreviewStylesheetUrl);
     }
 
     [Fact]

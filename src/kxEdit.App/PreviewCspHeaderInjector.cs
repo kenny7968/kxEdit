@@ -23,10 +23,14 @@ namespace kxEdit.App;
 /// <list type="bullet">
 ///   <item><c>&lt;meta http-equiv&gt;</c> CSP: HTML 文書本体 (<c>data:text/html</c> bootstrap
 ///     経由で HTTP header 注入不可) と passthrough sub-resource の CSP は meta が唯一の担保。</item>
-///   <item>本 Injector の HTTP header CSP: styles.css レスポンス自体の CSP を強化する
-///     defense-in-depth (CSS の <c>@import</c> / <c>url(...)</c> 経路)。両者は同一
-///     <see cref="MarkdownRenderer.PreviewCspHeader"/> 定数から生成され、ブラウザ側で
-///     intersect (両方を満たす制約集合) される。</item>
+///   <item>本 Injector の HTTP header CSP: <b>防御層として数えない</b> (V-6・2026-09-03)。
+///     CSP はドキュメントとワーカーにのみ適用される仕様で、<b>CSS レスポンスに付けた
+///     ヘッダは強制されない</b>。CSS の <c>@import</c> / <c>url(...)</c> を実際に縛って
+///     いるのは<b>文書側</b>の <c>style-src</c> / <c>img-src</c> / <c>font-src</c>。
+///     送出自体は <see cref="MarkdownRenderer.PreviewCspHeader"/> 定数を共有する
+///     single source of truth として残す (害が無いため) が、旧記述の
+///     「styles.css レスポンス自体を強化する defense-in-depth」「両者がブラウザ側で
+///     intersect される」は<b>実在しない防御</b>だった。</item>
 /// </list>
 /// </para>
 /// <para>
@@ -154,7 +158,9 @@ internal sealed class PreviewCspHeaderInjector
     /// <para>
     /// 2 本のみ: <c>Content-Type</c> + <c>Content-Security-Policy</c>。CSP は
     /// <see cref="MarkdownRenderer.PreviewCspHeader"/> を参照 (meta 側と同一の
-    /// single source of truth)。
+    /// single source of truth)。V-6: この CSP ヘッダは CSS レスポンスに付くので
+    /// <b>ブラウザに強制されない</b> — 定数共有の一貫性のために出しているだけで、
+    /// 防御層として数えないこと (詳細はクラスの doc)。
     /// </para>
     /// </summary>
     internal static string BuildResponseHeaders()

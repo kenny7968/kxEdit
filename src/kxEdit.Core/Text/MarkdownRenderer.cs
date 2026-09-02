@@ -53,6 +53,12 @@ public static class MarkdownRenderer
     ///   <item>MD-M-2 追加: <c>base-uri/form-action/frame-ancestors/object-src/worker-src/
     ///     manifest-src/connect-src</c> を全て <c>'none'</c> (fetch/submit/embed/worker 経路
     ///     を封鎖)</item>
+    ///   <item>V-5 (2026-09-03): 上のうち <c>frame-ancestors 'none'</c> だけは
+    ///     <b>meta http-equiv 配信では仕様上無視される</b> (HTTP response header 側でのみ
+    ///     有効な directive)。プレビュー文書は <c>data:text/html</c> 起点で header を注入
+    ///     できないため、<b>現在この directive が効く経路は無い</b>。<c>MarkdownPreviewForm</c>
+    ///     は iframe に置かれないので実害は無く、将来 header 経路で文書を配信するときに
+    ///     効くので残すが、<b>多層防御が在るとは読まないこと</b>。</item>
     ///   <item>A-2 (2026-08-22・案 B): <c>base-uri</c> は <c>'none'</c> のまま維持する。
     ///     文書に <c>&lt;base&gt;</c> 要素を一切出力しない方式へ切り替えたため
     ///     (相対 URL は <see cref="PreviewRelativeUrlExtension"/> が描画前に絶対化し、
@@ -61,9 +67,13 @@ public static class MarkdownRenderer
     ///     まで base 基準で解決され目次リンクと脚注の戻りリンクが MD-H-1 の Block に
     ///     巻き込まれるため採らない (設計書 §7.1)。</item>
     ///   <item>MD-L-1: <c>img-src</c> から <c>data:</c> を削除 (base64 SVG 埋め込み XSS 対策)</item>
-    ///   <item><c>style-src 'self' https://kxedit.preview</c>: inline <c>&lt;style&gt;</c> 撤去
-    ///     に伴い <c>'unsafe-inline'</c> を削除。<c>'self'</c> は data: URI 起点の
-    ///     bootstrap でも動くよう保険で残す (HTTP header 側では preview 経由のみ有効)</item>
+    ///   <item><c>style-src https://kxedit.preview</c>: inline <c>&lt;style&gt;</c> 撤去
+    ///     に伴い <c>'unsafe-inline'</c> を削除。V-4 (2026-09-03): <c>'self'</c> も削除した。
+    ///     プレビュー文書は <c>NavigateToString</c> の <c>data:text/html</c> 起点で origin が
+    ///     <b>opaque</b> なので <c>'self'</c> は何にもマッチせず、防御として機能していなかった
+    ///     (旧コメントの「data: URI 起点の bootstrap でも動く保険」は実在しない防御)。
+    ///     <c>&lt;link&gt;</c> を実際に通しているのは <c>https://kxedit.preview</c> の方で、
+    ///     将来プレビュー文書を仮想ホスト経由で配信しても origin は同じ値なので不足しない。</item>
     ///   <item><c>font-src</c> の <c>data:</c> は保持 (@font-face の data URI 埋め込み対応)</item>
     /// </list>
     /// </para>
@@ -83,7 +93,7 @@ public static class MarkdownRenderer
         + "media-src https://"
         + PreviewVirtualHost
         + "; "
-        + "style-src 'self' https://"
+        + "style-src https://"
         + PreviewVirtualHost
         + "; "
         + "font-src https://"
