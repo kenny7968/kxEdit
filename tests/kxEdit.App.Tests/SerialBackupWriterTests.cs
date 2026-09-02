@@ -258,10 +258,11 @@ public class SerialBackupWriterTests
     // ===== M-20(B5): 書込成功の観測面(OnWriteSucceeded) =====
 
     /// <summary>M-20(B5): 書込が成功したら Id を通知する。
-    /// <c>OnWriteFailed</c> の対であり、Coordinator が「復旧した」を判定する唯一の観測面。
-    /// これが無いと「失敗が来ない」を復旧と読むしかなく、<b>書込を一度も投入していない</b>
-    /// 場合(dirty でない・署名一致で <c>BackupAction.None</c>)と区別できない
-    /// = 虚偽の復旧発声になる。
+    /// <c>OnWriteFailed</c> の対であり、Coordinator が「復旧した」を、毎 tick の I/O を UI スレッドへ
+    /// 持ち込まずに判定<b>できる</b>唯一の観測面(B5 Task 4 の遷移発声がこれに乗る予定で、
+    /// 本タスク時点ではまだ誰も購読していない)。これが無いと「失敗が来ない」を復旧と読むしかなく、
+    /// <b>書込を一度も投入していない</b>場合(dirty でない・署名一致で <c>BackupAction.None</c>)と
+    /// 区別できない = 虚偽の復旧発声になる。
     ///
     /// 観測の流儀は失敗側の <see cref="Write_Failure_Invokes_OnWriteFailed_WithRecordId"/> に
     /// 揃える(<see cref="ManualResetEventSlim"/> で「発火その場」を捉える・sleep/リトライ 0)。

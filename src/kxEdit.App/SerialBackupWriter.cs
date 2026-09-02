@@ -9,8 +9,8 @@ namespace kxEdit.App;
 /// 単一の背景スレッドで投入順に実行する。各ジョブの失敗は致命でないため握り潰す(無音)が、
 /// 書込(Write)だけは結果を通知する: 失敗は OnWriteFailed に record.Id を渡して
 /// 次 Reconcile での強制再書込を促し(Stage 5 で IBackupWriter を実装)、成功は
-/// M-20(B5)で足した OnWriteSucceeded に record.Id を渡す(Coordinator が「復旧した」を
-/// 判定する材料)。どちらも背景スレッドから同期発火するため、スレッド越えの吸収は受け手責務。
+/// M-20(B5)で足した OnWriteSucceeded に record.Id を渡す(B5 Task 4 の「復旧した」判定の
+/// 材料になる)。どちらも背景スレッドから同期発火するため、スレッド越えの吸収は受け手責務。
 /// Dispose で投入を締め切り、保留ジョブをドレインしてから戻る。
 /// BK-M-2: <c>_dir</c> は base backup directory ではなく **自セッション用 subdirectory** を保持する
 /// (<c>%APPDATA%\kxEdit\backups\session-{Guid.N}\</c>)。<see cref="Write"/> / <see cref="Delete"/> は
@@ -178,7 +178,8 @@ public sealed class SerialBackupWriter : IBackupWriter
     public bool WaitForPendingJobs(TimeSpan timeout)
     {
         // キュー末尾にバリアジョブを積み、それが走り終わるのを待つ。直列ワーカーなので
-        // バリアが走った時点で先行ジョブは全て実行済み=失敗通知(OnWriteFailed)も発火済み。
+        // バリアが走った時点で先行ジョブは全て実行済み=結果通知(OnWriteFailed / OnWriteSucceeded)も
+        // 発火済み。
         //
         // 不変条件: 投入者(producer)は UI スレッドただ 1 つ。「末尾バリア」が「全保留ジョブの完了」を
         // 意味するのは、待っている間に誰も新しいジョブを積めないからである(現状 Reconcile を回す

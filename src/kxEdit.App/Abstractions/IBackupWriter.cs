@@ -17,8 +17,8 @@ public interface IBackupWriter : IDisposable
     /// <summary>M-20(B5): 書込<b>成功</b>の通知フック(<see cref="OnWriteFailed"/> の対)。
     /// 引数は書けた <c>BackupRecord.Id</c>。
     ///
-    /// Coordinator が「バックアップが復旧した」を判定できる唯一の観測面である(B5 Task 4 の
-    /// 遷移発声がこれに乗る) ——
+    /// Coordinator が「バックアップが復旧した」を、<b>毎 tick の I/O を UI スレッドへ持ち込まずに</b>
+    /// 判定できる唯一の観測面である(B5 Task 4 の遷移発声がこれに乗る) ——
     /// 失敗が来なくなったことだけでは、書込が成功したのか<b>そもそも投入していないのか</b>
     /// (dirty でない・署名一致で <c>BackupAction.None</c> になり <see cref="Write"/> 自体を
     /// 呼んでいない)を区別できず、後者を復旧と読むと「一度も書けていないのに再開した」という
@@ -30,6 +30,11 @@ public interface IBackupWriter : IDisposable
     /// - 逆は成り立たない ——<b>鳴らないことは「成功しなかった」を意味しない</b>。投入自体が
     ///   捨てられた場合(締切済み/破棄済み)や、投入は受理されたがジョブが実行されないまま
     ///   終わる場合(<c>SerialBackupWriter</c> の Dispose が Join 上限で諦めた等)はどちらも鳴らない。
+    /// - 引数の Id は<b>その record が書けた</b>ことを意味する。BK-M-3 の path-only fallback
+    ///   (本文長が <c>BackupCoordinator.MaxBackupChars</c> 超のとき <c>Content=null</c> の record を
+    ///   書く)でも書込は成功して本フックが鳴るので、<b>本文が退避された保証ではない</b>
+    ///   (本文が載らない件は BK-M-3 / M-21 として別カタログ。M-20 の射程は「バックアップ先に
+    ///   書けるかどうか」に閉じる)。
     /// - 呼び出しスレッドは実装依存で、<see cref="OnWriteFailed"/> と同じ扱いでよい
     ///   (<c>SerialBackupWriter</c> は背景スレッドから同期発火する)。スレッド越えの吸収は受け手責務。
     /// - フックは投げない前提。投げたときの扱いも <see cref="OnWriteFailed"/> と同じで実装依存
