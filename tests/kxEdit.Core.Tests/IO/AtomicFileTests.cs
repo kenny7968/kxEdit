@@ -66,6 +66,102 @@ public class AtomicFileTests
         }
     }
 
+    // ===== M-13: ステージングを File.WriteAllBytes から FileStream(CreateNew)+Flush(true) へ
+    //              置き換えたことの挙動不変ネット(設計 2026-09-02 §4)。
+    //
+    // これらは「fsync が効いたこと」を検証していない。電源断を再現できないため、
+    // Flush(flushToDisk: true) がディスクへ届いたことは自動テストでは観測できない(設計 §6.2)。
+    // ここで固定しているのは<書き手を差し替えても書けるバイト列が変わらないこと>だけである。
+    // CreateNew(既存 tmp を黙って上書きしない)を弁別する網は無い —— tmp 名が
+    // Path.GetRandomFileName() 由来で、テストから同名ファイルを先に置けないため。
+    // FileMode.Create へ退化させる変異は生存する(設計 §10.8 に実測を記録)。
+
+    /// <summary>
+    /// 空の payload は「0 バイトのファイル」になること。File.WriteAllBytes は空配列でも
+    /// ファイルを作るが、置き換え後の実装が「書くものが無いなら書かない」形へ倒れると
+    /// ステージングが失敗するか、内容の無いファイルが差し替わらなくなる。
+    /// </summary>
+    [Fact]
+    public void Bytes_writes_an_empty_payload_as_an_empty_file()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            File.WriteAllText(path, "original");
+            AtomicFile.Write(path, Array.Empty<byte>());
+            Assert.True(File.Exists(path));
+            Assert.Empty(File.ReadAllBytes(path));
+            Assert.Empty(
+                Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".*tmp*")
+            );
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// payload が null のときは <see cref="ArgumentNullException"/>(File.WriteAllBytes 時代と
+    /// 同じ型)で、<b>tmp を作らずに</b>弾くこと。
+    /// <para>
+    /// FileStream 版は <c>payload.Length</c> に触れるため、入口ガードが無いと
+    /// NullReferenceException になり、しかも空の tmp を作ってから消すことになる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Bytes_rejects_a_null_payload_without_creating_a_tmp()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            File.WriteAllText(path, "original");
+            // キャストが要る: null リテラルだと byte[] 版と Action<Stream> 版が曖昧になる(CS0121)。
+            Assert.Throws<ArgumentNullException>(() => AtomicFile.Write(path, (byte[])null!));
+            Assert.Equal("original", File.ReadAllText(path));
+            Assert.Empty(
+                Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".*tmp*")
+            );
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// FileStream の内部バッファ(既定 4KB)を大きく超える payload が<b>最後まで</b>書かれること。
+    /// <para>
+    /// 既存の byte[] 版テストは 1〜3 バイトしか書いておらず、書き手を
+    /// <c>File.WriteAllBytes</c>(1 回で全部書く)から <c>FileStream.Write</c> へ替えたときに
+    /// 部分書込へ退行しても検出できなかった。末尾も含めて内容を突き合わせる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Bytes_writes_a_payload_larger_than_the_stream_buffer_completely()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            byte[] payload = new byte[1024 * 1024 + 7]; // バッファ境界に揃わない長さ
+            for (int i = 0; i < payload.Length; i++)
+                payload[i] = (byte)(i % 251);
+
+            AtomicFile.Write(path, payload);
+
+            byte[] actual = File.ReadAllBytes(path);
+            Assert.Equal(payload.Length, actual.Length);
+            Assert.Equal(payload, actual);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
     [Fact]
     public void IsShareOrLockViolation_is_false_for_generic_io_error() =>
         Assert.False(AtomicFile.IsShareOrLockViolation(new IOException("generic")));

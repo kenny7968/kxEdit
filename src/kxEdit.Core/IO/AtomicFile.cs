@@ -16,6 +16,22 @@ namespace kxEdit.Core.IO;
 /// （M-12・設計 2026-09-02 §3）。</item>
 /// </list>
 /// </para>
+/// <para>
+/// <b>電源断に対して保証すること／しないこと（M-13・設計 2026-09-02 §4.3）。</b>
+/// ①のステージングは差し替える前に <c>Flush(flushToDisk: true)</c>（= Win32
+/// <c>FlushFileBuffers</c>）を掛ける。これが保証するのは<b>そのファイルの中身がディスクに
+/// 届いたこと</b>だけであり、<b>その後の rename が届いたことではない</b>
+/// —— Windows にはディレクトリのメタデータを明示的に flush する API が .NET から無い。
+/// <list type="bullet">
+/// <item>消える失敗: 「差し替わったファイルの中身が不完全」（= rename は届いたのに中身が
+/// 届いていない状態）。</item>
+/// <item><b>残る失敗</b>: 「rename 自体が失われる」。この場合<b>原本は無傷のまま残る</b>
+/// （= データ喪失ではなく、保存の取りこぼし）。</item>
+/// </list>
+/// したがって<b>「原子書込＋fsync だから電源断に強い」とは言えない</b>。言えるのは
+/// 「差し替わったファイルの中身が不完全になることはない」までで、<b>保存そのものが
+/// 無かったことになる可能性は残る</b>。
+/// </para>
 /// フォールバック（共有違反時の in-place 上書き等）を行うかは呼び出し側の責務で、
 /// IsShareOrLockViolation で判定できる。
 /// </summary>
@@ -32,6 +48,11 @@ public static class AtomicFile
     /// </summary>
     public static void Write(string path, byte[] payload)
     {
+        // 旧実装の File.WriteAllBytes は null で ArgumentNullException を投げていた。
+        // FileStream 版は payload.Length で NullReferenceException になるうえ、
+        // 空の tmp を作ってから消すことになるので、入口で同じ型の例外に揃える
+        // （Stream 版の ThrowIfNull(writer) とも形が揃う）。
+        ArgumentNullException.ThrowIfNull(payload);
         string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
         string tmp = Path.Combine(
             dir,
@@ -42,7 +63,18 @@ public static class AtomicFile
         //    原本に一切触れず、tmp 残骸の掃除だけ試みて例外を伝播する。
         try
         {
-            File.WriteAllBytes(tmp, payload);
+            // CreateNew: 既存 tmp があれば黙って上書きせず失敗する（乱数名なので衝突は
+            // 事実上起きないが、起きたなら他者の書込中ファイルを潰すより失敗する方が正しい）。
+            // Stream 版と同じ形。
+            using var fs = new FileStream(
+                tmp,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None
+            );
+            fs.Write(payload, 0, payload.Length);
+            // M-13: 差し替える前にディスクへ届かせる。保証の範囲はクラス xmldoc を参照。
+            fs.Flush(flushToDisk: true);
         }
         catch
         {
@@ -59,6 +91,15 @@ public static class AtomicFile
     /// FileStream を渡し、書き終えた後に <see cref="Write(string, byte[])"/> と同じ
     /// File.Replace / File.Move で差し替える。writer が例外を投げた場合は tmp を
     /// 掃除して例外を伝播する(原本に一切触れない=byte[] 版と同一契約)。
+    /// <para>
+    /// <b>writer は渡された Stream を閉じてはならない</b>(M-13 以降の契約)。戻ってきた後に
+    /// <c>Flush(flushToDisk: true)</c> を掛けるため、閉じられていると ObjectDisposedException に
+    /// なる。具体的には <c>using var sw = new StreamWriter(stream)</c> のように<b>下位ストリームごと
+    /// Dispose するラッパ</b>を writer 内で使わないこと(必要なら
+    /// <c>leaveOpen: true</c> を渡す)。閉じられた場合は例外が伝播して tmp が掃除され、
+    /// 原本は無傷のまま残る —— <b>黙って fsync を飛ばす方には倒さない</b>
+    /// (飛ばすと M-13 の保証が静かに消える)。
+    /// </para>
     /// </summary>
     public static void Write(string path, Action<Stream> writer)
     {
@@ -74,7 +115,13 @@ public static class AtomicFile
             using (
                 var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None)
             )
+            {
                 writer(fs);
+                // M-13: 差し替える前にディスクへ届かせる。using を抜ける前でなければならない
+                // （Dispose 後では fs へ触れないうえ、Dispose の flush は OS キャッシュまで）。
+                // 保証の範囲はクラス xmldoc を参照。
+                fs.Flush(flushToDisk: true);
+            }
         }
         catch
         {

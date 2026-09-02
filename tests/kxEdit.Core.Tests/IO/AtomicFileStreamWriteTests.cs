@@ -101,6 +101,53 @@ public class AtomicFileStreamWriteTests
         }
     }
 
+    /// <summary>
+    /// M-13 の契約: writer が渡された Stream を閉じてしまった場合、<b>安全側に倒れる</b>こと
+    /// —— 例外が伝播し、tmp は掃除され、原本は無傷のまま残る(設計 2026-09-02 §4)。
+    /// <para>
+    /// <c>using var sw = new StreamWriter(stream)</c> は<b>下位ストリームごと Dispose する</b>ので、
+    /// 将来の呼出側が素直に書くとこの形になる。閉じられた後は <c>Flush(flushToDisk: true)</c> を
+    /// 掛けられないため、<b>黙って fsync を飛ばす(= M-13 の保証が静かに消える)</b>か、
+    /// <b>失敗させる</b>かの二択になる。ここでは後者を選んだことを固定する。
+    /// </para>
+    /// <para>
+    /// <b>この網が殺せる変異と殺せない変異</b>: Stream 版から <c>fs.Flush(...)</c> を丸ごと
+    /// 落とす変異は殺せる(閉じられた fs に触らなくなるので例外が出ず、書込が成功してしまう)。
+    /// 一方 <c>Flush(flushToDisk: true)</c> を <c>Flush()</c> へ退化させる変異は<b>殺せない</b>
+    /// —— どちらも閉じられたストリームでは同じ例外になる。fsync が実際にディスクへ届いたことは
+    /// 自動テストでは観測できない(設計 §6.2 / §10.8)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Write_Stream_WriterClosesTheStream_FailsSafely()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            File.WriteAllText(path, "original");
+            Assert.Throws<ObjectDisposedException>(() =>
+                AtomicFile.Write(
+                    path,
+                    stream =>
+                    {
+                        // leaveOpen を渡していない = Dispose で下位ストリームまで閉じる。
+                        using var sw = new StreamWriter(stream, Encoding.UTF8);
+                        sw.Write("closed by the writer");
+                    }
+                )
+            );
+            // 原本は無傷・tmp 残骸なし(= ステージング失敗時の既存ポリシーどおり)。
+            Assert.Equal("original", File.ReadAllText(path, Encoding.UTF8));
+            string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+            Assert.Empty(Directory.GetFiles(dir, Path.GetFileName(path) + ".*.tmp"));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
     [Fact]
     public void Write_Stream_TargetLocked_ThrowsShareViolation_KeepsOriginal_CleansTmp()
     {
