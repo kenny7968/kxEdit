@@ -6,7 +6,9 @@
 V-2(未マップ時の実 DNS 解決)/ PR #57 申し送り(無境界 `Directory.Exists`)/ V-3(`%2f` 密輸)/
 V-4〜V-6(実在しない防御を謳うコメント)/ M-23(サイズ判定前の全文 string 化)。
 
-**Architecture:** 「マッピングは常に在る」を不変条件にして V-2 と 21 秒凍結を同時に解く。
+**Architecture:** 「マッピングは常に在る」を不変条件にして V-2 と UI スレッドのブロックを
+同時に解く(**2026-09-03 改訂**: 実在確認は消せない —— `SetVirtualHostNameToFolderMapping`
+自身が内蔵しているため。`Task.Run` 越しの境界付きプローブで UI スレッドから外す。設計書 §13.2)。
 判断は純粋ロジック(`PreviewVirtualHostMapping`)へ出して App.Tests で網を張り、WebView2 実体に
 残るのは呼び出し 1 行だけにする。V-3 は前置ガードではなく解決結果の事後条件で弾く(V-7 の教訓)。
 
@@ -47,6 +49,9 @@ powershell -File tools\pre-merge-check.ps1
 ---
 
 ## Task 0: スパイク — WebView2 と Uri の実挙動を測る
+
+> **実施済み(2026-09-03・commit `175bfb9`)。結果は設計書 §13.1。**
+> **①②は偽・③④は期待どおり**だったため、Task 1 を §13.2 の設計へ改訂した。
 
 **なぜ最初か:** 設計 §4 は「不存在フォルダーでも例外を投げない」「不達 UNC でも呼び出しが
 ブロックしない」を前提にしている。**この 2 つが偽なら §4 は作り直し**なので、kxEdit を触る前に測る。
@@ -179,21 +184,27 @@ Remove-Item -Recurse -Force <scratchpad>\wv2probe
 
 ---
 
-## Task 1: V-2 + PR #57 申し送り — マッピングは常に在る
+## Task 1: V-2 + PR #57 申し送り — マッピングは常に在る(2026-09-03 改訂)
+
+> **改訂の理由:** Task 0 の実測で「存在確認せずに `_baseDir` を渡す」が成立しないと分かった
+> (`SetVirtualHostNameToFolderMapping` 自身が実在確認を内蔵し、不存在は
+> `DirectoryNotFoundException`・不達 UNC は 21 秒ブロック)。**不変条件「マッピングは常に在る」は
+> 維持し、到達手段を非同期の境界付きプローブへ差し替える。** 現行設計は設計書 **§13.2**。
 
 **Files:**
 - Create: `src/kxEdit.App/PreviewVirtualHostMapping.cs`
 - Create: `tests/kxEdit.App.Tests/PreviewVirtualHostMappingTests.cs`
 - Modify: `src/kxEdit.App/PreviewUserDataFolder.cs`(`EnsureEmptyBaseFolder` 追加)
-- Modify: `tests/kxEdit.App.Tests/PreviewUserDataFolderTests.cs`(4 本追加)
-- Modify: `src/kxEdit.App/MarkdownPreviewForm.cs:9-10`(クラス doc)/ `:88-96`(呼び出し)
-- Modify: `src/kxEdit.App/RemoteAwareDirectory.cs:38-50`(申し送り節を「回収済み」へ)
+- Modify: `tests/kxEdit.App.Tests/PreviewUserDataFolderTests.cs`(3 本追加)
+- Modify: `src/kxEdit.App/MarkdownPreviewForm.cs`(ctor に probe / `InitAsync` の該当箇所 / クラス doc)
+- Modify: `src/kxEdit.App/MainForm.cs`(`new MarkdownPreviewForm(...)` に probe を渡す)
+- Modify: `src/kxEdit.App/RemoteAwareDirectory.cs`(申し送り節を「回収済み」へ)
 
 **Step 1: 失敗するテストを書く** — `tests/kxEdit.App.Tests/PreviewVirtualHostMappingTests.cs`
 
 ```csharp
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
+using System.IO;
 
 namespace kxEdit.App.Tests;
 
@@ -202,12 +213,19 @@ namespace kxEdit.App.Tests;
 /// <para>
 /// 守る不変条件は<b>「マッピングは常に在る」</b>。未マップの状態を作ると
 /// <c>https://kxedit.preview/...</c> が実 DNS 解決へ出る (監査 §9 V-2)。
-/// 「baseDir が無い」も「登録が失敗した」も、未マップではなく空フォルダーへ倒す。
+/// 「baseDir が無い」「実在しないと分かっている」「登録が失敗した」のどれも、
+/// 未マップではなく空フォルダーへ倒す。
+/// </para>
+/// <para>
+/// 実在判定そのものは<b>呼び出し側の責務</b>。SetVirtualHostNameToFolderMapping は
+/// 内部で実在確認をしており、不達な共有では 21 秒返らない (設計書 §13.1 の実測)。
+/// だから「実在が確定したフォルダーだけを渡す」形になっている。
 /// </para>
 /// </summary>
 public class PreviewVirtualHostMappingTests
 {
     private const string Fallback = @"C:\fallback\empty-base";
+    private const string BaseDir = @"C:\docs";
 
     [Theory]
     [InlineData(null)]
@@ -215,29 +233,37 @@ public class PreviewVirtualHostMappingTests
     public void NoBaseDir_MapsFallback(string? baseDir)
     {
         var calls = new List<string>();
-        PreviewVirtualHostMapping.Apply(baseDir, () => Fallback, calls.Add);
+        PreviewVirtualHostMapping.Apply(baseDir, baseDirExists: false, () => Fallback, calls.Add);
         Assert.Equal(new[] { Fallback }, calls);
     }
 
     [Fact]
-    public void NonExistentBaseDir_IsStillMapped()
+    public void BaseDirNotUsable_MapsFallbackInsteadOfLeavingUnmapped()
     {
-        // 存在確認をしないことの網。ここで存在確認を復活させると、不達な共有で
-        // UI スレッドが 21 秒固まる (A-17 の実測値) 経路が戻る。
-        const string missing = @"X:\no\such\folder";
+        // 実在しないと分かっているものは渡さない (渡すと例外か 21 秒ブロック)。
+        // ただし未マップにもしない = V-2 の状態を作らない。
         var calls = new List<string>();
-        PreviewVirtualHostMapping.Apply(missing, () => Fallback, calls.Add);
-        Assert.Equal(new[] { missing }, calls);
+        PreviewVirtualHostMapping.Apply(BaseDir, baseDirExists: false, () => Fallback, calls.Add);
+        Assert.Equal(new[] { Fallback }, calls);
     }
 
     [Fact]
-    public void ValidBaseDir_DoesNotTouchFallback()
+    public void UsableBaseDir_IsMapped()
+    {
+        var calls = new List<string>();
+        PreviewVirtualHostMapping.Apply(BaseDir, baseDirExists: true, () => Fallback, calls.Add);
+        Assert.Equal(new[] { BaseDir }, calls);
+    }
+
+    [Fact]
+    public void UsableBaseDir_DoesNotTouchFallback()
     {
         // フォールバック用フォルダーは実ディレクトリを作る副作用を持つので、
         // 要らないときは呼ばれないことを固定する。
         int fallbackCalls = 0;
         PreviewVirtualHostMapping.Apply(
-            @"C:\docs",
+            BaseDir,
+            baseDirExists: true,
             () =>
             {
                 fallbackCalls++;
@@ -249,26 +275,25 @@ public class PreviewVirtualHostMappingTests
     }
 
     [Theory]
-    [InlineData(true)] // ArgumentException (MAX_PATH 超・不正パス)
-    [InlineData(false)] // COMException (WebView2 が HRESULT を包む形)
-    public void MapFailure_FallsBackInsteadOfLeavingUnmapped(bool argumentException)
+    // 実測した型 (設計書 §13.1)。確認と登録の間に共有が落ちる競合で出る。
+    [InlineData(typeof(DirectoryNotFoundException))]
+    // 未実測の想定: アクセス拒否。プレビュー自体を失敗させるより空フォルダーへ倒す。
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void MapFailure_FallsBackInsteadOfLeavingUnmapped(Type exceptionType)
     {
         var calls = new List<string>();
         PreviewVirtualHostMapping.Apply(
-            @"C:\docs",
+            BaseDir,
+            baseDirExists: true,
             () => Fallback,
             folder =>
             {
                 calls.Add(folder);
                 if (calls.Count == 1)
-                {
-                    throw argumentException
-                        ? new ArgumentException("boom")
-                        : new COMException("boom");
-                }
+                    throw (Exception)Activator.CreateInstance(exceptionType)!;
             }
         );
-        Assert.Equal(new[] { @"C:\docs", Fallback }, calls);
+        Assert.Equal(new[] { BaseDir, Fallback }, calls);
     }
 
     [Fact]
@@ -276,18 +301,19 @@ public class PreviewVirtualHostMappingTests
     {
         // 2 回とも失敗したら握り潰さない (呼び出し側の catch がプレビュー失敗を出す)。
         var calls = new List<string>();
-        Assert.Throws<ArgumentException>(() =>
+        Assert.Throws<DirectoryNotFoundException>(() =>
             PreviewVirtualHostMapping.Apply(
-                @"C:\docs",
+                BaseDir,
+                baseDirExists: true,
                 () => Fallback,
                 folder =>
                 {
                     calls.Add(folder);
-                    throw new ArgumentException("boom");
+                    throw new DirectoryNotFoundException("boom");
                 }
             )
         );
-        Assert.Equal(new[] { @"C:\docs", Fallback }, calls);
+        Assert.Equal(new[] { BaseDir, Fallback }, calls);
     }
 
     [Fact]
@@ -296,7 +322,8 @@ public class PreviewVirtualHostMappingTests
         // 想定外の例外型までフォールバックへ倒すと、原因不明の「画像が出ない」に化ける。
         Assert.Throws<InvalidOperationException>(() =>
             PreviewVirtualHostMapping.Apply(
-                @"C:\docs",
+                BaseDir,
+                baseDirExists: true,
                 () => Fallback,
                 _ => throw new InvalidOperationException("boom")
             )
@@ -313,12 +340,12 @@ dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~Previ
 
 期待: **ビルドエラー**(`PreviewVirtualHostMapping` が存在しない)。
 ※ ビルドが割れているとテストは 1 本も走らない。**「テストが落ちた」と「ビルドが割れた」を
-混同しない**(memory: 変異ハーネスの exit code 罠)。
+混同しない**(過去に 5 回踏んでいる)。
 
 **Step 3: 実装する** — `src/kxEdit.App/PreviewVirtualHostMapping.cs`
 
 ```csharp
-using System.Runtime.InteropServices;
+using System.IO;
 
 namespace kxEdit.App;
 
@@ -332,31 +359,40 @@ namespace kxEdit.App;
 /// 明記しており、<b>マッピングさえ張れば DNS は起きない</b>。
 /// </para>
 /// <para>
-/// したがって <c>Directory.Exists</c> による存在確認は<b>置かない</b>。存在確認は
-/// 「フォルダーが無ければ張らない」= V-2 の状態を作るだけで、しかも UI スレッドで
-/// 無境界に走るため不達な共有では 21 秒固まる (A-17 の実測値)。
-/// <see cref="RemoteAwareDirectory"/> の境界付きプローブも要らない —— 到達可否を
-/// 判断する必要そのものが無いため。
+/// <b>実在判定は呼び出し側の責務。</b> <c>SetVirtualHostNameToFolderMapping</c> は内部で
+/// 実在確認をしており、不存在なら <see cref="DirectoryNotFoundException"/>、不達な UNC では
+/// <b>21 秒返らない</b> (設計書 §13.1 の実測)。しかも <c>CoreWebView2</c> は UI スレッド専有で
+/// 登録を背景スレッドへ逃がせない。だから呼び出し側 (<see cref="MarkdownPreviewForm"/>) が
+/// 境界付きプローブで実在を確定し、<b>確定した結果だけ</b>を
+/// <paramref name="baseDirExists"/> で渡す。
 /// </para>
 /// </summary>
 internal static class PreviewVirtualHostMapping
 {
     /// <summary>
-    /// <paramref name="baseDir"/> (無ければ <paramref name="emptyFallback"/> が返す空フォルダー) を
-    /// <paramref name="map"/> へ渡す。<paramref name="map"/> が失敗しても<b>未マップにはしない</b>。
+    /// マッピング先を決めて <paramref name="map"/> へ渡す。<paramref name="map"/> が
+    /// I/O 系の例外で失敗しても<b>未マップにはしない</b>。
     /// </summary>
-    /// <param name="baseDir">.md のフォルダー。未保存タブでは null。存在確認はしない。</param>
+    /// <param name="baseDir">.md のフォルダー。未保存タブでは null。</param>
+    /// <param name="baseDirExists">
+    /// 呼び出し側が境界付きで確定した実在フラグ。false なら <paramref name="baseDir"/> は使わない。
+    /// </param>
     /// <param name="emptyFallback">マッピング専用の空フォルダーを作って返す (必要時のみ呼ぶ)。</param>
     /// <param name="map">
     /// <c>SetVirtualHostNameToFolderMapping(PreviewVirtualHost, folder, Allow)</c> の薄いラッパ。
     /// デリゲートにしてあるのは WebView2 実体なしでテストするため。
     /// </param>
-    internal static void Apply(string? baseDir, Func<string> emptyFallback, Action<string> map)
+    internal static void Apply(
+        string? baseDir,
+        bool baseDirExists,
+        Func<string> emptyFallback,
+        Action<string> map
+    )
     {
         ArgumentNullException.ThrowIfNull(emptyFallback);
         ArgumentNullException.ThrowIfNull(map);
 
-        if (string.IsNullOrEmpty(baseDir))
+        if (string.IsNullOrEmpty(baseDir) || !baseDirExists)
         {
             map(emptyFallback());
             return;
@@ -366,10 +402,10 @@ internal static class PreviewVirtualHostMapping
         {
             map(baseDir);
         }
-        catch (Exception ex) when (ex is ArgumentException or COMException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // 未マップへ戻さない。ここで諦めると V-2 の状態が復活する。
-            // 想定は MAX_PATH 超 / 不正パス (Task 0 ④ で実測した型に合わせている)。
+            // 実在確認と登録の間に共有が落ちる競合が主な経路 (DirectoryNotFoundException)。
             System.Diagnostics.Trace.TraceWarning(
                 $"プレビュー仮想ホストのマッピングに失敗したので空フォルダーへ倒す: {ex.Message} ({baseDir})"
             );
@@ -385,7 +421,7 @@ internal static class PreviewVirtualHostMapping
 dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~PreviewVirtualHostMappingTests"
 ```
 
-期待: PASS(7 ケース)。
+期待: PASS(9 ケース)。
 
 **Step 5: `EnsureEmptyBaseFolder` の失敗するテストを書く**
 
@@ -395,7 +431,7 @@ dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~Previ
     [Fact]
     public void EnsureEmptyBaseFolder_CreatesEmptyDirectoryUnderPath()
     {
-        // V-2: baseDir が無いときのマッピング先。空であることが契約 (ここに何か置くと
+        // V-2: baseDir が使えないときのマッピング先。空であることが契約 (ここに何か置くと
         // プレビューへ露出する)。
         var sut = new PreviewUserDataFolder();
         try
@@ -476,16 +512,42 @@ dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~Previ
 
 **Step 7: `MarkdownPreviewForm` を書き換える**
 
-`src/kxEdit.App/MarkdownPreviewForm.cs:88-96` を置き換える:
+(1) ctor に `IReachabilityProbe` を足す(フィールド `_probe` を持つ)。
+`FileController` と同じ流儀で、生成側が実装を選ぶ。
 
 ```csharp
-            // V-2 + PR #57 申し送り: マッピングは常に張る。未マップのままだと本文中の
-            // 相対 URL (描画前に絶対化済み) が実 DNS 解決へ出る (監査 §9 V-2)。存在確認は
-            // 置かない —— UI スレッドで無境界の Directory.Exists を呼ぶと、不達な共有では
-            // 21 秒固まる (A-17 の実測値)。判断とフォールバックは
-            // PreviewVirtualHostMapping (テスト済み) が持つ。
+    private readonly string? _baseDir;
+    private readonly IReachabilityProbe _probe;
+
+    public MarkdownPreviewForm(string html, string? baseDir, string fileName, IReachabilityProbe probe)
+    {
+        _html = html;
+        _baseDir = baseDir;
+        _probe = probe ?? throw new ArgumentNullException(nameof(probe));
+        // 以下は既存のまま
+```
+
+(2) `InitAsync` の `Directory.Exists` ブロック(現行 `:88-96`)を置き換える:
+
+```csharp
+            // V-2 + PR #57 申し送り(設計書 §13.2): マッピングは常に張る。未マップのままだと
+            // 本文中の相対 URL(描画前に絶対化済み)が実 DNS 解決へ出る(監査 §9 V-2)。
+            //
+            // 実在確認は UI スレッドから外す: SetVirtualHostNameToFolderMapping 自身が
+            // 実在確認を内蔵しており、不達な共有では 21 秒返らない(§13.1 の実測)。
+            // CoreWebView2 は UI スレッド専有なので登録自体は逃がせない。したがって
+            // 「実在が確定したフォルダーだけを UI スレッドで渡す」形にする。
+            // RemoteAwareDirectory はローカルを Directory.Exists 直呼び、リモートのみ
+            // 5 秒の境界付きプローブへ回す(grep と同じ契約)。
+            bool baseDirExists =
+                !string.IsNullOrEmpty(_baseDir)
+                && await Task.Run(() => RemoteAwareDirectory.Exists(_probe, _baseDir!));
+            if (IsDisposed || Disposing)
+                return;
+
             PreviewVirtualHostMapping.Apply(
                 _baseDir,
+                baseDirExists,
                 _userData.EnsureEmptyBaseFolder,
                 folder =>
                     core.SetVirtualHostNameToFolderMapping(
@@ -496,63 +558,80 @@ dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~Previ
             );
 ```
 
-同ファイル `:9-10` のクラス doc を訂正する(現状は「仮想ホストを設定せず」と書いてある):
+(3) クラス doc(`:9-10`)の「baseDir が null（未保存タブ等）の場合は仮想ホストを設定せず、
+相対リソースは解決できない。」を訂正:
 
 ```csharp
-/// マークダウンを整形表示するモーダルプレビュー窓。WebView2 に HTML を流し込み、
-/// 相対リソース（画像・ローカルリンク）は元ファイルのフォルダ基準（仮想ホスト）で解決する。
-/// baseDir が null（未保存タブ等）の場合は空フォルダーへマッピングする（相対リソースは
-/// 解決できないが、仮想ホストは常にローカルで応答する = 実 DNS 解決を起こさない・V-2）。
+/// baseDir が null（未保存タブ等）または実在しない/不達の場合は空フォルダーへマッピングする
+/// （相対リソースは解決できないが、仮想ホストは常にローカルで応答する = 実 DNS 解決を
+/// 起こさない・V-2）。
 ```
 
-**Step 8: `RemoteAwareDirectory` の申し送りを回収済みにする**
+**Step 8: `MainForm` の生成側を直す**
+
+`src/kxEdit.App/MainForm.cs` の `ShowMarkdownPreview` 内:
+
+```csharp
+        using var f = new MarkdownPreviewForm(
+            html,
+            dir,
+            doc.State.DisplayName,
+            new FileReachabilityProbe()
+        );
+```
+
+**Step 9: `RemoteAwareDirectory` の申し送りを回収済みにする**
 
 `src/kxEdit.App/RemoteAwareDirectory.cs` の XML doc のうち、`MarkdownPreviewForm.InitAsync` を
 「同じバグクラスの未修正箇所」と書いている段落と「プレビュー側を『ついでに』境界付きに
 してはいけない」の段落を、次の 1 段落へ差し替える:
 
 ```csharp
-/// <para><b>「唯一の入口」は grep 経路に限った話で、App 全体ではない</b>(最終レビュー I-2)。
-/// かつて <c>MarkdownPreviewForm.InitAsync</c> が <c>Directory.Exists(_baseDir)</c> を
-/// UI スレッドで無境界に呼んでいたが、<b>B6 で存在確認そのものを廃止して回収済み</b>
-/// (2026-09-03・<c>docs/plans/2026-09-03-preview-csp-virtual-host-design.md</c> §4)。
-/// プレビューは「マッピングは常に在る」を不変条件にしたため到達可否を判断する必要がなく、
-/// 本クラス(到達不能を「フォルダーが無い」に畳む意味論)は使っていない。</para>
+/// <para><b>grep 専用ではなくなった</b>(2026-09-03・B6)。
+/// <c>MarkdownPreviewForm.InitAsync</c> も本クラスを使う —— ただし
+/// <b>UI スレッドから直接ではなく <c>Task.Run</c> 越しに await する</b>形で、
+/// UI スレッドはブロックしない(grep は同期呼び出しのまま)。
+/// かつての申し送り「プレビュー側を『ついでに』境界付きにしてはいけない
+/// (到達不能を『フォルダーが無い』に畳むと未マップになり監査 §9 V-2 を踏む)」は、
+/// <b>プレビュー側が空フォルダーへ倒すフェイルセーフを持ったことで解消した</b>
+/// (<c>docs/plans/2026-09-03-preview-csp-virtual-host-design.md</c> §13.2)。
+/// 警告の本旨は「境界付きにするな」ではなく「フェイルセーフとセットでなければするな」だった。</para>
 ```
 
-**Step 9: ビルドと全テスト**
+**Step 10: ビルドと全テスト**
 
 ```powershell
 dotnet build kxEdit.sln -c Release -warnaserror
 dotnet test tests/kxEdit.App.Tests -c Release --no-build
 ```
 
-期待: 警告 0・全緑。
+期待: 警告 0・全緑。`MainFormSmokeTests` など既存テストが緑のままであること。
 
-**Step 10: 手動スモーク(この段階でしか見えないもの)**
+**Step 11: 手動スモーク(この段階でしか見えないもの)**
 
 ```powershell
 dotnet run --project src\kxEdit.App -c Debug
 ```
 
 1. 新規タブ(未保存)に `![](pic.png)` と書いて **表示 → マークダウンプレビュー** →
-   窓が開き、画像は「読み込めない」表示。**エラーダイアログが出ないこと**
-   (出たら Task 0 ① の判定が間違っていたということ)。
-2. 保存済みの .md を開いてプレビュー → 同フォルダーの画像が**従来どおり表示される**
-   (回帰が無いことの確認)。
+   窓が開き、画像は「読み込めない」表示。**エラーダイアログが出ないこと**。
+2. 保存済みの .md を開いてプレビュー → 同フォルダーの画像が**従来どおり表示される**。
+3. 適当な .md を開いた状態で、その親フォルダーを別プロセスでリネーム(= `_baseDir` を
+   不存在にする)→ プレビュー → **エラーにならず窓が開き、画像だけが出ない**こと。
 
-**Step 11: commit**
+**Step 12: commit**
 
 ```powershell
 git add src/kxEdit.App tests/kxEdit.App.Tests
-git commit -m "fix(preview): 仮想ホストのマッピングを常に張る(V-2 / PR #57 申し送り)"
+git commit -m "fix(preview): 仮想ホストのマッピングを常に張り実在確認を UI スレッドから外す(V-2 / PR #57 申し送り)"
 ```
 
-**Step 12: 脆弱性レビュー(前倒し・傘設計書 §8 の指定)**
+**Step 13: 脆弱性レビュー(前倒し・傘設計書 §8 の指定)**
 
-**別エージェント**を起動し、次を渡す: 設計書 §4 / 本タスクの差分 / 監査 §9 の V-2 と V-7。
-観点は「未マップの状態が作れる経路が残っていないか」「空フォルダーに何かが置かれうるか」
-「例外フィルタから漏れる型で未マップになる経路」。
+**別エージェント**を起動し、次を渡す: 設計書 §4 + §13.1 + §13.2 / 本タスクの差分 /
+監査 §9 の V-2 と V-7。観点は「未マップの状態が作れる経路が残っていないか」
+「空フォルダーに何かが置かれうるか」「例外フィルタから漏れる型で未マップになる経路」
+「`Task.Run` 越しの await 中にフォームが閉じられたときの再入」。
 指摘は §4 の 3 択(fixup / PR で受容 / 理由付き却下)で処理する。
 
 ---

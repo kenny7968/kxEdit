@@ -113,6 +113,12 @@ V-2 は「マッピングを張らない状態を作らない」ことで消え�
 
 ## 4. V-2 + PR #57 申し送り — 「マッピングは常に在る」を不変条件にする
 
+> **⚠ 本節の前提は §13.1 の実測で偽と判明した(2026-09-03)。**
+> 不変条件(マッピングは常に在る)は維持しているが、到達手段は **§13.2 が現行設計**である。
+> 本節は策定時スナップショットとして残す(CLAUDE.md §8)。§4.1 の表の 1 行目
+> 「存在確認しない」は成立しない —— `SetVirtualHostNameToFolderMapping` 自身が
+> 実在確認を内蔵しており、不存在なら投げ、不達 UNC では 21 秒返らない。
+
 ### 4.1 設計
 
 `Directory.Exists` を**削除**し、マッピング先を必ず決める。
@@ -425,3 +431,76 @@ background-thread call -> System.InvalidOperationException: CoreWebView2 members
   実際には**不存在でも投げる**。§3.1 の読みは「例外の記載が無い = 投げない」ではなかった。
 - ③ が真なので、**V-3 のガードの前提(`%2f` がデコードされない)は保たれる**。
   §5 は本実測の影響を受けない。
+
+### 13.2 §4 の作り直し(2026-09-03・ユーザー承認済み)
+
+§13.1 の実測で §4.1 の表の 1 行目(存在確認せずに `_baseDir` を渡す)が成立しなくなった。
+**不変条件「マッピングは常に在る」は維持し、到達手段だけを差し替える。**
+
+#### 制約(実測から確定したもの)
+
+1. マッピングは**実在するフォルダーしか受け付けない**(不存在は `DirectoryNotFoundException`)
+2. その実在確認は **API 内部で UI スレッド同期に**走り、不達 UNC では 21 秒返らない
+3. `CoreWebView2` は **UI スレッド専有**(背景スレッドから登録できない)
+4. 実在フォルダーへの登録は **0 ms**
+
+#### 採る形 —— 非同期の境界付きプローブ
+
+`InitAsync` は既に `async` なので、実在確認を**スレッドプールへ逃がして await する**。
+UI スレッドは 1 ミリ秒もブロックしない。
+
+```csharp
+// 実在確認は UI スレッドから外す。SetVirtualHostNameToFolderMapping 自身が
+// 実在確認を内蔵しており(§13.1)、不達な共有では 21 秒返らないため、
+// 「実在が確定したフォルダーだけを UI スレッドで渡す」形にする。
+bool usable =
+    !string.IsNullOrEmpty(_baseDir)
+    && await Task.Run(() => RemoteAwareDirectory.Exists(_probe, _baseDir!));
+if (IsDisposed || Disposing)
+    return;
+
+PreviewVirtualHostMapping.Apply(
+    _baseDir,
+    usable,
+    _userData.EnsureEmptyBaseFolder,
+    folder => core.SetVirtualHostNameToFolderMapping(
+        MarkdownRenderer.PreviewVirtualHost, folder, CoreWebView2HostResourceAccessKind.Allow));
+```
+
+- `RemoteAwareDirectory.Exists` は**ローカルは `Directory.Exists` 直呼び**(挙動不変・高速)、
+  **リモートのみ 5 秒の境界付きプローブ**。grep と同じ seam・同じ 5 秒契約を使い回す。
+- `IReachabilityProbe` は `MarkdownPreviewForm` の ctor で受け取る(`MainForm` が
+  `new FileReachabilityProbe()` を渡す。`FileController` と同じ流儀)。
+- `Task.Run` の継続は WinForms の同期コンテキストで UI スレッドへ戻る。
+  await の直後に既存の流儀どおり `IsDisposed || Disposing` を見る。
+
+#### PR #57 の警告との関係
+
+`RemoteAwareDirectory` の doc は「プレビュー側を境界付きにすると未マップ状態ができて
+V-2 を踏む」と警告していた。**その根拠は空フォルダーの fail-safe が消す** —— 到達不能を
+「フォルダーが無い」に畳んだ結果は未マップではなく空フォルダーへのマッピングになる。
+警告は「境界付きにするな」ではなく「**フェイルセーフとセットでなければするな**」だったと読む。
+
+#### 受容する残余リスク
+
+- **確認と登録の間に共有が落ちる競合**。`Apply` の catch(`IOException` /
+  `UnauthorizedAccessException`)が空フォルダーへ倒すが、**その catch に入るまでに
+  UI スレッドで 21 秒ブロックされうる**。窓は数ミリ秒差で開いた後なので影響は限定的だが、
+  原理的には残る(登録を UI スレッド外へ出せない以上、塞げない)。
+- **不達な共有では最大 5 秒、画像なしの表示になるまで待つ**。UI は応答するが、
+  プレビュー窓の中身は空のまま。21 秒の凍結よりは良いが「即座」ではない。
+- `UnauthorizedAccessException` は**未実測の想定**(アクセス拒否の共有を用意していない)。
+  実測したのは `DirectoryNotFoundException` のみ。
+
+#### B6 の主張がどう変わったか
+
+「プレビューの 21 秒凍結を消す」ではなく、**「UI スレッドのブロックを消し、最悪でも
+5 秒で画像なし表示へ倒す」**になった。PR description にはこの表現で書く。
+
+#### L5 項目 3 の文言差し替え
+
+§10 の項目 3(`:323`)は「21 秒固まらず窓が即開く」と書いているが、実測を受けて次に読み替える:
+
+> 3. **PR #57 申し送り**: 不達になった共有上の .md でプレビュー → **窓は即座に開き、UI は
+>    応答し続ける**(他のタブ操作・Esc が効く)。**最大 5 秒後に**画像なしの本文が表示される。
+>    21 秒のフリーズが起きないことが合格条件で、「即座に本文が出る」ことではない。
