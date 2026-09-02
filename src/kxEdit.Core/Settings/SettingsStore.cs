@@ -117,11 +117,12 @@ public static class SettingsStore
     /// </para>
     /// <para>
     /// <b>この API 自体は <see cref="SettingsLoadStatus"/> を見ない。</b>「<c>Corrupt</c> のときだけ
-    /// 退避する」を守るのは呼出側(<c>SettingsStartup.Prepare</c> の <c>Corrupt</c> 分岐が
-    /// ソリューション唯一の呼出)であり、<b>ここに status 引数を足して構造的に封じる案は採らない</b>
-    /// —— App 層の判定を Core の API 形状へ持ち込むうえ、「status 違いの no-op」と「退避の失敗」が
-    /// どちらも <c>false</c> になって区別できなくなる。<c>Unreadable</c> を退避しないことは
-    /// <c>SettingsStartupTests.Prepare_warns_but_never_renames_an_unreadable_file</c> で固定してある。
+    /// 退避する」は<b>構造的に強制していない</b> —— 位置(<c>SettingsStartup.Prepare</c> の
+    /// <c>Corrupt</c> 分岐がソリューション唯一の呼出)と網
+    /// (<c>SettingsStartupTests.Prepare_warns_but_never_renames_an_unreadable_file</c>)で保っており、
+    /// <b>現状の呼出数では十分</b>と判断した。status を引数に取って構造的に封じる形も設計としては
+    /// 成立する(その場合は戻り値を <c>bool</c> ではなく「退避した / 対象外 / 失敗」の 3 値にして、
+    /// 対象外と失敗を呼出側が区別できるようにすること)。呼出が増えたら再考する。
     /// </para>
     /// <para>
     /// <b>宛先はどんな <paramref name="path"/> でも同じディレクトリに落ちる</b> ——
