@@ -319,6 +319,30 @@ public class MarkdownRendererTests
         Assert.Equal((long)(MarkdownRenderer.MaxMarkdownChars + 1) * 2L, ex.AttemptedBytes);
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(MarkdownRenderer.MaxMarkdownChars - 1, false)]
+    [InlineData(MarkdownRenderer.MaxMarkdownChars, false)] // 境界ちょうどは通す
+    [InlineData(MarkdownRenderer.MaxMarkdownChars + 1, true)]
+    public void ExceedsMaxChars_UsesSameBoundaryAsRenderCap(int charCount, bool expected)
+    {
+        // M-23: caller が全文 string 化の前に判定するための述語。Render 内の cap と
+        // 不等号がずれると「事前判定は通ったのに Render が投げる」二重基準になる。
+        Assert.Equal(expected, MarkdownRenderer.ExceedsMaxChars(charCount));
+    }
+
+    [Fact]
+    public void Render_TooLargeMessage_ComesFromTooLargeDetail()
+    {
+        // M-23: 事前判定した caller のダイアログと Render の例外で文面を一致させる。
+        var md = new string('a', MarkdownRenderer.MaxMarkdownChars + 1);
+        var ex = Assert.Throws<DocumentTooLargeException>(() => MarkdownRenderer.Render(md, ""));
+        Assert.Equal(
+            MarkdownRenderer.TooLargeDetail(MarkdownRenderer.MaxMarkdownChars + 1),
+            ex.Message
+        );
+    }
+
     // ---------------------------------------------------------------------
     // MD-M-2 + MD-L-1: CSP を HTTP ヘッダで配信 + img-src data: 削除 + CSS 外部化。
     //

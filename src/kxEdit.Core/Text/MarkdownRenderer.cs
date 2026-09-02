@@ -107,6 +107,21 @@ public static class MarkdownRenderer
     /// </summary>
     public const int MaxMarkdownChars = 4_000_000;
 
+    /// <summary>
+    /// M-23: <paramref name="charCount"/> 文字の本文が <see cref="MaxMarkdownChars"/> を
+    /// 超えるか。<b>全文を string 化する前に</b> caller が判定できるようにするための述語で、
+    /// <see cref="Render"/> 内の cap と同じ不等号を使う (二重基準を作らない)。
+    /// </summary>
+    public static bool ExceedsMaxChars(int charCount) => charCount > MaxMarkdownChars;
+
+    /// <summary>
+    /// M-23: 上限超過をユーザーへ伝える詳細文言。<see cref="Render"/> が投げる
+    /// <see cref="DocumentTooLargeException"/> と、事前判定した caller のダイアログで
+    /// <b>同じ文面</b>を使うための single source of truth。
+    /// </summary>
+    public static string TooLargeDetail(int charCount) =>
+        $"マークダウン本文が上限を超えました({charCount:N0}/{MaxMarkdownChars:N0} 文字)";
+
     // CommonMark + GFM 拡張（表・チェックリスト・自動リンク等）。スレッドセーフなので使い回す。
     //
     // A-2 (2026-08-22・案 B): 相対 URL の絶対化は preview 経路だけで行うためパイプラインを 2 本持つ。
@@ -183,6 +198,8 @@ public static class MarkdownRenderer
     /// <exception cref="DocumentTooLargeException">
     /// markdown が <see cref="MaxMarkdownChars"/> を超える場合 (MD-L-3)。
     /// caller (MainForm.ShowMarkdownPreview) が捕えてユーザに MessageBox で提示する。
+    /// M-23: その caller は全文を string 化する前に <see cref="ExceedsMaxChars"/> で弾くので
+    /// 通常ここへは到達しない。この cap は将来 caller が増えたときのための二重の壁。
     /// </exception>
     public static string Render(string? markdown, string baseHref)
     {
@@ -201,13 +218,12 @@ public static class MarkdownRenderer
         // MD-L-3: 入力サイズ cap (4M 文字 = 8 MB UTF-16 相当)。ネスト深度 / テーブル
         // サイズの pre-scan は入れず、入口一箇所で Markdig への pathological な
         // 入力を封じる。null は既存の ?? string.Empty で吸収されるため対象外。
-        if (markdown != null && markdown.Length > MaxMarkdownChars)
+        // M-23: caller (MainForm.ShowMarkdownPreview) は全文 string 化の前に
+        // ExceedsMaxChars で弾くが、この cap も残す (二重の壁。将来 caller が増えうる)。
+        if (markdown != null && ExceedsMaxChars(markdown.Length))
         {
             long attemptedBytes = (long)markdown.Length * 2L;
-            throw new DocumentTooLargeException(
-                attemptedBytes,
-                $"マークダウン本文が上限を超えました({markdown.Length:N0}/{MaxMarkdownChars:N0} 文字)"
-            );
+            throw new DocumentTooLargeException(attemptedBytes, TooLargeDetail(markdown.Length));
         }
 
         // A-2 (案 B): preview 経路だけ相対 URL を絶対化するパイプラインを使う。
