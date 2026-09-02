@@ -7,8 +7,10 @@ namespace kxEdit.App;
 /// <summary>
 /// バックアップの背景直列ライター。UI スレッドが投入したジョブ(Core への書込/削除)を、
 /// 単一の背景スレッドで投入順に実行する。各ジョブの失敗は致命でないため握り潰す(無音)が、
-/// 書込(Write)の失敗のみは OnWriteFailed に record.Id を渡して UI スレッド側に通知し、
-/// 次 Reconcile で強制再書込を促す(Stage 5 で IBackupWriter を実装)。
+/// 書込(Write)だけは結果を通知する: 失敗は OnWriteFailed に record.Id を渡して
+/// 次 Reconcile での強制再書込を促し(Stage 5 で IBackupWriter を実装)、成功は
+/// M-20(B5)で足した OnWriteSucceeded に record.Id を渡す。どちらも背景スレッドから同期発火する
+/// (通知フックの契約は IBackupWriter 側の xmldoc が正)。
 /// Dispose で投入を締め切り、保留ジョブをドレインしてから戻る。
 /// BK-M-2: <c>_dir</c> は base backup directory ではなく **自セッション用 subdirectory** を保持する
 /// (<c>%APPDATA%\kxEdit\backups\session-{Guid.N}\</c>)。<see cref="Write"/> / <see cref="Delete"/> は
@@ -25,6 +27,9 @@ public sealed class SerialBackupWriter : IBackupWriter
 
     /// <inheritdoc/>
     public Action<string>? OnWriteFailed { get; set; }
+
+    /// <inheritdoc/>
+    public Action<string>? OnWriteSucceeded { get; set; }
 
     /// <inheritdoc/>
     public Action? OnLayoutWriteFailed { get; set; }
@@ -50,7 +55,15 @@ public sealed class SerialBackupWriter : IBackupWriter
             catch
             {
                 OnWriteFailed?.Invoke(record.Id);
+                return;
             }
+            // M-20: 成功通知は try の**外**で撃つ。try の中(BackupStore.Write の直後)に置くと、
+            // フック自身が投げた場合に上の catch が拾って OnWriteFailed を鳴らす=書けているのに
+            // 「書込が失敗した」と報告する経路を新設してしまう(B5 が潰そうとしている虚偽通知そのもの)。
+            // catch 側の early return は、この位置と対で「成功と失敗のどちらか一方だけ」を保つ。
+            // フックが投げても Run のジョブ単位 catch が握るのでワーカーは死なず後続ジョブも走るが、
+            // 握るだけで再通知はしない=フックは投げない契約(IBackupWriter 側の xmldoc)。
+            OnWriteSucceeded?.Invoke(record.Id);
         });
 
     public void Delete(string id) =>
@@ -165,7 +178,8 @@ public sealed class SerialBackupWriter : IBackupWriter
     public bool WaitForPendingJobs(TimeSpan timeout)
     {
         // キュー末尾にバリアジョブを積み、それが走り終わるのを待つ。直列ワーカーなので
-        // バリアが走った時点で先行ジョブは全て実行済み=失敗通知(OnWriteFailed)も発火済み。
+        // バリアが走った時点で先行ジョブは全て実行済み=結果通知(OnWriteFailed / OnWriteSucceeded)も
+        // 発火済み。
         //
         // 不変条件: 投入者(producer)は UI スレッドただ 1 つ。「末尾バリア」が「全保留ジョブの完了」を
         // 意味するのは、待っている間に誰も新しいジョブを積めないからである(現状 Reconcile を回す

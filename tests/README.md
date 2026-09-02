@@ -78,10 +78,12 @@ private sealed class Host : IDisposable
 
 `tests/kxEdit.App.Tests/MainFormSmokeTests.cs` を参照。ポイントは 2 点:
 
-- **internal ctor の 4 引数 seam**: MainForm は `public MainForm(AppSettings)` →
-  `internal MainForm(AppSettings, string settingsPath, string? backupDirectory = null, string? sessionLayoutPath = null)`
-  にチェーン。テストは **必ず 4 引数すべてを TempDir 配下で指定**し、さらに
-  `SetLastSessionBuffersPathForTest` も併用する(`ShowMainForm` ヘルパが一括で行う)。
+- **internal ctor の隔離 seam**: MainForm は `public MainForm(AppSettings)` →
+  `internal MainForm(AppSettings, string settingsPath, string? backupDirectory = null, string? sessionLayoutPath = null, string? settingsWarning = null, bool quarantineSettingsBeforeFirstSave = false)`
+  にチェーン。テストは **必ずパス系 4 引数(`settingsPath` / `backupDirectory` /
+  `sessionLayoutPath` と `SetLastSessionBuffersPathForTest`)すべてを TempDir 配下で指定**する
+  (`ShowMainForm` ヘルパが一括で行う)。末尾 2 引数は隔離用ではなく起動時の設定状態
+  (`SettingsStartup.Prepare` の戻り値)を注入するもので、既定のままでよい。
 - **`BackupEnabled = false` だけでは隔離にならない**(hot exit 統合以降): close 時の
   `Shutdown(keepForRestore:false)` は writer 未生成でも `SessionLayoutStore.Delete` を既定パスへ
   直接実行するため、`sessionLayoutPath` を渡さないテストは開発機の実

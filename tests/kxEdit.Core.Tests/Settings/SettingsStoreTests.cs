@@ -1077,4 +1077,106 @@ public class SettingsStoreTests
                 Directory.Delete(dir, recursive: true);
         }
     }
+
+    // ---- B5: 読み取れなかった設定を上書きの直前に退避する(B4 申し送りの回収) ----
+
+    /// <summary>
+    /// 退避 = <c>&lt;path&gt;.bak</c> への<b>改名</b>。原本のパスからは消え、中身は退避先に残る。
+    /// <para>
+    /// <c>.bad</c>(破損)と<b>別名</b>にするのは意味が違うからである —— あちらは「壊れた内容」、
+    /// こちらは<b>「読めなかっただけで中身は正常かもしれない以前の設定」</b>。同じ名前へ落とすと、
+    /// 過去の破損コピーを正常な設定で(あるいはその逆で)黙って上書きすることになる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void TryQuarantineUnreadable_renames_to_bak_and_keeps_the_original_content()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "settings.json");
+            const string original = "{\"FontName\":\"BIZ UDゴシック\"}";
+            File.WriteAllText(path, original);
+
+            bool moved = SettingsStore.TryQuarantineUnreadable(path, out string quarantined);
+
+            Assert.True(moved);
+            Assert.Equal(path + ".bak", quarantined);
+            Assert.False(File.Exists(path)); // 原本のパスからは消える
+            Assert.Equal(original, File.ReadAllText(quarantined)); // 中身は失われていない
+            Assert.Equal(dir, Path.GetDirectoryName(quarantined)); // 親の外は指さない
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// 原本が無ければ <c>false</c>。<b>投げない</b>のは <see cref="SettingsStore.TryQuarantineCorrupt"/>
+    /// と同じ catch-all 契約で、こちらは<b>保存経路</b>から呼ばれるためより効く ——
+    /// ここで例外が漏れると、退避の失敗が<b>設定保存そのものの失敗</b>に化ける
+    /// (B4 §5.5 の「保存を止めない」が崩れる)。
+    /// </summary>
+    [Fact]
+    public void TryQuarantineUnreadable_returns_false_when_the_original_is_gone()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "never-created.json");
+
+            bool moved = SettingsStore.TryQuarantineUnreadable(path, out string quarantined);
+
+            Assert.False(moved);
+            Assert.Equal(path + ".bak", quarantined); // 実在は意味しない「試みた宛先」
+            Assert.False(File.Exists(quarantined));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// <b><c>.bad</c> と <c>.bak</c> を取り違えていない</b>こと。2 つの退避は同じ private ヘルパーへ
+    /// 割ってあるので、<b>suffix を渡し間違える変異は 1 文字で作れる</b>——
+    /// 個別のテストは片側しか見ないため、両方を同じディレクトリで動かして<b>共存</b>を固定する。
+    /// <para>
+    /// 潰す変異は 3 通り。①どちらも <c>.bad</c> → 2 回目が 1 回目を上書きし <c>.bak</c> が生えない。
+    /// ②どちらも <c>.bak</c> → 1 行目の <c>.bad</c> assertion が落ちる。③両者を入れ替える →
+    /// 中身の対応が逆になる。<b>「壊れた内容」と「読めなかった以前の設定」が別物として残る</b>
+    /// ことが退避を 2 名に分けた理由なので、ここが崩れると分けた意味そのものが消える。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Corrupt_and_unreadable_quarantines_do_not_share_a_destination()
+    {
+        string dir = Directory.CreateTempSubdirectory("kxEditQuarantine_").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "settings.json");
+            File.WriteAllText(path, "壊れた内容");
+            Assert.True(SettingsStore.TryQuarantineCorrupt(path, out string bad));
+
+            // 次の起動で「読めない」に転んだ世界。原本は作り直されている。
+            File.WriteAllText(path, "読めなかった以前の設定");
+            Assert.True(SettingsStore.TryQuarantineUnreadable(path, out string bak));
+
+            Assert.Equal(path + ".bad", bad);
+            Assert.Equal(path + ".bak", bak);
+            Assert.NotEqual(bad, bak);
+            // 2 つとも残っていて、中身が入れ替わっていない。
+            Assert.Equal("壊れた内容", File.ReadAllText(bad));
+            Assert.Equal("読めなかった以前の設定", File.ReadAllText(bak));
+            Assert.Equal(2, Directory.GetFiles(dir).Length); // 原本は消え、退避先が 2 つ
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
 }

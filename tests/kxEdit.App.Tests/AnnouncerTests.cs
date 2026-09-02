@@ -186,6 +186,67 @@ public class AnnouncerTests
             Assert.Equal("", label.Text);
         });
 
+    /// <summary>M-8: 窓外の即時 Raise は「今このメッセージが最新である」という宣言なので、
+    /// armed 済みの trailing(それより古い pending)を取り消さなければならない。
+    /// 取り消さないと、直後に trailing が発火して<b>1 つ前のメッセージが最後に読まれる</b>
+    /// (CSV で → を押しっぱなしにしたとき、着地セルの 1 つ手前が最後に発声される)。
+    /// 空文字列分岐(<c>UiaAnnouncer.Say</c> の IsNullOrEmpty ガード)が既に同じ危険をコメントで
+    /// 名指しして pending を潰しており、本テストはその対称化を固定する。</summary>
+    [Fact]
+    public void Say_OutsideWindow_CancelsPendingTrailingMessage() =>
+        Sta.Run(() =>
+        {
+            using var label = new Label();
+            var clock = new FakeTimeProvider();
+            var announcer = new RecordingAnnouncer(label, clock);
+            announcer.Say("a"); // T=0: 窓外 → 即 Raise。_lastSaidUtc=0
+            clock.Advance(TimeSpan.FromMilliseconds(20));
+            announcer.Say("b"); // T=20: 窓内 → pending="b"、trailing を T=70 へ armed
+            clock.Advance(TimeSpan.FromMilliseconds(40));
+            announcer.Say("c"); // T=60: 窓外(60-0=60 ≧ 50)→ 即 Raise。pending は潰されるべき
+            // T=70 の trailing 発火時刻を大きく越えて進める。潰せていれば何も起きない。
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            // 修正前は ["a", "c", "b"] になる = 最後に読まれるのが 1 つ前の "b"。
+            Assert.Equal(new[] { "a", "c" }, announcer.Spoken);
+            // 視覚 (Label.Text) は throttle 対象外=最新を反映する(晴眼/弱視も第一級)。
+            // Say("b") が arming だけで何も観測面に残さないケースと区別するためにも見ておく。
+            Assert.Equal("c", label.Text);
+        });
+
+    /// <summary>M-8: 窓外 Say は pending を捨てるだけでなく <b>timer 自体を Dispose</b> しなければならない。
+    /// <c>TrailingCallback</c> は pending が null でも <c>_lastSaidUtc</c> を「自分が走った時刻」へ
+    /// 無条件で更新するため、孤児 timer を残すと窓外 Say の時刻ではなく孤児発火の時刻を起点に
+    /// 次回の throttle が判定され、即 Raise されるべき Say が黙って遅延させられる。
+    /// (pending を null にするだけでは発声順は正しくなるので、この面は本テストでしか落ちない。)</summary>
+    [Fact]
+    public void Say_OutsideWindow_DisposesOrphanTrailingTimer_SoNextSayIsNotThrottled() =>
+        Sta.Run(() =>
+        {
+            using var label = new Label();
+            var clock = new FakeTimeProvider();
+            var announcer = new RecordingAnnouncer(label, clock);
+            announcer.Say("a"); // T=0: 窓外 → 即 Raise。_lastSaidUtc=0
+            clock.Advance(TimeSpan.FromMilliseconds(20));
+            announcer.Say("b"); // T=20: 窓内 → pending="b"、trailing を T=70 へ armed
+            clock.Advance(TimeSpan.FromMilliseconds(40));
+            announcer.Say("c"); // T=60: 窓外 → 即 Raise。_lastSaidUtc=60、armed 済み timer は破棄されるべき
+            // 孤児 timer の due 時刻 T=70 を越えてから、"c" の Raise 時刻 T=60 の窓外へ進める。
+            clock.Advance(TimeSpan.FromMilliseconds(55)); // T=115: 115-60=55 ≧ 50 → 即 Raise のはず
+            announcer.Say("d");
+            // timer を破棄していないと孤児が発火して _lastSaidUtc を上書きし、"d" が throttle されて
+            // この時点の Spoken は ["a","c"] に留まる。
+            //
+            // 上書きされる値は本番とテストで異なるが、どちらでも "d" は throttle される:
+            //  - 本番 (TimeProvider.System): 孤児は実時刻 ≒T=70 で発火し _lastSaidUtc=70。115-70=45 < 50。
+            //  - 本テスト (FakeTimeProvider): Advance は _now を先に進めてから callback を呼ぶため、
+            //    callback 内の GetUtcNow() は due 時刻 70 ではなく Advance 後の 115 を返す
+            //    (Microsoft.Extensions.TimeProvider.Testing 9.5.0 で実測)。
+            //    よって _lastSaidUtc=115 で 115-115=0 < 50。
+            // このため Advance(55) の 55 に意味は無く、due の 70 を越えれば任意の値で赤になる
+            // (「45<50 に収める」ような 5 ms マージンの脆さは実在しない)。
+            Assert.Equal(new[] { "a", "c", "d" }, announcer.Spoken);
+        });
+
     // ===== UIA-L-2 (PR-G Task 5): Raise catch の可観測化 =====
 
     /// <summary>UIA-L-2: <see cref="UiaAnnouncer.RaiseCore"/> が例外を投げても

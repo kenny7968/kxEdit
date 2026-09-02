@@ -2159,4 +2159,195 @@ public class BackupCoordinatorTests
             Assert.True(host.Backup.WaitForFinalFlush());
             Assert.Equal(0, host.Writer.WaitCalls); // _shutDown \u3067\u77ED\u7D61=\u7834\u68C4\u6E08\u307F\u3078\u554F\u3044\u5408\u308F\u305B\u306A\u3044
         });
+
+    // ===== M-20 (B5): \u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u66F8\u8FBC\u306E\u5065\u5168\u6027\u3092\u9077\u79FB\u3067 1 \u56DE\u3060\u3051\u4F1D\u3048\u308B =====
+
+    /// <summary>M-20: \u6700\u521D\u306E\u66F8\u8FBC\u5931\u6557\u3067 1 \u56DE\u3060\u3051\u300C\u5931\u6557\u300D\u3092\u5831\u544A\u3059\u308B\u3002\u4FEE\u6B63\u524D\u306F\u3053\u306E\u7D4C\u8DEF\u305D\u306E\u3082\u306E\u304C
+    /// \u5B58\u5728\u305B\u305A\u3001\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u5148\u304C\u585E\u304C\u3063\u3066\u3082\u30E6\u30FC\u30B6\u30FC\u306F\u5B88\u3089\u308C\u3066\u3044\u308B\u3068\u4FE1\u3058\u305F\u307E\u307E\u7DE8\u96C6\u3092\u7D9A\u3051\u305F\u3002
+    /// <para>\u5831\u544A\u304C\u51FA\u308B\u306E\u306F\u5931\u6557\u3057\u305F pass \u3067\u306F\u306A\u304F<b>\u305D\u306E\u6B21\u306E</b> Reconcile \u3067\u3042\u308B \u2014\u2014 \u5931\u6557 Id \u3092
+    /// \u56DE\u53CE\u3059\u308B\u306E\u306F <c>ReconcileContent</c> \u5192\u982D\u306E drain 1 \u7B87\u6240\u3060\u3051\u3067\u3001\u305D\u306E drain \u306F\u540C\u3058 pass \u306E
+    /// \u66F8\u8FBC\u3088\u308A\u524D\u306B\u8D70\u308B\u305F\u3081\u3002\u66F8\u8FBC\u3092\u6295\u5165\u3057\u305F pass \u3067\u306F\u307E\u3060\u4F55\u3082\u8A00\u308F\u306A\u3044\u3053\u3068\u3082\u4F75\u305B\u3066\u56FA\u5B9A\u3059\u308B\u3002</para></summary>
+    [Fact]
+    public void Reports_unhealthy_once_when_a_background_write_fails() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            _ = host.NewDoc("hello");
+
+            host.Writer.FailNextWrite = true;
+            host.Backup.Reconcile(); // \u66F8\u8FBC\u3092\u6295\u5165 \u2192 \u5931\u6557(_failed \u3078\u7A4D\u307E\u308C\u308B\u3060\u3051)
+            Assert.Empty(reports); // \u3053\u306E pass \u306E drain \u306F\u5931\u6557\u3088\u308A\u524D\u306B\u8D70\u3063\u3066\u3044\u308B
+
+            host.Backup.Reconcile(); // \u5192\u982D drain \u304C\u5931\u6557\u3092\u56DE\u53CE \u2192 \u9077\u79FB\u3092\u5831\u544A
+
+            Assert.Equal(new[] { false }, reports);
+        });
+
+    /// <summary>M-20: \u5931\u6557\u304C\u7D9A\u304F\u9593\u306F\u9CF4\u308A\u7D9A\u3051\u306A\u3044(\u9077\u79FB\u3067\u306E\u307F\u5831\u544A\u3059\u308B)\u3002\u65E2\u5B9A tick \u306F 300 \u79D2\u306A\u306E\u3067\u3001
+    /// \u6BCE tick \u5831\u544A\u3059\u308B\u3068 5 \u5206\u304A\u304D\u306B\u540C\u3058\u8B66\u544A\u3092\u6D74\u3073\u305B\u7D9A\u3051\u308B\u3053\u3068\u306B\u306A\u308B\u3002</summary>
+    [Fact]
+    public void Does_not_repeat_the_unhealthy_report_while_writes_keep_failing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            _ = host.NewDoc("hello");
+
+            // 5 pass \u7D9A\u3051\u3066\u5931\u6557\u3055\u305B\u308B\u30022 pass \u76EE\u306E drain \u3067 unhealthy \u3078\u843D\u3061\u3001\u4EE5\u964D\u306F\u7121\u8A00\u306E\u306F\u305A\u3002
+            for (int i = 0; i < 5; i++)
+            {
+                host.Writer.FailNextWrite = true;
+                host.Backup.Reconcile();
+            }
+
+            Assert.Equal(new[] { false }, reports);
+            Assert.Empty(host.Writer.Writes); // \u975E vacuous: 5 pass \u3068\u3082 1 \u4EF6\u3082\u66F8\u3051\u3066\u3044\u306A\u3044
+        });
+
+    /// <summary>M-20: \u66F8\u8FBC\u304C\u5B9F\u969B\u306B\u6210\u529F\u3057\u305F\u3089 1 \u56DE\u3060\u3051\u300C\u5FA9\u65E7\u300D\u3092\u5831\u544A\u3059\u308B(\u305D\u3057\u3066\u9CF4\u308A\u76F4\u3055\u306A\u3044)\u3002</summary>
+    [Fact]
+    public void Reports_healthy_again_after_a_write_succeeds() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            _ = host.NewDoc("hello");
+
+            host.Writer.FailNextWrite = true;
+            host.Backup.Reconcile(); // \u66F8\u8FBC\u3092\u6295\u5165 \u2192 \u5931\u6557
+            host.Backup.Reconcile(); // drain \u2192 \u5931\u6557\u3092\u5831\u544A\u3002ForceWrite \u306E\u518D\u66F8\u8FBC\u306F\u6210\u529F\u3059\u308B
+            Assert.Equal(new[] { false }, reports);
+            Assert.Single(host.Writer.Writes); // \u975E vacuous: \u518D\u66F8\u8FBC\u306F\u5B9F\u969B\u306B\u6210\u529F\u3057\u3066\u3044\u308B
+
+            host.Backup.Reconcile(); // drain \u304C\u6210\u529F\u3092\u56DE\u53CE \u2192 \u5FA9\u65E7\u3092\u5831\u544A
+
+            Assert.Equal(new[] { false, true }, reports);
+
+            host.Backup.Reconcile(); // \u4EE5\u5F8C\u306F\u5931\u6557\u3082\u65B0\u3057\u3044\u66F8\u8FBC\u3082\u7121\u3044 = \u9CF4\u308A\u76F4\u3055\u306A\u3044
+
+            Assert.Equal(new[] { false, true }, reports);
+        });
+
+    /// <summary>M-20 \u306E\u4E2D\u6838: <b>\u66F8\u8FBC\u3092\u6295\u5165\u3057\u3066\u3044\u306A\u3044</b>\u3060\u3051\u306E tick \u3092\u5FA9\u65E7\u3068\u8AAD\u307E\u306A\u3044\u3002
+    /// clean \u306A\u6587\u66F8\u3057\u304B\u7121\u3051\u308C\u3070 <see cref="BackupPlanner.Decide"/> \u306F <c>Write</c> \u3092\u8FD4\u3055\u306A\u3044\u306E\u3067\u3001
+    /// \u5931\u6557\u306F\u5C4A\u304B\u306A\u3044\u304C\u6210\u529F\u3082\u5C4A\u304B\u306A\u3044\u3002\u3053\u3053\u3067\u300C\u518D\u958B\u3057\u307E\u3057\u305F\u300D\u3068\u8A00\u3046\u306E\u306F\u3001\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u304C\u4E00\u5EA6\u3082
+    /// \u66F8\u3051\u3066\u3044\u306A\u3044\u306E\u306B\u5FA9\u65E7\u3092\u544A\u3052\u308B\u865A\u507D\u767A\u58F0\u3067\u3042\u308A\u3001B5 \u304C\u6F70\u305D\u3046\u3068\u3057\u3066\u3044\u308B\u6B20\u9665\u3092 B5 \u81EA\u8EAB\u304C
+    /// \u65B0\u8A2D\u3059\u308B\u3053\u3068\u306B\u306A\u308B\u3002
+    /// <para>CLAUDE.md \u00A74-B \u306B\u5F93\u3044<b>\u975E\u65E2\u5B9A\u72B6\u614B\u304B\u3089</b>\u59CB\u3081\u308B \u2014\u2014 \u5931\u6557\u306E\u524D\u306B\u6210\u529F\u3092 1 \u56DE\u901A\u3057\u3066\u304A\u304F\u3002
+    /// \u3053\u308C\u3067\u300C\u6210\u529F\u30D5\u30E9\u30B0\u3092\u8AAD\u307F\u6368\u3066\u306A\u3044\u300D\u5B9F\u88C5(\u5065\u5168\u306A\u3046\u3061\u306B\u7ACB\u3063\u305F\u53E4\u3044\u6210\u529F\u304C\u5C45\u5EA7\u308A\u3001\u5F8C\u306E tick \u3067
+    /// \u5FA9\u65E7\u3068\u8AAD\u307E\u308C\u308B)\u3082\u843D\u3061\u308B\u3002</para></summary>
+    [Fact]
+    public void Does_not_report_recovery_when_no_write_was_attempted() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            var doc = host.NewDoc("hello");
+
+            host.Backup.Reconcile(); // \u5065\u5168\u306A\u307E\u307E\u6210\u529F\u3059\u308B\u66F8\u8FBC\u3092 1 \u56DE\u901A\u3059(\u6210\u529F\u30D5\u30E9\u30B0\u304C\u7ACB\u3064)
+            Assert.Single(host.Writer.Writes);
+
+            doc.Editor.Text = "hello 2"; // \u7F72\u540D\u3092\u52D5\u304B\u3059(Text \u30BB\u30C3\u30BF\u30FC\u306F Modified=false \u8D77\u70B9)
+            doc.Editor.ClearSavePoint();
+            host.Writer.FailNextWrite = true;
+            host.Backup.Reconcile(); // drain \u306F\u5065\u5168\u306A\u307E\u307E\u53E4\u3044\u6210\u529F\u3092\u8AAD\u307F\u6368\u3066\u308B\u3002\u4ECA\u56DE\u306E\u66F8\u8FBC\u306F\u5931\u6557
+            Assert.Empty(reports);
+
+            doc.Editor.SetSavePoint(); // clean \u5316 = \u4EE5\u5F8C Write \u3092\u6295\u5165\u3057\u306A\u3044
+            host.Backup.Reconcile(); // drain \u2192 \u5931\u6557\u3092\u5831\u544A
+            Assert.Equal(new[] { false }, reports);
+
+            host.Backup.Reconcile(); // \u66F8\u8FBC\u3092\u6295\u5165\u3057\u3066\u3044\u306A\u3044 tick
+            host.Backup.Reconcile(); // \u4F55\u5EA6\u56DE\u3057\u3066\u3082\u540C\u3058
+
+            Assert.Equal(new[] { false }, reports);
+            Assert.Single(host.Writer.Writes); // \u975E vacuous: \u5931\u6557\u4EE5\u964D 1 \u4EF6\u3082\u66F8\u3051\u3066\u3044\u306A\u3044
+        });
+
+    /// <summary>M-20: \u540C\u4E00 drain \u306B\u5931\u6557\u3068\u6210\u529F\u304C\u4E21\u65B9\u3042\u308C\u3070\u5931\u6557\u304C\u52DD\u3064(healthy \u304B\u3089\u59CB\u3081\u308B)\u3002
+    /// \u8907\u6570\u6587\u66F8\u306E\u3046\u3061 1 \u3064\u3060\u3051\u66F8\u3051\u3066\u3044\u308B\u72B6\u614B\u3092\u300C\u5FA9\u65E7\u300D\u3068\u547C\u3070\u306A\u3044\u305F\u3081\u3002
+    /// <para>\u3053\u3053\u306F<b>\u5B9F\u7269\u3067\u306F\u8D77\u3053\u3089\u306A\u3044</b>\u300C1 \u4EF6\u306E Write \u306B\u6210\u529F\u3068\u5931\u6557\u306E\u4E21\u65B9\u300D\u3092\u610F\u56F3\u7684\u306B\u4F5C\u308B
+    /// (<see cref="FakeBackupWriter.OnWriteFailed"/> \u306E\u76F4\u63A5 Invoke = Fake \u306E xmldoc \u304C\u6319\u3052\u308B
+    /// 2 \u901A\u308A\u306E\u3046\u3061\u5F8C\u8005)\u3002\u6587\u66F8\u3092\u5897\u3084\u3055\u305A\u306B\u4E21 signal \u306E\u540C\u5C45\u3092\u4F5C\u308C\u308B\u6700\u77ED\u306E\u5F62\u3002</para></summary>
+    [Fact]
+    public void Failure_wins_over_success_within_the_same_drain() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            _ = host.NewDoc("hello");
+
+            host.Backup.Reconcile(); // \u66F8\u8FBC\u306F\u6210\u529F(\u6210\u529F\u30D5\u30E9\u30B0\u304C\u7ACB\u3064)
+            var written = Assert.Single(host.Writer.Writes);
+            host.Writer.OnWriteFailed!(written.Id); // \u540C\u3058 pass \u306E\u6210\u529F\u3078\u5931\u6557\u3092\u91CD\u306D\u308B
+
+            host.Backup.Reconcile(); // drain \u306B\u5931\u6557\u3068\u6210\u529F\u304C\u540C\u5C45 \u2192 \u5931\u6557\u304C\u52DD\u3064
+
+            Assert.Equal(new[] { false }, reports);
+        });
+
+    /// <summary>\u8A02\u6B63 C-1 \u306E\u9000\u884C\u30C6\u30B9\u30C8\u3002<b>\u65E2\u306B unhealthy \u306E\u72B6\u614B\u3067</b>\u540C\u4E00 drain \u306B\u5931\u6557\u3068\u6210\u529F\u304C
+    /// \u4E21\u65B9\u6765\u3066\u3082\u5FA9\u65E7\u3092\u5831\u544A\u3057\u306A\u3044\u3002
+    /// <para>\u5F53\u521D\u306E <c>else if</c> \u7248(<c>anyFailed &amp;&amp; _backupHealthy</c> \u2192 <c>else if
+    /// anySucceeded &amp;&amp; !_backupHealthy</c>)\u306F\u3053\u3053\u3067\u8AA4\u3063\u3066\u300C\u518D\u958B\u3057\u307E\u3057\u305F\u300D\u3092\u5831\u544A\u3057\u305F \u2014\u2014
+    /// \u7B2C 1 \u5206\u5C90\u304C <c>anyFailed &amp;&amp; false</c> \u3067\u843D\u3061\u3001\u7B2C 2 \u5206\u5C90\u304C\u6210\u7ACB\u3059\u308B\u305F\u3081\u3002
+    /// \u300C\u5931\u6557\u304C\u52DD\u3064\u300D\u306F<b>\u5065\u5168\u306A\u3068\u304D\u306B\u3057\u304B\u52B9\u3044\u3066\u3044\u306A\u304B\u3063\u305F</b>\u3002</para>
+    /// <para>\u4E0A\u306E <see cref="Failure_wins_over_success_within_the_same_drain"/> \u306F healthy \u304B\u3089
+    /// \u59CB\u307E\u308B\u306E\u3067<b>\u3053\u306E\u6B20\u9665\u3092\u6355\u307E\u3048\u306A\u3044</b>(CLAUDE.md \u00A74-B: no-change \u306E\u7DB2\u306F\u65E2\u5B9A\u5024\u3068\u533A\u5225\u3059\u308B
+    /// \u305F\u3081\u975E\u65E2\u5B9A\u72B6\u614B\u304B\u3089\u59CB\u3081\u308B\u3002<c>_backupHealthy</c> \u306E\u65E2\u5B9A\u306F <c>true</c>)\u3002</para>
+    /// <para>\u69CB\u6210\u306F\u5B9F\u969B\u306B\u8D77\u3053\u308B\u5F62\u305D\u306E\u3082\u306E \u2014\u2014 \u6587\u66F8 A \u306E\u66F8\u8FBC\u5148\u3060\u3051\u304C\u585E\u304C\u308C\u3001\u6587\u66F8 B \u306F\u6B63\u5E38\u306B
+    /// \u66F8\u3051\u3066\u3044\u308B(\u4E21\u65B9 dirty)\u3002\u5B9F\u5BB3\u306F 300 \u79D2\u3054\u3068\u306E\u300C\u4FDD\u5B58\u3067\u304D\u307E\u305B\u3093\u300D\u2192\u300C\u518D\u958B\u3057\u307E\u3057\u305F\u300D\u306E\u53CD\u5FA9\u3002</para></summary>
+    [Fact]
+    public void Does_not_report_recovery_while_another_document_is_still_failing() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var reports = new List<bool>();
+            host.Backup.OnBackupHealthChanged = healthy => reports.Add(healthy);
+            var a = host.NewDoc("doc-a");
+            var b = host.NewDoc("doc-b");
+            // \u30BF\u30D6\u751F\u6210\u304C ActiveDocumentChanged \u7D4C\u7531\u3067\u65E2\u306B Reconcile \u3092\u56DE\u3057\u3066\u3044\u308B\u305F\u3081\u3001\u307E\u305A\u4E21\u65B9\u3092
+            // \u66F8\u304D\u5207\u3063\u3066\u7F72\u540D\u3092\u843D\u3061\u7740\u304B\u305B\u308B(\u4EE5\u964D\u306E pass \u306F\u300C\u3053\u306E pass \u3067\u8AB0\u304C\u66F8\u3051\u305F\u304B\u300D\u3060\u3051\u3092\u898B\u308B)\u3002
+            host.Backup.Reconcile();
+            int settled = host.Writer.Writes.Count;
+            Assert.Empty(reports);
+
+            // pass 1: \u4E21\u65B9\u306E\u672C\u6587\u3092\u52D5\u304B\u3057\u305F\u3046\u3048\u3067 A \u306E\u66F8\u8FBC\u3060\u3051\u5931\u6557\u3055\u305B\u308B(FailNextWrite \u306F\u305D\u306E pass \u3067
+            // \u6700\u521D\u306B\u8D70\u308B Write 1 \u4EF6 = \u6587\u66F8\u9806\u306E\u5148\u982D\u3067\u3042\u308B A \u306B\u52B9\u304F)\u3002
+            Bump(a, "doc-a 2");
+            Bump(b, "doc-b 2");
+            host.Writer.FailNextWrite = true;
+            host.Backup.Reconcile();
+            Assert.Equal(settled + 1, host.Writer.Writes.Count); // \u66F8\u3051\u305F\u306E\u306F B \u3060\u3051
+            Assert.Equal("doc-b 2", host.Writer.Writes[^1].Content); // \u5931\u6557\u3057\u305F\u306E\u306F A(\u9806\u5E8F\u306E\u524D\u63D0)
+            Assert.Empty(reports); // \u5931\u6557\u306F\u307E\u3060 drain \u3057\u3066\u3044\u306A\u3044
+
+            // pass 2: drain(\u5931\u6557 A + \u6210\u529F B)\u2192 unhealthy \u3078\u843D\u3061\u308B\u3002\u3053\u306E pass \u3067\u3082 A \u306F ForceWrite \u3067
+            // \u518D\u3073\u5931\u6557\u3057\u3001B \u306F\u672C\u6587\u3092\u52D5\u304B\u3057\u305F\u306E\u3067\u65B0\u3057\u3044\u7F72\u540D\u3067\u66F8\u304B\u308C\u3066\u6210\u529F\u3059\u308B\u3002
+            Bump(b, "doc-b 3");
+            host.Writer.FailNextWrite = true;
+            host.Backup.Reconcile();
+            Assert.Equal(new[] { false }, reports);
+            Assert.Equal(settled + 2, host.Writer.Writes.Count); // \u975E vacuous: B \u306F\u66F8\u3051\u3066\u3044\u308B
+            Assert.Equal("doc-b 3", host.Writer.Writes[^1].Content);
+
+            // pass 3: drain \u306F\u518D\u3073\u300C\u5931\u6557 A + \u6210\u529F B\u300D\u3002\u305F\u3060\u3057\u4ECA\u5EA6\u306F unhealthy \u304B\u3089\u59CB\u307E\u308B\u3002
+            host.Backup.Reconcile();
+
+            Assert.Equal(new[] { false }, reports); // \u5FA9\u65E7\u3092\u5831\u544A\u3057\u306A\u3044
+
+            // \u672C\u6587\u3092\u52D5\u304B\u3057\u3066 dirty \u306E\u307E\u307E\u65B0\u3057\u3044\u7F72\u540D\u3092\u4E0E\u3048\u308B(Text \u30BB\u30C3\u30BF\u30FC\u306F\u65B0\u898F\u30D0\u30C3\u30D5\u30A1\u3092\u5DEE\u3059\u305F\u3081
+            // Modified=false \u8D77\u70B9\u306B\u623B\u308B\u306E\u3067\u3001ClearSavePoint \u3067 dirty \u3078\u623B\u3059)\u3002
+            static void Bump(Document doc, string text)
+            {
+                doc.Editor.Text = text;
+                doc.Editor.ClearSavePoint();
+            }
+        });
 }

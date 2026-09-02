@@ -59,12 +59,18 @@ public static class SettingsStore
     /// </para>
     /// <para>
     /// <b>ただし OOM の落ち先は段によって違う。</b><c>File.ReadAllText</c> 段(try #1)の OOM は
-    /// <c>Unreadable</c> = <b>退避しない</b>側へ落ちるので原本を改名する事故にならないが、
-    /// <c>Deserialize</c> 段(try #2)の OOM は <c>Corrupt</c> = <b>退避対象</b>へ落ちる。
+    /// <c>Unreadable</c> へ、<c>Deserialize</c> 段(try #2)の OOM は <c>Corrupt</c> へ落ちる。
     /// <c>ReadAllText</c> は約 1GB 未満なら成功するため、<b>読めたがトランスコード/グラフ構築で
     /// 落ちる帯は原理的に存在する</b>(多 GB の fixture が要るので未実測・コード構造からの確定)。
-    /// そのサイズの settings.json を「壊れている」扱いにするのは受容できるので分岐は足さないが、
-    /// <b>「OOM なら退避しない」は無条件には成立しない</b>。
+    /// <para>
+    /// <b>B5 以降、どちらの段でも原本は改名される</b>(仕様レビュー I-2)——<c>Corrupt</c> は
+    /// 起動時に <c>.bad</c> へ、<c>Unreadable</c> は最初の設定保存の直前に <c>.bak</c> へ
+    /// (<see cref="TryQuarantineUnreadable"/>)。<b>かつてここに書いていた「try #1 の OOM は
+    /// 退避しない側へ落ちるので原本を改名する事故にならない」は、もう成り立たない。</b>
+    /// 段によって違うのは<b>いつ・どの名前で</b>退避されるかだけである。そのサイズの
+    /// settings.json が既定値へ戻る扱いになるのは受容するので分岐は足さないが、
+    /// <b>「OOM なら原本は動かない」は成立しない</b>。
+    /// </para>
     /// </para>
     /// <para>
     /// <b>区別しきれないケース</b>: <c>File.Exists</c> は失敗理由を返さないので、
@@ -90,7 +96,9 @@ public static class SettingsStore
         }
         catch
         {
-            // 読めなかっただけ。中身は正常かもしれないので Corrupt と区別する(退避しない)。
+            // 読めなかっただけ。中身は正常かもしれないので Corrupt と区別する
+            // (<b>起動時は</b>退避しない。上書きの直前の退避は B5 が別に行う ——
+            //  TryQuarantineUnreadable / MainForm.TrySaveSettings)。
             status = SettingsLoadStatus.Unreadable;
             return new AppSettings();
         }
@@ -159,9 +167,76 @@ public static class SettingsStore
     /// 消すのはユーザーの判断。
     /// </para>
     /// </summary>
-    public static bool TryQuarantineCorrupt(string path, out string quarantinePath)
+    public static bool TryQuarantineCorrupt(string path, out string quarantinePath) =>
+        TryRenameAside(path, ".bad", out quarantinePath);
+
+    /// <summary>
+    /// 読み取れなかった settings.json を、既定値で<b>上書きする直前</b>に
+    /// <c>&lt;path&gt;.bak</c> へ退避する(B5・設計 2026-09-02 §6.3 = B4 申し送りの回収)。
+    /// <para>
+    /// <b><see cref="TryQuarantineCorrupt"/> とは呼ぶ時点が違う。</b>あちらは起動時に
+    /// 「壊れている」と判った内容を退避する。こちらは<b>中身が正常かもしれない</b>ファイルを
+    /// 扱うため<b>起動時には改名できない</b> —— 一過性のロックなら次回起動で普通に読めたはずの
+    /// ものを壊すことになる(B4 設計 §5.2 が退避を却下した理由)。<b>上書きの直前</b>なら中身は
+    /// どのみち失われるので、退避は<b>厳密に増える側</b>にしか働かない。
+    /// </para>
+    /// <para>
+    /// <b>読み取りを拒否された相手にも効きうるのが、<c>File.Copy</c> を採らなかった理由。</b>
+    /// コピーは <c>File.ReadAllText</c> と同じ読み取りを行うので、<c>Unreadable</c> にした事由が
+    /// そのままコピーも落とす。改名は<b>読み取り権を要さない</b>。
+    /// <b>ただし「読み取りを拒否する ACL なら必ず通る」ではない</b>(2026-09-03 実測・.NET 9):
+    /// <list type="bullet">
+    /// <item>読み取り権<b>だけ</b>を拒否する ACE(<c>icacls /deny "user:(RD)"</c> /
+    /// <c>(RD,RA,REA)</c> / <c>(RD,RA,REA,RC)</c>)—— <c>ReadAllText</c> は
+    /// <c>UnauthorizedAccessException</c>、<c>File.Move</c> は<b>成功する</b>。</item>
+    /// <item>まとめて拒否する ACE(<c>(R)</c> / <c>(GR)</c>)—— <b>改名も落ちる</b>。
+    /// これらは <c>SYNCHRONIZE</c> まで拒否し、それは改名側も要求するため
+    /// (<c>(S)</c> 単独の deny でも <c>File.Move</c> が落ちることを実測)。</item>
+    /// <item>他プロセスのロック —— <c>FileShare.Delete</c> を許すロックでは成功、
+    /// <c>FileShare.None</c> では落ちる。</item>
+    /// </list>
+    /// つまりこれは<b>belt であって保証ではない</b>。起動時の警告が「先にコピーしてください」を
+    /// 落とさないのはこのためで、文言も退避の成功を約束しない
+    /// (<c>SettingsStartup.Prepare</c> の <c>Unreadable</c> 枝)。
+    /// </para>
+    /// <para>
+    /// <b>退避が成功すると、直後の保存は差替ではなく新規作成の経路を通る</b>
+    /// (<see cref="IO.AtomicFile"/> は宛先の実在で <c>File.Replace</c> / <c>File.Move</c> を
+    /// 分けるため)。<c>File.Replace</c> と違って<b>原本の DACL は引き継がれず</b>、新しい
+    /// settings.json は親ディレクトリの継承 ACL になる。<c>Unreadable</c> の原因が読み取り拒否の
+    /// ACE だった場合はそれが落ちる(次回から普通に読める)が、原本に付いていた明示的な許可も
+    /// 同時に落ちる。対象は <c>%APPDATA%</c> 配下のユーザー自身の設定なので受容する
+    /// (仕様レビュー M-5)。
+    /// </para>
+    /// <para>
+    /// 呼出はソリューション中 <c>MainForm.TrySaveSettings</c> の 1 か所だけ。
+    /// <see cref="TryQuarantineCorrupt"/> と suffix 引数 1 本へまとめないのは、
+    /// <b>それぞれの呼出が 1 か所である</b>という構造的な主張(あちらの xmldoc)を保つため
+    /// —— まとめると「<c>Corrupt</c> のときだけ改名する」を位置で保っている根拠が消える。
+    /// </para>
+    /// <para>
+    /// <c>.bak</c> は掃除しない。<c>%APPDATA%\kxEdit\</c> 直下でどの sweeper の視野にも入らない
+    /// (<see cref="Save"/> の tmp・<c>.bad</c> と同じ性質)が、<b>消すのはユーザーの判断</b>という
+    /// B4 §9 の方針を踏襲する。
+    /// </para>
+    /// </summary>
+    public static bool TryQuarantineUnreadable(string path, out string quarantinePath) =>
+        TryRenameAside(path, ".bak", out quarantinePath);
+
+    /// <summary>
+    /// 2 つの退避(<see cref="TryQuarantineCorrupt"/> / <see cref="TryQuarantineUnreadable"/>)が
+    /// 共有する改名。宛先の性質(同じ親に落ちること・決め打ちの 1 名しか消さないこと)は
+    /// <b><see cref="TryQuarantineCorrupt"/> の xmldoc が正</b>で、両者で変わらない ——
+    /// 違うのは <paramref name="suffix"/> と<b>呼ぶ時点</b>だけである。
+    /// <para>
+    /// <b>catch-all のまま残す。</b>握ってよい例外を前置で列挙するのは原理的に漏れる(監査 §9 V-7)。
+    /// 退避の失敗は<b>起動も保存も止める理由にならない</b>ので、成否だけ返して呼出側に判断させる
+    /// (設計 §10.13 / B4 §5.5)。
+    /// </para>
+    /// </summary>
+    private static bool TryRenameAside(string path, string suffix, out string quarantinePath)
     {
-        quarantinePath = path + ".bad";
+        quarantinePath = path + suffix;
         try
         {
             File.Move(path, quarantinePath, overwrite: true);
@@ -169,7 +244,6 @@ public static class SettingsStore
         }
         catch
         {
-            // 退避の失敗で起動を落とさない(catch-all の理由は Load と同じ。設計 §10.13)。
             return false;
         }
     }
@@ -289,12 +363,19 @@ public static class SettingsStore
     /// 中身は設定で、<b>最近使ったファイルの一覧(パス)を含む</b>——本文は含まない。
     /// </para>
     /// <para>
-    /// <b>ここでの保証はユーザーへ届かない。</b> 唯一の呼出側 <c>MainForm.SaveSettingsSafe</c> が
-    /// 例外を握り潰すため、<c>AtomicReplaceFailedException.PreservedTempPath</c>(= 残した tmp の
-    /// 場所)は誰にも伝わらない。届くのは<b>原本を壊さない</b>ところまでで、「退避先を案内する」
-    /// M-12 の回収は文書保存経路(<c>TextFileService.Save</c>)にしか効いていない
-    /// (<c>BackupStore.Write</c> / <c>SessionLayoutStore.Save</c> と同じ形)。
-    /// 握り潰しの解消は B5(M-22)の担当で、本修正の射程外。
+    /// <b>ここでの失敗がユーザーへ届くかは呼出側による</b>(B5 / M-22 で解消済み。B4 時点の
+    /// 「唯一の呼出側 <c>MainForm.SaveSettingsSafe</c> が握り潰すので誰にも伝わらない」は
+    /// <b>もう成り立たない</b>)。現在の呼出<b>経路</b>は 3 つで、届き方が分かれる
+    /// (<b>直接の呼出側は <c>MainForm.TrySaveSettings</c> 1 か所だけ</b>。B5 が全経路をそこへ
+    /// 寄せたので、以下は<b>そこへ至る論理的な経路</b>の数え上げである):
+    /// <list type="bullet">
+    /// <item><b>設定ダイアログ OK</b>(<c>MainForm.ApplySettings</c>)—— <c>TrySaveSettings</c> が
+    /// 例外を返し、失敗が発声され、<c>AtomicReplaceFailedException.PreservedTempPath</c>
+    /// (= 残した tmp の場所)はダイアログで案内される。</item>
+    /// <item><b>終了時</b>(<c>MainForm.OnFormClosing</c>)/ <b>最近使ったファイルの更新</b>
+    /// (<c>FileController</c> へ <c>Action</c> で渡る経路)—— <c>MainForm.SaveSettingsSafe</c> が
+    /// 現在も握る(B5 設計 §8 の判断)。この 2 経路では届くのは<b>原本を壊さない</b>ところまで。</item>
+    /// </list>
     /// </para>
     /// </summary>
     public static void Save(string path, AppSettings settings)

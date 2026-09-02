@@ -4,9 +4,11 @@ using System.Linq;
 using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
+using kxEdit.Core.IO;
 using kxEdit.Core.Search;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
+using kxEdit.Core.Text;
 using Directory = System.IO.Directory;
 using File2 = System.IO.File;
 using IOException = System.IO.IOException;
@@ -1141,6 +1143,270 @@ public class MainFormSmokeTests
             Assert.Contains(p1, SettingsStore.Load(tmp.SettingsPath, out _).RecentFiles);
         });
 
+    // ===== B5(B4 申し送りの回収): 読み取れなかった設定を上書きの直前に退避する =====
+
+    /// <summary>
+    /// 起動時に読めなかった settings.json を、<b>最初の保存の直前に</b> <c>.bak</c> へ退避すること。
+    /// <para>
+    /// 起動時の警告は「先に次のファイルをコピーしてください」と案内するが、ユーザーが対処する前に
+    /// <c>OnFormClosing</c> / <c>RegisterRecent</c> が既定値で上書きしてしまう ——
+    /// <b>案内した当のファイルが、案内を読んでいる間に消える</b>(B4 設計 §10.15 の申し送り)。
+    /// </para>
+    /// <para>
+    /// <b>テスト seam を足していない。</b>実ファイルで <c>Unreadable</c> を作れる
+    /// (<c>FileShare.Delete</c> のロック = 読めないが改名はできる)ので、
+    /// <c>Program.CreateMainForm</c> → <c>MainForm</c> ctor → <c>TrySaveSettings</c> の
+    /// <b>実経路をそのまま</b>走らせ、ディスク上の <c>.bak</c> を観測面にできる。seam を挟むと
+    /// 「実経路が本当に通ったか」の観測が 1 段遠くなる(<c>SettingsStartupTests</c> の
+    /// <c>quarantineOverrideForTest</c> は「実ファイルでは決定的に作れない状態」のためのもので、
+    /// ここはその条件に当たらない)。
+    /// </para>
+    /// <para>
+    /// <b>「2 度目は退避しない」の観測面は <c>.bak</c> の<i>中身</i>である。</b>存在だけを見ると、
+    /// 毎回退避する変異(フラグを落とさない)が<b>緑のまま生存する</b> —— 2 度目の退避は
+    /// 1 度目の保存が書いた既定寄りの設定を <c>.bak</c> へ上書きするので、ファイルは在り続ける。
+    /// 非既定の <c>FontName</c> を目印にして、退避先が<b>以前の設定のまま</b>であることを見る。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_quarantines_the_unreadable_settings_file_exactly_once() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string original = File2.ReadAllText(tmp.SettingsPath);
+            string bak = tmp.SettingsPath + ".bak";
+
+            MainForm form;
+            using (
+                new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.Delete)
+            )
+            {
+                // 前提の検算: fixture が本当に Unreadable を作れている(Ok のまま素通りしていない)。
+                SettingsStore.Load(tmp.SettingsPath, out var status);
+                Assert.Equal(SettingsLoadStatus.Unreadable, status);
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+            }
+
+            using (form)
+            {
+                PrepareCreatedFormForSaveTest(form, tmp);
+                Assert.False(File2.Exists(bak)); // 起動時点では改名していない(B4 §5.2)
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                Assert.True(File2.Exists(bak)); // ★ 上書きの直前に退避された
+                Assert.Equal(original, File2.ReadAllText(bak)); // 中身は以前の設定
+                // 保存も進んでいる(退避は保存を止めない・B4 §5.5)。
+                Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+
+                // ★ 2 度目は退避しない。毎回退避する変異ではここが "MS ゴシック" の設定へ化ける。
+                Assert.Equal(original, File2.ReadAllText(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+            }
+        });
+
+    /// <summary>
+    /// 対照: 読めた settings.json は<b>退避しない</b>。ここが退避側へ倒れると、正常な設定を
+    /// <c>.bak</c> へ改名して既定値で上書きすることになり、M-11 が直しに来た無音リセットを
+    /// <b>より強い形で</b>新設する。
+    /// <para>
+    /// <b>末尾の 2 行が「呼ばない」と「呼んでも失敗する」を弁別する。</b>この環境では改名は
+    /// 実際に通るので、<c>.bak</c> の不在は<b>呼んでいないこと</b>を意味する ——
+    /// <c>SettingsStartupTests</c> の <c>Missing</c> 枝の xmldoc が名指ししている罠
+    /// (どのみち失敗する状況で不在を主張しても網にならない)の、こちら側での回避。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_does_not_quarantine_a_readable_settings_file() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string bak = tmp.SettingsPath + ".bak";
+
+            using var form = Program.CreateMainForm(
+                tmp.SettingsPath,
+                tmp.BackupDir,
+                tmp.LayoutPath
+            );
+            PrepareCreatedFormForSaveTest(form, tmp);
+
+            form.ApplySettingsForTest(
+                new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+            );
+
+            Assert.False(File2.Exists(bak)); // ★ 退避していない
+            Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+
+            // ★ 非 vacuous: 同じ状態で改名を実際に呼べば通る = 上の不在は「呼んでいない」。
+            Assert.True(SettingsStore.TryQuarantineUnreadable(tmp.SettingsPath, out string proof));
+            Assert.True(File2.Exists(proof));
+        });
+
+    /// <summary>
+    /// 退避に失敗しても<b>保存は進む</b>(B4 §5.5 の維持)。止めると「設定を適用しました」が
+    /// 虚偽になり、M-22 で潰した欠陥をここで新設することになる。
+    /// <para>
+    /// 失敗の作り方は<b>宛先をディレクトリにする</b> —— <c>File.Move(overwrite: true)</c> は
+    /// ディレクトリを置き換えられないので決定的で、しかも<b>退避だけ</b>が落ちる。ロックで
+    /// 失敗させると保存側(<c>AtomicFile</c> の差替)まで道連れになり、「保存が進んだ」の
+    /// 観測ができなくなる。
+    /// </para>
+    /// <para>
+    /// <c>TryQuarantineUnreadable</c> が例外を漏らす変異(catch-all を外す)もここで落ちる ——
+    /// <c>ApplySettings</c> ごと例外で抜けるため、保存も発声も起きない。
+    /// </para>
+    /// <para>
+    /// <b>後半は「退避失敗 + 保存成功」でフラグが落ちること</b>の網(仕様レビュー I-1 の 3 状態の
+    /// うち 2 番目)。保存が通った時点で読み取れなかった原本はもう無いので、armed のまま残すと
+    /// <b>次の保存が kxEdit 自身の書いた設定を <c>.bak</c> へ落とす</b> ——「以前の設定」と案内した
+    /// 名前に、以前の設定ではないものが入る。宛先のディレクトリを退けてから 2 度目を叩くので、
+    /// 「どのみち失敗するから <c>.bak</c> が無い」ではなく<b>呼んでいないこと</b>を見ている。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void First_save_proceeds_even_when_the_quarantine_fails() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+
+            MainForm form;
+            using (
+                new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.Delete)
+            )
+            {
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+            }
+
+            using (form)
+            {
+                PrepareCreatedFormForSaveTest(form, tmp);
+                string bak = tmp.SettingsPath + ".bak";
+                Directory.CreateDirectory(bak); // 退避を決定的に失敗させる
+                string marker = Path.Combine(bak, "keep.txt");
+                File2.WriteAllText(marker, "別物");
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                // ★ 保存は進み、発声も成功のまま(退避の失敗をユーザーの用件にしない)。
+                Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+                Assert.Equal("MS ゴシック", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+                // 退避の失敗が破壊に化けていない(overwrite: true が同名の別物を消さない)。
+                Assert.True(Directory.Exists(bak));
+                Assert.Equal("別物", File2.ReadAllText(marker));
+
+                // ★ 保存が通った時点で原本は失われた = belt の役目は終わり。障害物を退けてから
+                //   もう一度保存しても、kxEdit 自身が書いた設定を .bak へ落としてはいけない。
+                Directory.Delete(bak, recursive: true);
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+                Assert.False(File2.Exists(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+            }
+        });
+
+    /// <summary>
+    /// 仕様レビュー I-1: <b>ロックで落ちた保存は belt を使い切らない。</b>
+    /// <para>
+    /// 退避を「1 回試したら諦める」形にすると、<b>一過性ロックの場面で belt が丸ごと消える</b> ——
+    /// ①他プロセスが <c>FileShare.None</c> で掴む → 起動時 <c>Unreadable</c> ②ロック中に最初の
+    /// 保存が来る(ファイルを開く / 設定 OK / 終了のどれでも)→ <b>退避も保存も落ちる</b>
+    /// ③ロックが外れる ④次の保存が通り、原本は <c>.bak</c> を残さず消える。
+    /// <b>計画 Task 5 の表が「一過性のロック → 退避が効く」と書いた行そのもの</b>が失われる。
+    /// </para>
+    /// <para>
+    /// 文言の側も偽になる ——「<b>上書きの直前に</b>…退避しようとします」と言いながら、
+    /// <b>実際に原本を消したその上書き</b>では退避を試みていないことになる。
+    /// </para>
+    /// <para>
+    /// したがってフラグが表すのは「まだ試していない」ではなく<b>「原本がまだ在る」</b>である。
+    /// 落とすのは<b>退避が成功したとき</b>と<b>保存が成功したとき</b>(= 原本はもう無い)の 2 つで、
+    /// どちらも起きなければ armed のまま次の保存へ持ち越す。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_first_save_blocked_by_a_lock_keeps_the_quarantine_armed() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string original = File2.ReadAllText(tmp.SettingsPath);
+            string bak = tmp.SettingsPath + ".bak";
+
+            MainForm form;
+            // FileShare.None = 読めない(Unreadable になる)うえ、改名も差替も落ちる。
+            // FileShare.Delete では改名が通ってしまい、この経路を作れない(実測・§Task 5)。
+            using (new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                SettingsStore.Load(tmp.SettingsPath, out var status);
+                Assert.Equal(SettingsLoadStatus.Unreadable, status);
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+                PrepareCreatedFormForSaveTest(form, tmp);
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                // 前提の検算: ロック中なので退避も保存も落ちている(= vacuous ではない)。
+                Assert.False(File2.Exists(bak));
+                Assert.Contains(
+                    "保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+            }
+
+            using (form)
+            {
+                // ロックが外れた = 一過性ロック。原本はまだ失われていない。
+                Assert.Equal(original, File2.ReadAllText(tmp.SettingsPath));
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+
+                // ★ 原本を消したこの保存の直前に、belt が効いている。
+                Assert.True(File2.Exists(bak));
+                Assert.Equal(original, File2.ReadAllText(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+            }
+        });
+
+    /// <summary><see cref="Program.CreateMainForm"/> で作ったフォームを保存経路のテストへ渡す前の
+    /// 共通処理。<b><c>Show</c> しない</b> —— B5 の退避は <c>OnShown</c> ではなく保存経路に乗るので
+    /// 表示は要らず、表示すると起動警告の <c>MessageBox</c> まで面倒を見ることになる。
+    /// 残り 2 つの隔離(last-session-buffers)と抑止(保存失敗ダイアログ)はここで揃える
+    /// —— 抑止を落とすと、退行時にテストが<b>赤ではなくハング</b>する(<see cref="Sta"/> の xmldoc)。</summary>
+    private static void PrepareCreatedFormForSaveTest(MainForm form, TempDir tmp)
+    {
+        form.SetLastSessionBuffersPathForTest(tmp.BuffersPath);
+        form.SetSuppressRestoreDialogsForTest(true);
+        form.SetSuppressSettingsSaveFailedDialogForTest(true);
+    }
+
     /// <summary>実際の合成点(<see cref="Program.CreateMainForm"/>)からフォームを作り、
     /// <c>OnShown</c> まで進める。隔離は <see cref="ShowMainForm"/> と同じ 4 点
     /// (settings / backups / session-state / last-session-buffers)。</summary>
@@ -2044,4 +2310,786 @@ public class MainFormSmokeTests
             MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read)
         );
     }
+
+    // ===== M-22 (B5): 設定保存の失敗を実態どおりに伝える =====
+
+    /// <summary>M-22: 保存が成功したときだけ現行の成功文言を出す。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_reports_plain_success_when_nothing_failed()
+    {
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(null);
+        Assert.Equal("設定を適用しました", speech);
+        Assert.Null(dialog);
+    }
+
+    /// <summary>M-22: 通常の保存失敗では、<b>適用は済んでいる</b>ことと
+    /// <b>永続化だけが落ちた</b>ことの両方を言う。「適用できませんでした」は逆向きの嘘になる。
+    /// 案内すべきパスが無いのでダイアログは出さない。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_says_applied_but_not_saved_for_an_ordinary_failure()
+    {
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new UnauthorizedAccessException("denied")
+        );
+        Assert.Contains("適用しました", speech, StringComparison.Ordinal);
+        Assert.Contains("保存できませんでした", speech, StringComparison.Ordinal);
+        Assert.Null(dialog);
+    }
+
+    /// <summary>
+    /// <paramref name="minLength"/> 以上の長さを持つ設定ファイルパスを作る(親ディレクトリも作成する)。
+    /// <c>FileControllerTests.MakeLongTargetPath</c> の写しで、あちらが M-12 のレビューで
+    /// 到達した形をそのまま使う —— 退避先パスは これ+17 文字になるので、MAX_PATH(260)に
+    /// 収まるよう <c>minLength + 17 &lt; 260</c> の範囲で使うこと。
+    /// <para>
+    /// 詰め物の末尾側に<b>連続空白</b>を 1 か所埋め込む。Windows のパス構成要素に CR/LF/TAB は
+    /// 入れられないが、途中の連続空白は正当で実際に作成できる。
+    /// <see cref="SanitizeForDisplay.OneLine"/> はこれを 1 個へ畳むが
+    /// <see cref="SanitizeForDisplay.MultiLine"/> は畳まないので、<b>無害化を MultiLine へ
+    /// 格下げする変異を殺せる唯一の観測点</b>になる。位置を末尾寄りにするのは、原本パス側の
+    /// 丸め(80 字)に掛からない場所に置いて、丸めの網と混線させないため。
+    /// </para>
+    /// </summary>
+    /// <summary>U+202E RIGHT-TO-LEFT OVERRIDE。<b>ソースへ生の制御文字を置かない</b>ため
+    /// コードポイントから組み立てる(生で書くとエディタ上でこの行以降の表示順が反転して読めなくなる)。
+    /// <see cref="SanitizeForDisplay"/> が除去する対象そのもので、無害化が外れた変異の観測に使う。</summary>
+    private static readonly string Rlo = ((char)0x202E).ToString();
+
+    private static string MakeLongSettingsPath(TempDir tmp, string fileName, int minLength)
+    {
+        int segLen = Math.Max(8, minLength - tmp.Root.Length - 2 - fileName.Length);
+        string segment = new string('d', segLen - 4) + "  dd"; // 末尾寄りに連続空白 1 か所
+        string dir = Path.Combine(tmp.Root, segment);
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, fileName);
+    }
+
+    /// <summary>M-22: 差替失敗で tmp が<b>実在する</b>ときは、その場所と後始末をダイアログで案内する。
+    /// 発声(1 行のステータスラベル)には長いパスを載せられないための二段構え
+    /// (<c>FileController.WriteToPath</c> が M-12 で採った形と同型)。
+    /// <para>
+    /// <b>長いパス + U+202E + 連続空白の fixture で検証するのが本質</b>(仕様レビュー I-1)。
+    /// 短い ASCII パスだと、無害化撤廃 / <c>MultiLine</c> 格下げ / 原本 80 字上限の撤廃 /
+    /// tmp への 200 字上限の付け直しの<b>4 変異すべてが同一出力になり、全部生存する</b>
+    /// (当初 fixture で実測)。設計 §4.3 が「外さない(ダイアログ偽装を防ぐ既存のセキュリティ制御)」と
+    /// 明記した制御が、コードだけ踏襲されて網が来ていない状態だった —— B4 が
+    /// <c>FileControllerTests.Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull</c> の
+    /// レビュー指摘 1 で踏んだのと同じ欠陥。
+    /// </para>
+    /// <para>
+    /// 文字列比較はすべて <c>StringComparison.Ordinal</c> を明示する。既定の culture-sensitive 比較は
+    /// U+202E(<c>UnicodeCategory.Format</c>)を無視するため、<b>RLO の網を黙って無力化する</b>。
+    /// </para></summary>
+    [Fact]
+    public void SettingsSaveOutcome_points_at_the_preserved_temp_when_it_exists()
+    {
+        using var tmp = new TempDir();
+        // ファイル名に U+202E(RLO)。退避先は AtomicFile と同じ「原本 + . + 乱数 + .tmp」= +17 文字。
+        string target = MakeLongSettingsPath(tmp, "set" + Rlo + "tings.json", minLength: 220);
+        string preserved = target + "." + Path.GetRandomFileName() + ".tmp";
+        File2.WriteAllText(preserved, "{}"); // 実在させる(=案内してよい状態)
+
+        // 案内に載るべき形。tmp は切り詰めない / 原本は 80 字で丸める。
+        string preservedShown = SanitizeForDisplay.OneLine(preserved);
+        string targetShown = SanitizeForDisplay.OneLine(target, 80);
+        // 前提 1: 退避先だけで 200 字を超える(=tmp に 200 字上限を付け直す変異を落とせる)。
+        Assert.True(preservedShown.Length > 200, $"len={preservedShown.Length}");
+        // 前提 2: 連続空白が「生には有り・無害化後には無い」(=MultiLine 格下げを弁別できる)。
+        Assert.Contains("  ", preserved, StringComparison.Ordinal);
+        Assert.DoesNotContain("  ", preservedShown, StringComparison.Ordinal);
+        // 前提 3: 原本パスが実際に 80 字上限へ届く(190 で届かず無網だったのが B4 の失敗)。
+        Assert.Equal(80, targetShown.Length);
+        Assert.EndsWith("…", targetShown, StringComparison.Ordinal);
+
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: target,
+                preservedTempPath: preserved,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+
+        Assert.Contains("適用しました", speech, StringComparison.Ordinal);
+        Assert.NotNull(dialog);
+        // (a) 退避先は<b>丸めない</b>。連続空白が畳まれた形で載ることで MultiLine 格下げも落ちる。
+        Assert.Contains(preservedShown, dialog, StringComparison.Ordinal);
+        // (a') 無害化は外れていない(生の RLO がダイアログへ載らない)。
+        Assert.DoesNotContain(Rlo, dialog, StringComparison.Ordinal);
+        // (a'') 原本パス側は<b>丸める</b>。丸めた形(79 字+"…")が載ることで、丸めの撤廃も落ちる。
+        // ★「原本パス全体が載らないこと」は assert できない —— 退避先パスは原本パスを prefix と
+        //   して含むので、正しい実装でも原本パス全体は本文に現れる(下の StartsWith が実測で示す)。
+        Assert.StartsWith(target, preserved, StringComparison.Ordinal);
+        Assert.Contains(targetShown, dialog, StringComparison.Ordinal);
+        // (b) 掃除する者が誰もいないので削除を促す(自動削除は足さない)。
+        Assert.Contains("削除", dialog, StringComparison.Ordinal);
+        // (b') 最終レビュー M-1: 本文冒頭でキャプション(「設定を保存できませんでした」)を
+        //      逐語で繰り返さない —— SR はキャプション → 本文の順に読む。
+        Assert.DoesNotContain("設定を保存できませんでした", dialog, StringComparison.Ordinal);
+        // ★やり直しの手順が、長い退避先パスより<b>前</b>に出る(SR は線形に読む・M-12 の教訓)。
+        int guideAt = dialog.IndexOf("保存をやり直せます", StringComparison.Ordinal);
+        int tempAt = dialog.IndexOf(preservedShown, StringComparison.Ordinal);
+        Assert.True(guideAt >= 0, "やり直しの案内が無い");
+        Assert.True(guideAt < tempAt, $"guideAt={guideAt} tempAt={tempAt}");
+    }
+
+    /// <summary>M-22: tmp まで失われていたら、<b>実在しない退避先を案内しない</b>。
+    /// 弁別は <c>File.Exists</c> 一本(例外の型で分けると原理的に漏れる。監査 §9 V-7)。
+    /// <para>
+    /// ここは<b>短いパス</b>で検証する(<c>FileControllerTests</c> の (c) と同じ理由): 長いパスだと
+    /// 退避先が丸めで末尾から落ちるだけの実装とも区別が付かなくなる。無害化・丸めの網は
+    /// 上のテストが持つ(<c>target</c> の式は両分岐で共有)。
+    /// </para></summary>
+    [Fact]
+    public void SettingsSaveOutcome_does_not_point_at_a_temp_that_is_gone()
+    {
+        using var tmp = new TempDir();
+        string missing = tmp.File("never-created.tmp");
+        Assert.False(File2.Exists(missing)); // 前提(恒真 assertion 除け)
+
+        var (_, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: tmp.SettingsPath,
+                preservedTempPath: missing,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+
+        // ダイアログ自体は出す(差替失敗は起きている)が、退避先の案内だけを落とす。
+        Assert.NotNull(dialog);
+        Assert.DoesNotContain(missing, dialog, StringComparison.Ordinal);
+        Assert.DoesNotContain("削除", dialog, StringComparison.Ordinal);
+        // 最終レビュー M-1: 本文冒頭でキャプションを逐語で繰り返さない
+        // (SR はキャプション → 本文の順に読むため、同じ一文を 2 回聞くことになる)。
+        Assert.DoesNotContain("設定を保存できませんでした", dialog, StringComparison.Ordinal);
+    }
+
+    /// <summary>M-22(仕様レビュー I-2): <b>次回起動時の状態を断定しない</b>。
+    /// <para>
+    /// ここから到達しうる結末は 3 通りある —— (1) 同一セッションの他の保存経路
+    /// (最近使ったファイルの更新・終了時保存)が成功して<b>新しい設定が残る</b>、
+    /// (2) 何も保存されず<b>元の設定に戻る</b>(通常失敗=原本は無傷)、
+    /// (3) <b>既定値で始まる</b>(差替失敗=原本が失われているので次回の <c>Load</c> は
+    /// <c>Missing</c>)。とくに (1) は<b>案内を聞いたユーザーが最も自然に取る行動</b>
+    /// (読み取り専用属性を外してファイルを開く / 終了する)で起きる。
+    /// </para>
+    /// <para>
+    /// したがって発声で「元の設定に戻ります」と断定するのは、B5 が潰そうとしている虚偽発声を
+    /// B5 自身が新設することになる。<b>断定の語を置かない</b>ことを機械的に固定する。
+    /// </para></summary>
+    [Fact]
+    public void SettingsSaveOutcome_does_not_promise_a_particular_next_startup()
+    {
+        var (ordinarySpeech, _) = MainForm.SettingsSaveOutcomeForTest(
+            new UnauthorizedAccessException("denied")
+        );
+        // 断定形(旧文言)を置かない。3 通りのうち 2 通りで偽になる。
+        Assert.DoesNotContain("元の設定に戻ります", ordinarySpeech, StringComparison.Ordinal);
+        Assert.Contains("可能性", ordinarySpeech, StringComparison.Ordinal);
+
+        using var tmp = new TempDir();
+        string preserved = tmp.File("settings.json.abc.tmp");
+        File2.WriteAllText(preserved, "{}");
+        var (_, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: tmp.SettingsPath,
+                preservedTempPath: preserved,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+        Assert.NotNull(dialog);
+        // 原本が失われた分岐で「元に戻る」は明確な誤り(戻り先が存在しない)。
+        Assert.DoesNotContain("元に戻ります", dialog, StringComparison.Ordinal);
+        Assert.DoesNotContain("元の設定に戻ります", dialog, StringComparison.Ordinal);
+        // 言えるのは「保存されなければ既定値」という条件形と、やり直しの手順まで。
+        Assert.Contains("既定の設定で始まります", dialog, StringComparison.Ordinal);
+        Assert.Contains("保存をやり直せます", dialog, StringComparison.Ordinal);
+    }
+
+    /// <summary>M-22 の配線: 設定の適用経路が、保存の成否を見て発声を選んでいること。
+    /// 純関数だけを固定すると「<c>OpenSettings</c> が実際にそれを呼んでいるか」が観測できず、
+    /// 配線が黙って切れても緑のままになる(<see cref="Program.CreateMainForm"/> の xmldoc が
+    /// 名指ししている罠)。<c>SettingsDialog</c> はモーダルでテストから開けないため、
+    /// ダイアログを閉じた後の処理(<c>ApplySettings</c>)を実経路として叩く。
+    /// <para>
+    /// 失敗の注入は<b>読み取り専用の差替先</b>。<c>AtomicFile.Write</c> は書ける tmp を作ってから
+    /// <c>File.Replace</c> するので、落ちるのは差替段であり、原本は残る = 通常失敗
+    /// (<c>AtomicReplaceFailedException</c> にはならない)=ダイアログ分岐に入らない
+    /// (MessageBox でブロックしない)。実測で <c>UnauthorizedAccessException</c> 0x80070005。
+    /// </para>
+    /// <para>
+    /// <b>それでも抑止フラグは立てる</b>(仕様レビュー M-1)。「常にダイアログを出す」向きの変異や
+    /// 将来の退行が起きたとき、抑止していないと <c>MessageBox.Show</c> が STA スレッド上で
+    /// モーダルループを回し、テストは<b>赤ではなくハング</b>する(<see cref="Sta"/> の xmldoc が
+    /// 名指ししている事故形=CI の timeout を燃やす)。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_announces_the_failure_when_the_file_cannot_be_written() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+            File2.SetAttributes(tmp.SettingsPath, FileAttributes.ReadOnly);
+            try
+            {
+                form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+
+                Assert.Contains(
+                    "保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+                // 「適用できませんでした」へ倒す変異(逆向きの嘘)を kill する。
+                Assert.Contains(
+                    "適用しました",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+                // 通常失敗では案内すべきパスが無いのでダイアログは出さない(配線レベルで固定)。
+                Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest);
+            }
+            finally
+            {
+                // TempDir.Dispose が消せるように戻す(戻さないと後始末が握り潰されて残骸になる)。
+                File2.SetAttributes(tmp.SettingsPath, FileAttributes.Normal);
+            }
+        });
+
+    /// <summary>M-22: 保存できたときは現行の成功文言のまま(退行の証人)。
+    /// 「常に失敗文言」へ倒す実装は上のテストだけでは緑になる。
+    /// 抑止フラグを立てる理由は上と同じ(M-1: 退行時にハングさせない)。</summary>
+    [Fact]
+    public void Applying_settings_announces_plain_success_when_the_file_is_writable() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+
+            form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+            Assert.True(File2.Exists(tmp.SettingsPath)); // 保存は実際に成功している
+            Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest); // 成功時に出さない
+        });
+
+    /// <summary>M-22 の切り出しで初めて観測可能になった 2 つの副作用 —— 全タブへの外観適用
+    /// (<c>EditorAppearance.Apply</c>)とバックアップ設定の即時反映(<c>_backup.UpdateSettings</c>)。
+    /// <para>
+    /// <b>両方まるごと消しても App 全件が緑だった</b>(仕様レビュー M-3・実測)。cf17bdb が持ち込んだ
+    /// 退行ではなく、元の <c>OpenSettings</c> でも観測不能だった面だが、<c>ApplySettings</c> という
+    /// seam ができた今なら塞げる ——「判断をモーダルの中に残すと配線が黙って切れても緑のまま」
+    /// という切り出しの根拠は、切り出した先の 3 効果すべてに網が要る。
+    /// </para>
+    /// <para>
+    /// CLAUDE.md §4-B に従い<b>非既定値から動かす</b>: 適用前は <c>ShowLineNumbers=true</c>
+    /// (既定は false)・間隔 30 秒(既定 300)で、適用後はどちらもそれと違う値へ動かす。
+    /// これで「何もしない」実装とも「既定値を適用する」実装とも区別が付く。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_pushes_appearance_and_backup_interval_into_the_running_app() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                new AppSettings
+                {
+                    BackupEnabled = false,
+                    ShowLineNumbers = true, // 非既定
+                    BackupIntervalSeconds = 30, // 非既定(既定 300)
+                },
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            var doc = form.FileForTest.DocsForTest[0]; // ctor の NewFile で 1 つある
+            // 前提: 適用前は ctor の値が効いている(恒真 assertion 除け)。
+            Assert.True(doc.Editor.ShowLineNumbers);
+            Assert.Equal(30_000, form.BackupTimerIntervalMsForTest);
+
+            form.ApplySettingsForTest(
+                new AppSettings
+                {
+                    BackupEnabled = false,
+                    ShowLineNumbers = false,
+                    BackupIntervalSeconds = 45,
+                }
+            );
+
+            Assert.False(doc.Editor.ShowLineNumbers); // EditorAppearance.Apply のループが走った
+            Assert.Equal(45_000, form.BackupTimerIntervalMsForTest); // UpdateSettings が走った
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+        });
+
+    /// <summary>M-22 の配線(ダイアログ分岐): 差替失敗で残った tmp の案内が、純関数の中だけで
+    /// 終わらず<b>実際にダイアログ発火まで届く</b>こと。
+    /// <para>
+    /// この網が無いと、発火行(<c>if (dialogBody is not null) ShowSettingsSaveFailedDialog(...)</c>)を
+    /// 消しても・門を閉じても App 全 760 件が緑のままだった(実測)。通常失敗のテストは
+    /// 本文が null の経路しか通らず、純関数のテストは本文を組むところで止まるため、
+    /// <b>どちらも発火を観測していなかった</b>。
+    /// </para>
+    /// <para>
+    /// <c>AtomicReplaceFailedException</c> は「差替に失敗し<b>かつ原本が失われ</b>かつ復旧リネームも
+    /// 失敗」でしか出ないので、実 I/O では作れない。差替の 1 手だけを差し替える seam
+    /// (<see cref="AtomicFile.OverrideReplaceStepForTest"/>)で偽装する ——
+    /// <c>FileControllerTests</c> の M-12 の網と同じ形で、この seam のために
+    /// <c>kxEdit.Core.csproj</c> が App.Tests へ internal を可視化してある。
+    /// </para>
+    /// <para>
+    /// ★ seam は <c>[ThreadStatic]</c> なので、張ったスレッドと <c>Write</c> が走るスレッドが
+    /// ずれると黙って既定実装が走る。<c>scope.Invocations</c> を必ず assert すること。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_shows_the_preserved_temp_dialog_when_the_replace_loses_the_original() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            // MessageBox がテストを塞がないよう抑止する(到達の記録は抑止中でも行われる)。
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            // 差替先の原本。CommitStaged の復旧枝は destExists=true でしか通らない。
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+
+            string? preserved = null;
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    (stagedTmp, dest, _) =>
+                    {
+                        preserved = stagedTmp;
+                        File2.Delete(dest); // 原本を消す = tmp が唯一のコピー
+                        // 復旧の File.Move(tmp, dest) を決定的に失敗させる(同名ディレクトリ)。
+                        Directory.CreateDirectory(dest);
+                        throw new IOException("simulated partial replace failure");
+                    }
+                )
+            )
+            {
+                form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+                Assert.Equal(1, scope.Invocations); // ★フックが実際に発火した(不発ガード)
+            }
+
+            Assert.NotNull(preserved);
+            Assert.True(File2.Exists(preserved)); // 前提: 退避先は実在する(=案内してよい状態)
+
+            Assert.Equal(1, form.SettingsSaveFailedDialogCountForTest);
+            string? body = form.SettingsSaveFailedDialogBodyForTest;
+            Assert.NotNull(body);
+            // 案内は「その場で残した tmp」を指している。無害化・丸めの網は純関数側
+            // (SettingsSaveOutcome_points_at_the_preserved_temp_when_it_exists)が持つので、
+            // ここは<b>配線が届いていること</b>だけを見る(短いパスで十分)。
+            Assert.Contains(preserved, body, StringComparison.Ordinal);
+            Assert.Contains("削除", body, StringComparison.Ordinal);
+            // 発声の側は通常失敗と同じ 1 行のまま(長いパスはダイアログ側にだけ載る)。
+            Assert.Contains(
+                "保存できませんでした",
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
+            Assert.DoesNotContain(
+                preserved,
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
+        });
+
+    // ===== M-20 (B5): バックアップ書込の健全性を遷移で伝える(配線と文言) =====
+
+    /// <summary>M-20 の配線: 失敗の遷移が実 <see cref="MainForm"/> で発声になること。
+    /// <para>
+    /// 遷移の<b>判定</b>は <c>BackupCoordinatorTests</c> が固定するが、あちらは Coordinator を
+    /// 直接叩くため <c>_backup.OnBackupHealthChanged = ...</c> の 1 行を消しても緑のままだった
+    /// (実測)。ここは<b>その 1 行と文言</b>だけを見る。
+    /// </para>
+    /// <para>
+    /// 実バックアップの失敗を実 <see cref="MainForm"/> で起こすには背景ライターと壊れた書込先と
+    /// tick(既定 300 秒)が要り、L3 では再現が脆い。<c>InvokeBackupHealthChangedForTest</c> は
+    /// <b>Coordinator に配線済みのフックを読んで撃つ</b>ので、配線が切れればフックが null になり
+    /// 発声も起きない=この網は配線の有無を見ている。
+    /// </para>
+    /// <para>
+    /// 文言は B5 の主題(実際と違うことを言わない)に沿って 3 つに割れている:
+    /// <b>起きた事実</b>(書込が失敗した)は断定し、<b>帰結</b>(復元できるか)は possibility に
+    /// 留め、<b>行動</b>(保存)を添える。断定へ倒す変異・帰結を落とす変異のどちらも kill する。
+    /// </para></summary>
+    [Fact]
+    public void Backup_health_failure_is_announced_by_the_running_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            Assert.Empty(form.LastAnnouncementForTest); // 前提: まだ何も言っていない
+
+            form.InvokeBackupHealthChangedForTest(healthy: false);
+
+            string said = form.LastAnnouncementForTest;
+            Assert.Contains("バックアップを保存できませんでした", said, StringComparison.Ordinal);
+            // 帰結は possibility のまま(「復元できません」と断定すると、既存の古いバックアップが
+            // 残っている場合や、ユーザーが保存した場合に嘘になる)。
+            Assert.Contains("復元できない可能性", said, StringComparison.Ordinal);
+            // 行動指針(自動の網が落ちたので手で保存する)。
+            Assert.Contains("保存してください", said, StringComparison.Ordinal);
+            // 復旧側の文言へ倒す変異を kill する。
+            Assert.DoesNotContain("再開", said, StringComparison.Ordinal);
+        });
+
+    /// <summary>M-20 の配線: 復旧の遷移が実 <see cref="MainForm"/> で発声になること。
+    /// 失敗側と 2 本に割るのは、三項演算子を片側へ潰す変異(常に失敗文言 / 常に復旧文言)を
+    /// どちらの向きでも kill するため。</summary>
+    [Fact]
+    public void Backup_health_recovery_is_announced_by_the_running_form() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            Assert.Empty(form.LastAnnouncementForTest); // 前提: まだ何も言っていない
+
+            form.InvokeBackupHealthChangedForTest(healthy: true);
+
+            Assert.Equal("バックアップの保存を再開しました", form.LastAnnouncementForTest);
+        });
+
+    /// <summary>仕様レビュー I-1: <b>設定ダイアログ OK が M-20 の「1 回だけ」の通知を消していた。</b>
+    /// <para>
+    /// <c>ApplySettings</c> は先頭で <c>_backup.UpdateSettings</c> を呼び、そこから
+    /// <c>Reconcile</c> → drain → 健全性の警告が鳴る。ところが直後の
+    /// <c>Say("設定を適用しました")</c> がそれを上書きしてしまう(視覚は <c>_label.Text</c> の
+    /// 代入・発声は <c>AutomationNotificationProcessing.MostRecent</c>)。しかも
+    /// <c>_backupHealthy</c> は既に false なので<b>次 tick 以降も鳴らない</b> ——
+    /// M-20 が潰した「無言の失敗」がこの経路で復活していた。
+    /// </para>
+    /// <para>
+    /// 塞ぎ方は<b>発声チャネルを譲る</b>(最終レビュー I-2)—— この pass で健全性が鳴ったら
+    /// 設定の結果を発声しない。当初は「末尾で言い直す」形だったが、
+    /// それだと<b>同時故障で設定保存の失敗が消える</b>(下の
+    /// <see cref="Applying_settings_delivers_both_failures_when_the_save_and_the_backup_fail_together"/>)。
+    /// </para>
+    /// <para>
+    /// 失敗は実 writer の <c>OnWriteFailed</c> が入る受け口へ注入する(実 <c>MainForm</c> は
+    /// <c>SerialBackupWriter</c> を直生成していて writer を差し替えられない)。遷移そのものは
+    /// <c>UpdateSettings</c> が走らせる<b>実 drain</b> が起こすので、この網は
+    /// 「譲る 1 行」だけでなく<b>上書きが本当に起きる経路</b>ごと固定する。
+    /// </para>
+    /// <para><c>_enabled</c> を OFF にしたまま長く使ったあと ON へ戻した場合も同じ経路を通る
+    /// (drain は <c>ReconcileContent</c> 冒頭にしかないので、OFF の間に溜まった失敗はこの
+    /// pass で初めて読まれる)= その経路の警告がユーザーへ届くのも、この譲りのおかげである。</para></summary>
+    [Fact]
+    public void Applying_settings_keeps_the_backup_warning_its_own_announcement_would_overwrite() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true; // drain が走る条件(OFF では ReconcileContent へ入らない)
+            using var form = new MainForm(
+                settings,
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            form.InjectBackupWriteFailureForTest("id-1");
+            Assert.True(form.BackupHealthyForTest); // 前提: まだ drain していないので健全のまま
+
+            var applied = NewSettings(csvAutoModeOnOpen: false);
+            applied.BackupEnabled = true;
+            form.ApplySettingsForTest(applied);
+
+            // 非 vacuous: 保存は成功している = 譲らなければ「設定を適用しました」が出て上書きする側。
+            Assert.True(File2.Exists(tmp.SettingsPath));
+            Assert.False(form.BackupHealthyForTest); // drain が遷移させた
+            Assert.Contains(
+                "バックアップを保存できませんでした",
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
+            // 譲るだけで足りる = 余計に鳴らさない(drain の 1 回きり)。
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
+        });
+
+    /// <summary>仕様レビュー I-2(クラッシュ経路): <b>終端フラッシュでは健全性を言わない。</b>
+    /// <para>
+    /// <c>FlushBackupsForCrash</c> は <c>_closeInProgress</c> を立ててから
+    /// <c>FinalFlushForRestore</c> を呼ぶので、その drain で起きる遷移は抑止される。抑止しないと
+    /// SR は「…<b>ファイルを保存してください</b>」と言うが、直後に <c>Environment.Exit(1)</c> が
+    /// 続くので<b>実行不能な助言</b>になり、しかも <c>UiCrashSink.CrashMessage</c> の
+    /// 「編集中の内容は退避したので次回起動時に復元できます」と真逆に聞こえる。
+    /// </para>
+    /// <para><b>vacuous ではない</b>ことを <c>BackupHealthyForTest</c> で示す ——
+    /// 遷移は実際に起きている(= フックは撃たれた)うえで、発声だけが出ていない。</para></summary>
+    [Fact]
+    public void Backup_health_is_not_announced_during_the_crash_flush() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            using var form = ShowMainForm(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "unsaved-body"); // 終端 flush が実際に書込を投入する
+            form.InjectBackupWriteFailureForTest("id-1");
+            Assert.Empty(form.LastAnnouncementForTest); // 前提: まだ何も言っていない
+
+            Assert.True(form.FlushBackupsForCrash()); // 実クラッシュ経路(drain がここで走る)
+
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 遷移は起きた
+            Assert.Equal(0, form.BackupHealthSaidCountForTest); // それでも言わない
+            Assert.Empty(form.LastAnnouncementForTest);
+        });
+
+    /// <summary>仕様レビュー I-2(終了キャンセル): 終端フラッシュで抑止した警告は、
+    /// <b>終了を取りやめたら言い直す</b>。
+    /// <para>
+    /// 抑止したまま編集へ戻ると、その drain で unhealthy へ落ちた遷移が誰にも伝わらないまま
+    /// 居座り、以後の tick も「遷移していない」ので無言になる = M-20 が潰した欠陥の再発。
+    /// 閉じる側では言わない(助言が実行不能)ので、<b>キャンセルされたときだけ</b>言い直す。
+    /// </para>
+    /// <para>
+    /// 構成: <c>backups</c> の位置をファイルで塞いで実 writer の書込を必ず失敗させる
+    /// (<see cref="OnFormClosing_UnifiedOn_BackupWriteFails_FallsThroughToConfirm"/> と同じ
+    /// fixture)。これで <c>WaitForFinalFlush</c> が false を返し、silent close が確認経路へ
+    /// 倒れてキャンセルできる。<b>遷移させるための失敗は別に注入する</b>のが要点 ——
+    /// flush 自身の書込失敗は drain の<b>後</b>に届くので、その pass の判定には間に合わない。
+    /// </para></summary>
+    [Fact]
+    public void Canceling_the_close_repeats_the_backup_warning_the_terminal_flush_suppressed() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            File2.WriteAllText(tmp.BackupDir, "occupied"); // 実 writer の書込が必ず失敗する
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true; // silent path に入る = 先頭で flush が走る
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+            form.InjectBackupWriteFailureForTest("id-1"); // 先頭 flush の drain が読む失敗
+            form.SetConfirmDiscardOverrideForTest(_ => false); // ユーザーキャンセル
+
+            form.Close();
+
+            Assert.True(form.Visible); // e.Cancel=true で閉じられなかった
+            Assert.Equal(false, form.LastCloseFinalFlushOkForTest); // 確認経路へ倒れた前提
+            Assert.False(form.BackupHealthyForTest);
+            Assert.Equal(1, form.BackupHealthSaidCountForTest); // 終端で抑止 → キャンセル後に 1 回だけ
+            Assert.Contains(
+                "バックアップを保存できませんでした",
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
+        });
+
+    /// <summary>仕様レビュー I-2 の対照群: <b>閉じ切るなら言い直さない</b>。
+    /// 言い直すのは終了を取りやめたとき<b>だけ</b>で、そのまま閉じる側では抑止の理由
+    /// (助言「ファイルを保存してください」が実行不能)がそのまま効いている。
+    /// <para>この 1 本が無いと <c>e.Cancel &amp;&amp;</c> を落とす変異が生き残る(実測)——
+    /// 上の cancel テストは <c>e.Cancel=true</c> の側しか通らないため、
+    /// <b>言い直しの条件が広がる向き</b>を検出できない。</para>
+    /// <para>silent close(確認ループを通らない)を選ぶのは、確認ループが
+    /// <c>_docs.Activate</c> を回して別の発声を挟みうるのを避け、
+    /// 「終端で何も言っていない」を素の空文字列で見るため。</para></summary>
+    [Fact]
+    public void Backup_health_is_not_announced_when_the_close_actually_completes() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true; // silent close へ入る
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+            form.InjectBackupWriteFailureForTest("id-1"); // 終端 flush の drain が読む失敗
+
+            form.Close();
+
+            Assert.Equal(true, form.LastCloseTookSilentPathForTest); // 前提: キャンセルされていない
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 遷移そのものは起きている
+            // 観測は発声<b>回数</b>で行う —— 閉じた Form の Label はハンドルごと消え、
+            // LastAnnouncementForTest は常に空文字列を返す(= assert が vacuous になる。実測)。
+            Assert.Equal(0, form.BackupHealthSaidCountForTest);
+        });
+
+    /// <summary>最終レビュー I-2: <b>設定保存とバックアップ書込が同時に落ちても、どちらの事実も
+    /// 失われないこと。</b>
+    /// <para>
+    /// 修正前は末尾の言い直しが無条件だったため、この組み合わせで
+    /// 「設定を適用しましたが、保存できませんでした…」が健全性の警告に上書きされて消え、
+    /// 通常失敗はダイアログも出さないので<b>設定が保存できなかったことがどこからも届かなかった</b>
+    /// (= M-22 が潰した欠陥の復活)。例外的な組み合わせではない ——
+    /// <c>%APPDATA%\kxEdit</c> が丸ごと書けなくなれば(ACL 変更・ディスクフル・同期クライアントの
+    /// ロック)そのまま起きる。
+    /// </para>
+    /// <para>
+    /// 発声チャネルには 1 行しか載らない(50 ms 窓 + <c>MostRecent</c>)ので、<b>チャネルを分ける</b>:
+    /// 発声は健全性の警告(より緊急で行動可能)に譲り、設定保存の失敗はダイアログで届ける。
+    /// 通常失敗にダイアログを出さないという現行の判断に対する、ここだけの例外。
+    /// </para>
+    /// <para>
+    /// 失敗の注入は 2 系統 —— 設定側は<b>読み取り専用の差替先</b>(通常失敗=ダイアログ本文を
+    /// 持たない枝)、バックアップ側は実 writer の <c>OnWriteFailed</c> 受け口。
+    /// <c>UpdateSettings</c> が走らせる<b>実 drain</b> が遷移を起こすので、この網は
+    /// 「上書きが本当に起きる経路」ごと固定する。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_delivers_both_failures_when_the_save_and_the_backup_fail_together() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true; // drain が走る条件(OFF では ReconcileContent へ入らない)
+            using var form = new MainForm(
+                settings,
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            // MessageBox がテストを塞がないよう抑止する(到達の記録は抑止中でも行われる)。
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            form.InjectBackupWriteFailureForTest("id-1");
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+            File2.SetAttributes(tmp.SettingsPath, FileAttributes.ReadOnly);
+            try
+            {
+                var applied = NewSettings(csvAutoModeOnOpen: false);
+                applied.BackupEnabled = true;
+                form.ApplySettingsForTest(applied);
+
+                // (1) 発声に残るのは健全性の警告。
+                Assert.False(form.BackupHealthyForTest); // 非 vacuous: 遷移は実際に起きた
+                Assert.Contains(
+                    "バックアップを保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+                // (2) 設定保存の失敗はダイアログで届く(消えていない)。
+                Assert.Equal(1, form.SettingsSaveFailedDialogCountForTest);
+                string? body = form.SettingsSaveFailedDialogBodyForTest;
+                Assert.NotNull(body);
+                Assert.Contains("次回起動時に残らない可能性", body, StringComparison.Ordinal);
+                // キャプション(「設定を保存できませんでした」)と本文冒頭が逐語で重ならないこと
+                // (最終レビュー M-1。SR はキャプション → 本文の順に読む)。
+                Assert.DoesNotContain("設定を保存できませんでした", body, StringComparison.Ordinal);
+                // (3) モーダルは直前の通知に割り込むので、閉じた後に言い直す = 計 2 回。
+                Assert.Equal(2, form.BackupHealthSaidCountForTest);
+            }
+            finally
+            {
+                // TempDir.Dispose が消せるように戻す(戻さないと後始末が握り潰されて残骸になる)。
+                File2.SetAttributes(tmp.SettingsPath, FileAttributes.Normal);
+            }
+        });
+
+    /// <summary>最終レビュー I-2(事象ベース): <b>自分が上書きしていない警告は言い直さない。</b>
+    /// <para>
+    /// 言い直しの条件を「今 unhealthy か」という<b>状態</b>で書くと、3 tick 前に鳴らして誰も
+    /// 上書きしていない警告まで、設定 OK のたびに無条件で繰り返す。条件は
+    /// 「<c>UpdateSettings</c> の drain がこの呼出の中で<b>実際に鳴らしたか</b>」という事象で持つ。
+    /// </para>
+    /// <para><b>非 vacuous</b>: 2 回目の適用でも <c>BackupHealthyForTest</c> は false のまま
+    /// (状態ベースなら必ず鳴る条件が揃っている)。それでも発声は成功の 1 行に戻る。</para></summary>
+    [Fact]
+    public void Applying_settings_does_not_repeat_a_backup_warning_it_did_not_overwrite() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            using var form = new MainForm(
+                settings,
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            form.InjectBackupWriteFailureForTest("id-1");
+
+            var first = NewSettings(csvAutoModeOnOpen: false);
+            first.BackupEnabled = true;
+            form.ApplySettingsForTest(first); // ここで遷移 → 1 回だけ鳴る
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
+            Assert.False(form.BackupHealthyForTest);
+
+            var second = NewSettings(csvAutoModeOnOpen: false);
+            second.BackupEnabled = true;
+            form.ApplySettingsForTest(second); // 遷移なし = 何も上書きしていない
+
+            Assert.Equal(1, form.BackupHealthSaidCountForTest); // 言い直さない
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 依然 unhealthy のまま
+            Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest); // 保存は成功している
+        });
+
+    /// <summary>最終レビュー M-7(事象ベース): <b>終端フラッシュが何も抑止していなければ、
+    /// 終了キャンセル後に言い直さない。</b>
+    /// <para>
+    /// 既に unhealthy な状態で終了 → キャンセルすると、終端 flush の drain は
+    /// 「遷移していない」ので報告を出さない = 抑止も起きていない。ここで
+    /// 「今 unhealthy か」で言い直すと、キャンセルのたびに 1 回ずつ重複して鳴る。
+    /// </para>
+    /// <para>fixture は <see cref="Canceling_the_close_repeats_the_backup_warning_the_terminal_flush_suppressed"/>
+    /// と同じ(<c>backups</c> の位置をファイルで塞ぐ)。違いは<b>遷移を close より前に済ませておく</b>
+    /// ことだけで、これで「抑止が起きた回」と「起きなかった回」を弁別する。</para></summary>
+    [Fact]
+    public void Canceling_the_close_does_not_repeat_a_warning_the_terminal_flush_did_not_suppress() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            File2.WriteAllText(tmp.BackupDir, "occupied"); // 実 writer の書込が必ず失敗する
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true; // silent path に入る = 先頭で flush が走る
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+            form.InjectBackupWriteFailureForTest("id-1");
+
+            var applied = NewSettings(csvAutoModeOnOpen: false);
+            applied.BackupEnabled = true;
+            applied.RestoreOpenFilesOnStartup = true;
+            form.ApplySettingsForTest(applied); // close より前に遷移を済ませる
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
+            Assert.False(form.BackupHealthyForTest);
+
+            form.SetConfirmDiscardOverrideForTest(_ => false); // ユーザーキャンセル
+            form.Close();
+
+            Assert.True(form.Visible); // e.Cancel=true で閉じられなかった
+            Assert.Equal(false, form.LastCloseFinalFlushOkForTest); // 確認経路へ倒れた前提
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 状態は unhealthy のまま
+            Assert.Equal(1, form.BackupHealthSaidCountForTest); // 抑止が無い = 言い直さない
+        });
 }
