@@ -1269,6 +1269,13 @@ public class MainFormSmokeTests
     /// <c>TryQuarantineUnreadable</c> が例外を漏らす変異(catch-all を外す)もここで落ちる ——
     /// <c>ApplySettings</c> ごと例外で抜けるため、保存も発声も起きない。
     /// </para>
+    /// <para>
+    /// <b>後半は「退避失敗 + 保存成功」でフラグが落ちること</b>の網(仕様レビュー I-1 の 3 状態の
+    /// うち 2 番目)。保存が通った時点で読み取れなかった原本はもう無いので、armed のまま残すと
+    /// <b>次の保存が kxEdit 自身の書いた設定を <c>.bak</c> へ落とす</b> ——「以前の設定」と案内した
+    /// 名前に、以前の設定ではないものが入る。宛先のディレクトリを退けてから 2 度目を叩くので、
+    /// 「どのみち失敗するから <c>.bak</c> が無い」ではなく<b>呼んでいないこと</b>を見ている。
+    /// </para>
     /// </summary>
     [Fact]
     public void First_save_proceeds_even_when_the_quarantine_fails() =>
@@ -1306,6 +1313,85 @@ public class MainFormSmokeTests
                 // 退避の失敗が破壊に化けていない(overwrite: true が同名の別物を消さない)。
                 Assert.True(Directory.Exists(bak));
                 Assert.Equal("別物", File2.ReadAllText(marker));
+
+                // ★ 保存が通った時点で原本は失われた = belt の役目は終わり。障害物を退けてから
+                //   もう一度保存しても、kxEdit 自身が書いた設定を .bak へ落としてはいけない。
+                Directory.Delete(bak, recursive: true);
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+                Assert.False(File2.Exists(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
+            }
+        });
+
+    /// <summary>
+    /// 仕様レビュー I-1: <b>ロックで落ちた保存は belt を使い切らない。</b>
+    /// <para>
+    /// 退避を「1 回試したら諦める」形にすると、<b>一過性ロックの場面で belt が丸ごと消える</b> ——
+    /// ①他プロセスが <c>FileShare.None</c> で掴む → 起動時 <c>Unreadable</c> ②ロック中に最初の
+    /// 保存が来る(ファイルを開く / 設定 OK / 終了のどれでも)→ <b>退避も保存も落ちる</b>
+    /// ③ロックが外れる ④次の保存が通り、原本は <c>.bak</c> を残さず消える。
+    /// <b>計画 Task 5 の表が「一過性のロック → 退避が効く」と書いた行そのもの</b>が失われる。
+    /// </para>
+    /// <para>
+    /// 文言の側も偽になる ——「<b>上書きの直前に</b>…退避しようとします」と言いながら、
+    /// <b>実際に原本を消したその上書き</b>では退避を試みていないことになる。
+    /// </para>
+    /// <para>
+    /// したがってフラグが表すのは「まだ試していない」ではなく<b>「原本がまだ在る」</b>である。
+    /// 落とすのは<b>退避が成功したとき</b>と<b>保存が成功したとき</b>(= 原本はもう無い)の 2 つで、
+    /// どちらも起きなければ armed のまま次の保存へ持ち越す。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_first_save_blocked_by_a_lock_keeps_the_quarantine_armed() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            SettingsStore.Save(
+                tmp.SettingsPath,
+                new AppSettings { BackupEnabled = false, FontName = "BIZ UDゴシック" }
+            );
+            string original = File2.ReadAllText(tmp.SettingsPath);
+            string bak = tmp.SettingsPath + ".bak";
+
+            MainForm form;
+            // FileShare.None = 読めない(Unreadable になる)うえ、改名も差替も落ちる。
+            // FileShare.Delete では改名が通ってしまい、この経路を作れない(実測・§Task 5)。
+            using (new FileStream(tmp.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                SettingsStore.Load(tmp.SettingsPath, out var status);
+                Assert.Equal(SettingsLoadStatus.Unreadable, status);
+                form = Program.CreateMainForm(tmp.SettingsPath, tmp.BackupDir, tmp.LayoutPath);
+                PrepareCreatedFormForSaveTest(form, tmp);
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS ゴシック" }
+                );
+
+                // 前提の検算: ロック中なので退避も保存も落ちている(= vacuous ではない)。
+                Assert.False(File2.Exists(bak));
+                Assert.Contains(
+                    "保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+            }
+
+            using (form)
+            {
+                // ロックが外れた = 一過性ロック。原本はまだ失われていない。
+                Assert.Equal(original, File2.ReadAllText(tmp.SettingsPath));
+
+                form.ApplySettingsForTest(
+                    new AppSettings { BackupEnabled = false, FontName = "MS 明朝" }
+                );
+
+                // ★ 原本を消したこの保存の直前に、belt が効いている。
+                Assert.True(File2.Exists(bak));
+                Assert.Equal(original, File2.ReadAllText(bak));
+                Assert.Equal("MS 明朝", SettingsStore.Load(tmp.SettingsPath, out _).FontName);
             }
         });
 

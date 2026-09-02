@@ -59,12 +59,18 @@ public static class SettingsStore
     /// </para>
     /// <para>
     /// <b>ただし OOM の落ち先は段によって違う。</b><c>File.ReadAllText</c> 段(try #1)の OOM は
-    /// <c>Unreadable</c> = <b>退避しない</b>側へ落ちるので原本を改名する事故にならないが、
-    /// <c>Deserialize</c> 段(try #2)の OOM は <c>Corrupt</c> = <b>退避対象</b>へ落ちる。
+    /// <c>Unreadable</c> へ、<c>Deserialize</c> 段(try #2)の OOM は <c>Corrupt</c> へ落ちる。
     /// <c>ReadAllText</c> は約 1GB 未満なら成功するため、<b>読めたがトランスコード/グラフ構築で
     /// 落ちる帯は原理的に存在する</b>(多 GB の fixture が要るので未実測・コード構造からの確定)。
-    /// そのサイズの settings.json を「壊れている」扱いにするのは受容できるので分岐は足さないが、
-    /// <b>「OOM なら退避しない」は無条件には成立しない</b>。
+    /// <para>
+    /// <b>B5 以降、どちらの段でも原本は改名される</b>(仕様レビュー I-2)——<c>Corrupt</c> は
+    /// 起動時に <c>.bad</c> へ、<c>Unreadable</c> は最初の設定保存の直前に <c>.bak</c> へ
+    /// (<see cref="TryQuarantineUnreadable"/>)。<b>かつてここに書いていた「try #1 の OOM は
+    /// 退避しない側へ落ちるので原本を改名する事故にならない」は、もう成り立たない。</b>
+    /// 段によって違うのは<b>いつ・どの名前で</b>退避されるかだけである。そのサイズの
+    /// settings.json が既定値へ戻る扱いになるのは受容するので分岐は足さないが、
+    /// <b>「OOM なら原本は動かない」は成立しない</b>。
+    /// </para>
     /// </para>
     /// <para>
     /// <b>区別しきれないケース</b>: <c>File.Exists</c> は失敗理由を返さないので、
@@ -90,7 +96,9 @@ public static class SettingsStore
         }
         catch
         {
-            // 読めなかっただけ。中身は正常かもしれないので Corrupt と区別する(退避しない)。
+            // 読めなかっただけ。中身は正常かもしれないので Corrupt と区別する
+            // (<b>起動時は</b>退避しない。上書きの直前の退避は B5 が別に行う ——
+            //  TryQuarantineUnreadable / MainForm.TrySaveSettings)。
             status = SettingsLoadStatus.Unreadable;
             return new AppSettings();
         }
@@ -190,6 +198,15 @@ public static class SettingsStore
     /// つまりこれは<b>belt であって保証ではない</b>。起動時の警告が「先にコピーしてください」を
     /// 落とさないのはこのためで、文言も退避の成功を約束しない
     /// (<c>SettingsStartup.Prepare</c> の <c>Unreadable</c> 枝)。
+    /// </para>
+    /// <para>
+    /// <b>退避が成功すると、直後の保存は差替ではなく新規作成の経路を通る</b>
+    /// (<see cref="IO.AtomicFile"/> は宛先の実在で <c>File.Replace</c> / <c>File.Move</c> を
+    /// 分けるため)。<c>File.Replace</c> と違って<b>原本の DACL は引き継がれず</b>、新しい
+    /// settings.json は親ディレクトリの継承 ACL になる。<c>Unreadable</c> の原因が読み取り拒否の
+    /// ACE だった場合はそれが落ちる(次回から普通に読める)が、原本に付いていた明示的な許可も
+    /// 同時に落ちる。対象は <c>%APPDATA%</c> 配下のユーザー自身の設定なので受容する
+    /// (仕様レビュー M-5)。
     /// </para>
     /// <para>
     /// 呼出はソリューション中 <c>MainForm.TrySaveSettings</c> の 1 か所だけ。

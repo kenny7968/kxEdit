@@ -15,7 +15,10 @@ public enum SettingsLoadStatus
     /// <summary>読めたが JSON として解釈できない(内容が "null" の場合を含む)。通知し、退避する。</summary>
     Corrupt,
 
-    /// <summary>I/O で読めない(ロック・権限)。通知するが<b>退避しない</b>
-    /// —— 中身が正常なファイルを改名してしまうため。</summary>
+    /// <summary>I/O で読めない(ロック・権限)。通知し、<b>起動時には退避しない</b>
+    /// —— 中身が正常なファイルを改名してしまうため。
+    /// <b>ただし退避しないのは起動時だけ</b>(B5・仕様レビュー I-2): 最初の設定保存の直前には
+    /// <c>.bak</c> へ退避する(<see cref="SettingsStore.TryQuarantineUnreadable"/>)——
+    /// そこまで来れば中身はどのみち上書きで失われるため。</summary>
     Unreadable,
 }

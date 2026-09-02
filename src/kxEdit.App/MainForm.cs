@@ -1229,24 +1229,34 @@ public sealed partial class MainForm : Form
     {
         // 起動時の警告は「先に次のファイルをコピーしてください」と案内するが、ユーザーが対処する
         // 前に上書きが走る = 案内した当のファイルが消える。ここで先回りして退避する。
-        // フラグを先に落とす = 退避が失敗しても<b>再試行しない</b>(毎回の保存で失敗し続ける
-        // リネームを試みても得るものが無いうえ、成功した .bak を後の保存内容で塗り替えうる)。
-        // 残余(多重起動): 2 つ目のインスタンスも Unreadable で起動していると、そちらの最初の
-        // 保存が<先着が書き直した settings.json>を .bak へ落とし、先着が退避した本物の原本を
+        // 退避の失敗で保存を止めない(B4 §5.5)。止めると「設定を適用しました」が虚偽になり、
+        // M-22 で潰した欠陥をここで新設することになる。
+        //
+        // フラグが表すのは「まだ試していない」ではなく<b>「原本がまだ在る」</b>である
+        // (仕様レビュー I-1)。試行の前に落とすと、一過性ロックの場面で belt が丸ごと消える ——
+        // ロック中の保存で退避も保存も落ち、ロックが外れた次の保存が .bak を残さずに原本を消す。
+        // 落とすのは①退避が成功したとき ②保存が成功したとき(= 原本はもう無い)の 2 つで、
+        // どちらも起きなければ armed のまま次の保存へ持ち越す。
+        //
+        // 残余(多重起動): 2 つ目のインスタンスも Unreadable で起動していると、そちらで最初に
+        // 通る保存が<先着が書き直した settings.json>を .bak へ落とし、先着が退避した本物の原本を
         // 上書きしうる。.bad と同じ「最新のコピーだけを残す」を採った結果で、窓は<b>両方が同じ
         // 起動時に読めなかった</b>ときだけ。逆(overwrite: false)にすると、過去の .bak が 1 つでも
-        // 残っている限り退避が二度と効かなくなる。
+        // 残っている限り退避が二度と効かなくなる。データ面だけでなく<b>文言の面でも</b>残余が
+        // ある —— その .bak は「以前の設定」と案内された名前を持ちながら、中身は<b>以前の設定
+        // ではない</b>(kxEdit 自身が書いた既定寄りの設定)。
         if (_quarantineSettingsBeforeFirstSave)
-        {
-            _quarantineSettingsBeforeFirstSave = false;
-            // 退避の失敗で保存を止めない(B4 §5.5)。止めると「設定を適用しました」が虚偽になり、
-            // M-22 で潰した欠陥をここで新設することになる。
-            _ = SettingsStore.TryQuarantineUnreadable(_settingsPath, out _);
-        }
+            _quarantineSettingsBeforeFirstSave = !SettingsStore.TryQuarantineUnreadable(
+                _settingsPath,
+                out _
+            );
 
         try
         {
             SettingsStore.Save(_settingsPath, _settings);
+            // 保存が通った = 読み取れなかった原本はこの書込で失われた。以後の退避は
+            // <b>kxEdit 自身が書いた設定</b>を .bak へ落とすだけになるので、ここで確実に落とす。
+            _quarantineSettingsBeforeFirstSave = false;
             return null;
         }
         catch (Exception ex)

@@ -70,10 +70,10 @@ public class SettingsStartupTests
     /// 「いつ上書きされるか」を<b>実物どおりに</b>述べていることの網(設計 §10.15 (1) / §10.16)。
     /// <para>
     /// 計画案の文言は「設定を変更すると上書きされます」だったが、実物は違う ——
-    /// <c>MainForm.OnFormClosing</c>(<c>MainForm.cs:665</c>)が<b>終了のたび</b>に、
-    /// <c>FileController.RegisterRecent</c>(<c>FileController.cs:1575</c> / <c>:276</c>)が
+    /// <c>MainForm.OnFormClosing</c> が<b>終了のたび</b>に、<c>FileController.RegisterRecent</c> が
     /// <b>ファイルを開く・切り替える・保存するたび</b>に設定を書き直す。つまり
-    /// <b>ユーザーが何も操作しなくても</b>上書きされる。
+    /// <b>ユーザーが何も操作しなくても</b>上書きされる(参照を行番号からシンボル名へ直した理由は
+    /// 仕様レビュー M-6 —— B5 が同じ保存経路へ手を入れて引用が漂流した)。
     /// </para>
     /// <para>
     /// 計画案へ戻すと「設定を変えなければ大丈夫」と読める = <b>案内文の側で、より静かな喪失を
@@ -110,8 +110,10 @@ public class SettingsStartupTests
     /// 呼んでも <c>File.Move</c> が落ちて <c>false</c> を返し、<c>.bad</c> は生えない ——
     /// 下の <c>.bad</c> 不在 assertion が見ているのは「呼ばないこと」ではなく<b>「呼んでも失敗する
     /// こと」</b>である(<c>FileShare.None</c> の fixture で踏んだ欠陥と同型・§10.16 指摘 3)。
-    /// 退避が <c>Corrupt</c> に限られることの網は <c>Ok</c> 側(原本のバイト列不変)と
-    /// <c>Unreadable</c> 側(改名可能なロックで固定)が持つ。ここでは
+    /// <b>起動時の</b>退避が <c>Corrupt</c> に限られることの網は <c>Ok</c> 側(原本のバイト列不変)と
+    /// <c>Unreadable</c> 側(改名可能なロックで固定)が持つ ——「起動時の」を落とすと
+    /// セッション単位では偽になる(B5 の <c>Unreadable</c> は最初の保存の直前に退避する。
+    /// 仕様レビュー M-7)。ここでは
     /// <b><c>Prepare</c> が設定ファイルを作らない</b>ことだけを押さえる。
     /// </para>
     /// </summary>
@@ -286,10 +288,14 @@ public class SettingsStartupTests
     }
 
     /// <summary>
-    /// <b>読めなかっただけのファイルは退避しない</b>(設計 §5.2)—— 本タスクで最も重要な網。
-    /// <c>Unreadable</c> の実態は AV / 同期ソフト / 別プロセスの一時的なロックで、<b>中身は正常</b>
-    /// であることが多い。ここを <c>Corrupt</c> と同じ扱いにすると、健全な設定を <c>.bad</c> へ改名して
-    /// 既定値で上書きすることになり、M-11 が直しに来た無音リセットを<b>より強い形で新設</b>する。
+    /// <b>読めなかっただけのファイルは<i>起動時には</i>退避しない</b>(設計 §5.2)——
+    /// 本タスクで最も重要な網。<c>Unreadable</c> の実態は AV / 同期ソフト / 別プロセスの一時的な
+    /// ロックで、<b>中身は正常</b>であることが多い。ここを <c>Corrupt</c> と同じ扱いにすると、
+    /// 健全な設定を <c>.bad</c> へ改名して既定値で上書きすることになり、M-11 が直しに来た
+    /// 無音リセットを<b>より強い形で新設</b>する。
+    /// <b>「起動時には」を落とすとセッション単位では偽になる</b>(仕様レビュー M-7 と同型)——
+    /// 下で <c>QuarantineBeforeFirstSave: true</c> を固定しているとおり、B5 は<b>最初の保存の
+    /// 直前</b>には退避する。ここで守っているのは<b>その時点ではまだ改名しないこと</b>である。
     /// <para>
     /// 観測点は「<c>.bad</c> が無い」だけでは足りない。原本が<b>そのまま残り、中身も無傷</b>で、
     /// ロックが外れれば<b>以前の設定へ戻れる</b>ところまで見る(非既定の <c>FontName</c> なので
@@ -339,8 +345,13 @@ public class SettingsStartupTests
         // 掃除しないこと(設計 §6.4 / B4 §9)は文言で伝える。ただし<b>条件付き</b>で ——
         // 無条件に「削除してください」と書くと、退避が落ちたユーザーへ実在しないファイルの
         // 後始末を指示することになる(Corrupt 側の退避失敗枝で潰したのと同型の誤誘導)。
-        Assert.Contains("退避できた場合", warning, StringComparison.Ordinal);
+        Assert.Contains("退避できたファイルは", warning, StringComparison.Ordinal);
         Assert.Contains("削除してください", warning, StringComparison.Ordinal);
+        // 失敗の事由を「読み取れない原因」に限定しない(仕様レビュー M-4)—— 宛先が同名の
+        // ディレクトリでも MAX_PATH 超過でも落ちる。前者は
+        // MainFormSmokeTests.First_save_proceeds_even_when_the_quarantine_fails が使っている
+        // 失敗の作り方そのもので、限定した書き方はその網の存在と矛盾する。
+        Assert.DoesNotContain("読み取れない原因によっては", warning, StringComparison.Ordinal);
         // 即時の行動指針は残す —— 退避が効かない事由では、これが唯一の手段になる。
         Assert.Contains("コピーしてください", warning, StringComparison.Ordinal);
         // ★ 無害化を通っている(fixture が長いので恒真にならない)。
