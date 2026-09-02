@@ -2423,6 +2423,9 @@ public class MainFormSmokeTests
         Assert.Contains(targetShown, dialog, StringComparison.Ordinal);
         // (b) 掃除する者が誰もいないので削除を促す(自動削除は足さない)。
         Assert.Contains("削除", dialog, StringComparison.Ordinal);
+        // (b') 最終レビュー M-1: 本文冒頭でキャプション(「設定を保存できませんでした」)を
+        //      逐語で繰り返さない —— SR はキャプション → 本文の順に読む。
+        Assert.DoesNotContain("設定を保存できませんでした", dialog, StringComparison.Ordinal);
         // ★やり直しの手順が、長い退避先パスより<b>前</b>に出る(SR は線形に読む・M-12 の教訓)。
         int guideAt = dialog.IndexOf("保存をやり直せます", StringComparison.Ordinal);
         int tempAt = dialog.IndexOf(preservedShown, StringComparison.Ordinal);
@@ -2457,6 +2460,9 @@ public class MainFormSmokeTests
         Assert.NotNull(dialog);
         Assert.DoesNotContain(missing, dialog, StringComparison.Ordinal);
         Assert.DoesNotContain("削除", dialog, StringComparison.Ordinal);
+        // 最終レビュー M-1: 本文冒頭でキャプションを逐語で繰り返さない
+        // (SR はキャプション → 本文の順に読むため、同じ一文を 2 回聞くことになる)。
+        Assert.DoesNotContain("設定を保存できませんでした", dialog, StringComparison.Ordinal);
     }
 
     /// <summary>M-22(仕様レビュー I-2): <b>次回起動時の状態を断定しない</b>。
@@ -2783,16 +2789,22 @@ public class MainFormSmokeTests
     /// M-20 が潰した「無言の失敗」がこの経路で復活していた。
     /// </para>
     /// <para>
+    /// 塞ぎ方は<b>発声チャネルを譲る</b>(最終レビュー I-2)—— この pass で健全性が鳴ったら
+    /// 設定の結果を発声しない。当初は「末尾で言い直す」形だったが、
+    /// それだと<b>同時故障で設定保存の失敗が消える</b>(下の
+    /// <see cref="Applying_settings_delivers_both_failures_when_the_save_and_the_backup_fail_together"/>)。
+    /// </para>
+    /// <para>
     /// 失敗は実 writer の <c>OnWriteFailed</c> が入る受け口へ注入する(実 <c>MainForm</c> は
     /// <c>SerialBackupWriter</c> を直生成していて writer を差し替えられない)。遷移そのものは
     /// <c>UpdateSettings</c> が走らせる<b>実 drain</b> が起こすので、この網は
-    /// 「言い直しの 1 行」だけでなく<b>上書きが本当に起きる経路</b>ごと固定する。
+    /// 「譲る 1 行」だけでなく<b>上書きが本当に起きる経路</b>ごと固定する。
     /// </para>
     /// <para><c>_enabled</c> を OFF にしたまま長く使ったあと ON へ戻した場合も同じ経路を通る
     /// (drain は <c>ReconcileContent</c> 冒頭にしかないので、OFF の間に溜まった失敗はこの
-    /// pass で初めて読まれる)= その経路の警告がユーザーへ届くのも、この言い直しのおかげである。</para></summary>
+    /// pass で初めて読まれる)= その経路の警告がユーザーへ届くのも、この譲りのおかげである。</para></summary>
     [Fact]
-    public void Applying_settings_repeats_the_backup_warning_its_own_announcement_overwrote() =>
+    public void Applying_settings_keeps_the_backup_warning_its_own_announcement_would_overwrite() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
@@ -2812,7 +2824,7 @@ public class MainFormSmokeTests
             applied.BackupEnabled = true;
             form.ApplySettingsForTest(applied);
 
-            // 非 vacuous: 保存は成功している = 「設定を適用しました」が実際に出て上書きした側。
+            // 非 vacuous: 保存は成功している = 譲らなければ「設定を適用しました」が出て上書きする側。
             Assert.True(File2.Exists(tmp.SettingsPath));
             Assert.False(form.BackupHealthyForTest); // drain が遷移させた
             Assert.Contains(
@@ -2820,6 +2832,8 @@ public class MainFormSmokeTests
                 form.LastAnnouncementForTest,
                 StringComparison.Ordinal
             );
+            // 譲るだけで足りる = 余計に鳴らさない(drain の 1 回きり)。
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
         });
 
     /// <summary>仕様レビュー I-2(クラッシュ経路): <b>終端フラッシュでは健全性を言わない。</b>
@@ -2925,5 +2939,157 @@ public class MainFormSmokeTests
             // 観測は発声<b>回数</b>で行う —— 閉じた Form の Label はハンドルごと消え、
             // LastAnnouncementForTest は常に空文字列を返す(= assert が vacuous になる。実測)。
             Assert.Equal(0, form.BackupHealthSaidCountForTest);
+        });
+
+    /// <summary>最終レビュー I-2: <b>設定保存とバックアップ書込が同時に落ちても、どちらの事実も
+    /// 失われないこと。</b>
+    /// <para>
+    /// 修正前は末尾の言い直しが無条件だったため、この組み合わせで
+    /// 「設定を適用しましたが、保存できませんでした…」が健全性の警告に上書きされて消え、
+    /// 通常失敗はダイアログも出さないので<b>設定が保存できなかったことがどこからも届かなかった</b>
+    /// (= M-22 が潰した欠陥の復活)。例外的な組み合わせではない ——
+    /// <c>%APPDATA%\kxEdit</c> が丸ごと書けなくなれば(ACL 変更・ディスクフル・同期クライアントの
+    /// ロック)そのまま起きる。
+    /// </para>
+    /// <para>
+    /// 発声チャネルには 1 行しか載らない(50 ms 窓 + <c>MostRecent</c>)ので、<b>チャネルを分ける</b>:
+    /// 発声は健全性の警告(より緊急で行動可能)に譲り、設定保存の失敗はダイアログで届ける。
+    /// 通常失敗にダイアログを出さないという現行の判断に対する、ここだけの例外。
+    /// </para>
+    /// <para>
+    /// 失敗の注入は 2 系統 —— 設定側は<b>読み取り専用の差替先</b>(通常失敗=ダイアログ本文を
+    /// 持たない枝)、バックアップ側は実 writer の <c>OnWriteFailed</c> 受け口。
+    /// <c>UpdateSettings</c> が走らせる<b>実 drain</b> が遷移を起こすので、この網は
+    /// 「上書きが本当に起きる経路」ごと固定する。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_delivers_both_failures_when_the_save_and_the_backup_fail_together() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true; // drain が走る条件(OFF では ReconcileContent へ入らない)
+            using var form = new MainForm(
+                settings,
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            // MessageBox がテストを塞がないよう抑止する(到達の記録は抑止中でも行われる)。
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            form.InjectBackupWriteFailureForTest("id-1");
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+            File2.SetAttributes(tmp.SettingsPath, FileAttributes.ReadOnly);
+            try
+            {
+                var applied = NewSettings(csvAutoModeOnOpen: false);
+                applied.BackupEnabled = true;
+                form.ApplySettingsForTest(applied);
+
+                // (1) 発声に残るのは健全性の警告。
+                Assert.False(form.BackupHealthyForTest); // 非 vacuous: 遷移は実際に起きた
+                Assert.Contains(
+                    "バックアップを保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+                // (2) 設定保存の失敗はダイアログで届く(消えていない)。
+                Assert.Equal(1, form.SettingsSaveFailedDialogCountForTest);
+                string? body = form.SettingsSaveFailedDialogBodyForTest;
+                Assert.NotNull(body);
+                Assert.Contains("次回起動時に残らない可能性", body, StringComparison.Ordinal);
+                // キャプション(「設定を保存できませんでした」)と本文冒頭が逐語で重ならないこと
+                // (最終レビュー M-1。SR はキャプション → 本文の順に読む)。
+                Assert.DoesNotContain("設定を保存できませんでした", body, StringComparison.Ordinal);
+                // (3) モーダルは直前の通知に割り込むので、閉じた後に言い直す = 計 2 回。
+                Assert.Equal(2, form.BackupHealthSaidCountForTest);
+            }
+            finally
+            {
+                // TempDir.Dispose が消せるように戻す(戻さないと後始末が握り潰されて残骸になる)。
+                File2.SetAttributes(tmp.SettingsPath, FileAttributes.Normal);
+            }
+        });
+
+    /// <summary>最終レビュー I-2(事象ベース): <b>自分が上書きしていない警告は言い直さない。</b>
+    /// <para>
+    /// 言い直しの条件を「今 unhealthy か」という<b>状態</b>で書くと、3 tick 前に鳴らして誰も
+    /// 上書きしていない警告まで、設定 OK のたびに無条件で繰り返す。条件は
+    /// 「<c>UpdateSettings</c> の drain がこの呼出の中で<b>実際に鳴らしたか</b>」という事象で持つ。
+    /// </para>
+    /// <para><b>非 vacuous</b>: 2 回目の適用でも <c>BackupHealthyForTest</c> は false のまま
+    /// (状態ベースなら必ず鳴る条件が揃っている)。それでも発声は成功の 1 行に戻る。</para></summary>
+    [Fact]
+    public void Applying_settings_does_not_repeat_a_backup_warning_it_did_not_overwrite() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            using var form = new MainForm(
+                settings,
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            form.InjectBackupWriteFailureForTest("id-1");
+
+            var first = NewSettings(csvAutoModeOnOpen: false);
+            first.BackupEnabled = true;
+            form.ApplySettingsForTest(first); // ここで遷移 → 1 回だけ鳴る
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
+            Assert.False(form.BackupHealthyForTest);
+
+            var second = NewSettings(csvAutoModeOnOpen: false);
+            second.BackupEnabled = true;
+            form.ApplySettingsForTest(second); // 遷移なし = 何も上書きしていない
+
+            Assert.Equal(1, form.BackupHealthSaidCountForTest); // 言い直さない
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 依然 unhealthy のまま
+            Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest); // 保存は成功している
+        });
+
+    /// <summary>最終レビュー M-7(事象ベース): <b>終端フラッシュが何も抑止していなければ、
+    /// 終了キャンセル後に言い直さない。</b>
+    /// <para>
+    /// 既に unhealthy な状態で終了 → キャンセルすると、終端 flush の drain は
+    /// 「遷移していない」ので報告を出さない = 抑止も起きていない。ここで
+    /// 「今 unhealthy か」で言い直すと、キャンセルのたびに 1 回ずつ重複して鳴る。
+    /// </para>
+    /// <para>fixture は <see cref="Canceling_the_close_repeats_the_backup_warning_the_terminal_flush_suppressed"/>
+    /// と同じ(<c>backups</c> の位置をファイルで塞ぐ)。違いは<b>遷移を close より前に済ませておく</b>
+    /// ことだけで、これで「抑止が起きた回」と「起きなかった回」を弁別する。</para></summary>
+    [Fact]
+    public void Canceling_the_close_does_not_repeat_a_warning_the_terminal_flush_did_not_suppress() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            File2.WriteAllText(tmp.BackupDir, "occupied"); // 実 writer の書込が必ず失敗する
+            var settings = NewSettings(csvAutoModeOnOpen: false);
+            settings.BackupEnabled = true;
+            settings.RestoreOpenFilesOnStartup = true; // silent path に入る = 先頭で flush が走る
+
+            using var form = ShowMainForm_Unified(settings, tmp);
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            var doc = Assert.Single(form.FileForTest.DocsForTest);
+            doc.Editor.ReplaceCharRange(0, 0, "unsaved-body");
+            form.InjectBackupWriteFailureForTest("id-1");
+
+            var applied = NewSettings(csvAutoModeOnOpen: false);
+            applied.BackupEnabled = true;
+            applied.RestoreOpenFilesOnStartup = true;
+            form.ApplySettingsForTest(applied); // close より前に遷移を済ませる
+            Assert.Equal(1, form.BackupHealthSaidCountForTest);
+            Assert.False(form.BackupHealthyForTest);
+
+            form.SetConfirmDiscardOverrideForTest(_ => false); // ユーザーキャンセル
+            form.Close();
+
+            Assert.True(form.Visible); // e.Cancel=true で閉じられなかった
+            Assert.Equal(false, form.LastCloseFinalFlushOkForTest); // 確認経路へ倒れた前提
+            Assert.False(form.BackupHealthyForTest); // 非 vacuous: 状態は unhealthy のまま
+            Assert.Equal(1, form.BackupHealthSaidCountForTest); // 抑止が無い = 言い直さない
         });
 }

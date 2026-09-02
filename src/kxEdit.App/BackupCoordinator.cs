@@ -622,10 +622,10 @@ public sealed class BackupCoordinator : IDisposable
     /// <b>両方が同じ drain に届いている</b>場合で、届く順序のずれまでは閉じていない。
     /// <b>次の drain で失敗が再び報告されるので自己修復する</b>(状態が恒久的にずれることはない)
     /// ため、順序を保証する機構は入れない。</para>
-    /// <para><b>成功の観測が必須である理由</b>: 「失敗が来ない」だけでは、書込が成功したのか
-    /// <b>そもそも投入していない</b>のか(dirty でない・署名一致で <c>BackupAction.None</c>)を
-    /// 区別できない。後者を復旧と読むと、一度も書けていないのに「再開しました」と言うことに
-    /// なる(<see cref="IBackupWriter.OnWriteSucceeded"/> がある理由そのもの)。</para>
+    /// <para><b>成功の観測が必須である理由</b>は <see cref="IBackupWriter.OnWriteSucceeded"/> の
+    /// 契約を参照(あちらの xmldoc が本 seam の存在理由の正)。ここに再掲しない ——
+    /// 同じ段落を 2 か所に置くと、片方だけが更新されて食い違う(Task 3 品質レビューが
+    /// 同型の逐語重複を消したのと同じ理由)。</para>
     /// <para><b>early return であって else-if ではない。</b> else-if で書くと、既に unhealthy の
     /// ときに第 1 分岐が <c>anyFailed &amp;&amp; false</c> で落ち、第 2 分岐
     /// (<c>anySucceeded &amp;&amp; !_backupHealthy</c>)が成立して<b>誤って復旧を報告する</b>。
@@ -639,8 +639,9 @@ public sealed class BackupCoordinator : IDisposable
     /// 後で ON へ戻した最初の pass が<b>切替より前の失敗</b>を報告する。文言が過去形の断定に
     /// 留めてあるぶん嘘にはならないが、鳴る時点は実際の失敗より遅れる。
     /// <b>その pass は設定ダイアログ OK の中で走る</b>ため、報告は直後の「設定を適用しました」に
-    /// 上書きされる —— ユーザーへ届くのは配線側(<c>MainForm.ApplySettings</c>)が末尾で言い直す
-    /// からで(仕様レビュー I-1)、その言い直しを外すとこの経路の警告は<b>丸ごと消える</b>。</para></summary>
+    /// 上書きされうる —— 消えずに済むのは配線側(<c>MainForm.ApplySettings</c>)が、この pass で
+    /// 報告が鳴ったときは<b>発声チャネルを譲る</b>(設定の結果を発声しない)からである
+    /// (仕様レビュー I-1・最終レビュー I-2)。その譲りを外すとこの経路の警告は<b>丸ごと消える</b>。</para></summary>
     private void ReportBackupHealth(bool anyFailed, bool anySucceeded)
     {
         if (anyFailed)

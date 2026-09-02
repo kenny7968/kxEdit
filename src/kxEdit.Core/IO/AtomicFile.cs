@@ -177,7 +177,7 @@ public static class AtomicFile
     /// </list>
     /// </para>
     /// <para>
-    /// 残した tmp の行方は、この 2 経路で<b>異なる</b>。
+    /// 残した tmp の行方は、この 3 経路で<b>異なる</b>。
     /// <list type="bullet">
     /// <item><b>バックアップ</b>(<c>%APPDATA%\kxEdit\backups</c> 配下)—— 起動時に
     /// <c>BackupCoordinator</c> が自セッション dir と base dir へ
@@ -194,8 +194,11 @@ public static class AtomicFile
     /// <b>場所と「消してよいこと」がダイアログで案内される</b>(残る tmp の中身は設定で、
     /// 最近使ったファイルの一覧=パスを含む)。</item>
     /// </list>
-    /// 握り潰しの解消は M-22 で設定保存経路の分が済み、<b>残るのは M-20</b>
-    /// (<c>SerialBackupWriter</c> のワーカーが握るバックアップ / レイアウト書込)である。
+    /// 握り潰しの解消は M-22 で設定保存経路の分が済んだ。<c>SerialBackupWriter</c> のワーカーが
+    /// 握るバックアップ / レイアウト書込は<b>今も握ったままである</b> —— M-20 が足したのは
+    /// 「書込が失敗した / 復旧した」という<b>通知面</b>であって、残した tmp の案内ではない。
+    /// <c>AtomicReplaceFailedException.PreservedTempPath</c> は今もユーザーへ届かない
+    /// (M-20 の射程外・設計 2026-09-02 §5.5)。
     /// </para>
     /// </summary>
     private static void CommitStaged(string tmp, string path)

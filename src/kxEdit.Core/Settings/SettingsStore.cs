@@ -365,7 +365,9 @@ public static class SettingsStore
     /// <para>
     /// <b>ここでの失敗がユーザーへ届くかは呼出側による</b>(B5 / M-22 で解消済み。B4 時点の
     /// 「唯一の呼出側 <c>MainForm.SaveSettingsSafe</c> が握り潰すので誰にも伝わらない」は
-    /// <b>もう成り立たない</b>)。現在の呼出は 3 つで、届き方が分かれる:
+    /// <b>もう成り立たない</b>)。現在の呼出<b>経路</b>は 3 つで、届き方が分かれる
+    /// (<b>直接の呼出側は <c>MainForm.TrySaveSettings</c> 1 か所だけ</b>。B5 が全経路をそこへ
+    /// 寄せたので、以下は<b>そこへ至る論理的な経路</b>の数え上げである):
     /// <list type="bullet">
     /// <item><b>設定ダイアログ OK</b>(<c>MainForm.ApplySettings</c>)—— <c>TrySaveSettings</c> が
     /// 例外を返し、失敗が発声され、<c>AtomicReplaceFailedException.PreservedTempPath</c>

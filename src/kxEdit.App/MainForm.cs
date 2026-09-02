@@ -97,8 +97,11 @@ public sealed partial class MainForm : Form
     /// <summary>B5(設計 2026-09-02 §6.3 = B4 申し送りの回収): 読み取れなかった設定ファイルを、
     /// <b>このセッションの最初の保存の直前に</b> <c>.bak</c> へ退避するか。
     /// <c>SettingsStartup.Prepare</c> が <c>Unreadable</c> の枝でだけ立てる。
-    /// <b>readonly ではない</b> —— 退避は 1 回きりで、実行した時点で落とす
-    /// (<see cref="TrySaveSettings"/>)。</summary>
+    /// <b>readonly ではない</b> —— 表すのは「まだ試していない」ではなく<b>「原本がまだ在る」</b>で、
+    /// ①退避が成功したとき ②保存が成功したとき(= 原本はもう無い)に落とす
+    /// (<see cref="TrySaveSettings"/>)。<b>試行した時点では落とさない</b> ——
+    /// 一過性ロックで退避も保存も落ちた回に落とすと、ロックが外れた次の保存が
+    /// <c>.bak</c> を残さずに原本を消す(仕様レビュー I-1)。</summary>
     private bool _quarantineSettingsBeforeFirstSave;
 
     // M-11 テスト用: 設定警告に到達した回数(抑止中でも数える)。MessageBox は blocking で
@@ -152,13 +155,28 @@ public sealed partial class MainForm : Form
     /// <see cref="BackupTimerIntervalMsForTest"/> と同じ方針。</summary>
     internal bool BackupHealthyForTest => _backup.BackupHealthy;
 
-    // M-20 テスト用: 健全性の発声が実際に出た回数(SayBackupHealth の到達記録)。
+    // M-20: 健全性の発声が実際に出た回数(SayBackupHealth の到達記録)。
     // 抑止された分は数えない = 「終端では言わない」をフォーム破棄後にも検証できる唯一の面。
-    private int _backupHealthSaidCountForTest;
+    // 最終レビュー I-2 以降は<b>本番の判定材料でもある</b>—— ApplySettings が
+    // 「直下の drain がこの呼出の中で実際に鳴らしたか」をこの値の差で見る。
+    private int _backupHealthSaidCount;
 
     /// <summary>M-20 テスト観測用: 健全性の発声が実際に出た回数
     /// (理由は <see cref="SayBackupHealth"/> の xmldoc)。</summary>
-    internal int BackupHealthSaidCountForTest => _backupHealthSaidCountForTest;
+    internal int BackupHealthSaidCountForTest => _backupHealthSaidCount;
+
+    /// <summary>最終レビュー I-2: 直近に <see cref="SayBackupHealth"/> が言った健全性。
+    /// 言い直し(<see cref="ApplySettings"/> の末尾)が<b>直前に鳴らしたのと同じ事実</b>を
+    /// 繰り返すために要る —— 状態(<c>_backup.BackupHealthy</c>)を読み直す形にすると、
+    /// 報告と言い直しの間に状態が動いた場合に別の事実を言うことになる。</summary>
+    private bool _lastBackupHealthSaid;
+
+    /// <summary>最終レビュー M-7: 終端フラッシュ(<see cref="OnFormClosing"/> /
+    /// <see cref="FlushBackupsForCrash"/>)の drain で<b>抑止した</b>健全性の報告
+    /// (null=抑止していない)。終了をキャンセルしたときに言い直す判断を、
+    /// 「今 unhealthy か」という状態ではなく<b>抑止が実際に起きたか</b>という事象で行うための記録。
+    /// 値まで持つのは、抑止されるのが失敗の報告とは限らない(復旧も同じ経路で飲み込まれる)ため。</summary>
+    private bool? _suppressedBackupHealth;
 
     /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
     /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
@@ -330,7 +348,12 @@ public sealed partial class MainForm : Form
             // FinalFlushForRestore の**呼出前に**立つ(実コードで確認)。前者は finally で必ず
             // 戻すので、終了がキャンセルされればフックは通常運用へ復帰する。
             if (_closeInProgress)
+            {
+                // 最終レビュー M-7: 飲み込んだ事実を残す。終了がキャンセルされたときの言い直しは、
+                // 「今 unhealthy か」ではなく<b>ここで抑止が起きたか</b>を条件にする。
+                _suppressedBackupHealth = healthy;
                 return;
+            }
             SayBackupHealth(healthy);
         };
         _csv = new CsvController(
@@ -790,12 +813,19 @@ public sealed partial class MainForm : Form
             // 戻し漏れると、一度キャンセルした窓は以後永久に閉じられなくなる。
             _closeInProgress = false;
             // I-2 の続き: 終了を取りやめて編集へ戻るなら、上の終端フラッシュで抑止した健全性の
-            // 警告を言い直す。抑止したまま戻ると、その drain で unhealthy へ落ちた遷移が誰にも
-            // 伝わらないまま居座り、以後の tick も「遷移していない」ので無言になる
+            // 報告を言い直す。抑止したまま戻ると、その drain で起きた遷移が誰にも伝わらないまま
+            // 居座り、以後の tick も「遷移していない」ので無言になる
             // (= M-20 が潰した「無言の失敗」の再発)。閉じる側では言わない —— 助言が実行不能な
             // のは上の (a) のとおりで、終端の抑止理由がそのまま効いている。
-            if (e.Cancel && !_backup.BackupHealthy)
-                SayBackupHealth(healthy: false);
+            //
+            // 条件は<b>抑止が実際に起きたか</b>(最終レビュー M-7)。「今 unhealthy か」で書くと、
+            // 既に unhealthy な状態で終了 → キャンセルするたびに、何も飲み込んでいないのに
+            // 1 回ずつ重ねて鳴る(終端の drain は遷移が無ければ報告しない)。
+            if (e.Cancel && _suppressedBackupHealth is bool suppressed)
+            {
+                _suppressedBackupHealth = null; // 次のキャンセルで二重に鳴らさない
+                SayBackupHealth(suppressed);
+            }
         }
     }
 
@@ -830,10 +860,14 @@ public sealed partial class MainForm : Form
     /// (WinForms の <c>Control</c> は <c>CacheText</c> でない限りテキストをネイティブ窓側に置くため)。
     /// つまり「閉じ切る側では言わない」を閉じた後に検証する術が他に無く、記録を止めると
     /// <c>e.Cancel</c> の条件を落とす変異が生き残る(実測)。
-    /// <see cref="ShowSettingsSaveFailedDialog"/> が MessageBox の発火を数えているのと同じ形。</para></summary>
+    /// <see cref="ShowSettingsSaveFailedDialog"/> が MessageBox の発火を数えているのと同じ形。</para>
+    /// <para>最終レビュー I-2 以降、この記録は<b>本番の判定にも使う</b>——
+    /// <see cref="ApplySettings"/> が「直下の drain がこの呼出の中で実際に鳴らしたか」を
+    /// <see cref="_backupHealthSaidCount"/> の差で見る。テスト観測専用ではない。</para></summary>
     private void SayBackupHealth(bool healthy)
     {
-        _backupHealthSaidCountForTest++;
+        _backupHealthSaidCount++;
+        _lastBackupHealthSaid = healthy;
         _announcer.Say(BackupHealthMessage(healthy));
     }
 
@@ -1245,6 +1279,11 @@ public sealed partial class MainForm : Form
         // 残っている限り退避が二度と効かなくなる。データ面だけでなく<b>文言の面でも</b>残余が
         // ある —— その .bak は「以前の設定」と案内された名前を持ちながら、中身は<b>以前の設定
         // ではない</b>(kxEdit 自身が書いた既定寄りの設定)。
+        //
+        // 文言の残余は<b>単一インスタンスでも到達する</b>(最終レビュー・脆弱性パス Minor 3):
+        // 今セッションの退避が落ちたまま保存だけ通ると、過去のセッションが残した .bak
+        // (中身が kxEdit 自身の書いた設定であることもある)がそのまま残り、ユーザーはそれを
+        // 「今回退避された以前の設定」と読んで復元しうる。多重起動固有の窓ではない。
         if (_quarantineSettingsBeforeFirstSave)
             _quarantineSettingsBeforeFirstSave = !SettingsStore.TryQuarantineUnreadable(
                 _settingsPath,
@@ -1325,34 +1364,92 @@ public sealed partial class MainForm : Form
     /// <summary>設定ダイアログ OK 後の反映本体。全タブへ外観適用＋バックアップ設定の即時反映＋
     /// 永続化を行い、<b>永続化の成否を見て</b>発声を選ぶ(M-22・設計 2026-09-02 §4)。
     /// 発声の時点で外観適用と <c>UpdateSettings</c> は済んでいる = 走っているアプリには効いている
-    /// ので、失敗時も「適用しました」は残し、落ちた永続化の方を足す。</summary>
+    /// ので、失敗時も「適用しました」は残し、落ちた永続化の方を足す。
+    /// <para>
+    /// <b>発声チャネルには 1 行しか載らない</b>(<c>UiaAnnouncer</c> は 50 ms 窓 +
+    /// <c>AutomationNotificationProcessing.MostRecent</c> なので、続けて <c>Say</c> すると SR が
+    /// 1 つ目を読み終える前に 2 つ目が置き換える)。ところが直上の <c>UpdateSettings</c> は
+    /// <c>Reconcile</c> → drain を走らせ、その中でバックアップ健全性が報告されうる
+    /// (仕様レビュー I-1)。<b>1 本のチャネルに 2 つの事実は載らない</b>ので、
+    /// ここでは<b>チャネルを分ける</b>(最終レビュー I-2):
+    /// <list type="bullet">
+    /// <item><b>発声</b>は健全性の報告に譲る。より緊急で(未保存の内容が復元できないかもしれない)、
+    /// より行動可能(ファイルを保存する)なため。</item>
+    /// <item><b>設定保存の失敗</b>はダイアログで届ける。<b>通常失敗にはダイアログを出さない</b>
+    /// という現行の判断(<see cref="SettingsSaveOutcome"/> の xmldoc)に対する、ここだけの
+    /// 原則的な例外である —— 例外の根拠は「案内すべきパスがある」ことではなく
+    /// <b>発声チャネルが埋まっていること</b>。</item>
+    /// </list>
+    /// 併記(1 つの発声にまとめる)を採らなかったのは長さ —— 既存の発声は 44〜53 字で、
+    /// つなぐと約 100 字になる。<c>_announceLabel</c> は高さ 22px・<c>AutoSize=false</c> の
+    /// 1 行ラベルなので、視覚側(晴眼・弱視も第一級)では末尾が黙って切れる。
+    /// </para>
+    /// <para>
+    /// 犠牲にするのは<b>成功の定型文だけ</b>(「設定を適用しました」)。失敗の事実は
+    /// どの分岐でもいずれかのチャネルで必ず届く。
+    /// </para></summary>
     private void ApplySettings(AppSettings result)
     {
         _settings = result;
         foreach (var doc in _docs.Documents)
             EditorAppearance.Apply(doc.Editor, _settings);
+        // 健全性の報告が「この呼出の中で」鳴ったかを<b>事象として</b>捉える(最終レビュー I-2)。
+        // 「今 unhealthy か」という状態で見ると、3 tick 前に鳴らして誰も上書きしていない警告まで
+        // 設定 OK のたびに言い直す。drain を走らせうるのは直下の UpdateSettings だけ
+        // (EditorAppearance.Apply も TrySaveSettings も Coordinator を触らない)。
+        int healthSaidBefore = _backupHealthSaidCount;
         _backup.UpdateSettings(
             _settings.BackupEnabled,
             _settings.BackupIntervalSeconds,
             _settings.RestoreOpenFilesOnStartup
         );
-        var (speech, dialogBody) = SettingsSaveOutcome(TrySaveSettings());
-        _announcer.Say(speech);
+        bool healthJustAnnounced = _backupHealthSaidCount != healthSaidBefore;
+
+        var saveError = TrySaveSettings();
+        var (speech, dialogBody) = SettingsSaveOutcome(saveError);
+        if (healthJustAnnounced)
+        {
+            // 発声は健全性の報告に譲る(上書きしない)。失敗していたらダイアログへ回す。
+            if (saveError is not null)
+                dialogBody ??= SettingsSaveFailedWithoutSpeechBody;
+        }
+        else
+        {
+            _announcer.Say(speech);
+        }
+
         if (dialogBody is not null)
+        {
             ShowSettingsSaveFailedDialog(dialogBody);
-        // 仕様レビュー I-1: 直上の UpdateSettings が走らせた Reconcile の drain で健全性の警告が
-        // 鳴っていた場合、その後の Say がそれを上書きする(視覚は _label.Text の代入・発声は
-        // AutomationNotificationProcessing.MostRecent)。しかも _backupHealthy は既に false なので
-        // 次 tick 以降も鳴らない = M-20 が潰した「無言の失敗」がここで復活する。最後に言い直す。
-        // 「設定を適用しました」を犠牲にするのは意図的 —— 定型の確認より、バックアップが効いて
-        // いない事実の方が失ってはいけない。
-        if (!_backup.BackupHealthy)
-            SayBackupHealth(healthy: false);
+            // モーダルは直前の通知に割り込む(SR は先にダイアログを読む)。閉じた後に言い直して、
+            // 譲ったはずの発声がダイアログの陰で失われないようにする。
+            if (healthJustAnnounced)
+                SayBackupHealth(_lastBackupHealthSaid);
+        }
     }
 
     /// <summary>テスト専用: 設定ダイアログを閉じた<b>後</b>の経路だけを叩く
     /// (<c>SettingsDialog.ShowDialog</c> はモーダルで自動テストから開けない)。</summary>
     internal void ApplySettingsForTest(AppSettings result) => ApplySettings(result);
+
+    /// <summary>最終レビュー I-2: 発声チャネルを健全性の報告へ譲ったときに、設定保存の失敗を
+    /// 届けるダイアログ本文(通常失敗=<see cref="SettingsSaveOutcome"/> が本文を持たない枝で使う)。
+    /// <para>
+    /// <b>発声の 1 行と同じ事実を、同じ強さで書く。</b>「今の kxEdit には効いている」と
+    /// 「次回まで残るかは<b>可能性</b>」の 2 点だけで、やり直しの手順は足さない ——
+    /// 通常失敗の原因は外(読み取り専用・ディスクフル・他プロセスのロック)にあるので、
+    /// もう一度 OK すれば直る、と読める案内は<b>断定できないことを断定する</b>ことになる
+    /// (原本が失われた枝の <c>LostOriginal</c> がやり直しを案内できるのは、その枝では次の保存が
+    /// <c>File.Move</c> になるぶん成功しやすいという根拠があるため)。
+    /// </para>
+    /// <para>
+    /// 冒頭でキャプション(<see cref="ShowSettingsSaveFailedDialog"/> の
+    /// 「設定を保存できませんでした」)を逐語で繰り返さない —— SR はキャプション → 本文の順に
+    /// 読むので、同じ一文を 2 回聞くことになる(最終レビュー M-1)。
+    /// </para></summary>
+    private const string SettingsSaveFailedWithoutSpeechBody =
+        "設定は今の kxEdit には適用されていますが、設定ファイルに書き込めませんでした。"
+        + "この設定は次回起動時に残らない可能性があります。";
 
     /// <summary>M-22: 設定保存の結果から「発声する 1 行」と「出すならダイアログ本文」を決める。
     /// <para>
@@ -1379,11 +1476,19 @@ public sealed partial class MainForm : Form
     /// 事実を使って既定値の側だけを述べる。
     /// </para>
     /// <para>
-    /// ダイアログを出すのは <see cref="AtomicReplaceFailedException"/> のときだけ。通常の失敗
-    /// (ディスクフル・ACL)は tmp が残らず案内すべきパスが無いので、発声だけで完結する。
-    /// tmp が残る場合は <c>%APPDATA%\kxEdit\</c> <b>直下に恒久残留し、中身は最近使ったファイルの
-    /// 一覧(パス)を含む</b>(B4 の実測。<see cref="SettingsStore.Save"/> の xmldoc)ため、
-    /// 場所と後始末を届ける価値がある。1 行のステータスラベルに長いパスは載らないので二段にする。
+    /// <b>本メソッドが</b>ダイアログ本文を返すのは <see cref="AtomicReplaceFailedException"/> の
+    /// ときだけ。通常の失敗(ディスクフル・ACL)は tmp が残らず案内すべきパスが無いので、
+    /// 発声だけで完結する。tmp が残る場合は <c>%APPDATA%\kxEdit\</c> <b>直下に恒久残留し、
+    /// 中身は最近使ったファイルの一覧(パス)を含む</b>(B4 の実測。
+    /// <see cref="SettingsStore.Save"/> の xmldoc)ため、場所と後始末を届ける価値がある。
+    /// 1 行のステータスラベルに長いパスは載らないので二段にする。
+    /// </para>
+    /// <para>
+    /// <b>ただし「通常失敗にはダイアログを出さない」には呼出側に 1 つだけ例外がある</b> ——
+    /// <see cref="ApplySettings"/> は発声チャネルをバックアップ健全性の報告へ譲る場合に限り、
+    /// 通常失敗でも <see cref="SettingsSaveFailedWithoutSpeechBody"/> をダイアログへ回す
+    /// (最終レビュー I-2)。判断を呼出側に置くのは、<b>チャネルが埋まっているかを知っているのは
+    /// 呼出側だけ</b>だからで、ここは失敗の中身だけを見る純関数のまま保つ。
     /// </para>
     /// <para>
     /// 実在確認は <c>File.Exists</c> 一本。復旧リネームが「tmp まで失われていた」で落ちた場合も
@@ -1421,14 +1526,18 @@ public sealed partial class MainForm : Form
         // 語順も SR を前提に決める(FileController の M-12 が確立した教訓): SR は線形に読むので、
         // 「何が起きたか」と「次に何をすればよいか」(= LostOriginal 末尾のやり直し手順)を
         // 長い退避先パスより<b>前</b>に置く。
+        //
+        // 冒頭でキャプション(ShowSettingsSaveFailedDialog の「設定を保存できませんでした」)を
+        // 逐語で繰り返さない —— SR はキャプション → 本文の順に読むので同じ一文を 2 回聞く
+        // (最終レビュー M-1)。本文が FileController の M-12(キャプションは汎用の「エラー」)に
+        // 倣って書かれた名残で、専用キャプションを後から付けたときに重複が残っていた。
         string target = SanitizeForDisplay.OneLine(replaceFailed.TargetPath, 80);
         string body = System.IO.File.Exists(replaceFailed.PreservedTempPath)
-            ? $"設定を保存できませんでした: 保存先 '{target}' が失われました。"
+            ? $"保存先 '{target}' が失われました。"
                 + LostOriginal
                 + "\n\n書き込んだ内容は次の場所に残してあります。不要になったら削除してください:\n  "
                 + SanitizeForDisplay.OneLine(replaceFailed.PreservedTempPath)
-            : $"設定を保存できませんでした: 保存先 '{target}' が失われ、書き込んだ内容も残せませんでした。"
-                + LostOriginal;
+            : $"保存先 '{target}' が失われ、書き込んだ内容も残せませんでした。" + LostOriginal;
         return (Speech, body);
     }
 
