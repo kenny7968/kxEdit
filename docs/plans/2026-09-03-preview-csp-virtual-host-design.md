@@ -648,3 +648,66 @@ L5 項目 1 を次のとおり拡張する:
 画像 URL に対する検査は `PreviewRelativeUrlExtension.OnDocumentProcessed` の
 `NeutralizeEncodedSeparators` **だけ**である。今後この拡張の登録順や `DocumentProcessed` の
 構成を触る変更は、**画像の唯一のガードを外す変更になりうる**。レビュー時に明示的に見ること。
+
+### 14.6 §14.2 の作り直し(2026-09-03・Task 2 の脆弱性レビュー由来)
+
+§14.2 は「全 `LinkInline` に対する事後条件」で相対・絶対の両方を覆う設計だった。
+**ホスト判定が `Uri.Host` であること**と、**ガードが AST 段に居るのに主張が出力 HTML に
+ついてなされていること**から、実測で 4 系統の迂回路が残っていた。
+
+| ID | 入力 | 何が起きたか(実測) |
+|----|------|--------------------|
+| F-1 | `https://kxedit。preview/..%2f..%2fx`(U+3002 が 1 文字) | `Uri.Host` は Unicode を保つのでガードが一致せず素通り。ところが Markdig の `WriteEscapeUrl` は **`IdnHost` で ASCII 化して出力**するため、**修正前とバイト同一の出力**になる |
+| F-2 | `https://%6bxedit.preview/..%2f..%2fx` | `Uri.TryCreate` が **false**(.NET は parse 失敗)→ ガードは即 return。WHATWG のホスト解析は percent-decode してから ASCII 化するので **Chromium では `kxedit.preview`**(Node/Ada で確認) |
+| F-3 | `https://kxedit.preview./..%2f..%2fx`(末尾ドット) | ガードも F-7 の Block も通り抜ける |
+| F-4 | `https://kxedit.preview/..\..\x`(生の `\`) | `Uri` が `\` を `/` に直して dot-segment を畳むのでガードは「区切りは無い」と判断 → **その後 Markdig が `%5C` へエスケープして出力する** |
+| F-5 | `<https://kxedit.preview/..%2f..%2fa>` | `AutolinkInline` は `LinkInline` ではないので `Descendants<LinkInline>()` に掛からない |
+
+#### 採る形
+
+1. **ガードを `HtmlRenderer.LinkRewriter` へ移す**(`PreviewRelativeUrlExtension.Setup(pipeline, renderer)`
+   —— それまで空実装だった)。実測で画像・インラインリンク・角括弧宛先・**CommonMark autolink**・
+   GFM 裸 URL・参照リンク定義・表セル内で発火し、**Markdig がエスケープする前の生の URL**が届く。
+   発火しないのは**脚注リンクのみ**(Markdig 採番の固定形式でユーザー入力が入らない)。
+2. **判定を default-deny にする**。null / 空 と `#` 始まりは素通し、
+   `Uri.TryCreate` に成功して **`IdnHost` の末尾ドットを除いたもの**が preview と一致しない場合だけ
+   「明確に外部」として素通し、**それ以外(preview 宛 / parse 不能 / 相対)は無害化**する。
+   `IdnHost` が F-1 を、末尾ドット除去が F-3 を、parse 不能を無害化側へ倒すことが F-2 を塞ぐ。
+3. **`AbsolutePath` の前置チェックを撤去**する(F-4 の原因そのもの)。判定も置換も URL 全体に掛ける。
+4. **生のバックスラッシュも無害化対象**に足す(`\` → `%255C`)。
+
+#### 実装時に反証された根拠(記録)
+
+本設計は当初「`LinkRewriter` への移設が F-4 と F-5 を同時に塞ぐ」と書いていた。
+**実装担当が変異で反証した** —— ガードを AST 段へ戻す変異で落ちたのは **autolink 1 本だけ**で、
+F-4 のケースは落ちない。**F-4 を塞いだのは resolver 側の 2 修正(前置チェック撤去 + 生 `\` の対象化)**
+であり、移設が実測で必須なのは F-5 に対してだけである。移設には「主張の対象(出力 HTML)と
+ガードの位置を一致させる」という設計上の根拠が別にあるが、それは現時点で穴ではない。
+**結論は正しかったが根拠が偽だった**型(memory: 結論ではなく根拠を検証する)。
+
+#### 副作用として受容するもの
+
+- `mailto:a%2fb@kxedit.preview` はローカル部の `%2f` が `%252f` になる(`Classify` は mailto を
+  LaunchExternal のまま通すので実害なしと判断)。
+- protocol-relative `//kxedit.preview/a%2fb` は .NET が file scheme + Host=preview と解釈するため
+  無害化される(外部の `//example.com/…` は不変)。
+- autolink はリンク**テキスト**に生 URL を出すので、HTML 全文への `DoesNotContain("%2f")` は
+  成立しない。テストは `href` / `src` の属性値を抽出して検証している。
+
+#### §15 の訂正 —— 「唯一の残存経路」は偽だった
+
+F-3 により、`http://kxedit.preview./leak`(末尾ドット 1 文字)は F-7 の Block を通り抜けて
+`LaunchExternal` に落ちていた。**§15 の「唯一の残存経路」という記述は偽**である。
+`Classify` のホスト判定も `IdnHost` + 末尾ドット除去へ揃えて塞いだ。
+
+#### L5 に足す項目(V-3 の前提を測る)
+
+1. `![a](https://kxedit。preview/sub%2fchild.png)` —— 表示されたら WebView2 は `%2f` を区切りとして
+   **復号する** = V-3 は実在し、本ガードは load-bearing。表示されなければ V-3 の脅威度自体が下がる。
+2. `![b](https://kxedit.preview/sub%252fchild.png)` —— **本ガードの唯一の前提**。表示されたら
+   `%25` が二重復号され、無害化は無効。
+3. `![d](https://kxedit.preview./pic.png)` —— 末尾ドットが仮想ホストマッピングに一致するか。
+4. `![f](https://kxedit.preview/sub\child.png)` —— `%5C` を Windows のパス区切りとして復号するか。
+5. `![g](https://%6bxedit.preview/pic.png)` —— Chromium のホスト正規化がマッピングに一致するか。
+6. `![h](https://kxedit.preview/pic.png?x=%2f../secret.txt)` —— query がフォルダー解決に
+   使われないという**未実測の前提**の確認。
