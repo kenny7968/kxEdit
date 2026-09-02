@@ -289,12 +289,17 @@ public static class SettingsStore
     /// 中身は設定で、<b>最近使ったファイルの一覧(パス)を含む</b>——本文は含まない。
     /// </para>
     /// <para>
-    /// <b>ここでの保証はユーザーへ届かない。</b> 唯一の呼出側 <c>MainForm.SaveSettingsSafe</c> が
-    /// 例外を握り潰すため、<c>AtomicReplaceFailedException.PreservedTempPath</c>(= 残した tmp の
-    /// 場所)は誰にも伝わらない。届くのは<b>原本を壊さない</b>ところまでで、「退避先を案内する」
-    /// M-12 の回収は文書保存経路(<c>TextFileService.Save</c>)にしか効いていない
-    /// (<c>BackupStore.Write</c> / <c>SessionLayoutStore.Save</c> と同じ形)。
-    /// 握り潰しの解消は B5(M-22)の担当で、本修正の射程外。
+    /// <b>ここでの失敗がユーザーへ届くかは呼出側による</b>(B5 / M-22 で解消済み。B4 時点の
+    /// 「唯一の呼出側 <c>MainForm.SaveSettingsSafe</c> が握り潰すので誰にも伝わらない」は
+    /// <b>もう成り立たない</b>)。現在の呼出は 3 つで、届き方が分かれる:
+    /// <list type="bullet">
+    /// <item><b>設定ダイアログ OK</b>(<c>MainForm.ApplySettings</c>)—— <c>TrySaveSettings</c> が
+    /// 例外を返し、失敗が発声され、<c>AtomicReplaceFailedException.PreservedTempPath</c>
+    /// (= 残した tmp の場所)はダイアログで案内される。</item>
+    /// <item><b>終了時</b>(<c>MainForm.OnFormClosing</c>)/ <b>最近使ったファイルの更新</b>
+    /// (<c>FileController</c> へ <c>Action</c> で渡る経路)—— <c>MainForm.SaveSettingsSafe</c> が
+    /// 現在も握る(B5 設計 §8 の判断)。この 2 経路では届くのは<b>原本を壊さない</b>ところまで。</item>
+    /// </list>
     /// </para>
     /// </summary>
     public static void Save(string path, AppSettings settings)

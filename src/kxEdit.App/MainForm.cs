@@ -115,6 +115,13 @@ public sealed partial class MainForm : Form
     private string? _settingsSaveFailedDialogBodyForTest;
     internal string? SettingsSaveFailedDialogBodyForTest => _settingsSaveFailedDialogBodyForTest;
 
+    /// <summary>M-22 テスト用: <see cref="ApplySettings"/> が <c>_backup.UpdateSettings</c> まで
+    /// 通っているかの観測点(<see cref="BackupCoordinator.TimerIntervalMs"/> の中継)。
+    /// 発声だけを見ていると、<b>外観適用と UpdateSettings をどちらも削っても全緑</b>になる
+    /// (仕様レビュー M-3・実測)。Coordinator 全体を露出せず観測点 1 個に絞るのは
+    /// <see cref="StartupRestoreGateOpenForTest"/> と同じ方針。</summary>
+    internal int BackupTimerIntervalMsForTest => _backup.TimerIntervalMs;
+
     /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
     /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
     /// 陳腐化警告より後ろへ動かしても、どちらの到達数も 1 のままだからである。そこで
@@ -1200,7 +1207,25 @@ public sealed partial class MainForm : Form
     /// <para>
     /// <b>失敗時も「適用しました」を残す。</b> 呼出時点で外観適用と <c>UpdateSettings</c> は
     /// 済んでおり、走っているアプリには設定が効いている。「適用できませんでした」は
-    /// <b>逆向きの嘘</b>になる。欠けているのは「次回起動時には元に戻る」という帰結の方。
+    /// <b>逆向きの嘘</b>になる。欠けているのは「この設定が次回まで残るか」の方。
+    /// </para>
+    /// <para>
+    /// <b>次回起動時の状態を断定しない</b>(仕様レビュー I-2)。ここから到達しうる結末は 3 通りで、
+    /// どれも起こりうる:
+    /// <list type="bullet">
+    /// <item><b>新しい設定が残る</b> —— 同一セッションの他の保存経路
+    /// (<c>FileController.RegisterRecent</c> の最近ファイル更新・<c>OnFormClosing</c>)は
+    /// <see cref="ApplySettings"/> が差し替えた<b>新しい</b> <see cref="AppSettings"/> を書くので、
+    /// 失敗が一過性なら、あるいはユーザーが案内を聞いて読み取り専用属性を外したら、
+    /// ファイルを 1 つ開くか終了するだけで新設定が永続化される。
+    /// <b>案内を聞いたユーザーが最も自然に取る行動が、断定をそのまま偽にする。</b></item>
+    /// <item><b>元の設定に戻る</b> —— 通常の失敗(原本は無傷)でこのまま何も保存されなかった場合。</item>
+    /// <item><b>既定値で始まる</b> —— <see cref="AtomicReplaceFailedException"/> の分岐。原本が
+    /// 失われているので、次回の <see cref="SettingsStore.Load"/> は <c>File.Exists</c> が false =
+    /// <c>Missing</c> となり、戻るのは「元の設定」ではなく<b>既定値</b>である(実コードで確認)。</item>
+    /// </list>
+    /// したがって発声は possibility に留め、ダイアログ側は<b>原本が失われた分岐でしか出ない</b>という
+    /// 事実を使って既定値の側だけを述べる。
     /// </para>
     /// <para>
     /// ダイアログを出すのは <see cref="AtomicReplaceFailedException"/> のときだけ。通常の失敗
@@ -1218,28 +1243,41 @@ public sealed partial class MainForm : Form
         if (error is null)
             return ("設定を適用しました", null);
 
-        // 語順は SR を前提に決める(FileController の M-12 が確立した教訓): SR は線形に読むので、
-        // 「何が起きたか」と「次に何をすればよいか」を長いパスより前に置く。
+        // 発声は 1 行のステータスラベル。3 通りの結末(上の xmldoc)のどれとも矛盾しないよう、
+        // 「保存できなかった」という<b>起きた事実</b>だけを断定し、次回起動時の状態は possibility に
+        // 留める。ここを断定にすると、このブランチが潰そうとしている虚偽発声を自分で新設する。
         const string Speech =
-            "設定を適用しましたが、保存できませんでした。次回起動時は元の設定に戻ります";
+            "設定を適用しましたが、保存できませんでした。この設定は次回起動時に残らない可能性があります";
 
         if (error is not AtomicReplaceFailedException replaceFailed)
             return (Speech, null);
+
+        // ここから先は<b>原本が失われた分岐だけ</b>(AtomicFile が
+        // AtomicReplaceFailedException を投げる条件そのもの)。通常失敗と違って原本が無いので、
+        // 「元の設定に戻る」は書けない —— 何も保存されないまま次回起動すると既定値で始まる。
+        // 逆に断定もしない: 後続の保存が成功すれば新設定が残る(むしろ destExists=false =
+        // File.Move になるぶん成功しやすい)。両方を含む条件形にする。
+        const string LostOriginal =
+            "設定は今の kxEdit には適用されていますが、保存先が無くなったため、"
+            + "このまま保存されなければ次回起動時は既定の設定で始まります。"
+            + "設定をもう一度開いて OK すると、保存をやり直せます。";
 
         // 原本パスは丸めてよい(80)——ユーザーが設定ファイルの場所を知らなくても、退避先の
         // フォルダーは tmp パス側に完全な形で載る。逆に tmp パスは kxEdit がその場で作った
         // 乱数入りで他所から知る手段が無いので<b>切り詰めない</b>(FileController が確立した非対称)。
         // 無害化(OneLine)はどちらも外さない —— ダイアログ偽装を防ぐ既存のセキュリティ制御。
+        //
+        // 語順も SR を前提に決める(FileController の M-12 が確立した教訓): SR は線形に読むので、
+        // 「何が起きたか」と「次に何をすればよいか」(= LostOriginal 末尾のやり直し手順)を
+        // 長い退避先パスより<b>前</b>に置く。
         string target = SanitizeForDisplay.OneLine(replaceFailed.TargetPath, 80);
-        const string Applied =
-            "設定は今の kxEdit には適用されていますが、次回起動時は元に戻ります。必要な項目は設定し直してください。";
         string body = System.IO.File.Exists(replaceFailed.PreservedTempPath)
             ? $"設定を保存できませんでした: 保存先 '{target}' が失われました。"
-                + Applied
+                + LostOriginal
                 + "\n\n書き込んだ内容は次の場所に残してあります。不要になったら削除してください:\n  "
                 + SanitizeForDisplay.OneLine(replaceFailed.PreservedTempPath)
             : $"設定を保存できませんでした: 保存先 '{target}' が失われ、書き込んだ内容も残せませんでした。"
-                + Applied;
+                + LostOriginal;
         return (Speech, body);
     }
 

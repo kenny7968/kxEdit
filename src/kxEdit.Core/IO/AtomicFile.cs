@@ -163,11 +163,18 @@ public static class AtomicFile
     /// (保存は実際に成立しているので「保存しました」は虚偽ではない)。
     /// </para>
     /// <para>
-    /// <b>保証が及ぶ範囲</b>(設計 §10.3 / §10.5): ここは <c>Write</c> の 4 呼出者すべての
-    /// 通り道だが、「tmp を残して例外で伝える」が実際にユーザーへ届くのは<b>文書保存経路
-    /// (<c>TextFileService.Save</c>)だけ</b>である。<c>BackupStore.Write</c> /
-    /// <c>SessionLayoutStore.Save</c> は <c>SerialBackupWriter</c> のワーカーが catch で
-    /// 握り潰すため、例外はユーザーへ届かない。
+    /// <b>保証が及ぶ範囲</b>(設計 §10.3 / §10.5、B5 / M-22 で更新): ここは <c>Write</c> の
+    /// 4 呼出者すべての通り道だが、「tmp を残して例外で伝える」が実際にユーザーへ届くのは
+    /// <b>そのうち 2 つだけ</b>である。
+    /// <list type="bullet">
+    /// <item><b>文書保存</b>(<c>TextFileService.Save</c>)—— <c>FileController.WriteToPath</c> の
+    /// catch が退避先を案内する(M-12)。</item>
+    /// <item><b>設定保存</b>(<c>SettingsStore.Save</c>)—— ただし<b>設定ダイアログ OK の経路だけ</b>。
+    /// <c>MainForm.ApplySettings</c> が退避先を案内する(M-22)。終了時と最近ファイル更新の
+    /// 保存は <c>MainForm.SaveSettingsSafe</c> が今も握る(B5 設計 §8)。</item>
+    /// <item><c>BackupStore.Write</c> / <c>SessionLayoutStore.Save</c> —— <c>SerialBackupWriter</c> の
+    /// ワーカーが catch で握り潰すため、例外はユーザーへ届かない。</item>
+    /// </list>
     /// </para>
     /// <para>
     /// 残した tmp の行方は、この 2 経路で<b>異なる</b>。
@@ -182,8 +189,13 @@ public static class AtomicFile
     /// <b>恒久残留する</b>。本文を含まない数 KB で、かつ差替失敗と復旧失敗の二重障害が要るので
     /// 実害は小さいが、「静かに消える」ではない。<c>%APPDATA%\kxEdit\</c> 直下へ書く経路を
     /// 増やすときは同じことが起きる。</item>
+    /// <item><b>設定</b>(<c>%APPDATA%\kxEdit\settings.json</c>)—— セッションレイアウトと同じく
+    /// <c>%APPDATA%\kxEdit\</c> 直下に落ちて<b>恒久残留する</b>が、こちらは B5 / M-22 以降
+    /// <b>場所と「消してよいこと」がダイアログで案内される</b>(残る tmp の中身は設定で、
+    /// 最近使ったファイルの一覧=パスを含む)。</item>
     /// </list>
-    /// 握り潰しの解消は別ブランチ(B5 / M-20)の担当で、本修正の射程外。
+    /// 握り潰しの解消は M-22 で設定保存経路の分が済み、<b>残るのは M-20</b>
+    /// (<c>SerialBackupWriter</c> のワーカーが握るバックアップ / レイアウト書込)である。
     /// </para>
     /// </summary>
     private static void CommitStaged(string tmp, string path)

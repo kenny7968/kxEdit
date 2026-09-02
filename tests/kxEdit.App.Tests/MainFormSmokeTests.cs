@@ -8,6 +8,7 @@ using kxEdit.Core.IO;
 using kxEdit.Core.Search;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
+using kxEdit.Core.Text;
 using Directory = System.IO.Directory;
 using File2 = System.IO.File;
 using IOException = System.IO.IOException;
@@ -2066,39 +2067,112 @@ public class MainFormSmokeTests
         var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
             new UnauthorizedAccessException("denied")
         );
-        Assert.Contains("適用しました", speech);
-        Assert.Contains("保存できませんでした", speech);
+        Assert.Contains("適用しました", speech, StringComparison.Ordinal);
+        Assert.Contains("保存できませんでした", speech, StringComparison.Ordinal);
         Assert.Null(dialog);
+    }
+
+    /// <summary>
+    /// <paramref name="minLength"/> 以上の長さを持つ設定ファイルパスを作る(親ディレクトリも作成する)。
+    /// <c>FileControllerTests.MakeLongTargetPath</c> の写しで、あちらが M-12 のレビューで
+    /// 到達した形をそのまま使う —— 退避先パスは これ+17 文字になるので、MAX_PATH(260)に
+    /// 収まるよう <c>minLength + 17 &lt; 260</c> の範囲で使うこと。
+    /// <para>
+    /// 詰め物の末尾側に<b>連続空白</b>を 1 か所埋め込む。Windows のパス構成要素に CR/LF/TAB は
+    /// 入れられないが、途中の連続空白は正当で実際に作成できる。
+    /// <see cref="SanitizeForDisplay.OneLine"/> はこれを 1 個へ畳むが
+    /// <see cref="SanitizeForDisplay.MultiLine"/> は畳まないので、<b>無害化を MultiLine へ
+    /// 格下げする変異を殺せる唯一の観測点</b>になる。位置を末尾寄りにするのは、原本パス側の
+    /// 丸め(80 字)に掛からない場所に置いて、丸めの網と混線させないため。
+    /// </para>
+    /// </summary>
+    /// <summary>U+202E RIGHT-TO-LEFT OVERRIDE。<b>ソースへ生の制御文字を置かない</b>ため
+    /// コードポイントから組み立てる(生で書くとエディタ上でこの行以降の表示順が反転して読めなくなる)。
+    /// <see cref="SanitizeForDisplay"/> が除去する対象そのもので、無害化が外れた変異の観測に使う。</summary>
+    private static readonly string Rlo = ((char)0x202E).ToString();
+
+    private static string MakeLongSettingsPath(TempDir tmp, string fileName, int minLength)
+    {
+        int segLen = Math.Max(8, minLength - tmp.Root.Length - 2 - fileName.Length);
+        string segment = new string('d', segLen - 4) + "  dd"; // 末尾寄りに連続空白 1 か所
+        string dir = Path.Combine(tmp.Root, segment);
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, fileName);
     }
 
     /// <summary>M-22: 差替失敗で tmp が<b>実在する</b>ときは、その場所と後始末をダイアログで案内する。
     /// 発声(1 行のステータスラベル)には長いパスを載せられないための二段構え
-    /// (<c>FileController.WriteToPath</c> が M-12 で採った形と同型)。</summary>
+    /// (<c>FileController.WriteToPath</c> が M-12 で採った形と同型)。
+    /// <para>
+    /// <b>長いパス + U+202E + 連続空白の fixture で検証するのが本質</b>(仕様レビュー I-1)。
+    /// 短い ASCII パスだと、無害化撤廃 / <c>MultiLine</c> 格下げ / 原本 80 字上限の撤廃 /
+    /// tmp への 200 字上限の付け直しの<b>4 変異すべてが同一出力になり、全部生存する</b>
+    /// (当初 fixture で実測)。設計 §4.3 が「外さない(ダイアログ偽装を防ぐ既存のセキュリティ制御)」と
+    /// 明記した制御が、コードだけ踏襲されて網が来ていない状態だった —— B4 が
+    /// <c>FileControllerTests.Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull</c> の
+    /// レビュー指摘 1 で踏んだのと同じ欠陥。
+    /// </para>
+    /// <para>
+    /// 文字列比較はすべて <c>StringComparison.Ordinal</c> を明示する。既定の culture-sensitive 比較は
+    /// U+202E(<c>UnicodeCategory.Format</c>)を無視するため、<b>RLO の網を黙って無力化する</b>。
+    /// </para></summary>
     [Fact]
     public void SettingsSaveOutcome_points_at_the_preserved_temp_when_it_exists()
     {
         using var tmp = new TempDir();
-        string preserved = tmp.File("settings.json.abc.tmp");
-        File2.WriteAllText(preserved, "{}");
+        // ファイル名に U+202E(RLO)。退避先は AtomicFile と同じ「原本 + . + 乱数 + .tmp」= +17 文字。
+        string target = MakeLongSettingsPath(tmp, "set" + Rlo + "tings.json", minLength: 220);
+        string preserved = target + "." + Path.GetRandomFileName() + ".tmp";
+        File2.WriteAllText(preserved, "{}"); // 実在させる(=案内してよい状態)
+
+        // 案内に載るべき形。tmp は切り詰めない / 原本は 80 字で丸める。
+        string preservedShown = SanitizeForDisplay.OneLine(preserved);
+        string targetShown = SanitizeForDisplay.OneLine(target, 80);
+        // 前提 1: 退避先だけで 200 字を超える(=tmp に 200 字上限を付け直す変異を落とせる)。
+        Assert.True(preservedShown.Length > 200, $"len={preservedShown.Length}");
+        // 前提 2: 連続空白が「生には有り・無害化後には無い」(=MultiLine 格下げを弁別できる)。
+        Assert.Contains("  ", preserved, StringComparison.Ordinal);
+        Assert.DoesNotContain("  ", preservedShown, StringComparison.Ordinal);
+        // 前提 3: 原本パスが実際に 80 字上限へ届く(190 で届かず無網だったのが B4 の失敗)。
+        Assert.Equal(80, targetShown.Length);
+        Assert.EndsWith("…", targetShown, StringComparison.Ordinal);
 
         var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
             new AtomicReplaceFailedException(
-                targetPath: tmp.SettingsPath,
+                targetPath: target,
                 preservedTempPath: preserved,
                 replaceError: new IOException("replace"),
                 recoveryError: new IOException("recover")
             )
         );
 
-        Assert.Contains("適用しました", speech);
+        Assert.Contains("適用しました", speech, StringComparison.Ordinal);
         Assert.NotNull(dialog);
-        // tmp パスは<b>切り詰めない</b>=フルパスがそのまま載る(乱数入りで他所から知る手段が無い)。
-        Assert.Contains(preserved, dialog);
-        Assert.Contains("削除", dialog);
+        // (a) 退避先は<b>丸めない</b>。連続空白が畳まれた形で載ることで MultiLine 格下げも落ちる。
+        Assert.Contains(preservedShown, dialog, StringComparison.Ordinal);
+        // (a') 無害化は外れていない(生の RLO がダイアログへ載らない)。
+        Assert.DoesNotContain(Rlo, dialog, StringComparison.Ordinal);
+        // (a'') 原本パス側は<b>丸める</b>。丸めた形(79 字+"…")が載ることで、丸めの撤廃も落ちる。
+        // ★「原本パス全体が載らないこと」は assert できない —— 退避先パスは原本パスを prefix と
+        //   して含むので、正しい実装でも原本パス全体は本文に現れる(下の StartsWith が実測で示す)。
+        Assert.StartsWith(target, preserved, StringComparison.Ordinal);
+        Assert.Contains(targetShown, dialog, StringComparison.Ordinal);
+        // (b) 掃除する者が誰もいないので削除を促す(自動削除は足さない)。
+        Assert.Contains("削除", dialog, StringComparison.Ordinal);
+        // ★やり直しの手順が、長い退避先パスより<b>前</b>に出る(SR は線形に読む・M-12 の教訓)。
+        int guideAt = dialog.IndexOf("保存をやり直せます", StringComparison.Ordinal);
+        int tempAt = dialog.IndexOf(preservedShown, StringComparison.Ordinal);
+        Assert.True(guideAt >= 0, "やり直しの案内が無い");
+        Assert.True(guideAt < tempAt, $"guideAt={guideAt} tempAt={tempAt}");
     }
 
     /// <summary>M-22: tmp まで失われていたら、<b>実在しない退避先を案内しない</b>。
-    /// 弁別は <c>File.Exists</c> 一本(例外の型で分けると原理的に漏れる。監査 §9 V-7)。</summary>
+    /// 弁別は <c>File.Exists</c> 一本(例外の型で分けると原理的に漏れる。監査 §9 V-7)。
+    /// <para>
+    /// ここは<b>短いパス</b>で検証する(<c>FileControllerTests</c> の (c) と同じ理由): 長いパスだと
+    /// 退避先が丸めで末尾から落ちるだけの実装とも区別が付かなくなる。無害化・丸めの網は
+    /// 上のテストが持つ(<c>target</c> の式は両分岐で共有)。
+    /// </para></summary>
     [Fact]
     public void SettingsSaveOutcome_does_not_point_at_a_temp_that_is_gone()
     {
@@ -2117,8 +2191,51 @@ public class MainFormSmokeTests
 
         // ダイアログ自体は出す(差替失敗は起きている)が、退避先の案内だけを落とす。
         Assert.NotNull(dialog);
-        Assert.DoesNotContain(missing, dialog);
-        Assert.DoesNotContain("削除", dialog);
+        Assert.DoesNotContain(missing, dialog, StringComparison.Ordinal);
+        Assert.DoesNotContain("削除", dialog, StringComparison.Ordinal);
+    }
+
+    /// <summary>M-22(仕様レビュー I-2): <b>次回起動時の状態を断定しない</b>。
+    /// <para>
+    /// ここから到達しうる結末は 3 通りある —— (1) 同一セッションの他の保存経路
+    /// (最近使ったファイルの更新・終了時保存)が成功して<b>新しい設定が残る</b>、
+    /// (2) 何も保存されず<b>元の設定に戻る</b>(通常失敗=原本は無傷)、
+    /// (3) <b>既定値で始まる</b>(差替失敗=原本が失われているので次回の <c>Load</c> は
+    /// <c>Missing</c>)。とくに (1) は<b>案内を聞いたユーザーが最も自然に取る行動</b>
+    /// (読み取り専用属性を外してファイルを開く / 終了する)で起きる。
+    /// </para>
+    /// <para>
+    /// したがって発声で「元の設定に戻ります」と断定するのは、B5 が潰そうとしている虚偽発声を
+    /// B5 自身が新設することになる。<b>断定の語を置かない</b>ことを機械的に固定する。
+    /// </para></summary>
+    [Fact]
+    public void SettingsSaveOutcome_does_not_promise_a_particular_next_startup()
+    {
+        var (ordinarySpeech, _) = MainForm.SettingsSaveOutcomeForTest(
+            new UnauthorizedAccessException("denied")
+        );
+        // 断定形(旧文言)を置かない。3 通りのうち 2 通りで偽になる。
+        Assert.DoesNotContain("元の設定に戻ります", ordinarySpeech, StringComparison.Ordinal);
+        Assert.Contains("可能性", ordinarySpeech, StringComparison.Ordinal);
+
+        using var tmp = new TempDir();
+        string preserved = tmp.File("settings.json.abc.tmp");
+        File2.WriteAllText(preserved, "{}");
+        var (_, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: tmp.SettingsPath,
+                preservedTempPath: preserved,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+        Assert.NotNull(dialog);
+        // 原本が失われた分岐で「元に戻る」は明確な誤り(戻り先が存在しない)。
+        Assert.DoesNotContain("元に戻ります", dialog, StringComparison.Ordinal);
+        Assert.DoesNotContain("元の設定に戻ります", dialog, StringComparison.Ordinal);
+        // 言えるのは「保存されなければ既定値」という条件形と、やり直しの手順まで。
+        Assert.Contains("既定の設定で始まります", dialog, StringComparison.Ordinal);
+        Assert.Contains("保存をやり直せます", dialog, StringComparison.Ordinal);
     }
 
     /// <summary>M-22 の配線: 設定の適用経路が、保存の成否を見て発声を選んでいること。
@@ -2131,6 +2248,12 @@ public class MainFormSmokeTests
     /// <c>File.Replace</c> するので、落ちるのは差替段であり、原本は残る = 通常失敗
     /// (<c>AtomicReplaceFailedException</c> にはならない)=ダイアログ分岐に入らない
     /// (MessageBox でブロックしない)。実測で <c>UnauthorizedAccessException</c> 0x80070005。
+    /// </para>
+    /// <para>
+    /// <b>それでも抑止フラグは立てる</b>(仕様レビュー M-1)。「常にダイアログを出す」向きの変異や
+    /// 将来の退行が起きたとき、抑止していないと <c>MessageBox.Show</c> が STA スレッド上で
+    /// モーダルループを回し、テストは<b>赤ではなくハング</b>する(<see cref="Sta"/> の xmldoc が
+    /// 名指ししている事故形=CI の timeout を燃やす)。
     /// </para></summary>
     [Fact]
     public void Applying_settings_announces_the_failure_when_the_file_cannot_be_written() =>
@@ -2143,15 +2266,26 @@ public class MainFormSmokeTests
                 backupDirectory: tmp.BackupDir,
                 sessionLayoutPath: tmp.LayoutPath
             );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
             File2.WriteAllText(tmp.SettingsPath, "{}");
             File2.SetAttributes(tmp.SettingsPath, FileAttributes.ReadOnly);
             try
             {
                 form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
 
-                Assert.Contains("保存できませんでした", form.LastAnnouncementForTest);
+                Assert.Contains(
+                    "保存できませんでした",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
                 // 「適用できませんでした」へ倒す変異(逆向きの嘘)を kill する。
-                Assert.Contains("適用しました", form.LastAnnouncementForTest);
+                Assert.Contains(
+                    "適用しました",
+                    form.LastAnnouncementForTest,
+                    StringComparison.Ordinal
+                );
+                // 通常失敗では案内すべきパスが無いのでダイアログは出さない(配線レベルで固定)。
+                Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest);
             }
             finally
             {
@@ -2161,7 +2295,8 @@ public class MainFormSmokeTests
         });
 
     /// <summary>M-22: 保存できたときは現行の成功文言のまま(退行の証人)。
-    /// 「常に失敗文言」へ倒す実装は上のテストだけでは緑になる。</summary>
+    /// 「常に失敗文言」へ倒す実装は上のテストだけでは緑になる。
+    /// 抑止フラグを立てる理由は上と同じ(M-1: 退行時にハングさせない)。</summary>
     [Fact]
     public void Applying_settings_announces_plain_success_when_the_file_is_writable() =>
         Sta.Run(() =>
@@ -2173,12 +2308,62 @@ public class MainFormSmokeTests
                 backupDirectory: tmp.BackupDir,
                 sessionLayoutPath: tmp.LayoutPath
             );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
 
             form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
 
             Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
             Assert.True(File2.Exists(tmp.SettingsPath)); // 保存は実際に成功している
             Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest); // 成功時に出さない
+        });
+
+    /// <summary>M-22 の切り出しで初めて観測可能になった 2 つの副作用 —— 全タブへの外観適用
+    /// (<c>EditorAppearance.Apply</c>)とバックアップ設定の即時反映(<c>_backup.UpdateSettings</c>)。
+    /// <para>
+    /// <b>両方まるごと消しても App 全件が緑だった</b>(仕様レビュー M-3・実測)。cf17bdb が持ち込んだ
+    /// 退行ではなく、元の <c>OpenSettings</c> でも観測不能だった面だが、<c>ApplySettings</c> という
+    /// seam ができた今なら塞げる ——「判断をモーダルの中に残すと配線が黙って切れても緑のまま」
+    /// という切り出しの根拠は、切り出した先の 3 効果すべてに網が要る。
+    /// </para>
+    /// <para>
+    /// CLAUDE.md §4-B に従い<b>非既定値から動かす</b>: 適用前は <c>ShowLineNumbers=true</c>
+    /// (既定は false)・間隔 30 秒(既定 300)で、適用後はどちらもそれと違う値へ動かす。
+    /// これで「何もしない」実装とも「既定値を適用する」実装とも区別が付く。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_pushes_appearance_and_backup_interval_into_the_running_app() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                new AppSettings
+                {
+                    BackupEnabled = false,
+                    ShowLineNumbers = true, // 非既定
+                    BackupIntervalSeconds = 30, // 非既定(既定 300)
+                },
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            var doc = form.FileForTest.DocsForTest[0]; // ctor の NewFile で 1 つある
+            // 前提: 適用前は ctor の値が効いている(恒真 assertion 除け)。
+            Assert.True(doc.Editor.ShowLineNumbers);
+            Assert.Equal(30_000, form.BackupTimerIntervalMsForTest);
+
+            form.ApplySettingsForTest(
+                new AppSettings
+                {
+                    BackupEnabled = false,
+                    ShowLineNumbers = false,
+                    BackupIntervalSeconds = 45,
+                }
+            );
+
+            Assert.False(doc.Editor.ShowLineNumbers); // EditorAppearance.Apply のループが走った
+            Assert.Equal(45_000, form.BackupTimerIntervalMsForTest); // UpdateSettings が走った
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
         });
 
     /// <summary>M-22 の配線(ダイアログ分岐): 差替失敗で残った tmp の案内が、純関数の中だけで
@@ -2240,10 +2425,21 @@ public class MainFormSmokeTests
             Assert.Equal(1, form.SettingsSaveFailedDialogCountForTest);
             string? body = form.SettingsSaveFailedDialogBodyForTest;
             Assert.NotNull(body);
-            Assert.Contains(preserved, body); // 案内は「その場で残した tmp」を指している
-            Assert.Contains("削除", body);
+            // 案内は「その場で残した tmp」を指している。無害化・丸めの網は純関数側
+            // (SettingsSaveOutcome_points_at_the_preserved_temp_when_it_exists)が持つので、
+            // ここは<b>配線が届いていること</b>だけを見る(短いパスで十分)。
+            Assert.Contains(preserved, body, StringComparison.Ordinal);
+            Assert.Contains("削除", body, StringComparison.Ordinal);
             // 発声の側は通常失敗と同じ 1 行のまま(長いパスはダイアログ側にだけ載る)。
-            Assert.Contains("保存できませんでした", form.LastAnnouncementForTest);
-            Assert.DoesNotContain(preserved, form.LastAnnouncementForTest);
+            Assert.Contains(
+                "保存できませんでした",
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
+            Assert.DoesNotContain(
+                preserved,
+                form.LastAnnouncementForTest,
+                StringComparison.Ordinal
+            );
         });
 }
