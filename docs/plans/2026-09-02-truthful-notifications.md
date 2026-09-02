@@ -678,15 +678,44 @@ git commit -m "feat(app): バックアップ書込の成功を通知する seam 
     /// (1 文書だけ書けている状態を「復旧」と呼ばない)。</summary>
     [Fact]
     public void Failure_wins_over_success_within_the_same_drain() { }
+
+    /// <summary>訂正 C-1 の退行テスト。<b>既に unhealthy の状態で</b>同一 drain に失敗と成功が
+    /// 両方来ても、復旧を報告しない。当初の <c>else if</c> 版はここで誤って「再開しました」と
+    /// 発声した —— 「失敗が勝つ」が健全なときにしか効いていなかった。
+    /// <para>文書 A の書込先が恒久的に塞がれ文書 B は正常、という現実的な構成で作る。
+    /// 上の <see cref="Failure_wins_over_success_within_the_same_drain"/> は healthy から
+    /// 始まるので<b>この欠陥を捕まえない</b>(2 本が要る理由)。</para></summary>
+    [Fact]
+    public void Does_not_report_recovery_while_another_document_is_still_failing() { }
 ```
+
+> **`Failure_wins_over_success_within_the_same_drain` と
+> `Does_not_report_recovery_while_another_document_is_still_failing` は別々に要る。**
+> 前者は healthy から、後者は **unhealthy から**始める。訂正 C-1 の欠陥は後者でしか落ちない
+> —— CLAUDE.md §4-B「no-change のテストは既定値と区別するため**非既定状態から**検証を始める」の
+> 実例そのものである(`_backupHealthy` の既定値は `true`)。
 
 各テストの骨子:
 
 1. `FakeBackupWriter` + Coordinator を作り、`coordinator.OnBackupHealthChanged = h => reports.Add(h);`
 2. dirty 文書を用意して `Reconcile` を 1 回回す(書込が投入される)
-3. 失敗を注入するときは既存作法どおり `writer.OnWriteFailed!.Invoke(<書いた record の Id>)` を直接叩く
+3. 失敗の注入は**用途で 2 通りを使い分ける**(訂正 C-2)
 4. 再度 `Reconcile` を回して drain させる
 5. `reports` の系列を assert する(`Assert.Equal(new[] { false }, reports)` など)
+
+> **訂正 C-2(2026-09-03・Task 3 のコード品質レビューで発覚)。** 骨子 3 は当初
+> 「既存作法どおり `writer.OnWriteFailed!.Invoke(...)` を直接叩く」だった。そのとおり書くと
+> Task 3 が足した `FakeBackupWriter.FailNextWrite` が**恒久的に未使用**になる(実測: Fake の
+> `FailNextWrite` 分岐と `OnWriteSucceeded?.Invoke` を丸ごと削除しても App 全 755 本が緑)。
+> 正しくは**用途が 2 つある**:
+>
+> | 作り方 | できる pass | 使うテスト |
+> |--------|------------|-----------|
+> | `writer.FailNextWrite = true` | **失敗だけ**が来る(実物と同じ) | 失敗の立ち上がり / 復旧の判定 |
+> | `writer.OnWriteFailed!.Invoke(id)` を直接叩く | **両方**鳴る(`Write` が成功を撃った後に失敗を撃つため) | **訂正 C-1 の退行テスト** |
+>
+> 後者は「実物では起こらない状態」だが、**その状態で消費者が正しく振る舞うかを試すのが
+> まさに C-1 の網**なので、意図的に作る用途がある。両方を使うこと。
 
 > **`Does_not_report_recovery_when_no_write_was_attempted` は本タスクで最も重要な網。**
 > ここが緑にならない実装は M-20 を直す代わりに新しい虚偽発声を作っている。
@@ -758,18 +787,41 @@ git commit -m "feat(app): バックアップ書込の成功を通知する seam 
     /// 正しい</b>。</para></summary>
     private void ReportBackupHealth(bool anyFailed, bool anySucceeded)
     {
-        if (anyFailed && _backupHealthy)
+        if (anyFailed)
         {
-            _backupHealthy = false;
-            OnBackupHealthChanged?.Invoke(false);
+            // 失敗がある pass では復旧の判定に入らない。else-if で書くと、
+            // 既に unhealthy のとき第 1 分岐が `anyFailed && false` で落ちて
+            // 第 2 分岐が成立し、**誤って「復旧」を発声する**(訂正 C-1)。
+            if (_backupHealthy)
+            {
+                _backupHealthy = false;
+                OnBackupHealthChanged?.Invoke(false);
+            }
+            return;
         }
-        else if (anySucceeded && !_backupHealthy)
+        if (anySucceeded && !_backupHealthy)
         {
             _backupHealthy = true;
             OnBackupHealthChanged?.Invoke(true);
         }
     }
 ```
+
+> **訂正 C-1(2026-09-03・Task 3 のコード品質レビューで発覚)。** 上のコードは当初
+> `if (anyFailed && _backupHealthy) { … } else if (anySucceeded && !_backupHealthy) { … }`
+> だった。この形は **`_backupHealthy == false` の状態で同一 drain に両方来ると復旧を発声する** ——
+> 第 1 分岐が `anyFailed && false` で落ち、第 2 分岐が `anySucceeded && !false` で成立するため。
+> §5.3 と本節が掲げた「失敗が勝つ」は、**健全なとき(= 何もしなくても失敗が勝つ場合)にしか
+> 効いていなかった**。
+>
+> 実害: 文書 A の書込先が恒久的に塞がれ文書 B は正常(両方 dirty)のとき、毎 tick の drain が
+> `failed=A, succeeded=B` になり、300 秒ごとに「保存できません」→「再開しました」→
+> 「保存できません」を繰り返す。**B5 が潰そうとしている虚偽発声を B5 が新設する。**
+> 単一文書でも `Timer.Tick` と `ActiveDocumentChanged` の 2 経路があるため、
+> 1 drain に失敗と成功が同居する状況は作れる。
+>
+> **この分岐には退行テストを必ず置くこと**(Step 1 の骨子を参照)。設計書 §5.3 は策定時
+> スナップショットなので書き換えない(CLAUDE.md §8)。訂正の記録は Task 6 の実施記録へ。
 
 **(d) MainForm の配線**(`MainForm.cs:242` の `_backup = new BackupCoordinator(...)` 直後):
 
