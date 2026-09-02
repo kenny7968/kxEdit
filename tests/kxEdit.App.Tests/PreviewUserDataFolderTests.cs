@@ -120,6 +120,61 @@ public class PreviewUserDataFolderTests
         }
     }
 
+    [Fact]
+    public void EnsureEmptyBaseFolder_CreatesEmptyDirectoryUnderPath()
+    {
+        // V-2: baseDir が使えないときのマッピング先。空であることが契約 (ここに何か置くと
+        // プレビューへ露出する)。
+        var sut = new PreviewUserDataFolder();
+        try
+        {
+            string empty = sut.EnsureEmptyBaseFolder();
+            Assert.True(System.IO.Directory.Exists(empty));
+            Assert.Empty(System.IO.Directory.GetFileSystemEntries(empty));
+            Assert.StartsWith(sut.Path, empty, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SafeCleanup(sut);
+        }
+    }
+
+    [Fact]
+    public void EnsureEmptyBaseFolder_Idempotent()
+    {
+        // 2 回目でも throw しない (InitAsync が再入しても登録先が変わらない網)。
+        var sut = new PreviewUserDataFolder();
+        try
+        {
+            string first = sut.EnsureEmptyBaseFolder();
+            string second = sut.EnsureEmptyBaseFolder();
+            Assert.Equal(first, second);
+            Assert.True(System.IO.Directory.Exists(second));
+        }
+        finally
+        {
+            SafeCleanup(sut);
+        }
+    }
+
+    [Fact]
+    public void Dispose_RemovesEmptyBaseFolder()
+    {
+        // 後始末の経路を増やさない設計 (親を消せば一緒に消える) の網。
+        var sut = new PreviewUserDataFolder();
+        string empty = sut.EnsureEmptyBaseFolder();
+        try
+        {
+            sut.Dispose();
+            Assert.False(System.IO.Directory.Exists(empty));
+        }
+        finally
+        {
+            if (System.IO.Directory.Exists(sut.Path))
+                System.IO.Directory.Delete(sut.Path, recursive: true);
+        }
+    }
+
     private static void SafeCleanup(PreviewUserDataFolder sut)
     {
         try

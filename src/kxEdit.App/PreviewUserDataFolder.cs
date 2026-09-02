@@ -39,6 +39,23 @@ internal sealed class PreviewUserDataFolder : IDisposable
         System.IO.Directory.CreateDirectory(Path);
     }
 
+    /// <summary>
+    /// V-2: 仮想ホストのマッピング先にする空フォルダー(<c>{Path}\empty-base</c>)を作って返す。
+    /// <para>
+    /// <b>契約: このフォルダーには何も置かない。</b> マッピング専用であり、ここに置いた
+    /// ファイルは <c>https://kxedit.preview/</c> でプレビューから読める。
+    /// WebView2 のプロファイル実体は <see cref="Path"/> 直下に作られるが、マッピングは
+    /// このサブフォルダーに閉じるためプロファイルは露出しない。
+    /// </para>
+    /// <para>後始末は <see cref="Dispose"/> が親ごと消すので専用の経路を持たない。</para>
+    /// </summary>
+    public string EnsureEmptyBaseFolder()
+    {
+        string path = System.IO.Path.Combine(Path, "empty-base");
+        System.IO.Directory.CreateDirectory(path); // idempotent: 既存でも throw しない
+        return path;
+    }
+
     public void Dispose()
     {
         try

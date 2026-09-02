@@ -7,7 +7,9 @@ namespace kxEdit.App;
 /// <summary>
 /// マークダウンを整形表示するモーダルプレビュー窓。WebView2 に HTML を流し込み、
 /// 相対リソース（画像・ローカルリンク）は元ファイルのフォルダ基準（仮想ホスト）で解決する。
-/// baseDir が null（未保存タブ等）の場合は仮想ホストを設定せず、相対リソースは解決できない。
+/// baseDir が null（未保存タブ等）または実在しない/不達の場合は空フォルダーへマッピングする
+/// （相対リソースは解決できないが、仮想ホストは常にローカルで応答する = 実 DNS 解決を
+/// 起こさない・V-2）。
 /// 「閉じる」ボタンと Esc の両方でエディタへ戻る。
 /// <para>
 /// MD-M-4: WebView2 の <c>userDataFolder</c> は per-form 一意 (<see cref="PreviewUserDataFolder"/>)
@@ -34,16 +36,26 @@ public sealed class MarkdownPreviewForm : Form
     private readonly string _html;
     private readonly string? _baseDir;
 
+    // V-2 + PR #57 申し送り: _baseDir の実在確認を境界付きで行う seam。
+    // 生成側 (MainForm) が実装を選ぶ流儀は FileController と同じ。
+    private readonly IReachabilityProbe _probe;
+
     // WebView2 の NavigateToString(html) は内部で data:text/html;charset=utf-16;base64,... へ
     // エンコードして NavigationStarting を発火させる。このオブジェクトの生存期間で 1 回だけ
     // その data URI を通すためのフラグ。通過後は false に落として MD-M-3 (二層防御) を復元する。
     // WebView2 のイベントは全て UI スレッド発火なので通常のフィールドで OK。
     private bool _bootstrappingDataUri = true;
 
-    public MarkdownPreviewForm(string html, string? baseDir, string fileName)
+    public MarkdownPreviewForm(
+        string html,
+        string? baseDir,
+        string fileName,
+        IReachabilityProbe probe
+    )
     {
         _html = html;
         _baseDir = baseDir;
+        _probe = probe ?? throw new ArgumentNullException(nameof(probe));
 
         Text = $"プレビュー: {fileName} - kxEdit";
         Width = 900;
@@ -86,14 +98,32 @@ public sealed class MarkdownPreviewForm : Form
             new PreviewCspHeaderInjector(env).Attach(core);
 
             // 相対リソース（画像・ローカルリンク）を .md のフォルダから解決する。
-            if (!string.IsNullOrEmpty(_baseDir) && System.IO.Directory.Exists(_baseDir))
-            {
-                core.SetVirtualHostNameToFolderMapping(
-                    MarkdownRenderer.PreviewVirtualHost,
-                    _baseDir,
-                    CoreWebView2HostResourceAccessKind.Allow
-                );
-            }
+            // V-2 + PR #57 申し送り(設計書 §13.2): マッピングは常に張る。未マップのままだと
+            // 本文中の相対 URL(描画前に絶対化済み)が実 DNS 解決へ出る(監査 §9 V-2)。
+            //
+            // 実在確認は UI スレッドから外す: SetVirtualHostNameToFolderMapping 自身が
+            // 実在確認を内蔵しており、不達な共有では 21 秒返らない(§13.1 の実測)。
+            // CoreWebView2 は UI スレッド専有なので登録自体は逃がせない。したがって
+            // 「実在が確定したフォルダーだけを UI スレッドで渡す」形にする。
+            // RemoteAwareDirectory はローカルを Directory.Exists 直呼び、リモートのみ
+            // 5 秒の境界付きプローブへ回す(grep と同じ契約)。
+            bool baseDirExists =
+                !string.IsNullOrEmpty(_baseDir)
+                && await Task.Run(() => RemoteAwareDirectory.Exists(_probe, _baseDir!));
+            if (IsDisposed || Disposing)
+                return;
+
+            PreviewVirtualHostMapping.Apply(
+                _baseDir,
+                baseDirExists,
+                _userData.EnsureEmptyBaseFolder,
+                folder =>
+                    core.SetVirtualHostNameToFolderMapping(
+                        MarkdownRenderer.PreviewVirtualHost,
+                        folder,
+                        CoreWebView2HostResourceAccessKind.Allow
+                    )
+            );
 
             // ローカル閲覧用途のため不要機能を抑止。
             core.Settings.AreDevToolsEnabled = false;

@@ -1702,7 +1702,12 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        using var f = new MarkdownPreviewForm(html, dir, doc.State.DisplayName);
+        using var f = new MarkdownPreviewForm(
+            html,
+            dir,
+            doc.State.DisplayName,
+            new FileReachabilityProbe()
+        );
         f.ShowDialog(this);
         _docs.Active?.FocusTarget.Focus(); // 戻り後は編集領域へフォーカス
     }
