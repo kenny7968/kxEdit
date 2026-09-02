@@ -59,7 +59,11 @@ public static class AtomicFile
         // 旧実装の File.WriteAllBytes は null で ArgumentNullException を投げていた。
         // 委譲先の Stream 版は writer の中で payload.Length に触れるため、ここで止めないと
         // NullReferenceException になるうえ、空の tmp を作ってから消すことになる。
-        // paramName も "payload" のまま保つ(ここで投げるので "writer" には化けない)。
+        //
+        // 保たれるのは<例外の型>と<tmp を作らないこと>で、paramName は M-13 で変わっている:
+        // File.WriteAllBytes は "bytes"、ここは "payload"(いずれも実測)。依存コードは無く、
+        // 本メソッドの公開引数名と一致する方へ寄っている。ここで投げる以上、委譲先の
+        // "writer" には化けない —— この 3 点は AtomicFileTests が網で固定している。
         ArgumentNullException.ThrowIfNull(payload);
         Write(path, stream => stream.Write(payload, 0, payload.Length));
     }
