@@ -16,7 +16,9 @@ namespace kxEdit.App;
 ///   <item>同梱 <c>https://kxedit.preview/*.html</c>/<c>.svg</c> への in-frame 遷移を Block
 ///     (attacker フォルダ由来の CSP 未適用ドキュメントが same-origin でスクリプト実行するのを塞ぐ・MD-H-1)。</item>
 ///   <item>preview 仮想ホストは <c>http</c> でも Block (<c>LaunchExternal</c> だと既定ブラウザが
-///     <c>kxedit.preview</c> を実 DNS 解決してしまう・F-7)。</item>
+///     <c>kxedit.preview</c> を実 DNS 解決してしまう・F-7)。ホスト判定は <c>Uri.IdnHost</c> の
+///     末尾ドット除去で行い、<c>kxedit.preview.</c> / <c>kxedit。preview</c> も同じ扱いにする
+///     (F-3。F-7 の時点では <c>Uri.Host</c> 直比較だったのでこれらが漏れていた)。</item>
 ///   <item>外部 http/https は in-frame ナビゲートさせず既定ブラウザへ逃がす
 ///     (プレビュー窓の title を保ったまま偽サイトが表示される phishing 防止)。</item>
 ///   <item><c>file://</c> UNC は Windows が SMB 経由で NTLM 認証を通してしまうため
@@ -34,11 +36,20 @@ public static class PreviewNavigationPolicy
         /// <summary>preview 内で許可 (about:blank のみ)。MD-H-1 / F-7 以降 http(s)://kxedit.preview/* は Block。</summary>
         AllowIntra,
 
-        /// <summary>既定ブラウザ/アプリで開く安全 scheme (http/https 非 preview, mailto)。</summary>
+        /// <summary>
+        /// 既定ブラウザ/アプリで開く安全 scheme (http/https で preview 仮想ホストを指さないもの, mailto)。
+        /// <para>
+        /// 「preview を指さない」の判定は <c>Uri.IdnHost</c> の末尾ドット除去で行う。
+        /// F-3 以前は <c>Uri.Host</c> の直比較だったため、<c>http://kxedit.preview./leak</c> が
+        /// ここへ落ちて既定ブラウザに実 DNS 解決させていた (実測)。
+        /// </para>
+        /// </summary>
         LaunchExternal,
 
         /// <summary>
-        /// 阻止 (http(s)://kxedit.preview/*, file://, ftp://, data:, javascript:, vbscript:, その他 unknown)。
+        /// 阻止 (preview 仮想ホスト宛の http(s), file://, ftp://, data:, javascript:, vbscript:,
+        /// parse 不能, その他 unknown)。preview 仮想ホスト宛には末尾ドット形
+        /// (<c>kxedit.preview.</c>) と非 ASCII 表記 (<c>kxedit。preview</c>) も含む。
         /// </summary>
         Block,
     }
@@ -49,6 +60,24 @@ public static class PreviewNavigationPolicy
     /// と単一の source of truth を共有し、host 名の判定基準がずれないようにする。
     /// </summary>
     private static readonly string PreviewHost = MarkdownRenderer.PreviewVirtualHost;
+
+    /// <summary>
+    /// URI のホストが preview 仮想ホストを指すかを、ブラウザ側の解釈に寄せて判定する。
+    /// <para>
+    /// <see cref="Uri.Host"/> ではなく <see cref="Uri.IdnHost"/> を末尾ドット除去つきで見る。
+    /// <c>Host</c> のままだと <c>http://kxedit.preview./leak</c> が「preview ではない」と
+    /// 判定されて <see cref="Classification.LaunchExternal"/> に落ち、既定ブラウザが
+    /// <c>kxedit.preview</c> を実 DNS 解決してしまう (F-3・実測)。
+    /// <c>IdnHost</c> は非 ASCII ホスト (<c>kxedit。preview</c> 等) も IDNA 正規化して
+    /// 同じ土俵に載せる。
+    /// </para>
+    /// <para>
+    /// parse 自体に失敗する形 (<c>http://%6bxedit.preview/</c> 等) はここへ来る前の
+    /// <c>Uri.TryCreate</c> 失敗で既定 <see cref="Classification.Block"/> に落ちる。
+    /// </para>
+    /// </summary>
+    private static bool PointsAtPreviewHost(Uri uri) =>
+        string.Equals(uri.IdnHost.TrimEnd('.'), PreviewHost, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// WebView2 の navigation 対象 URI を 3 クラスに分類する。
@@ -80,9 +109,12 @@ public static class PreviewNavigationPolicy
         return scheme switch
         {
             // preview 仮想ホストは全面 Block (MD-H-1)。
-            // preview 本体は NavigateToString (data: URI) 経由、CSS/画像は WebResourceRequested
-            // のサブリソース経由で届くため、正当な top-level ナビゲーションがこのホストを対象にする
-            // ことは無い。ここを AllowIntra にすると、攻撃者が .md と同梱した CSP 未適用の
+            // preview 本体は NavigateToString (data: URI) 経由、CSS は WebResourceRequested の
+            // サブリソース経由で届く。画像はこの経路を通らない —— PreviewCspHeaderInjector の
+            // filter は CSS の仮想パスへ narrow に絞ってあり、画像は
+            // SetVirtualHostNameToFolderMapping が直接応答する。いずれにせよ正当な
+            // top-level ナビゲーションがこのホストを対象にすることは無い。
+            // ここを AllowIntra にすると、攻撃者が .md と同梱した CSP 未適用の
             // .html/.svg への相対リンク click が in-frame 遷移し、same-origin でスクリプト実行
             // (兄弟ファイル fetch + 外部 exfiltration) されてしまう。よって Block する。
             //
@@ -91,10 +123,7 @@ public static class PreviewNavigationPolicy
             // 無意味」と書いていたが、無意味ではない —— 既定ブラウザが実 DNS 解決を行い、
             // 企業 DNS の search suffix 等で「どの URL を踏ませたか」が外部へ漏れる
             // (監査 §9 V-2 と同じ経路。2026-09-03・F-7)。
-            "http"
-            or "https"
-                when string.Equals(parsed.Host, PreviewHost, StringComparison.OrdinalIgnoreCase) =>
-                Classification.Block,
+            "http" or "https" when PointsAtPreviewHost(parsed) => Classification.Block,
             "http" or "https" => Classification.LaunchExternal,
             "mailto" => Classification.LaunchExternal,
             // file:// UNC は Windows が SMB で NTLM 認証を通してしまうため全面 Block (MD-M-5)。

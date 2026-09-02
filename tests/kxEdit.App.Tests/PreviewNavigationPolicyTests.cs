@@ -8,10 +8,14 @@ namespace kxEdit.App.Tests;
 /// 分類ルール:
 ///   - null / 空 → Block
 ///   - about:blank (大小区別なし) → AllowIntra (NavigateToString の初回 origin)
-///   - https://kxedit.preview/* (大小区別なし) → Block (MD-H-1: 同梱 .html/.svg の same-origin 実行防止)
-///   - http/https 非 preview → LaunchExternal (既定ブラウザへ逃がす)
+///   - preview 仮想ホスト宛の http / https → Block
+///     * https は MD-H-1 (同梱 .html/.svg の same-origin 実行防止)
+///     * http は F-7 (LaunchExternal だと既定ブラウザが実 DNS 解決してしまう)
+///     * ホスト判定は Uri.IdnHost の末尾ドット除去。よって kxedit.preview. や
+///       kxedit。preview (U+3002) も同じく Block (F-3)
+///   - http/https で preview 仮想ホストを指さないもの → LaunchExternal (既定ブラウザへ逃がす)
 ///   - mailto → LaunchExternal
-///   - file / ftp / data / javascript / vbscript / その他 → Block
+///   - file / ftp / data / javascript / vbscript / parse 不能 / その他 → Block
 ///     * file:// は特に MD-M-5 の NTLM 漏出対策の主眼
 ///     * javascript:/vbscript:/data: は MD-M-3 (renderer 段) の二層目
 ///
@@ -107,8 +111,16 @@ public class PreviewNavigationPolicyTests
     /// <para>
     /// 以前はここを <c>LaunchExternal</c> で固定していたが、それだと既定ブラウザが
     /// <c>kxedit.preview</c> を<b>実 DNS 解決</b>する (監査 V-2 と同じ漏れ方: 企業 DNS の
-    /// search suffix 等に乗って「どの URL を踏ませたか」が外部へ出る)。本ブランチの
-    /// 不変条件「この名前を実 DNS に出さない」の唯一の残存経路だった。
+    /// search suffix 等に乗って「どの URL を踏ませたか」が外部へ出る)。
+    /// </para>
+    /// <para>
+    /// <b>訂正 (2026-09-03)</b>: F-7 の commit はこれを「不変条件『この名前を実 DNS に
+    /// 出さない』の<b>唯一の</b>残存経路」と書いたが、それは<b>偽</b>だった。ホスト判定が
+    /// <c>Uri.Host</c> の直比較だったため、末尾ドット形 <c>http://kxedit.preview./leak</c> が
+    /// <c>LaunchExternal</c> のまま残っていた (F-3・実測)。現在は
+    /// <c>Uri.IdnHost</c> + 末尾ドット除去で判定しており、その網が
+    /// <see cref="Classify_HttpPreviewHost_TrailingDot_ReturnsBlock"/> と
+    /// <see cref="Classify_HttpsPreviewHost_TrailingDot_ReturnsBlock"/>。
     /// </para>
     /// <para>
     /// http は preview として in-frame 許可もしない (strict): 仮想ホストマッピングは
@@ -120,6 +132,59 @@ public class PreviewNavigationPolicyTests
         Assert.Equal(
             PreviewNavigationPolicy.Classification.Block,
             PreviewNavigationPolicy.Classify("http://kxedit.preview/")
+        );
+
+    /// <summary>
+    /// F-3: 末尾ドット付きの preview 仮想ホスト (http) も Block。
+    /// <para>
+    /// DNS の絶対名表記なので既定ブラウザは <c>kxedit.preview</c> として実解決する。
+    /// <c>Uri.Host</c> / <c>Uri.IdnHost</c> はどちらも末尾ドットを保持する (実測) ため、
+    /// 実装側の <c>TrimEnd('.')</c> を外すとこのテストが落ちる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Classify_HttpPreviewHost_TrailingDot_ReturnsBlock() =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.Block,
+            PreviewNavigationPolicy.Classify("http://kxedit.preview./leak")
+        );
+
+    /// <summary>F-3: 末尾ドット付きの preview 仮想ホスト (https) も Block (MD-H-1 と同じ理由)。</summary>
+    [Fact]
+    public void Classify_HttpsPreviewHost_TrailingDot_ReturnsBlock() =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.Block,
+            PreviewNavigationPolicy.Classify("https://kxedit.preview./x.html")
+        );
+
+    /// <summary>
+    /// F-3 の副産物: 非 ASCII 表記の preview 仮想ホストも Block。
+    /// <para>
+    /// <c>Uri.Host</c> は Unicode を保つので Host 直比較では外れるが、<c>Uri.IdnHost</c> は
+    /// IDNA 正規化して <c>kxedit.preview</c> を返す (実測)。実装を <c>Uri.Host</c> へ戻すと
+    /// このテストが落ちる。
+    /// </para>
+    /// <para>
+    /// WebView2 が <c>NavigationStarting</c> にこの形を渡してくるかは<b>未実測 (推測)</b>。
+    /// 正規化済みの URI を渡すと思われるが、確認していないので安全側に倒してある。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Classify_HttpsPreviewHost_NonAsciiHost_ReturnsBlock() =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.Block,
+            PreviewNavigationPolicy.Classify("https://kxedit。preview/x.html")
+        );
+
+    /// <summary>
+    /// 非退化の対照: 末尾ドット付きの<b>外部</b>ホストは従来どおり LaunchExternal。
+    /// <c>TrimEnd('.')</c> が preview 判定を広げすぎて外部 URL まで Block していないことを固定する。
+    /// </summary>
+    [Fact]
+    public void Classify_HttpsNonPreviewHost_TrailingDot_ReturnsLaunchExternal() =>
+        Assert.Equal(
+            PreviewNavigationPolicy.Classification.LaunchExternal,
+            PreviewNavigationPolicy.Classify("https://example.com./x")
         );
 
     [Fact]
