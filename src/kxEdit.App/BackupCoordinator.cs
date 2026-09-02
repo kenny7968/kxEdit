@@ -86,6 +86,19 @@ public sealed class BackupCoordinator : IDisposable
     /// <see cref="OnBackupHealthChanged"/> を撃つための状態。初期 true = 最初の失敗も報告される。</summary>
     private bool _backupHealthy = true;
 
+    /// <summary>M-20 テスト観測用 / 配線用: いま健全とみなしているか。
+    /// <c>MainForm</c> はこれを読んで、<b>自分の後続の発声で上書きしてしまった警告を言い直す</b>
+    /// (仕様レビュー I-1 / I-2)。状態を持つのはここ 1 箇所で、写しは作らない。</summary>
+    internal bool BackupHealthy => _backupHealthy;
+
+    /// <summary>テスト専用: 背景書込の失敗通知を注入する。注入先は
+    /// <see cref="OnBackgroundWriteFailed"/> = 実 writer の <see cref="IBackupWriter.OnWriteFailed"/>
+    /// が入る受け口そのもので、遷移は次の drain で実経路どおりに起きる。
+    /// <para>実 <c>MainForm</c> は <c>SerialBackupWriter</c> を直生成していて writer を差し替え
+    /// られないため、<b>実 MainForm 経路で健全性を非既定へ動かす唯一の手段</b>である
+    /// (Coordinator 側テストは Fake writer のフックを直接叩けるので使わない)。</para></summary>
+    internal void InjectWriteFailureForTest(string id) => OnBackgroundWriteFailed(id);
+
     private bool _shutDown;
 
     /// <summary>起動時復元(MainForm.OnShown)が完了したか。完了までは保存点/クローズの
@@ -600,6 +613,15 @@ public sealed class BackupCoordinator : IDisposable
     /// <summary>M-20(B5): 書込の健全性が遷移したときだけ報告する。
     /// <para><b>同一 pass に失敗と成功が両方あれば失敗が勝つ。</b> 複数文書のうち 1 つだけ
     /// 書けている状態を「復旧」と呼ばないため。</para>
+    /// <para><b>ただし非同期由来の取り違えは残る(受容・仕様レビュー M-2)。</b>
+    /// <c>SerialBackupWriter</c> は失敗も成功も背景スレッドから撃つため、pass N の書込に対する
+    /// <b>失敗通知がまだ届いておらず</b>、それより前の pass の成功フラグが残っている瞬間に次の
+    /// drain が走ると <c>anyFailed=false / anySucceeded=true</c> になり、unhealthy から誤って
+    /// 復旧を報告しうる(<see cref="Reconcile"/> はタブ切替でも走るので、書込先が固まっていると
+    /// きに続けてタブを切り替えると窓が開く)。上の「失敗が勝つ」が構造として潰したのは
+    /// <b>両方が同じ drain に届いている</b>場合で、届く順序のずれまでは閉じていない。
+    /// <b>次の drain で失敗が再び報告されるので自己修復する</b>(状態が恒久的にずれることはない)
+    /// ため、順序を保証する機構は入れない。</para>
     /// <para><b>成功の観測が必須である理由</b>: 「失敗が来ない」だけでは、書込が成功したのか
     /// <b>そもそも投入していない</b>のか(dirty でない・署名一致で <c>BackupAction.None</c>)を
     /// 区別できない。後者を復旧と読むと、一度も書けていないのに「再開しました」と言うことに
@@ -614,8 +636,11 @@ public sealed class BackupCoordinator : IDisposable
     /// <see cref="FinalFlushForRestore"/> も <see cref="ReconcileMapMaintenance"/> 側へ分岐して
     /// 本メソッドが走らない = 報告も起きない。<b>バックアップを書いていないのだから正しい</b>。
     /// ただしその間 <see cref="_failed"/> は溜まったままなので(drain がここ 1 箇所しかない)、
-    /// 後で ON へ戻した最初の pass が<b>切替より前の失敗</b>を報告しうる。文言が過去形の断定に
-    /// 留めてあるぶん嘘にはならないが、鳴る時点が実際の失敗より遅れることはある。</para></summary>
+    /// 後で ON へ戻した最初の pass が<b>切替より前の失敗</b>を報告する。文言が過去形の断定に
+    /// 留めてあるぶん嘘にはならないが、鳴る時点は実際の失敗より遅れる。
+    /// <b>その pass は設定ダイアログ OK の中で走る</b>ため、報告は直後の「設定を適用しました」に
+    /// 上書きされる —— ユーザーへ届くのは配線側(<c>MainForm.ApplySettings</c>)が末尾で言い直す
+    /// からで(仕様レビュー I-1)、その言い直しを外すとこの経路の警告は<b>丸ごと消える</b>。</para></summary>
     private void ReportBackupHealth(bool anyFailed, bool anySucceeded)
     {
         if (anyFailed)

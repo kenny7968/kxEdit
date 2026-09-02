@@ -131,6 +131,28 @@ public sealed partial class MainForm : Form
     internal void InvokeBackupHealthChangedForTest(bool healthy) =>
         _backup.OnBackupHealthChanged?.Invoke(healthy);
 
+    /// <summary>M-20 テスト用: 実 <see cref="BackupCoordinator"/> へ背景書込の失敗を注入する
+    /// (実 writer の <c>OnWriteFailed</c> が入る受け口と同じ場所)。遷移は次の drain で実経路
+    /// どおりに起きるので、<b>抑止・言い直しの網を実 <see cref="MainForm"/> の上で張れる</b>。
+    /// <see cref="BackupCoordinator.InjectWriteFailureForTest"/> の中継。</summary>
+    internal void InjectBackupWriteFailureForTest(string id) =>
+        _backup.InjectWriteFailureForTest(id);
+
+    /// <summary>M-20 テスト観測用: いま健全とみなしているか
+    /// (<see cref="BackupCoordinator.BackupHealthy"/> の中継)。「言わなかった」ことの検証が
+    /// vacuous にならないよう、<b>遷移が実際に起きたこと</b>を突き合わせるために要る。
+    /// Coordinator 全体を露出せず観測点 1 個に絞るのは
+    /// <see cref="BackupTimerIntervalMsForTest"/> と同じ方針。</summary>
+    internal bool BackupHealthyForTest => _backup.BackupHealthy;
+
+    // M-20 テスト用: 健全性の発声が実際に出た回数(SayBackupHealth の到達記録)。
+    // 抑止された分は数えない = 「終端では言わない」をフォーム破棄後にも検証できる唯一の面。
+    private int _backupHealthSaidCountForTest;
+
+    /// <summary>M-20 テスト観測用: 健全性の発声が実際に出た回数
+    /// (理由は <see cref="SayBackupHealth"/> の xmldoc)。</summary>
+    internal int BackupHealthSaidCountForTest => _backupHealthSaidCountForTest;
+
     /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
     /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
     /// 陳腐化警告より後ろへ動かしても、どちらの到達数も 1 のままだからである。そこで
@@ -278,17 +300,28 @@ public sealed partial class MainForm : Form
         // 一過性の失敗では「失敗」「復旧」の 2 回鳴りうるが、その間バックアップは実際に効いて
         // いなかったので、黙る側ではなく言う側へ倒す(設計 §5.5 (b) で受容)。
         //
-        // 文言は 3 つに割る —— 起きた事実(書込が失敗した)は断定し、帰結(復元できるか)は
-        // possibility に留め、行動(手で保存する)を添える。帰結を断定できないのは、
-        // 直前までの成功で取れた古いバックアップが残っている場合があるうえ、報告が届く時点で
-        // ユーザーが既に保存を済ませていることもあるため(M-22 と同じ規律)。
+        // 文言の根拠は BackupHealthMessage の xmldoc(言い直しの経路が 2 つあるので 1 箇所に閉じる)。
         _backup.OnBackupHealthChanged = healthy =>
-            _announcer.Say(
-                healthy
-                    ? "バックアップの保存を再開しました"
-                    : "バックアップを保存できませんでした。"
-                        + "未保存の内容は復元できない可能性があるため、ファイルを保存してください"
-            );
+        {
+            // 仕様レビュー I-2: 終端フラッシュ(通常終了の OnFormClosing / クラッシュ時の
+            // FlushBackupsForCrash)の drain から来た報告は言わない。理由は 3 つ:
+            // (a) 助言「ファイルを保存してください」がその場で原理的に実行不能である
+            //     (クラッシュ経路は直後に Environment.Exit(1) が続く)。
+            // (b) 通常終了は A-8 の WaitForFinalFlush が既にユーザーへ届ける仕組みを持つ ——
+            //     退避を確認できなければ silent close をやめて未保存確認へ倒す。そちらの方が
+            //     正確(実際に書けたかを見ている)で行動可能。しかも終端 flush では、drain が
+            //     セットした ForceWrite による再書込が**同じ pass の中で**走るため、
+            //     「復元できない可能性がある」と言った直後に実際には退避できている、という
+            //     偽の発声になりうる(復旧の報告は次 pass が無いので永遠に来ない)。
+            // (c) クラッシュ経路では UiCrashSink.CrashMessage(「退避したので次回起動時に
+            //     復元できます」)が権威ある案内であり、それと矛盾する発声を重ねない。
+            // _closeInProgress は OnFormClosing / FlushBackupsForCrash のどちらでも
+            // FinalFlushForRestore の**呼出前に**立つ(実コードで確認)。前者は finally で必ず
+            // 戻すので、終了がキャンセルされればフックは通常運用へ復帰する。
+            if (_closeInProgress)
+                return;
+            SayBackupHealth(healthy);
+        };
         _csv = new CsvController(
             docs: _docs,
             announcer: _announcer,
@@ -745,6 +778,13 @@ public sealed partial class MainForm : Form
             // キャンセル経路(確認ループの早期 return / e.Cancel=true)でも必ず戻す。
             // 戻し漏れると、一度キャンセルした窓は以後永久に閉じられなくなる。
             _closeInProgress = false;
+            // I-2 の続き: 終了を取りやめて編集へ戻るなら、上の終端フラッシュで抑止した健全性の
+            // 警告を言い直す。抑止したまま戻ると、その drain で unhealthy へ落ちた遷移が誰にも
+            // 伝わらないまま居座り、以後の tick も「遷移していない」ので無言になる
+            // (= M-20 が潰した「無言の失敗」の再発)。閉じる側では言わない —— 助言が実行不能な
+            // のは上の (a) のとおりで、終端の抑止理由がそのまま効いている。
+            if (e.Cancel && !_backup.BackupHealthy)
+                SayBackupHealth(healthy: false);
         }
     }
 
@@ -770,6 +810,39 @@ public sealed partial class MainForm : Form
         kind == ClipboardFailureKind.Write
             ? "クリップボードにコピーできません。他のアプリが使用中の可能性があります"
             : "クリップボードから貼り付けられません。他のアプリが使用中の可能性があります";
+
+    /// <summary>M-20: 健全性の 1 行を発声する。呼び出しは 3 つ(遷移そのもの / 設定適用の末尾で
+    /// 言い直す経路 / 終了キャンセル後に言い直す経路)あり、<b>ここへ集めて</b>文言と到達の記録を
+    /// 一対にする。
+    /// <para><b>到達の記録が要る理由</b>: 発声先の <c>_announceLabel</c> は Form を閉じると
+    /// ハンドルごと消え、<see cref="LastAnnouncementForTest"/> は<b>常に空文字列を返すようになる</b>
+    /// (WinForms の <c>Control</c> は <c>CacheText</c> でない限りテキストをネイティブ窓側に置くため)。
+    /// つまり「閉じ切る側では言わない」を閉じた後に検証する術が他に無く、記録を止めると
+    /// <c>e.Cancel</c> の条件を落とす変異が生き残る(実測)。
+    /// <see cref="ShowSettingsSaveFailedDialog"/> が MessageBox の発火を数えているのと同じ形。</para></summary>
+    private void SayBackupHealth(bool healthy)
+    {
+        _backupHealthSaidCountForTest++;
+        _announcer.Say(BackupHealthMessage(healthy));
+    }
+
+    /// <summary>M-20(B5): バックアップ書込の健全性を伝える 1 行。
+    /// <para><b>文言をここ 1 箇所に閉じる。</b> 言う場所は 3 つある(遷移そのもの / 設定適用の
+    /// 末尾で言い直す経路 / 終了キャンセル後に言い直す経路)ので、配線ラムダの三項に埋めたままだと
+    /// <b>同じ事実を別の強さで書く</b>温床になる。</para>
+    /// <para>失敗側は 3 つに割ってある —— <b>起きた事実</b>(書込が失敗した)は断定し、
+    /// <b>帰結</b>(復元できるか)は possibility に留め、<b>行動</b>(手で保存する)を添える。
+    /// 帰結を断定できないのは、直前までの成功で取れた古いバックアップが残っていることがあり、
+    /// かつ報告が届く時点でユーザーが既に保存を済ませていることもあるため
+    /// (<c>SetSavePoint</c> は <c>ReconcileMapMaintenance</c> しか通らず drain しないので、
+    /// 失敗の報告は次の tick までずれる)。M-22 の <see cref="SettingsSaveOutcome"/> と同じ規律。
+    /// 「編集中の内容」ではなく<b>「未保存の内容」</b>と書くのはその 2 つ目のため —— 前者は
+    /// 報告の瞬間に編集中の文書があることを前提にしてしまい、ずれて届いた場合に偽になる。</para></summary>
+    private static string BackupHealthMessage(bool healthy) =>
+        healthy
+            ? "バックアップの保存を再開しました"
+            : "バックアップを保存できませんでした。"
+                + "未保存の内容は復元できない可能性があるため、ファイルを保存してください";
 
     /// <summary>
     /// M-1(設計 2026-08-29 §5): 未処理例外からの退避。
@@ -1222,6 +1295,14 @@ public sealed partial class MainForm : Form
         _announcer.Say(speech);
         if (dialogBody is not null)
             ShowSettingsSaveFailedDialog(dialogBody);
+        // 仕様レビュー I-1: 直上の UpdateSettings が走らせた Reconcile の drain で健全性の警告が
+        // 鳴っていた場合、その後の Say がそれを上書きする(視覚は _label.Text の代入・発声は
+        // AutomationNotificationProcessing.MostRecent)。しかも _backupHealthy は既に false なので
+        // 次 tick 以降も鳴らない = M-20 が潰した「無言の失敗」がここで復活する。最後に言い直す。
+        // 「設定を適用しました」を犠牲にするのは意図的 —— 定型の確認より、バックアップが効いて
+        // いない事実の方が失ってはいけない。
+        if (!_backup.BackupHealthy)
+            SayBackupHealth(healthy: false);
     }
 
     /// <summary>テスト専用: 設定ダイアログを閉じた<b>後</b>の経路だけを叩く
