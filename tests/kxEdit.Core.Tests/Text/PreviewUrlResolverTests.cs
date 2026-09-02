@@ -72,4 +72,25 @@ public class PreviewUrlResolverTests
         Assert.False(PreviewUrlResolver.TryResolve(input, out string? actual));
         Assert.Null(actual);
     }
+
+    [Theory]
+    // preview origin のパスに残った %2f / %5c は % 自身をエスケープして無害化する
+    // (区切り文字を含まない 1 つのファイル名への要求になり、マッピング先で 404 で終わる)。
+    // System.Uri はこれらを復号しない (AbsoluteUri / AbsolutePath いずれもエスケープを大小
+    // 込みで保つ・実測) ので、ここで潰さない限り WebView2 まで生のまま届く。
+    [InlineData("https://kxedit.preview/..%2f..%2fx", "https://kxedit.preview/..%252f..%252fx")]
+    // 大小保存 (%2F → %252F)。IgnoreCase の検出と、置換で元の大小を保つことの両方を固定する。
+    [InlineData("https://kxedit.preview/..%2F..%2Fx", "https://kxedit.preview/..%252F..%252Fx")]
+    [InlineData("https://kxedit.preview/a%5cb", "https://kxedit.preview/a%255cb")]
+    [InlineData("https://kxedit.preview/a%5Cb", "https://kxedit.preview/a%255Cb")]
+    // 対象外はそのまま返す (退化していないことの対照)
+    [InlineData("https://kxedit.preview/my%20file.png", "https://kxedit.preview/my%20file.png")]
+    [InlineData("https://example.com/a%2fb", "https://example.com/a%2fb")] // 外部 origin
+    [InlineData("https://example.com/a%5cb", "https://example.com/a%5cb")] // 外部 origin
+    [InlineData("#anchor", "#anchor")]
+    [InlineData("pic.png", "pic.png")] // 相対 URL は絶対 URL として parse できないので対象外
+    [InlineData("", "")]
+    [InlineData(null, null)]
+    public void NeutralizeEncodedSeparators_Cases(string? input, string? expected) =>
+        Assert.Equal(expected, PreviewUrlResolver.NeutralizeEncodedSeparators(input));
 }

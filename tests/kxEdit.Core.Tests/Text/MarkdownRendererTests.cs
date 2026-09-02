@@ -657,4 +657,37 @@ public class MarkdownRendererTests
         Assert.DoesNotContain("https://kxedit.preview/pic.png", html);
         Assert.DoesNotContain("https://kxedit.preview/other.md", html);
     }
+
+    [Theory]
+    // V-3 (監査 §9): 区切り文字をエスケープで密輸する形。相対・絶対の両方を潰す。
+    // 絶対形は TryResolve が触らない経路なので、ガードを resolver 側に置くと素通りする
+    // (設計書 §14.1 の実測)。ここは Render の出力で固定する。
+    [InlineData("![x](..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2F..%2FEBWebView/Default/Preferences)")]
+    [InlineData("[a](https://kxedit.preview/..%5c..%5cx)")]
+    [InlineData("[a](..%5C..%5Cx)")]
+    public void Preview_EncodedSeparators_NeverReachOutput(string markdown)
+    {
+        string html = MarkdownRenderer.Render(markdown, Base);
+        Assert.DoesNotContain("%2f", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("%5c", html, StringComparison.OrdinalIgnoreCase);
+        // 無害化の形も固定する (URL を空にはしない = <img src=""> の解決はブラウザ依存)。
+        Assert.Contains("%25", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // 非退化の対照: 他の percent-escape と通常の相対パスは従来どおり絶対化される。
+    [InlineData("![x](my%20file.png)", "https://kxedit.preview/my%20file.png")]
+    [InlineData("![x](sub/dir/pic.png)", "https://kxedit.preview/sub/dir/pic.png")]
+    // 外部 URL は我々のマッピングではないので触らない。
+    [InlineData("[a](https://example.com/a%2fb)", "https://example.com/a%2fb")]
+    public void Preview_OtherUrls_AreUntouched(string markdown, string expectedUrl)
+    {
+        Assert.Contains(
+            expectedUrl,
+            MarkdownRenderer.Render(markdown, Base),
+            StringComparison.Ordinal
+        );
+    }
 }

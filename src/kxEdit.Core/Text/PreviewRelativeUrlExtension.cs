@@ -33,6 +33,9 @@ internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
             {
                 link.Url = absolute;
             }
+            // V-3: 相対・絶対の両方をここで覆う。TryResolve は絶対 URL に触らないので、
+            // 事後条件を resolver 側だけに置くと絶対 URL 形が素通りする (設計書 §14.1 の実測)。
+            link.Url = PreviewUrlResolver.NeutralizeEncodedSeparators(link.Url);
         }
     }
 }
