@@ -845,3 +845,188 @@ byte[] 版・Stream 版の 2 本を追加した(`*_recovery_refuses_to_replace_a
       (tmp パスは丸めない)
    2. 文言に「**復旧後にこのファイルを削除してください**」を入れる
    3. `File.Exists(ex.PreservedTempPath)` で**実在を確かめてから**案内する(上の申し送り #1)
+
+### 10.6 Task 4 — 残した場所をユーザーへ届ける(M-12 の回収)
+
+Task 3 で tmp を残せるようになったが、**残した場所が伝わらなければ M-12 の修正は意味を持たない**。
+唯一の案内である例外メッセージは `FileController.WriteToPath` の共通文言
+(`SanitizeForDisplay.OneLine(ex.Message, 200)`)で切られ、tmp パスは文末にある(§10.5 申し送り 3)。
+
+#### 採った文言(実物)
+
+`AtomicReplaceFailedException` 専用の分岐を、既存の `DocumentTooLargeException` 分岐の直後に置いた。
+
+```
+[退避先が実在するとき]
+保存できませんでした: 保存先 '<原本パス(200 字で丸める)>' が失われました。
+書き込んだ内容は '<退避先パス(丸めない)>' に残してあります。
+内容を復旧したら、このファイルを削除してください。
+
+[退避先が実在しないとき]
+保存できませんでした: 保存先 '<原本パス(200 字で丸める)>' が失われ、書き込んだ内容も残せませんでした。
+編集中の内容はまだ開いたままです。「名前を付けて保存」で別の場所へ保存してください。
+```
+
+(実際は 1 行。上は読みやすさのため折り返している)
+
+3 点仕様の反映:
+
+| 仕様 | 反映 |
+|------|------|
+| (a) tmp パスを丸めない | `ex.Message` に任せず `PreservedTempPath` を**別引数**として組む。`SanitizeForDisplay.OneLine(path)` = 無害化はするが `maxLength` 既定 (`int.MaxValue`) で**切り詰めない**。丸めるのは原本パス側だけ |
+| (b) 削除を促す | 「内容を復旧したら、このファイルを削除してください。」**自動削除は足していない** |
+| (c) 実在確認 | `System.IO.File.Exists(ex.PreservedTempPath)` **一本**で分岐。`RecoveryError` の型では分けない |
+
+`return false;` は維持(保存できていないので `Modified` は立ったまま)。網でも固定した。
+
+**原本パスだけ丸めてよい理由**: 原本はユーザーが今まさに保存しようとした先で**既知**だが、
+退避先の名前は kxEdit がその場で作った乱数入り(`<原本ファイル名>.<乱数>.tmp`)で、
+**ユーザーが他所から知る手段が無い**。切ってよい方と切ってはいけない方が非対称である。
+
+**`File.Exists` が倒れる向き**: `File.Exists` は読めない/不正なパスでも例外を投げず `false` を返す。
+つまり親ディレクトリが読めなくなった場合、tmp が実在しても「残せませんでした」側へ倒れる。
+倒れる先が「無い場所を案内する」ではなく「あるのに案内しない」なので、(c) の目的
+(実在しない退避先を案内しない)には反しない。コメントに明記した。
+
+**catch フィルタは無変更で一致する**ことを実装時に確認した。`AtomicReplaceFailedException` は
+`IOException` 派生で、既存の `when (ex is System.IO.IOException or …)` にそのまま載る。
+確認は「読んで確かめた」ではなく**網で押さえている** —— 一致しなければ catch に入らず未処理例外に
+なるため、新規 2 本が例外送出で赤くなる(§10.2 M-1/M-2 の教訓: 「現在そうなっていること」と
+「変えられたら気付ける網」は別物)。
+
+#### 「丸めない」ことの弁別 —— 実測
+
+短いパスでは共通文言でも退避先が丸ごと収まるため、**短いパスの fixture では修正の有無を弁別できない**
+(既定値から始める no-change テストと同型の罠)。実測値(修正前のコードに対して測定):
+
+| 原本パス長 | 退避先パス長 | 生メッセージ長 | 退避先の開始位置 | 200 字切り後に残る退避先 |
+|---|---|---|---|---|
+| 120 | 137 | 293 | 145 | **54 文字**(83 文字が欠落) |
+| 190 | 206 | 431 | 214 | **0 文字**(案内が丸ごと消える) |
+
+`SanitizeForDisplay.OneLine(s, 200)` は 199 文字 + `…` を返すので、退避先の開始位置が 199 を超えると
+案内は**1 文字も残らない**。網の fixture は下段(原本 190 文字)を使っている。
+`Assert.DoesNotContain(<退避先>, SanitizeForDisplay.OneLine(<例外の Message>, 200))` を
+テスト内に置き、**fixture がその領域に入っていること自体を毎回検算**する
+(この行が緑にならない fixture では、その下の `Assert.Contains` は修正前でも PASS してしまう)。
+
+一時プローブで測った修正前の赤:
+
+```
+Assert.Equal() Failure: Strings differ
+Actual:   "tgt=190 tmp=206 raw=431 at=214 shown=0 cut=206 act=212"
+```
+
+`act=212` = 修正前のダイアログ本文長(`"保存できませんでした: "` 12 + 切り詰め後 200)。
+このプローブは測定用で、commit には含めていない。
+
+#### 網(`FileControllerTests`・3 本)
+
+Core の差替段 seam(`AtomicFile.OverrideReplaceStepForTest`)へ偽装を注入し、
+`FileController` → `TextFileService` → `AtomicFile` の end-to-end で固定した。
+**3 本とも `Assert.Equal(1, scope.Invocations)` を置いている**(§10.4 I-2 の不発ガード)。
+
+1. `Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull` —— 原本を消し、宛先に同名ディレクトリを
+   作って復旧の `File.Move` も落とす。退避先は**実在する**。原本パス 190 文字。観測点は
+   ①退避先が**完全な形**で載る ②「削除してください」が載る ③生の U+202E がダイアログへ載らない
+   ④`Modified` が true のまま。
+2. `Save_ReplaceLosesOriginalAndTemp_DoesNotPointAtAMissingFile` —— 原本と tmp の**両方**を消してから
+   投げる。退避先は**実在しない**。観測点は「残してあります」と退避先パスを**言わない**こと。
+   こちらは**短いパス**を使う —— 長いパスだと共通文言へ素通ししても 200 字切りで
+   「残してあります」が末尾から落ち、**素通しと修正済みを区別できない**(前提として
+   「短いパスなら共通文言には丸ごと載る」ことを assert して検算している)。
+3. `Save_OrdinaryIoFailure_KeepsGenericMessageTruncatedAt200` —— 退行の確認。一般的な `IOException` の
+   文言が**完全一致で**変わっていないこと(切り詰め込み)。新分岐の条件を `ex is IOException` 等へ
+   広げるとここが赤くなる。
+
+網を 2 つ足した(タスク本文の要求 3 点には無いが、実装が壊れやすい向き):
+
+- **退避先パス単体でも 200 字を超える** fixture にした(`Assert.True(preservedShown.Length > 200)`)。
+  「共通文言はやめたが、退避先に 200 字の上限を付け直す」形の退行が落ちる。
+  これが無いと、`OneLine(path, 200)` へ差し替える変異が生存する。
+- **ファイル名に U+202E(RLO)を混ぜた**。`SanitizeForDisplay` は「丸めない」を実装するときに
+  一緒に外されやすい(切り詰めと無害化が同じ呼出にある)。生の RLO がダイアログへ載らないことを
+  固定して、**無害化だけ外す変異**を落とす。比較は全て `StringComparison.Ordinal`
+  (U+202E は `UnicodeCategory.Format` のため culture-sensitive な `Contains` は常に「見つかる」側に
+  倒れる —— CSV-L-5 系テストと同旨)。
+
+#### `InternalsVisibleTo` を `kxEdit.App.Tests` へ広げた判断
+
+`kxEdit.Core.csproj` に 1 行足した。理由と、それでも受容する根拠:
+
+- **必要性**: `File.Replace` の部分失敗は実環境で決定的に起こせない(§6.1)。App 層の文言を
+  end-to-end で固定するには、App.Tests 側から差替段を差し替えるしかない。
+  代替案「`AtomicReplaceFailedException` を直接 `_prompt` へ流す単体テスト」は、
+  **例外が本当に catch フィルタに載るか**を検証できない(§10.1 の申し送りが心配していた当のもの)。
+- **前例と同種**: `kxEdit.Editor.csproj` は既に `kxEdit.App.Tests` へ internal を可視化しており
+  (A-13 の `SetClipboardForTest`)、理由も同じ「テスト専用 seam を public へ昇格させるより副作用が
+  小さい」。今回は横並びで、新しい種類の緩和ではない。
+- **副作用の範囲**: `kxEdit.Core` の internal は既に `kxEdit.Core.Tests` / `kxEdit.Core.Bench` /
+  `kxEdit.Editor` の 3 つへ開いている。増えるのは**テストアセンブリ 1 つ**で、production 出荷物は
+  増えない。§10.4 I-1 で確認したとおり「テストからのみ置換できる」は元々**強制ではない**ので、
+  この 1 行がその保証を壊すわけでもない。
+
+#### 計画と実物が食い違った点
+
+1. **`Assert.Single(collection.Where(...))` がビルドを割った**。
+   `error xUnit2031: Do not use a Where clause to filter before calling Assert.Single` で停止。
+   `Assert.Single(collection, predicate)` overload(要素を返す)へ寄せた。
+   **計画/実装案のコードがアナライザに弾かれたのは本ブランチ 3 件目**
+   (Task 1 = RCS1194 / Task 2 = S2696 + S3398)。
+2. **fixture は「既存の ReadOnly 属性テストと同じ形」にならなかった**。タスク本文はそう指示していたが、
+   seam で差替段そのものを偽装するので**実失敗を作る必要が無い**。原本を実在させるだけでよく、
+   ReadOnly 属性も、その後始末(`SetAttributes(..., Normal)` の `finally`)も要らない。
+   ReadOnly 属性が要るのは「実失敗経路で押さえる」既存テストの方である。
+3. **退行確認に ReadOnly 経路を使わなかった**。OS 由来のメッセージはロケール依存で完全一致に使えない。
+   `Host.MetaChangedThrow` seam へ既知の 300 文字メッセージを注入し、
+   切り詰めまで含めて完全一致で固定した。ReadOnly 経路の文言は既存の
+   `Save_ReadOnlyDocument_WriteFailure_StillRestoresReadOnly` ほかが押さえている(いずれも緑のまま)。
+4. **原本パスの丸めは 200 のまま据え置いた**。「原本パスも切らない」案は採らない —— 切ってよい側と
+   切ってはいけない側の非対称(上記)を、コードの形として残したかった。
+
+#### 事故: `Copy-Item` のタイムスタンプ保持で古い DLL を読みかけた
+
+修正前の赤を測るため `Copy-Item` で `FileController.cs` を退避 → `git checkout` → 測定 →
+`Copy-Item` で書き戻し、という手順を踏んだ。`Copy-Item` は **LastWriteTime を複製元から引き継ぐ**ため、
+書き戻した直後のソースは**ビルド済み DLL より古い**。MSBuild は最新と判断してリビルドせず、
+`dotnet build` は EXITCODE=0 を返したのに**修正前の DLL のまま**テストが走り、2 本が赤のままだった。
+`grep -E " (error|warning) [A-Z]+[0-9]+"` も終了コードも**この事故を検出しない**
+(ビルドは本当に成功している)。`LastWriteTime` を現在時刻へ更新して解決。
+§10.4 の「古い DLL のテスト結果を読みかけた」の別バリアントで、**終了コードの確認だけでは足りない**
+ケースがあることの記録。以後、ファイルを退避 → 書き戻す手順では書き戻し後に必ずタイムスタンプを更新する。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Debug -warnaserror   →  0 個の警告 / 0 エラー (EXITCODE=0)
+kxEdit.Core.Tests    成功!  合格: 1400 / 合計: 1400
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737   (修正前 734 + 新規 3)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+dotnet csharpier check <変更 2 ファイル>  →  EXITCODE=0
+```
+
+修正前の赤(新規 3 本を修正前の `src` に対して実行):
+
+```
+失敗 …FileControllerTests.Save_ReplaceLosesOriginalAndTemp_DoesNotPointAtAMissingFile
+   Assert.DoesNotContain() Failure: Sub-string found
+                                              ↓ (pos 189)
+   String: ···"h2w.loe\\a.txt.sfokpzdf.52r.tmp' に残してあります。"
+   Found:  "残してあります"
+失敗 …FileControllerTests.Save_ReplaceLosesOriginal_ReportsPreservedTempPathInFull
+   Assert.Contains() Failure: Sub-string not found
+   String:    "保存できませんでした: 保存先 '%USERPROFILE%\AppData\Lo"···
+   Not found: "%USERPROFILE%\AppData\Local\Temp\kxEditAp"···
+失敗!   -失敗:     2、合格:     1、スキップ:     0、合計:     3
+```
+
+(上の実パスは `%USERPROFILE%` へ伏せてある。実出力はユーザーホーム下の絶対パス)
+
+3 本目(退行確認)は**修正前から緑**である = 一般文言の基準線として働いている。
+
+#### L5
+
+この文言は **L5 の対象にしない**(§7 の「M-12 の復旧経路は L5 項目にしない」と同じ理由:
+`File.Replace` の部分失敗を実機で決定的に起こせず、「起こらなかった」と「直っている」を区別できない)。
+SR 前提での文言設計(何が起きたか / どこに残っているか / 何をすべきか の 3 点を過不足なく・1 行で)は
+守っているが、**実発声の確認はしていない**。
