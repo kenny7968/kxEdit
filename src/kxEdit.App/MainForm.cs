@@ -2,6 +2,7 @@ using kxEdit.App.Settings;
 using kxEdit.App.Speech;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Csv;
+using kxEdit.Core.IO;
 using kxEdit.Core.Reading;
 using kxEdit.Core.Search;
 using kxEdit.Core.Settings;
@@ -97,6 +98,22 @@ public sealed partial class MainForm : Form
     // 観測できないため、陳腐化警告と同じく到達数だけを見る。
     private int _settingsWarningCountForTest;
     internal int SettingsWarningCountForTest => _settingsWarningCountForTest;
+
+    // M-22 テスト用: 保存失敗ダイアログの抑止と観測。MessageBox=blocking なので実表示そのものは
+    // テストから叩けず、代わりに「到達した回数」と「渡された本文」を写し取る ——
+    // 回数だけでは「常に同じ文字列を渡す」変異が生き残るため、本文まで観測面に載せる。
+    // 実運用経路では常に false=ダイアログは出る(seam の作り方は _suppressRestoreDialogsForTest に倣う:
+    // Form 派生上の bool プロパティは WFO1000 を誘発するので field + setter method)。
+    private bool _suppressSettingsSaveFailedDialogForTest;
+
+    internal void SetSuppressSettingsSaveFailedDialogForTest(bool value) =>
+        _suppressSettingsSaveFailedDialogForTest = value;
+
+    private int _settingsSaveFailedDialogCountForTest;
+    internal int SettingsSaveFailedDialogCountForTest => _settingsSaveFailedDialogCountForTest;
+
+    private string? _settingsSaveFailedDialogBodyForTest;
+    internal string? SettingsSaveFailedDialogBodyForTest => _settingsSaveFailedDialogBodyForTest;
 
     /// <summary>M-11 テスト用: 設定警告に到達した<b>位置</b>の観測点(null=未到達)。
     /// 回数だけでは<b>順序を入れ替える変異が殺せない</b>——復元より前へ動かしても、
@@ -491,6 +508,32 @@ public sealed partial class MainForm : Form
             MessageBoxButtons.OK,
             MessageBoxIcon.Warning
         );
+
+    /// <summary>M-22(設計 2026-09-02 §4.3): 設定保存の差替失敗を伝える。
+    /// <b>文言は組み立て済みで渡ってくる</b>(<see cref="SettingsSaveOutcome"/>)——
+    /// パスの無害化も「tmp は切り詰めない」判断もそちらの担当なので、ここで加工しない。
+    /// <b>本文をログ・クリップボード・例外へ流さないこと</b>(B4 Task 8 の申し送り 2 と同じ制約:
+    /// 長さに上限が無い上、%APPDATA% 配下のパスを含む)。
+    /// <para>
+    /// 呼ばれるのは設定ダイアログを閉じた直後だけなので、ここで MessageBox を出しても編集は
+    /// 止まらない。<b>到達の記録は抑止中でも行う</b>——MessageBox は blocking で実表示を
+    /// 観測できないため、ここが「ダイアログが実際に発火したか」の唯一の観測面になる
+    /// (記録を止めると <see cref="ApplySettings"/> の発火分岐が無網に戻る。実測で確認)。
+    /// </para></summary>
+    private void ShowSettingsSaveFailedDialog(string body)
+    {
+        _settingsSaveFailedDialogCountForTest++;
+        _settingsSaveFailedDialogBodyForTest = body;
+        if (_suppressSettingsSaveFailedDialogForTest)
+            return;
+        MessageBox.Show(
+            this,
+            body,
+            "設定を保存できませんでした",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning
+        );
+    }
 
     private void ShowStaleBackupWarning(IReadOnlyList<string> paths)
     {
@@ -1054,17 +1097,32 @@ public sealed partial class MainForm : Form
 
     // ==================== 最近のファイル / 設定（M7） ====================
 
-    /// <summary>設定を永続化する（保存失敗は致命でないため握る）。</summary>
-    private void SaveSettingsSafe()
+    /// <summary>設定を永続化し、失敗した例外を返す(成功なら null)。
+    /// M-22(B5・設計 2026-09-02 §4.2): 握り潰しをここで止め、<b>伝えるかどうかは呼び出し側に
+    /// 決めさせる</b>。3 つの呼出のうち発声を伴うのは <see cref="ApplySettings"/> だけで、
+    /// 残る 2 つ(<c>OnFormClosing</c> / <see cref="FileController"/> の最近ファイル更新)は
+    /// 設計 §8 の判断により現行どおり握る(= <see cref="SaveSettingsSafe"/> を通る)。</summary>
+    private Exception? TrySaveSettings()
     {
         try
         {
             SettingsStore.Save(_settingsPath, _settings);
+            return null;
         }
-        catch
-        { /* 設定保存失敗は致命でない */
+        catch (Exception ex)
+        {
+            // catch-all のまま残す理由は SettingsStore.Load / TryQuarantineCorrupt と同じ ——
+            // 握ってよい例外の前置列挙は原理的に漏れる(監査 §9 V-7)。ここは握らずに<b>返す</b>ので、
+            // 「伝えるか黙るか」の判断はコード上に呼出側として残る。
+            return ex;
         }
     }
+
+    /// <summary>設定を永続化する(保存失敗は致命でないため握る)。
+    /// <see cref="FileController"/> へ <c>Action</c> として渡るため戻り値を持てない経路
+    /// (最近使ったファイル一覧の更新)と、終了時の保存が使う。失敗を<b>伝える</b>のは
+    /// <see cref="ApplySettings"/> だけ(設計 2026-09-02 §8)。</summary>
+    private void SaveSettingsSafe() => _ = TrySaveSettings();
 
     private void RebuildRecentMenu()
     {
@@ -1099,14 +1157,28 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>設定ダイアログを開き、OK なら全タブへ外観適用＋バックアップ設定の即時反映＋永続化する。
-    /// 項目→コントロールの対応はダイアログに閉じ、ここは Result を差し替えるだけにする。</summary>
+    /// <summary>設定ダイアログを開き、OK なら <see cref="ApplySettings"/> へ渡す。
+    /// 項目→コントロールの対応はダイアログに閉じ、ここは Result を渡すだけにする。
+    /// <para>
+    /// <b>ダイアログを開くこと以外はここに置かない</b>(M-22)—— <c>ShowDialog</c> はモーダルで
+    /// 自動テストから叩けないため、判断をここへ残すと配線が黙って切れても緑のままになる
+    /// (<see cref="Program.CreateMainForm"/> を <c>Main</c> から切り出したのと同じ理由)。
+    /// </para></summary>
     private void OpenSettings()
     {
         using var dlg = new SettingsDialog(_settings);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
-        _settings = dlg.Result; // Result は取得のたびに組み立てるため一度だけ読む
+        ApplySettings(dlg.Result); // Result は取得のたびに組み立てるため一度だけ読む
+    }
+
+    /// <summary>設定ダイアログ OK 後の反映本体。全タブへ外観適用＋バックアップ設定の即時反映＋
+    /// 永続化を行い、<b>永続化の成否を見て</b>発声を選ぶ(M-22・設計 2026-09-02 §4)。
+    /// 発声の時点で外観適用と <c>UpdateSettings</c> は済んでいる = 走っているアプリには効いている
+    /// ので、失敗時も「適用しました」は残し、落ちた永続化の方を足す。</summary>
+    private void ApplySettings(AppSettings result)
+    {
+        _settings = result;
         foreach (var doc in _docs.Documents)
             EditorAppearance.Apply(doc.Editor, _settings);
         _backup.UpdateSettings(
@@ -1114,9 +1186,74 @@ public sealed partial class MainForm : Form
             _settings.BackupIntervalSeconds,
             _settings.RestoreOpenFilesOnStartup
         );
-        SaveSettingsSafe();
-        _announcer.Say("設定を適用しました");
+        var (speech, dialogBody) = SettingsSaveOutcome(TrySaveSettings());
+        _announcer.Say(speech);
+        if (dialogBody is not null)
+            ShowSettingsSaveFailedDialog(dialogBody);
     }
+
+    /// <summary>テスト専用: 設定ダイアログを閉じた<b>後</b>の経路だけを叩く
+    /// (<c>SettingsDialog.ShowDialog</c> はモーダルで自動テストから開けない)。</summary>
+    internal void ApplySettingsForTest(AppSettings result) => ApplySettings(result);
+
+    /// <summary>M-22: 設定保存の結果から「発声する 1 行」と「出すならダイアログ本文」を決める。
+    /// <para>
+    /// <b>失敗時も「適用しました」を残す。</b> 呼出時点で外観適用と <c>UpdateSettings</c> は
+    /// 済んでおり、走っているアプリには設定が効いている。「適用できませんでした」は
+    /// <b>逆向きの嘘</b>になる。欠けているのは「次回起動時には元に戻る」という帰結の方。
+    /// </para>
+    /// <para>
+    /// ダイアログを出すのは <see cref="AtomicReplaceFailedException"/> のときだけ。通常の失敗
+    /// (ディスクフル・ACL)は tmp が残らず案内すべきパスが無いので、発声だけで完結する。
+    /// tmp が残る場合は <c>%APPDATA%\kxEdit\</c> <b>直下に恒久残留し、中身は最近使ったファイルの
+    /// 一覧(パス)を含む</b>(B4 の実測。<see cref="SettingsStore.Save"/> の xmldoc)ため、
+    /// 場所と後始末を届ける価値がある。1 行のステータスラベルに長いパスは載らないので二段にする。
+    /// </para>
+    /// <para>
+    /// 実在確認は <c>File.Exists</c> 一本。復旧リネームが「tmp まで失われていた」で落ちた場合も
+    /// 同じ例外型になるため、例外の型で分けると原理的に漏れる(監査 §9 V-7)。
+    /// </para></summary>
+    private static (string Speech, string? DialogBody) SettingsSaveOutcome(Exception? error)
+    {
+        if (error is null)
+            return ("設定を適用しました", null);
+
+        // 語順は SR を前提に決める(FileController の M-12 が確立した教訓): SR は線形に読むので、
+        // 「何が起きたか」と「次に何をすればよいか」を長いパスより前に置く。
+        const string Speech =
+            "設定を適用しましたが、保存できませんでした。次回起動時は元の設定に戻ります";
+
+        if (error is not AtomicReplaceFailedException replaceFailed)
+            return (Speech, null);
+
+        // 原本パスは丸めてよい(80)——ユーザーが設定ファイルの場所を知らなくても、退避先の
+        // フォルダーは tmp パス側に完全な形で載る。逆に tmp パスは kxEdit がその場で作った
+        // 乱数入りで他所から知る手段が無いので<b>切り詰めない</b>(FileController が確立した非対称)。
+        // 無害化(OneLine)はどちらも外さない —— ダイアログ偽装を防ぐ既存のセキュリティ制御。
+        string target = SanitizeForDisplay.OneLine(replaceFailed.TargetPath, 80);
+        const string Applied =
+            "設定は今の kxEdit には適用されていますが、次回起動時は元に戻ります。必要な項目は設定し直してください。";
+        string body = System.IO.File.Exists(replaceFailed.PreservedTempPath)
+            ? $"設定を保存できませんでした: 保存先 '{target}' が失われました。"
+                + Applied
+                + "\n\n書き込んだ内容は次の場所に残してあります。不要になったら削除してください:\n  "
+                + SanitizeForDisplay.OneLine(replaceFailed.PreservedTempPath)
+            : $"設定を保存できませんでした: 保存先 '{target}' が失われ、書き込んだ内容も残せませんでした。"
+                + Applied;
+        return (Speech, body);
+    }
+
+    /// <summary>テスト専用: <see cref="SettingsSaveOutcome"/> の判断だけを直接叩く。
+    /// <see cref="AtomicReplaceFailedException"/> は「差替に失敗し<b>かつ原本が失われ</b>かつ
+    /// 復旧リネームも失敗」でしか出ない(<see cref="AtomicFile"/> のクラス xmldoc)ため、
+    /// <b>素の I/O では作れない</b>——例外を組み立ててここへ渡すのが、<c>File.Exists</c> の
+    /// 2 分岐(退避先が実在する / 失われている)を並べて固定できる唯一の形である。
+    /// <b>ここだけでは発火まで届かない</b>ので、配線の側は
+    /// <c>AtomicFile.OverrideReplaceStepForTest</c> で差替段を偽装する網が別に要る
+    /// (<c>MainFormSmokeTests.Applying_settings_shows_the_preserved_temp_dialog_...</c>)。</summary>
+    internal static (string Speech, string? DialogBody) SettingsSaveOutcomeForTest(
+        Exception? error
+    ) => SettingsSaveOutcome(error);
 
     /// <summary>
     /// スモークテストの導線=Active 経由の TryOpenOrActivate/Save を Test から叩くため

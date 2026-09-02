@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
+using kxEdit.Core.IO;
 using kxEdit.Core.Search;
 using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
@@ -2044,4 +2045,205 @@ public class MainFormSmokeTests
             MainForm.ClipboardFailureMessage(ClipboardFailureKind.Read)
         );
     }
+
+    // ===== M-22 (B5): 設定保存の失敗を実態どおりに伝える =====
+
+    /// <summary>M-22: 保存が成功したときだけ現行の成功文言を出す。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_reports_plain_success_when_nothing_failed()
+    {
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(null);
+        Assert.Equal("設定を適用しました", speech);
+        Assert.Null(dialog);
+    }
+
+    /// <summary>M-22: 通常の保存失敗では、<b>適用は済んでいる</b>ことと
+    /// <b>永続化だけが落ちた</b>ことの両方を言う。「適用できませんでした」は逆向きの嘘になる。
+    /// 案内すべきパスが無いのでダイアログは出さない。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_says_applied_but_not_saved_for_an_ordinary_failure()
+    {
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new UnauthorizedAccessException("denied")
+        );
+        Assert.Contains("適用しました", speech);
+        Assert.Contains("保存できませんでした", speech);
+        Assert.Null(dialog);
+    }
+
+    /// <summary>M-22: 差替失敗で tmp が<b>実在する</b>ときは、その場所と後始末をダイアログで案内する。
+    /// 発声(1 行のステータスラベル)には長いパスを載せられないための二段構え
+    /// (<c>FileController.WriteToPath</c> が M-12 で採った形と同型)。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_points_at_the_preserved_temp_when_it_exists()
+    {
+        using var tmp = new TempDir();
+        string preserved = tmp.File("settings.json.abc.tmp");
+        File2.WriteAllText(preserved, "{}");
+
+        var (speech, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: tmp.SettingsPath,
+                preservedTempPath: preserved,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+
+        Assert.Contains("適用しました", speech);
+        Assert.NotNull(dialog);
+        // tmp パスは<b>切り詰めない</b>=フルパスがそのまま載る(乱数入りで他所から知る手段が無い)。
+        Assert.Contains(preserved, dialog);
+        Assert.Contains("削除", dialog);
+    }
+
+    /// <summary>M-22: tmp まで失われていたら、<b>実在しない退避先を案内しない</b>。
+    /// 弁別は <c>File.Exists</c> 一本(例外の型で分けると原理的に漏れる。監査 §9 V-7)。</summary>
+    [Fact]
+    public void SettingsSaveOutcome_does_not_point_at_a_temp_that_is_gone()
+    {
+        using var tmp = new TempDir();
+        string missing = tmp.File("never-created.tmp");
+        Assert.False(File2.Exists(missing)); // 前提(恒真 assertion 除け)
+
+        var (_, dialog) = MainForm.SettingsSaveOutcomeForTest(
+            new AtomicReplaceFailedException(
+                targetPath: tmp.SettingsPath,
+                preservedTempPath: missing,
+                replaceError: new IOException("replace"),
+                recoveryError: new IOException("recover")
+            )
+        );
+
+        // ダイアログ自体は出す(差替失敗は起きている)が、退避先の案内だけを落とす。
+        Assert.NotNull(dialog);
+        Assert.DoesNotContain(missing, dialog);
+        Assert.DoesNotContain("削除", dialog);
+    }
+
+    /// <summary>M-22 の配線: 設定の適用経路が、保存の成否を見て発声を選んでいること。
+    /// 純関数だけを固定すると「<c>OpenSettings</c> が実際にそれを呼んでいるか」が観測できず、
+    /// 配線が黙って切れても緑のままになる(<see cref="Program.CreateMainForm"/> の xmldoc が
+    /// 名指ししている罠)。<c>SettingsDialog</c> はモーダルでテストから開けないため、
+    /// ダイアログを閉じた後の処理(<c>ApplySettings</c>)を実経路として叩く。
+    /// <para>
+    /// 失敗の注入は<b>読み取り専用の差替先</b>。<c>AtomicFile.Write</c> は書ける tmp を作ってから
+    /// <c>File.Replace</c> するので、落ちるのは差替段であり、原本は残る = 通常失敗
+    /// (<c>AtomicReplaceFailedException</c> にはならない)=ダイアログ分岐に入らない
+    /// (MessageBox でブロックしない)。実測で <c>UnauthorizedAccessException</c> 0x80070005。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_announces_the_failure_when_the_file_cannot_be_written() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+            File2.SetAttributes(tmp.SettingsPath, FileAttributes.ReadOnly);
+            try
+            {
+                form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+
+                Assert.Contains("保存できませんでした", form.LastAnnouncementForTest);
+                // 「適用できませんでした」へ倒す変異(逆向きの嘘)を kill する。
+                Assert.Contains("適用しました", form.LastAnnouncementForTest);
+            }
+            finally
+            {
+                // TempDir.Dispose が消せるように戻す(戻さないと後始末が握り潰されて残骸になる)。
+                File2.SetAttributes(tmp.SettingsPath, FileAttributes.Normal);
+            }
+        });
+
+    /// <summary>M-22: 保存できたときは現行の成功文言のまま(退行の証人)。
+    /// 「常に失敗文言」へ倒す実装は上のテストだけでは緑になる。</summary>
+    [Fact]
+    public void Applying_settings_announces_plain_success_when_the_file_is_writable() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+
+            form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+
+            Assert.Equal("設定を適用しました", form.LastAnnouncementForTest);
+            Assert.True(File2.Exists(tmp.SettingsPath)); // 保存は実際に成功している
+            Assert.Equal(0, form.SettingsSaveFailedDialogCountForTest); // 成功時に出さない
+        });
+
+    /// <summary>M-22 の配線(ダイアログ分岐): 差替失敗で残った tmp の案内が、純関数の中だけで
+    /// 終わらず<b>実際にダイアログ発火まで届く</b>こと。
+    /// <para>
+    /// この網が無いと、発火行(<c>if (dialogBody is not null) ShowSettingsSaveFailedDialog(...)</c>)を
+    /// 消しても・門を閉じても App 全 760 件が緑のままだった(実測)。通常失敗のテストは
+    /// 本文が null の経路しか通らず、純関数のテストは本文を組むところで止まるため、
+    /// <b>どちらも発火を観測していなかった</b>。
+    /// </para>
+    /// <para>
+    /// <c>AtomicReplaceFailedException</c> は「差替に失敗し<b>かつ原本が失われ</b>かつ復旧リネームも
+    /// 失敗」でしか出ないので、実 I/O では作れない。差替の 1 手だけを差し替える seam
+    /// (<see cref="AtomicFile.OverrideReplaceStepForTest"/>)で偽装する ——
+    /// <c>FileControllerTests</c> の M-12 の網と同じ形で、この seam のために
+    /// <c>kxEdit.Core.csproj</c> が App.Tests へ internal を可視化してある。
+    /// </para>
+    /// <para>
+    /// ★ seam は <c>[ThreadStatic]</c> なので、張ったスレッドと <c>Write</c> が走るスレッドが
+    /// ずれると黙って既定実装が走る。<c>scope.Invocations</c> を必ず assert すること。
+    /// </para></summary>
+    [Fact]
+    public void Applying_settings_shows_the_preserved_temp_dialog_when_the_replace_loses_the_original() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = new MainForm(
+                NewSettings(csvAutoModeOnOpen: false),
+                tmp.SettingsPath,
+                backupDirectory: tmp.BackupDir,
+                sessionLayoutPath: tmp.LayoutPath
+            );
+            // MessageBox がテストを塞がないよう抑止する(到達の記録は抑止中でも行われる)。
+            form.SetSuppressSettingsSaveFailedDialogForTest(true);
+            // 差替先の原本。CommitStaged の復旧枝は destExists=true でしか通らない。
+            File2.WriteAllText(tmp.SettingsPath, "{}");
+
+            string? preserved = null;
+            using (
+                var scope = AtomicFile.OverrideReplaceStepForTest(
+                    (stagedTmp, dest, _) =>
+                    {
+                        preserved = stagedTmp;
+                        File2.Delete(dest); // 原本を消す = tmp が唯一のコピー
+                        // 復旧の File.Move(tmp, dest) を決定的に失敗させる(同名ディレクトリ)。
+                        Directory.CreateDirectory(dest);
+                        throw new IOException("simulated partial replace failure");
+                    }
+                )
+            )
+            {
+                form.ApplySettingsForTest(NewSettings(csvAutoModeOnOpen: false));
+                Assert.Equal(1, scope.Invocations); // ★フックが実際に発火した(不発ガード)
+            }
+
+            Assert.NotNull(preserved);
+            Assert.True(File2.Exists(preserved)); // 前提: 退避先は実在する(=案内してよい状態)
+
+            Assert.Equal(1, form.SettingsSaveFailedDialogCountForTest);
+            string? body = form.SettingsSaveFailedDialogBodyForTest;
+            Assert.NotNull(body);
+            Assert.Contains(preserved, body); // 案内は「その場で残した tmp」を指している
+            Assert.Contains("削除", body);
+            // 発声の側は通常失敗と同じ 1 行のまま(長いパスはダイアログ側にだけ載る)。
+            Assert.Contains("保存できませんでした", form.LastAnnouncementForTest);
+            Assert.DoesNotContain(preserved, form.LastAnnouncementForTest);
+        });
 }
