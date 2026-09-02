@@ -1195,3 +1195,169 @@ dotnet csharpier check <変更 2 ファイル>  →  EXITCODE=0
 
 テスト本数は変わっていない(既存 3 本の網を強化しただけで、新規テストは足していない)。
 変異は 4 件とも復帰を確認済み。
+
+### 10.8 Task 5 — rename 前の fsync(M-13)。張れた網と、張れなかった網
+
+#### 実装
+
+- **Stream 版**: `writer(fs)` の直後・`using` を抜ける前に `fs.Flush(flushToDisk: true)`。
+- **byte[] 版**: `File.WriteAllBytes(tmp, payload)` を
+  `FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None)` + `Write` +
+  `Flush(flushToDisk: true)` へ置き換え(Stream 版と同じ形)。
+- クラス xmldoc に §4.3 の限界(rename が届いたことは保証しない・その失敗では原本が無傷で残る)を明記。
+
+**唯一の production 呼出側を読んで確認した**: Stream 版を使うのは
+`TextFileService.Save(string, TextBuffer, Encoding, bool)`(`:375`)だけで、渡された `stream` へ
+直接 `Write` するのみ。`StreamWriter` 等でラップしていないので、`fs.Flush(true)` が
+「ラッパの中に溜まったバイト列」を取りこぼす経路は無い(下の食い違い 3 も参照)。
+
+#### 性能の実測(設計 §4.2 の申し送り)
+
+環境: Windows 11 Pro 26200 / .NET 9 / 保存先は `%TEMP%`(C: = INTEL SSDPEKNW512G8・NVMe SSD)。
+計測プログラムはスクラッチパッドに置き、リポジトリには入れていない。
+
+**測定 1 —— DLL レベルの前後比較**(Debug ビルドの `kxEdit.Core.dll` を修正前/修正後で差し替え、
+`AtomicFile.Write` を直接呼ぶ。宛先を実在させて `File.Replace` 経路を通す。3 回の中央値・ms)
+
+| サイズ | byte[] 前 | byte[] 後 | Stream 前 | Stream 後 |
+|---|---|---|---|---|
+| 1 MB | 9.6 | 10.0 | 10.7 | 10.0 |
+| 10 MB | 22.2 | 23.4 | 21.8 | 22.0 |
+| 100 MB | 139.0 | 148.6 | 153.8 | 155.1 |
+| 200 MB | 284.1 | **258.6** | 288.3 | **273.7** |
+
+n=3 ではばらつきに埋もれ、200 MB では「後」の方が速く出る。**これだけでは受容判断の根拠にならない**ので、
+同一プロセス内で 1 反復ごとに交互に測る対照実験を別に行った(ブロック単位で測ると、NVMe の熱や
+ライトバックの滞留が片側にだけ乗る)。
+
+**測定 2 —— 交互・9 反復の中央値**(Release ビルドの対照プローブ・ms)
+
+| サイズ | ステージングのみ 前<br>(WriteAllBytes) | ステージングのみ 後<br>(FileStream+Flush(true)) | 全体フロー 前<br>(stage+File.Replace) | 全体フロー 後 |
+|---|---|---|---|---|
+| 1 MB | 0.6 | 2.4 | 9.1 | **10.2** |
+| 10 MB | 2.7 | 13.7 | 21.5 | **23.2** |
+| 100 MB | 121.1 | 118.4 | 152.6 | **135.8** |
+
+**読み**: fsync 単体のコストは 10 MB で +11 ms あるが、**差替まで含めた全体フローでは +1.7 ms**
+(1 MB で +1.1 ms)に縮み、100 MB では**前より速い**。逆転の機序は測っていない
+(想定: 差替段が同じ待ちを既に強いており、fsync を先に済ませた方が総額で安くなる)。
+**想定は根拠にしない** —— 受容判断に使うのは「全体フローで最大 +1.7 ms」という測定値の方である。
+
+**受容と判断した**。体感で分かる遅さではなく、`SerialBackupWriter` の Join 15 秒
+(`SerialBackupWriter.cs:203`)に対しても無視できる(バックアップ 1 本あたり +1〜2 ms)。
+設計 §4.2 の適用範囲(全書込に効かせる)は変更しない。
+
+**計測時の罠(自分で踏んだ)**: 最初の測定では 1 MB の全体フローが **75 ms** と出た。直前に
+100/200 MB を連続で書いた直後で、ディスクがまだ吐いている最中の値だった。反復前に settle
+(8〜30 秒)を入れると 9〜10 ms に落ち着く。**直前の I/O 負荷を落としてから測ること。**
+また汚染された測定では 100 MB で **5,925 ms** の外れ値が 1 度出た(数 GB 連続書込後の NVMe の
+ストール)。前後どちらの形でも起こりうるので、中央値で評価している。
+
+#### 網が張れた範囲と、張れなかった範囲(変異 6 件を実測)
+
+いずれもビルドの終了コード 0 / 0 warning を確認してからテストを走らせ、`git checkout --` で
+復帰(`git status` が空)を確認している。
+
+| # | 変異 | 結果 |
+|---|------|------|
+| M-A | byte[] 版 `FileMode.CreateNew` → `FileMode.Create` | **生存**(Core 1404 全 PASS) |
+| M-B | Stream 版の `fs.Flush(flushToDisk: true)` を落とす | Core 1404 中 **1 失敗** |
+| M-C | byte[] 版の `fs.Flush(flushToDisk: true)` を落とす | **生存**(Core 1404 全 PASS) |
+| M-D | `ArgumentNullException.ThrowIfNull(payload)` を落とす | Core 1404 中 **1 失敗** |
+| M-E | `fs.Write(payload, 0, payload.Length)` → `Math.Min(payload.Length, 4096)` | Core 1404 中 **1 失敗** |
+| M-F | Stream 版 `Flush(flushToDisk: true)` → `Flush()` | **生存**(Core 1404 全 PASS) |
+
+```
+# M-B
+失敗 kxEdit.Core.Tests.IO.AtomicFileStreamWriteTests.Write_Stream_WriterClosesTheStream_FailsSafely
+   Assert.Throws() Failure: No exception was thrown
+失敗!   -失敗:     1、合格:  1403、スキップ:     0、合計:  1404
+
+# M-D
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Bytes_rejects_a_null_payload_without_creating_a_tmp
+   Assert.Throws() Failure: Exception type was not an exact match
+   Expected: typeof(System.ArgumentNullException)
+   Actual:   typeof(System.NullReferenceException)
+
+# M-E
+失敗 kxEdit.Core.Tests.IO.AtomicFileTests.Bytes_writes_a_payload_larger_than_the_stream_buffer_completely
+   Assert.Equal() Failure: Values differ
+失敗!   -失敗:     1、合格:  1403、スキップ:     0、合計:  1404
+```
+
+**張れなかった網 1 —— fsync そのもの**。電源を落とせないので、`Flush(flushToDisk: true)` が
+実際にディスクへ届いたことは自動テストでは観測できない(設計 §6.2 のとおり)。M-B が殺せるのは
+「Stream 版が writer から戻ったあと、`using` を抜ける前に `fs` へ触ること」までであって、
+**それが `Flush(flushToDisk: true)` であることは押さえていない**(M-F が生存)。byte[] 版に至っては
+flush の有無すら網が無い(M-C が生存)。**「fsync の網がある」とは書かない。**
+
+**張れなかった網 2 —— `CreateNew` の弁別(試した結果)**。`CreateNew` と `Create` の差は
+**宛先が既に存在するときにだけ**現れるので、弁別するには「tmp と同名のファイルを先に置く」以外に
+手が無い。tmp 名は `<ファイル名>.<Path.GetRandomFileName()>.tmp` で、`GetRandomFileName` は
+暗号乱数(32^11 通り)だから、テストから予測も固定もできない。実際に検討して退けた案:
+
+- **差替段 seam を使う**: `OverrideReplaceStepForTest` はステージングが**終わった後**に呼ばれる。
+  そこで tmp 名を知っても手遅れで、ステージング段には効かない。
+- **ステージング名の seam を新設する**: 計画も「過剰」としている。production に差替点を 1 つ増やして
+  得られるのは「乱数名が衝突したとき上書きしない」という、実際には起こらない事象の網。
+- **`FileStream.Name` から tmp パスを採る**: Stream 版なら writer の中で tmp パスを知れるが、
+  その時点でファイルは既に作られている。byte[] 版にはそもそもコールバックが無い。
+- **IL を読む**(`MethodBody.GetILAsByteArray()` で `ldc.i4.1` / `ldc.i4.2` を探す): 挙動を
+  1 つも見ていないうえ、同じ定数が引数列の他の位置にも現れるので弁別が壊れやすい。
+  モック検証と同種で、**網に見えるが網ではない**。
+
+したがって **M-A は生存する**(上表で実測)。`CreateNew` を採る根拠は設計 §4.1 の判断
+(Stream 版と形が揃う・衝突時に他者の書込中ファイルを潰さない)のままで、**網では守られていない**。
+
+**張れた網(挙動不変ネット 3 本 + 契約 1 本)**。既存の byte[] 版テストは 1〜3 バイトしか
+書いておらず、書き手を `File.WriteAllBytes` から `FileStream.Write` へ替えたときの
+**空 payload / null payload / 部分書込が丸ごと無網**だった。M-D / M-E が実際に生存→死亡したのが
+その証拠である(「現在そうなっていること」と「変えられたら気付ける網」は別物 —— §10.2 の再確認)。
+
+#### 計画と実物が食い違った点
+
+1. **計画の `Bytes_staging_uses_CreateNew_and_does_not_clobber_an_existing_tmp` は採らなかった。**
+   tmp の名前しか見ておらず、`FileMode.Create` への退化を 1 つも弁別しない
+   (= テスト名が「CreateNew を固定した」と主張するのに中身が伴わない。**張れていない網を
+   張ったと言う**形になる)。tmp の命名は既存の `*.tmp` グロブ assertion が押さえている。
+   代わりに実際に弁別する 4 本(上記)を書いた。
+2. **計画に無い `ArgumentNullException.ThrowIfNull(payload)` を足した。** `File.WriteAllBytes` は
+   null で `ArgumentNullException` を投げていたが、`FileStream` 版は `payload.Length` で
+   `NullReferenceException` になり、しかも空 tmp を作ってから消す。入口で型を揃えた
+   (Stream 版の `ThrowIfNull(writer)` とも形が揃う)。
+3. **計画に無い契約変更が 1 つ出た —— writer はストリームを閉じてはいけない。**
+   `using var sw = new StreamWriter(stream)` は**下位ストリームごと Dispose する**ため、
+   変更後は続く `fs.Flush(true)` が `ObjectDisposedException` になる(変更前は成功していた)。
+   現行の唯一の production 呼出は `stream` へ直接書くだけなので実害は無いが、将来の呼出側が
+   素直に書くとこの形になる。**黙って fsync を飛ばす側には倒さない**(飛ばすと M-13 の保証が
+   静かに消える)。xmldoc に契約として明記し、`Write_Stream_WriterClosesTheStream_FailsSafely` で
+   「安全側に倒れる(例外伝播・tmp 掃除・原本不変)」を固定した。
+4. **`AtomicFile.Write(path, null!)` は CS0121 でビルドが割れる**(byte[] 版と `Action<Stream>` 版が
+   曖昧)。`(byte[])null!` へキャストした。アナライザではなくコンパイラだが、
+   「実装案のコードはそのままでは通らない」の**本ブランチ 6 件目**
+   (RCS1194 / S2696 / S3398 / xUnit2031 / xUnit2020 / CS0121)。
+5. **変更ファイルは 3 つになった**(計画は 2 つ)。Stream 版の契約ネットは
+   `AtomicFileStreamWriteTests.cs` に置く方が置き場として自然なため。
+
+#### 環境ノート(踏んだ罠)
+
+変異を回す自作スクリプトで **Windows PowerShell 5.1 の `2>&1`(ネイティブコマンドの stderr 統合)**が
+`NativeCommandError` を起こし、`$ErrorActionPreference='Stop'` と組み合わさってスクリプトが
+**revert の前に中断**した。作業ツリーに変異が残ったまま次の作業へ進みかける形になる
+(`git status` で気付いて復帰)。native exe に `2>&1` を付けない・revert は `finally` 相当に置く。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Debug --no-incremental -warnaserror  →  0 個の警告 / 0 エラー (EXITCODE=0)
+kxEdit.Core.Tests    成功!  合格: 1404 / 合計: 1404   (修正前 1400 + 新規 4)
+kxEdit.App.Tests     成功!  合格:  737 / 合計:  737
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516
+dotnet csharpier check <変更 3 ファイル>  →  EXITCODE=0
+```
+
+#### L5 への申し送り
+
+設計 §7 の項目 5「大きい文書の Ctrl+S で体感で待たされない」は上の実測(全体フローで最大 +1.7 ms)で
+裏付けたが、**実機の体感確認は L5 のまま残す** —— 測ったのは `AtomicFile` 単体で、
+エンコード変換やスナップショット取得は含んでいない。
