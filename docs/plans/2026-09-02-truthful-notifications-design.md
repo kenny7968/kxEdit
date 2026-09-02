@@ -481,9 +481,17 @@ M-22 と M-20 は独立に設計・レビューしたが、**両方が同じ 1 �
 
 ### 12.8 未回収・射程外
 
-- **`tests/kxEdit.App.Tests/BackupCoordinatorTests.cs` の 194 行が `\uXXXX` エスケープのまま**
-  (`tests/kxEdit.Editor.Smoke/WordUnitBench.cs` も 1 行)。A-8 期の commit 由来・**既存**で、
-  コンパイルには無害だが人間が読めない。B5 の射程外。別途回収すること
+- **`tests/kxEdit.App.Tests/BackupCoordinatorTests.cs` の日本語コメントが `\uXXXX` エスケープのまま。**
+  **回収先は傘設計書 `2026-08-31-v0.2-remaining-work-design.md` §11.1**(2026-09-03 追記)。
+  本書は B5 の完了で役目を終える(§11)ので、ここに置くと読み返されないため移した。
+
+  > **訂正(2026-09-03)。** 本項目を当初「**194 行**・`WordUnitBench.cs` も同様・**A-8 期**由来」と
+  > 書いたが、**3 点とも誤り**だった。正しくは **207 行**(全 2353 行中・範囲は 1397〜2346)/
+  > `WordUnitBench.cs` の 1 行は**正当な用途**(`"今日　は"` の U+3000 は不可視なので
+  > literal では書けない)/ 起点は **`53a7e50`(2026-07-23・hot exit 統合 = PR #24)**。
+  > 数え方の pattern がシェルで壊れており(`\\u` が `u` へ潰れて `OnWriteS**uccee**ded` を
+  > 拾っていた)、かな域しか数えられていなかった。**申し送りの数値と帰属も解決確認してから
+  > 書くこと** —— B5 の主題が、申し送りの記録自体で 3 回破られていた。
 - **M-7**(境界 no-op の Backspace / Delete でも UIA `TextChanged` を発火)は L5 §5 で
   **観測のみ**行う。発声面の欠陥かどうかがまだ確定していないため
 - `ApplySettings` のモーダル表示中に backup timer の tick が入れ子で走る経路に網が無い
