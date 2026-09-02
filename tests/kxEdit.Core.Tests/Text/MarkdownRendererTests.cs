@@ -659,21 +659,111 @@ public class MarkdownRendererTests
     }
 
     [Theory]
-    // V-3 (監査 §9): 区切り文字をエスケープで密輸する形。相対・絶対の両方を潰す。
-    // 絶対形は TryResolve が触らない経路なので、ガードを resolver 側に置くと素通りする
+    // V-3 (監査 §9): 区切り文字を密輸する形。相対・絶対の両方を潰す。
+    // 絶対形は TryResolve が触らない経路なので、ガードを resolver の絶対化側に置くと素通りする
     // (設計書 §14.1 の実測)。ここは Render の出力で固定する。
     [InlineData("![x](..%2f..%2fsecret.txt)")]
     [InlineData("![x](https://kxedit.preview/..%2f..%2fsecret.txt)")]
     [InlineData("![x](https://kxedit.preview/..%2F..%2FEBWebView/Default/Preferences)")]
     [InlineData("[a](https://kxedit.preview/..%5c..%5cx)")]
     [InlineData("[a](..%5C..%5Cx)")]
+    // --- 脆弱性レビュー (2026-09-03) で実測された迂回形 ---
+    // F-1: 非 ASCII ホスト。Uri.Host は Unicode を保つので Host 比較では一致しないが、
+    // Markdig の WriteEscapeUrl は IdnHost で ASCII 化して出力するため、最終的な HTML は
+    // 本物の preview ホスト宛になる。ホスト判定を IdnHost にしないとここだけ素通りする。
+    [InlineData("![x](https://kxedit。preview/..%2f..%2fsecret.txt)")] // U+3002 全角句点
+    [InlineData("![x](https://ｋxedit.preview/..%2f..%2fsecret.txt)")] // U+FF4B 全角 k
+    // F-2: percent-encode されたホスト。.NET は Uri.TryCreate(Absolute) 自体に失敗するが、
+    // WHATWG (Chromium) のホスト解析は percent-decode → domain-to-ASCII なので
+    // kxedit.preview に解決される。parse 不能を「そのまま返す」に倒すと素通りする。
+    [InlineData("![x](https://%6bxedit.preview/..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit%2epreview/..%2f..%2fsecret.txt)")]
+    // F-3: 末尾ドット。Uri.Host も Uri.IdnHost も末尾ドットを保持するので明示的に削る必要がある。
+    [InlineData("![x](https://kxedit.preview./..%2f..%2fsecret.txt)")]
+    // F-4: 生のバックスラッシュ。Uri.AbsolutePath 上では '\' が '/' へ正規化されて
+    // dot-segment が畳まれるため AST 段では「区切りは無い」と見えるのに、そのあと
+    // WriteEscapeUrl が %5C を作って出力する。ガードを LinkRewriter 段へ置き、かつ
+    // 生の '\' を対象に含めて初めて塞がる。
+    //
+    // 注意 (二重エスケープ): ここは C# 文字列と CommonMark の両方でエスケープが効く。
+    // C# の "\\\\" は markdown ソース上の `\\` = CommonMark のバックスラッシュエスケープで
+    // 1 個の生 '\' になる。C# の "\\" は markdown 上の `\` で、後続が '.' (ASCII 句読点) だと
+    // CommonMark が食べてしまい URL は `....\secret.txt` になる。どちらも生 '\' が
+    // LinkRewriter に届くので両方を網に入れる (実測)。
+    [InlineData("![x](https://kxedit.preview/..\\\\..\\\\secret.txt)")] // URL は ..\..\secret.txt
+    [InlineData("![x](https://kxedit.preview/..\\..\\secret.txt)")] // URL は ....\secret.txt
+    // F-5: AutolinkInline は LinkInline ではないので Descendants<LinkInline>() に掛からない。
+    // LinkRewriter は autolink 経路でも発火する (実測)。
+    [InlineData("<https://kxedit.preview/..%2f..%2fa>")] // CommonMark autolink
+    [InlineData("[a](<https://kxedit.preview/..%2f..%2fa>)")] // 角括弧宛先 (これは LinkInline)
     public void Preview_EncodedSeparators_NeverReachOutput(string markdown)
     {
         string html = MarkdownRenderer.Render(markdown, Base);
-        Assert.DoesNotContain("%2f", html, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("%5c", html, StringComparison.OrdinalIgnoreCase);
-        // 無害化の形も固定する (URL を空にはしない = <img src=""> の解決はブラウザ依存)。
-        Assert.Contains("%25", html, StringComparison.Ordinal);
+        string[] urls = BodyUrlAttributes(html);
+        // 網が空振りしていないこと (URL 属性が 1 つも無ければ以下の Assert.All は空虚)。
+        Assert.NotEmpty(urls);
+        Assert.All(
+            urls,
+            url =>
+            {
+                Assert.DoesNotContain("%2f", url, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("%5c", url, StringComparison.OrdinalIgnoreCase);
+                // 生の '\' も残さない (残ると WebView2 側が区切りとして解釈しうる)。
+                Assert.DoesNotContain("\\", url, StringComparison.Ordinal);
+                // 無害化の形も固定する (URL を空にはしない = <img src=""> の解決はブラウザ依存。
+                // LinkRewriter が null を返すと実際に src="" になる・実測)。
+                Assert.Contains("%25", url, StringComparison.Ordinal);
+            }
+        );
+        // 検証対象は URL 属性のみ。autolink はリンクテキストにも生 URL を出すため
+        // (<a href="…%252f…">https://kxedit.preview/..%2f..%2fa</a>)、HTML 全文に対する
+        // DoesNotContain("%2f") は成立しない。テキストは要求を発生させないので対象外
+        // ——「どこを見て安全と言っているか」を取り違えないためにここへ明記する。
+    }
+
+    /// <summary>
+    /// F-9: V-3 の無害化が preview 経路<b>専用</b>であることの対照。
+    /// <para>
+    /// <c>LinkRewriter</c> を設定するのは <c>PreviewRelativeUrlExtension</c> で、
+    /// その拡張は preview パイプラインにしか入らない。よって空 baseHref 経路では
+    /// 区切りエスケープはそのまま出力される。これは穴ではなく境界:
+    /// 空 baseHref 経路の出力を WebView2 へ渡す caller が存在せず
+    /// (Render の唯一の caller = MainForm.ShowMarkdownPreview は常に PreviewBaseHref を渡す)、
+    /// 仮想ホストマッピングによるフォルダー解決自体が起きないため。
+    /// 「ここでは無害化されない」ことを明示的に固定して、将来 caller が増えたときに
+    /// この前提が黙って崩れないようにする。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void EmptyBaseHref_EncodedSeparators_AreNotNeutralized()
+    {
+        string html = MarkdownRenderer.Render(
+            "![x](https://kxedit.preview/..%2f..%2fsecret.txt)",
+            ""
+        );
+        Assert.Contains(
+            "src=\"https://kxedit.preview/..%2f..%2fsecret.txt\"",
+            html,
+            StringComparison.Ordinal
+        );
+        Assert.DoesNotContain("%252f", html, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// <c>&lt;body&gt;</c> 内の <c>href</c> / <c>src</c> 属性値をすべて取り出す。
+    /// head の stylesheet <c>&lt;link&gt;</c> は本文由来ではないので範囲外に置く。
+    /// </summary>
+    private static string[] BodyUrlAttributes(string html)
+    {
+        int start = html.IndexOf("<body>", StringComparison.Ordinal);
+        int end = html.IndexOf("</body>", StringComparison.Ordinal);
+        Assert.InRange(start, 0, int.MaxValue);
+        Assert.InRange(end, start, int.MaxValue);
+        string body = html[(start + "<body>".Length)..end];
+        return Regex
+            .Matches(body, "(?:href|src)=\"([^\"]*)\"", RegexOptions.CultureInvariant)
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
     }
 
     [Theory]

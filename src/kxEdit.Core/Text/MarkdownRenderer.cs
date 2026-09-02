@@ -105,7 +105,16 @@ public static class MarkdownRenderer
     // ただし Render の唯一の caller (MainForm.ShowMarkdownPreview) は常に PreviewBaseHref を
     // 渡すため、空 baseHref 側 (Pipeline) は現状 production から使われないテスト専用経路である。
     // MD-L-4 の allow-list が空文字を受け付ける契約なので分岐ごと残す (2 本化は受容)。
-    // セキュリティ網のテストは両経路を回すこと (構成差で穴が開かないようにするため)。
+    //
+    // セキュリティ網のうち「両経路を回すべきもの」と「preview 経路専用のもの」を取り違えないこと
+    // (F-9・2026-09-03):
+    //   - DisableHtml / GenericAttributes・Abbreviations の除去 / SafeLinkExtension は
+    //     両パイプライン共通なので、網も両経路で回す価値がある。
+    //   - V-3 の区切りエスケープ無害化 (PreviewRelativeUrlExtension が LinkRewriter として
+    //     設定する) は preview 経路専用。空 baseHref 経路には仮想ホストによるフォルダー解決が
+    //     無く (上記のとおり production caller が存在せず WebView2 へ渡らない)、
+    //     無害化する対象そのものが無いため。この境界は
+    //     MarkdownRendererTests.EmptyBaseHref_EncodedSeparators_AreNotNeutralized で固定してある。
     private static readonly MarkdownPipeline PreviewPipeline = BuildPipeline(
         rewriteRelativeUrls: true
     );
