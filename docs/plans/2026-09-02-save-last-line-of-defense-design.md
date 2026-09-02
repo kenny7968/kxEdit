@@ -2664,19 +2664,20 @@ dotnet csharpier check <変更ファイル>  →  EXIT=0
 | # | 観測点 | 結果 |
 |---|--------|------|
 | 1 | 警告があるとき `OnShown` で 1 回到達する | **固定した**(到達数=1) |
-| 1' | 「2 回出ない」 | **固定できていない**(下記) |
+| 1' | 「2 回出ない」 | **固定した**(§10.19 指摘 A で訂正。当初「固定できていない」と書いたのは誤り) |
 | 2 | 警告が無いとき 1 回も到達しない | **固定した**(到達数=0 + ゲート開放で OnShown 実行を併せて固定) |
 | 3 | 陳腐化警告より前・復元より後 | **固定した**(到達時スナップショット・変異 2 件で実測) |
 | 4 | L-3: 原本が無いとき原本パスを案内しない | **固定した**(退避 seam 注入・変異 2 件で実測) |
 | 5 | `Program` の配線 | **固定した**(合成点を切り出して実行で固定 + 残る 1 ホップは IL) |
 
-**1' が固定できていない理由(正直に)**: `Form.Shown` は**フォーム 1 個につき 1 回しか上がらない**。
-`Hide()`→`Show()`、`ShowInTaskbar` 切替によるハンドル再生成、その両方の組合せの **3 通りを実測して
-追加の `Shown` は 1 件も起きなかった**。つまり `OnShown` を 2 周させる手段が無く、
-「2 回目が出ないこと」を動かして観測できない。この事実自体は
-`Shown_never_fires_twice_for_the_same_form_instance` で網にしてある ——
-消すと、後から「Hide/Show で 2 回目を確かめる」**空振りのテスト**(何を変異させても緑)が書かれる。
-1 回だけであることは `_restoreOffered` の early return と、この WinForms の性質の両方に依っている。
+**1' について(当初の記述は誤り。§10.19 指摘 A で訂正済み)**: `Form.Shown` が**フォーム 1 個につき
+1 回しか上がらない**のは事実で、`Hide()`→`Show()`、`ShowInTaskbar` 切替によるハンドル再生成、
+その両方の組合せの **3 通りを実測して追加の `Shown` は 1 件も起きなかった**。
+**しかしそこから「2 回目が出ないことを観測できない」は導けない** —— `OnShown` は `protected override`
+で、`kxEdit.App.Tests` は `InternalsVisibleTo` を持つので、リフレクションで直接呼べば観測できる。
+`OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain` がそれをやっている。
+`Shown_never_fires_twice_for_the_same_form_instance` は**網ではなく WinForms 側の環境仮定の記録**である
+(kxEdit のどの変異でも赤にならない)。当初ここを「網にしてある」と書いていたのは過大な主張だった。
 
 #### 観測点 5 —— 「固定できない」を一度受け入れかけた(自己レビューで覆した)
 
@@ -2800,5 +2801,149 @@ kxEdit.Core.Tests    成功!  合格: 1427 / 合計: 1427   (不変)
 kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
 kxEdit.App.Tests     成功!  合格:  750 / 合計:  750   (743 → +7)
 dotnet csharpier check src/kxEdit.App tests/kxEdit.App.Tests  →  EXIT=0
+%APPDATA%\kxEdit\ の実ファイル: settings.json / backups とも変化なし(.bad は生えていない)
+```
+
+### 10.19 Task 9 — 仕様レビューの反映(「観測できない」がまた誤りだった・恒真 assertion 2 枝・無網の隔離引数)
+
+中核の配線(表示位置・`MarkStartupRestoreComplete` の無傷・L-3 の `File.Exists` 一本弁別・文言に推測
+なし・パスの流出経路ゼロ)と `CreateMainForm` への切り出しは妥当と確認された。以下は**網の穴 3 件**と
+**構造の重複 1 件**、**理由節の誤り 1 件**の回収。
+
+#### 指摘 A(Major・修正済み) —— 「2 回目は観測できない」は誤り。同一ブランチで 2 度目
+
+`Form.Shown` が 1 度しか上がらない事実は正しく、レビュアーも独立に **5 通り**
+(`Hide()`→`Show()` / `Visible` トグル / `ShowInTaskbar` 切替 / `RightToLeftLayout` 切替 /
+`Control.RecreateHandle` 直叩き)を実測して追加発火 0 件だった。
+**しかしそこから「観測できない」は導けない。** `OnShown` は `protected override` で、
+`kxEdit.App.Tests` は `InternalsVisibleTo` を持ち、当のファイルは既に IL 走査でリフレクションを
+使っている。**呼べばよかった。**
+
+空振りでないことは変異で確かめた。`MainForm.OnShown` 冒頭の `_restoreOffered = true;` が
+**冪等性の唯一の機構**(`_settingsWarning` は `readonly` なので他に依り所が無い)なのに、無網だった:
+
+```
+# M-H(冪等ガードの立てを落とす)
+        if (_restoreOffered)
+            return;
+-       _restoreOffered = true;
+
+  網を張る前:  成功!  合格: 750 / 合計: 750           ← 750 本を 1 本も落とさない(生存)
+  網を張った後: 失敗 OnShown_SettingsWarning_IsIdempotent_WhenInvokedAgain
+               Assert.Equal() Expected: 1 / Actual: 3   (kill)
+```
+
+`Shown_never_fires_twice_for_the_same_form_instance` は**網ではなく環境仮定の記録**
+(kxEdit のどの変異でも赤にならない)。そう述べ直した。§10.18 の該当記述も訂正済み。
+
+**これは同一ブランチで 2 度目である**(Task 8 の「網が張れない」も実際には誤りだった。§10.16 指摘 2)。
+メモリーの教訓「『網が無い』も検証対象」がまだ効いていない —— **「観測できない」と書く前に、
+その観測面へ到達する手段を最低 1 つは実際に試すこと**。今回で言えば「イベント経由で 2 周させられない」は
+「メソッドを 2 回呼べない」を意味しない。
+
+#### 指摘 B(Major・修正済み) —— `OneLine` を外す変異が 3 枝中 2 枝で生存
+
+```
+# M-B1 / M-B2(Corrupt の退避失敗・原本あり / Unreadable の無害化を外す)
+-       + SanitizeForDisplay.OneLine(path)
++       + path
+
+  fixture を直す前:  成功!  合格: 750 / 合計: 750                      (両方とも生存)
+  fixture を直した後: 失敗 2 本
+    Prepare_does_not_point_at_a_quarantine_that_was_never_created
+    Prepare_warns_but_never_renames_an_unreadable_file
+    いずれも Assert.Contains() Failure: Sub-string not found            (kill)
+```
+
+原因は**実装ではなく fixture**。`Assert.Contains(SanitizeForDisplay.OneLine(path), warning, ...)` は
+無害化を固定しているように見えるが、**短いパスでは `OneLine(path) == path` なので恒真**だった。
+**§10.16 が退避先の枝で発見して `MakeLongSettingsPath`(連続空白入り・275 文字)で潰したのと同じ罠**が、
+残り 2 枝にそのまま残っていた —— つまり §10.17 申し送り 3「`OneLine` を外さないこと」は
+**3 枝中 1 枝しか守られていなかった**。
+
+該当 2 本(+ L-3 の 1 本)を `MakeLongSettingsPath` へ寄せ、`AssertSanitizationIsObservable` で
+**「この fixture では `OneLine(path) != path`」を明示的に検算**するようにした。
+罠が 1 枝で見つかったら、**同じ形の assertion を持つ全枝を数えて潰すこと**(片方だけ直る事故は
+`IlCallees` の統合理由と同型)。
+
+#### 指摘 F(Major・修正済み) —— 隔離引数が無網。実 `%APPDATA%` 破壊が「緑のまま」起きうる
+
+`CreateMainForm` が `backupDirectory` / `sessionLayoutPath` をどこへ渡そうと、テストは一切見ていなかった。
+将来この配線が切れても CI は緑のまま、**開発機の実 `%APPDATA%\kxEdit\backups` を走査・削除しうる**
+(破損 `settings.json` から作る既定設定は `BackupEnabled=true`)。**§10.18 で「隔離引数を開けたのは必須」と
+自分で書いた当の性質が無網**で、防御は `Program.cs` の xmldoc だけだった。
+
+```
+# M-G''(隔離引数を無視して別の空ディレクトリを使う)
+-           backupDirectory,
+-           sessionLayoutPath,
++           Path.Combine(Path.GetTempPath(), "kxEditMutG", "backups"),
++           Path.Combine(Path.GetTempPath(), "kxEditMutG", "session-state.json"),
+
+  網を張る前:  成功!  合格: 750 / 合計: 750                             (生存)
+  網を張った後: 失敗 CreateMainForm_routes_the_isolation_paths_into_the_form
+               Assert.Equal() Failure: Strings differ / Actual: null    (kill)
+```
+
+**変異に `null`(= 実 `%APPDATA%`)は使っていない。** 使うと開発機の実バックアップを走査・削除しうる。
+代わりに**空の別ディレクトリ**を使った —— 「テストが植えた場所ではない」点で `null` と同値の代理であり、
+これを殺せる網は `null` も殺せる(どちらも植えたレイアウト/バックアップが見つからない)。
+**危険な変異は、同じ観測結果を出す安全な代理に置き換えてから当てること。**
+
+#### 指摘 C / D(Minor・修正済み) —— `IlCallees` の 2 本目の私的コピー、と逆向きの根拠
+
+`MainFormSmokeTests.CalledMembers` は、**過去の最終レビュー Q-m-1 が「同一アセンブリ内で 2 本に分岐
+していた(片方だけ直る事故の温床)」として統合した当のもの**の 2 本目だった。しかも劣化コピーで、
+メタデータテーブル種別のフィルタが無く(偽陽性が増える)、`BadImageFormatException` を catch しない。
+
+`IlCallees` に `OfIncludingNewobj`(走査本体は共有・拾う命令だけ分岐)を足して私的コピーを削除した。
+`Of` と別入口にしたのは、既存 3 ファイルの呼出側が集合へ ctor が混ざることを想定していないため。
+
+**`newobj` 検出が空振りでないことも確かめた**(そうでなければ「`MainForm` を直に組み立てない」の
+`DoesNotContain` は永久に赤くならない):
+
+```
+# M-E-3(合成点は通しつつ MainForm を直に組み立てる行を足す)
++       var extra = new MainForm(new AppSettings());
+  → 失敗 ProgramMain_builds_the_form_through_the_tested_composition_point
+    Assert.DoesNotContain() Failure: Filter matched in collection       (kill)
+```
+
+xmldoc の**健全性の向きが逆**だった件も直した。走査に残るのは偽陽性だけで偽陰性は無いので、
+健全なのは **`DoesNotContain` の側**(偽陽性で緑にならない)。弱くなるのは `Contains` の側で、
+そちらは変異(M-E'')を当てて実際に赤くなることを確認してある。旧記述は「`Contains` 側が健全」と
+**結論だけ逆**に書いており、しかも実際のテストは `Contains` 1 本 + `DoesNotContain` 2 本で、
+**自分で書いた使用ルールにも反していた**。
+
+#### 指摘 E(② 受容 + 記録) —— `Unreadable` の非対称。理由が一部成立しなかった
+
+`Unreadable` に L-3 と同じ `File.Exists` ガードを入れない判断は維持でよいと裁定されたが、
+**挙げた理由の 1 つが成立しなかった**。「誤爆の向きが悪い(ACL 拒否で `Exists` が false になる機では、
+実在するファイルの案内を落とす)」は**偽**である —— `SettingsStore.Load` は `File.Exists` が **true を
+返した後**にしか `Unreadable` を出さず、権限起因は §10.14 のとおり `Missing` へ落ちるので、
+ここで `Exists` を再評価しても誤爆の余地はほぼ無い。
+
+**一方、残余は実在する。** L-3 とまったく同じ多重起動シナリオで、後着が `File.Exists`→true と
+`ReadAllText` の間に先着の `File.Move` を踏むと `Unreadable` になり、もう存在しないパスを案内する。
+窓は極小で、レビュアーも決定的には再現できていない。
+
+**正しい理由は「網が張れず、残余が極小だから」**である(`Corrupt` 側と違い退避の seam も通らないので、
+ガードを足すと無網の分岐を 1 本増やすことになる)。この非対称は**コードにも設計書にも一行も無かった**ので、
+`SettingsStartup.cs` の `Unreadable` 分岐へ記録した。決定的に作る手段ができたら対称化してよい。
+
+#### 参考(② 受容・§4-A) —— タイトルとアイコンの変異は生存
+
+`MessageBox` のタイトル「設定を読み込めませんでした」と `MessageBoxIcon.Warning` を変えても 750 PASS。
+**CLAUDE.md §4-A(GUI・テーマは変異検証禁止)により受容**。ただしタイトルは NVDA が最初に読む文字列で、
+**§10.18 の L5 項目 1 が唯一の網**である。Task 10 で確実に回収すること。
+
+#### 検証
+
+```
+dotnet build kxEdit.sln -c Release --no-incremental -warnaserror  →  0 エラー / 0 個の警告 (EXIT=0)
+kxEdit.Core.Tests    成功!  合格: 1427 / 合計: 1427   (不変)
+kxEdit.Editor.Tests  成功!  合格:  516 / 合計:  516   (不変)
+kxEdit.App.Tests     成功!  合格:  752 / 合計:  752   (750 → +2)
+dotnet csharpier check src tests  →  Checked 370 files (EXIT=0)
 %APPDATA%\kxEdit\ の実ファイル: settings.json / backups とも変化なし(.bad は生えていない)
 ```
