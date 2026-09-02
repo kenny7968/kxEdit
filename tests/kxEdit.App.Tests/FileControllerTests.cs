@@ -1660,14 +1660,23 @@ public class FileControllerTests
     /// <summary>
     /// <paramref name="minLength"/> 以上の長さを持つ保存先パスを作る(親ディレクトリも作成する)。
     /// 一時ディレクトリ名の長さは実行環境(ユーザー名等)で変わるため、足りない分を 1 段の
-    /// ディレクトリ名で詰める。tmp パスは これ+17 文字になるので、MAX_PATH(260)に触れないよう
-    /// minLength は 200 未満で使うこと。
+    /// ディレクトリ名で詰める。退避先パスは これ+17 文字になるので、MAX_PATH(260)に収まるよう
+    /// <c>minLength + 17 &lt; 260</c> の範囲で使うこと(240 程度までは取れる)。
+    /// <para>
+    /// 詰め物の末尾側に<b>連続空白</b>を 1 か所埋め込む。Windows のパス構成要素に CR/LF/TAB は
+    /// 入れられないが、<b>途中の連続空白は正当で、実際に作成できる</b>(実測で確認)。
+    /// <see cref="SanitizeForDisplay.OneLine"/> はこれを 1 個へ畳むが
+    /// <see cref="SanitizeForDisplay.MultiLine"/> は畳まないので、<b>無害化を MultiLine へ
+    /// 格下げする変異を殺せる唯一の観測点</b>になる(設計 §10.7)。位置を末尾寄りにするのは、
+    /// 原本パス側の丸め(80 字)に掛からない場所に置いて、丸めの網と混線させないため。
+    /// </para>
     /// </summary>
     private static string MakeLongTargetPath(TempDir tmp, string fileName, int minLength)
     {
         // 区切り 2 個(Root\seg\fileName)を差し引いて必要なセグメント長を出す。
-        int segLen = Math.Max(1, minLength - tmp.Root.Length - 2 - fileName.Length);
-        string dir = System.IO.Path.Combine(tmp.Root, new string('d', segLen));
+        int segLen = Math.Max(8, minLength - tmp.Root.Length - 2 - fileName.Length);
+        string segment = new string('d', segLen - 4) + "  dd"; // 末尾寄りに連続空白 1 か所
+        string dir = System.IO.Path.Combine(tmp.Root, segment);
         System.IO.Directory.CreateDirectory(dir);
         return System.IO.Path.Combine(dir, fileName);
     }
@@ -1684,7 +1693,8 @@ public class FileControllerTests
     }
 
     /// <summary>
-    /// (a)(b) 退避先が<b>実在する</b>とき: 退避先パスが<b>完全な形</b>で載り、削除を促す。
+    /// 退避先が<b>実在する</b>とき: 退避先パスが<b>完全な形</b>で載り、削除を促し、
+    /// <b>最短の復旧手段が長いパスより前に出る</b>。原本パス側は<b>丸められる</b>。
     /// <para>
     /// ★ <b>長いパスで検証するのが本質</b>。短いパスだと共通文言(<c>ex.Message</c> を 200 字で切る)
     /// でも退避先が丸ごと収まってしまい、「丸めない」修正の有無を弁別できない(既定状態から始める
@@ -1693,11 +1703,23 @@ public class FileControllerTests
     /// 「共通文言はやめたが退避先に 200 字の上限を付け直す」形の退行も落ちる。
     /// </para>
     /// <para>
-    /// ファイル名に U+202E(RLO)を混ぜてあるのは、<b>無害化まで外れていない</b>ことを固定するため
-    /// (<see cref="SanitizeForDisplay"/> はダイアログ偽装を防ぐ既存のセキュリティ制御で、
-    /// 「丸めない」を実装するときに一緒に外されやすい)。U+202E は <c>UnicodeCategory.Format</c> の
-    /// ため culture-sensitive な <c>Contains</c> は常に「見つかる」側に倒れる。以下の文字列比較は
-    /// すべて <c>StringComparison.Ordinal</c> を明示する(CSV-L-5 系テストと同旨)。
+    /// レビュー指摘 1(2026-09-02): 当初 <c>minLength: 190</c> だったため<b>原本パス側が丸ごと無網</b>
+    /// だった —— 無害化後 189 文字で、当時の 200 字上限に 11 文字届いていなかった。そのため
+    /// 「原本の丸めを撤廃する」「原本をファイル名だけに縮退させる」の 2 変異がどちらも生存した
+    /// (実測・設計 §10.7)。220 へ上げ、<b>丸めた形が載っていること</b>を assert して塞いだ。
+    /// </para>
+    /// <para>
+    /// 無害化(<see cref="SanitizeForDisplay"/> = ダイアログ偽装を防ぐ既存のセキュリティ制御)が
+    /// 外れていないことも 2 系統で固定する。「丸めない」を実装するときに一緒に外されやすい。
+    /// <list type="bullet">
+    /// <item>ファイル名の U+202E(RLO)が<b>除去</b>されること。U+202E は
+    /// <c>UnicodeCategory.Format</c> のため culture-sensitive な <c>Contains</c> は常に
+    /// 「見つかる」側に倒れる。以下の文字列比較はすべて <c>StringComparison.Ordinal</c> を
+    /// 明示する(CSV-L-5 系テストと同旨)。</item>
+    /// <item>ディレクトリ名の<b>連続空白</b>(<see cref="MakeLongTargetPath"/> が埋め込む)が
+    /// 1 個へ<b>畳まれる</b>こと。<c>OneLine</c> → <c>MultiLine</c> の格下げ変異はこれでしか
+    /// 殺せない(パス構成要素に CR/LF/TAB は入れられないため)。</item>
+    /// </list>
     /// </para>
     /// </summary>
     [Fact]
@@ -1706,7 +1728,7 @@ public class FileControllerTests
         {
             using var host = new Host();
             using var tmp = new TempDir();
-            string path = MakeLongTargetPath(tmp, "no\u202Etes.txt", minLength: 190);
+            string path = MakeLongTargetPath(tmp, "no\u202Etes.txt", minLength: 220);
             File2.WriteAllText(path, "orig"); // 原本を実在させる(=destExists=true で差替経路へ)
             var doc = NewDirtyDocAt(host, path);
 
@@ -1733,10 +1755,22 @@ public class FileControllerTests
             Assert.NotNull(preserved);
             Assert.True(File2.Exists(preserved!)); // 前提: 退避先は実在する(=案内してよい状態)
 
-            // 案内に載るべき形 = 無害化済み(RLO が落ちる)・切り詰め無しの退避先パス。
+            // 案内に載るべき形 = 無害化済み(RLO が落ち、連続空白が畳まれる)・切り詰め無しの退避先パス。
             string preservedShown = SanitizeForDisplay.OneLine(preserved!);
             // 前提: 退避先だけで 200 字を超える(=退避先に 200 字上限を付け直す退行も落とせる)。
             Assert.True(preservedShown.Length > 200, $"len={preservedShown.Length}");
+            // 前提: 連続空白が「生には有り・無害化後には無い」= MultiLine への格下げ変異を弁別できる。
+            // どちらか一方でも崩れると、その網は黙って無力化する。
+            Assert.Contains("  ", preserved!, StringComparison.Ordinal);
+            Assert.DoesNotContain("  ", preservedShown, StringComparison.Ordinal);
+
+            // 原本パス側は 80 字で丸める。丸めた形を組み立てておく。
+            string targetShown = SanitizeForDisplay.OneLine(path, 80);
+            // 前提: 実際に丸めが起きる長さである(80 字ちょうど+末尾は省略記号)。
+            // ここが崩れると「丸めが効いている」の網が既定値と区別できなくなる
+            // (レビュー指摘 1 で踏んだ当のもの: minLength 190 では上限に届いていなかった)。
+            Assert.Equal(80, targetShown.Length);
+            Assert.EndsWith("…", targetShown, StringComparison.Ordinal);
 
             // ★fixture 検算: 旧実装の形(ex.Message を丸ごと 200 字で切る)では、この退避先パスは
             // 末尾から落ちる。ここが DoesNotContain にならない fixture だと、下の Contains は
@@ -1755,12 +1789,32 @@ public class FileControllerTests
 
             var error = Assert.Single(host.Prompt.Log, e => e.Kind == "Error");
             Assert.StartsWith("保存できませんでした", error.Text, StringComparison.Ordinal);
-            // (a) 退避先は丸めない
+            // (a) 退避先は丸めない。連続空白が畳まれた形で載ることで、無害化を MultiLine へ
+            // 格下げする変異も落ちる(MultiLine は畳まないのでこの Contains が外れる)。
             Assert.Contains(preservedShown, error.Text, StringComparison.Ordinal);
             // (a') 無害化は外れていない(生の RLO がダイアログへ載らない)
             Assert.DoesNotContain("\u202E", error.Text, StringComparison.Ordinal);
+            // (a'') 原本パス側は<b>丸める</b>。丸めた形(79 字+"…")がそのまま載ることで、
+            // 「丸めを撤廃する」変異も「ファイル名だけに縮退させる」変異も落ちる
+            // (どちらも 79 字の直後に "…" が来ないため)。
+            //
+            // ★レビュー指摘 1 の提案「DoesNotContain(原本パス全体)」は<b>そのままでは成立しない</b>:
+            //   退避先パスは原本パスを prefix として含む(直下の StartsWith が実測で示す)ので、
+            //   正しい実装でも原本パス全体はダイアログに現れる。弁別は「丸めた形が載っていること」
+            //   の側で行う。
+            Assert.StartsWith(path, preserved!, StringComparison.Ordinal);
+            Assert.Contains(targetShown, error.Text, StringComparison.Ordinal);
             // (b) 掃除する者が誰もいないので削除を促す(自動削除は足さない=M-12 の目的を潰すため)
             Assert.Contains("削除してください", error.Text, StringComparison.Ordinal);
+            // ★最短の復旧手段(「名前を付けて保存」)が、長い退避先パスより<b>前</b>に出る。
+            // 失われたのは元ファイルの方で、退避先はエディタが今も持っている内容の複製でしかない
+            // ——最短の復旧は tmp を探すことではない。SR は線形に読むので、案内を後ろに置くと
+            // 数百文字のパス朗読を聞き終えるまで到達できない(レビュー指摘 3)。
+            // 存在だけでなく<b>順序</b>を固定する。
+            int guideAt = error.Text.IndexOf("名前を付けて保存", StringComparison.Ordinal);
+            int tempAt = error.Text.IndexOf(preservedShown, StringComparison.Ordinal);
+            Assert.True(guideAt >= 0, "復旧手段の案内が無い");
+            Assert.True(guideAt < tempAt, $"guideAt={guideAt} tempAt={tempAt}");
             // 保存できていないので dirty のまま(終了時の確認が効く)
             Assert.True(doc.Editor.Modified);
         });
