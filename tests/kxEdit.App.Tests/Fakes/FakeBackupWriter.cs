@@ -59,12 +59,24 @@ public sealed class FakeBackupWriter : IBackupWriter
 
     public Action<string>? OnWriteFailed { get; set; }
 
+    /// <summary>M-20: 成功通知。<b>実物との非対称に注意</b> —— Fake は <see cref="Write"/> の中で
+    /// 同期発火する(=投入したその場・呼び出しスレッド)。<c>SerialBackupWriter</c> は背景スレッドが
+    /// 後で撃つため<b>いつ届くかは不定</b>で、同じ Reconcile の最中に届くこともあれば次 tick 以降に
+    /// なることもある。Fake はその最速端に固定した形。
+    /// 設計(2026-09-02 §5.3)どおり遷移判定を「次の Reconcile 冒頭の drain でキューを吸う」形に
+    /// 保つ限り、早く届いた分は次 pass まで待たされるので、この差は結論を変えない。
+    /// 逆に「投入した同じ pass 内で成功が観測されること」を前提にしたテストを書くと実物では
+    /// 成立しないので、そこに寄りかからないこと。</summary>
+    public Action<string>? OnWriteSucceeded { get; set; }
+
     public Action? OnLayoutWriteFailed { get; set; }
 
     public void Write(BackupRecord record)
     {
         Writes.Add(record);
         Store[record.Id] = record;
+        // M-20: 実物と同じく成功を通知する(発火タイミングの非対称は OnWriteSucceeded の xmldoc 参照)。
+        OnWriteSucceeded?.Invoke(record.Id);
     }
 
     public void Delete(string id)

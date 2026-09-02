@@ -255,6 +255,137 @@ public class SerialBackupWriterTests
         Assert.Equal(HashId("id-mre"), capturedId);
     }
 
+    // ===== M-20(B5): 書込成功の観測面(OnWriteSucceeded) =====
+
+    /// <summary>M-20(B5): 書込が成功したら Id を通知する。
+    /// <c>OnWriteFailed</c> の対であり、Coordinator が「復旧した」を判定する唯一の観測面。
+    /// これが無いと「失敗が来ない」を復旧と読むしかなく、<b>書込を一度も投入していない</b>
+    /// 場合(dirty でない・署名一致で <c>BackupAction.None</c>)と区別できない
+    /// = 虚偽の復旧発声になる。
+    ///
+    /// 観測の流儀は失敗側の <see cref="Write_Failure_Invokes_OnWriteFailed_WithRecordId"/> に
+    /// 揃える(<see cref="ManualResetEventSlim"/> で「発火その場」を捉える・sleep/リトライ 0)。
+    /// capturedId=id → Set の順で書けば Wait 側の参照は Set の memory barrier で可視化される
+    /// =lock 不要。タイムアウト 15s は Dispose の Join 上限と揃えた保険値。</summary>
+    [Fact]
+    public void Write_Success_Invokes_OnWriteSucceeded_WithRecordId()
+    {
+        using var tmp = new SbwTempDir();
+
+        string? capturedId = null;
+        var doneEvent = new ManualResetEventSlim(initialState: false);
+        using var writer = new SerialBackupWriter(tmp.Root)
+        {
+            OnWriteSucceeded = id =>
+            {
+                capturedId = id;
+                doneEvent.Set();
+            },
+        };
+
+        writer.Write(Rec("id-ok", "body"));
+
+        Assert.True(
+            doneEvent.Wait(TimeSpan.FromSeconds(15)),
+            "OnWriteSucceeded が背景スレッドから発火しなかった(タイムアウト)"
+        );
+        Assert.Equal(HashId("id-ok"), capturedId);
+    }
+
+    /// <summary>M-20: 失敗したときは成功を通知しない。両方鳴ると Task 4 の遷移判定
+    /// (同一 pass に両方あれば失敗が勝つ)が意味を失う=1 文書も書けていないのに
+    /// 「復旧した」と言い得る。
+    ///
+    /// no-change 側(成功が来ないこと)を空虚にしないため、<b>失敗通知が来たことと対で</b>
+    /// 観測する:成功側だけを見て null を主張すると「書込ジョブがそもそも走らなかった」場合と
+    /// 区別できない(CLAUDE.md §4-B)。
+    ///
+    /// 同期の二段構え:
+    /// - MRE = 失敗通知が「発火その場」で来たことの観測(=ジョブが走った証拠)。
+    /// - <see cref="SerialBackupWriter.WaitForPendingJobs"/> = 書込ジョブが<b>最後まで</b>
+    ///   走り終えたことの確定。MRE の Set とジョブ末尾の間には実装上まだコードが入り得る
+    ///   (catch の early return を落とす変異は、まさにそこへ成功通知を足す)ため、MRE だけで
+    ///   打ち切ると no-change の assert が背景スレッドとの競り合いに依存する。実測では
+    ///   バリア無しでも当該変異を 8/8 で捕まえたが、捕まえたのは main 側が競り負けたからで
+    ///   あって保証ではない。直列ワーカーは FIFO なので後から積んだバリアが書込ジョブを
+    ///   追い越すことはない=バリアは競合そのものを消す。</summary>
+    [Fact]
+    public void Write_Failure_DoesNotInvoke_OnWriteSucceeded()
+    {
+        using var tmp = new SbwTempDir();
+        // "<HashId(id-fail-only)>.json" と同名のディレクトリで AtomicFile.Write 内の File.Move を
+        // 決定的に IOException で落とす(既存の失敗注入と同型。SbwTempDir 削除では
+        // BackupStore.Write 冒頭の Directory.CreateDirectory に負けて失敗しない)。
+        Directory.CreateDirectory(Path.Combine(tmp.Root, HashId("id-fail-only") + ".json"));
+
+        string? succeededId = null;
+        string? failedId = null;
+        var failedEvent = new ManualResetEventSlim(initialState: false);
+        using var writer = new SerialBackupWriter(tmp.Root)
+        {
+            OnWriteSucceeded = id => succeededId = id,
+            OnWriteFailed = id =>
+            {
+                failedId = id;
+                failedEvent.Set();
+            },
+        };
+
+        writer.Write(Rec("id-fail-only", "boom"));
+
+        Assert.True(
+            failedEvent.Wait(TimeSpan.FromSeconds(15)),
+            "OnWriteFailed が背景スレッドから発火しなかった(タイムアウト)"
+        );
+        Assert.True(writer.WaitForPendingJobs(TimeSpan.FromSeconds(15))); // ジョブの完走を確定させる
+        Assert.Equal(HashId("id-fail-only"), failedId); // 失敗は来ている(=ジョブは走った)
+        Assert.Null(succeededId); // その上で成功は来ていない
+    }
+
+    /// <summary>M-20: 成功通知は try の<b>外</b>で撃つ、という実装上の位置決めを固定する。
+    /// 中(<c>BackupStore.Write</c> の直後)へ移すと、<b>フック自身が投げた場合</b>に隣の catch が
+    /// 拾って <c>OnWriteFailed</c> を鳴らす=書けているのに「書込が失敗した」と報告する経路を
+    /// 新設する(B5 が潰そうとしている虚偽通知そのもの)。実測: この網が無いと当該変異は
+    /// 他 2 本を全緑のまま通過した。
+    ///
+    /// <b>投げるフックを正当化するテストではない</b>(<see cref="IBackupWriter.OnWriteSucceeded"/> の
+    /// 契約は「投げない前提」)。固定するのは「万一投げても<b>失敗報告に化けない</b>」ことと、
+    /// ついでに実測された握りの効果 —— <c>Run</c> のジョブ単位 catch がフックの例外を握るので
+    /// ワーカーは死なず、後続ジョブが通常どおり走る —— の 2 点。
+    ///
+    /// no-change 側(失敗が来ないこと)を空虚にしない担保: フックが実際に 2 回とも走ったこと
+    /// (<c>succeededCalls</c>)と、書込が実際にディスクへ届いたこと(LoadAll)を併せて見る
+    /// =「ジョブが走らなかったから鳴らなかった」ではないことを示す。待ちは入れない
+    /// (Dispose のドレインで両ジョブの完走が同期確定する)。</summary>
+    [Fact]
+    public void Write_SucceededHookThrows_DoesNotReportFailure_AndWorkerSurvives()
+    {
+        using var tmp = new SbwTempDir();
+
+        int succeededCalls = 0;
+        string? failedId = null;
+        using (
+            var writer = new SerialBackupWriter(tmp.Root)
+            {
+                OnWriteSucceeded = _ =>
+                {
+                    succeededCalls++;
+                    throw new InvalidOperationException("hook boom");
+                },
+                OnWriteFailed = id => failedId = id,
+            }
+        )
+        {
+            writer.Write(Rec("hook-throws", "one"));
+            // 1 件目のフックが投げた後も worker が生きていることを見るための後続ジョブ。
+            writer.Write(Rec("hook-throws-next", "two"));
+        } // Dispose = CompleteAdding + Join で 2 ジョブとも完走が同期確定
+
+        Assert.Equal(2, succeededCalls); // フックは 2 回とも走った(=どちらのジョブも成功側へ来た)
+        Assert.Null(failedId); // 投げたことを「書込の失敗」として報告していない
+        Assert.Equal(2, BackupStore.LoadAll(tmp.Root).Count); // 実際に 2 件ともディスクに在る
+    }
+
     // ===== Enqueue 締切後ガード(xmldoc「破棄後は無視」契約) =====
 
     /// <summary>

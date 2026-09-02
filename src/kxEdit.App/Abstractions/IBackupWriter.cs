@@ -14,6 +14,29 @@ public interface IBackupWriter : IDisposable
     /// Coordinator が ctor で失敗回復用の Enqueue を登録する(null なら握り潰す)。</summary>
     Action<string>? OnWriteFailed { get; set; }
 
+    /// <summary>M-20(B5): 書込<b>成功</b>の通知フック(<see cref="OnWriteFailed"/> の対)。
+    /// 引数は書けた <c>BackupRecord.Id</c>。
+    ///
+    /// Coordinator が「バックアップが復旧した」を判定できる唯一の観測面である(B5 Task 4 の
+    /// 遷移発声がこれに乗る) ——
+    /// 失敗が来なくなったことだけでは、書込が成功したのか<b>そもそも投入していないのか</b>
+    /// (dirty でない・署名一致で <c>BackupAction.None</c> になり <see cref="Write"/> 自体を
+    /// 呼んでいない)を区別できず、後者を復旧と読むと「一度も書けていないのに再開した」という
+    /// 虚偽の発声になる。
+    ///
+    /// 契約:
+    /// - <see cref="Write"/> 1 件につき、本フックと <see cref="OnWriteFailed"/> が<b>両方鳴ることはない</b>
+    ///   (実行されたジョブは成功か失敗のどちらか一方だけを通知する)。
+    /// - 逆は成り立たない ——<b>鳴らないことは「成功しなかった」を意味しない</b>。投入自体が
+    ///   捨てられた場合(締切済み/破棄済み)や、投入は受理されたがジョブが実行されないまま
+    ///   終わる場合(<c>SerialBackupWriter</c> の Dispose が Join 上限で諦めた等)はどちらも鳴らない。
+    /// - 呼び出しスレッドは実装依存で、<see cref="OnWriteFailed"/> と同じ扱いでよい
+    ///   (<c>SerialBackupWriter</c> は背景スレッドから同期発火する)。スレッド越えの吸収は受け手責務。
+    /// - フックは投げない前提。投げたときの扱いも <see cref="OnWriteFailed"/> と同じで実装依存
+    ///   (<c>SerialBackupWriter</c> はジョブ単位の catch で握り潰し、ワーカーは次のジョブへ進む)。
+    /// - null なら何もしない(=本フックを配線しない実装・テストの挙動は不変)。</summary>
+    Action<string>? OnWriteSucceeded { get; set; }
+
     /// <summary>レイアウト書込失敗の通知(次 Reconcile で強制再書込)。</summary>
     Action? OnLayoutWriteFailed { get; set; }
 
