@@ -36,8 +36,10 @@ public sealed class FakePrompt : IUserPrompt
         return YesNoCancelResult;
     }
 
+    /// <summary>許可側(はい)の既定。拒否経路のテストは明示的に false を入れる(<see cref="OkCancelResult"/> と同じ流儀)。</summary>
     public bool YesNoResult { get; set; } = true;
 
+    /// <summary><c>YesNo</c> の呼出ごとの (Caption, defaultNo)。<see cref="OkCancelCalls"/> と対称(設計 2026-09-03 §3.6)。理由も同じ。</summary>
     public List<(string Caption, bool DefaultNo)> YesNoCalls { get; } = new();
 
     /// <summary>M-18 再入テスト用: 応答を返す直前に呼ぶ(ダイアログのモーダルループの中で
