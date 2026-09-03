@@ -285,7 +285,9 @@ public class FileControllerExternalChangeTests
             Assert.Equal(("ファイルの変更", false), call);
             var text = Assert.Single(host.Prompt.Log, e => e.Kind == "YesNo").Text;
             Assert.Equal("'a.txt' は kxEdit の外で変更されました。読み直しますか?", text);
-            Assert.Contains(doc, host.OpenedFresh); // 開き直しと同じく .csv 自動モードの対象
+            // 開き直しと同じく .csv 自動モードの対象(設計 §3.5 手順 4)。1 回目は Open ヘルパの
+            // TryOpenOrActivate、2 回目が読み直し。Contains では初回の分で常に緑になり網にならない。
+            Assert.Equal(2, host.OpenedFresh.Count(d => ReferenceEquals(d, doc)));
         });
 
     /// <summary>新しい本文が短ければキャレットは末尾へクランプされる。</summary>
@@ -403,6 +405,8 @@ public class FileControllerExternalChangeTests
             Assert.Equal("v1", doc.Editor.Text);
             Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc);
             Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+            // 読み直しに失敗したら _openedFresh は走らない(設計 §3.5 手順 2)。1 回 = Open ヘルパの分だけ。
+            Assert.Equal(1, host.OpenedFresh.Count(d => ReferenceEquals(d, doc)));
         });
 
     /// <summary>確認ダイアログのモーダルループの中で届いた 2 本目は何もしない(設計 §3.4 再入ガード)。</summary>
