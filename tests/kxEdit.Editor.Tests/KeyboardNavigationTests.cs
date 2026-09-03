@@ -1,5 +1,6 @@
 using System.Reflection;
 using kxEdit.Core.Editing;
+using kxEdit.Core.Settings;
 
 namespace kxEdit.Editor.Tests;
 
@@ -183,6 +184,87 @@ public class KeyboardNavigationTests
                 Assert.Equal(2, c.CaretCharOffset); // SmartHome=先頭空白の後
                 SendKey(c, Keys.Home);
                 Assert.Equal(0, c.CaretCharOffset); // トグルで行頭へ
+            }
+        });
+
+    [Fact]
+    public void SmartHome_DefaultsToTrue() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("  hello");
+            using (f)
+            using (c)
+            {
+                Assert.True(c.SmartHome); // 既存ユーザーの挙動不変
+            }
+        });
+
+    [Fact]
+    public void Home_WithSmartHomeOff_AlwaysMovesToLineStart() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("  hello");
+            using (f)
+            using (c)
+            {
+                c.SmartHome = false;
+                c.SetCaretCharOffset(4); // 非既定位置(本文内)から始める
+                SendKey(c, Keys.Home);
+                Assert.Equal(0, c.CaretCharOffset); // 空白を飛ばさず行頭へ
+                SendKey(c, Keys.Home);
+                Assert.Equal(0, c.CaretCharOffset); // トグルしない(2 回目で firstNonWs へ戻らない)
+            }
+        });
+
+    [Fact]
+    public void ShiftHome_FollowsSmartHomeSetting() =>
+        Sta.Run(() =>
+        {
+            // Shift+Home は移動先の算出を Home と共有する=設定に追従する。
+            var (f, c) = MakeControl("  hello");
+            using (f)
+            using (c)
+            {
+                c.SmartHome = false;
+                c.SetCaretCharOffset(4);
+                SendKey(c, Keys.Home | Keys.Shift);
+                Assert.Equal(0, c.CaretCharOffset);
+                Assert.Equal(4, c.SelectionAnchor);
+                Assert.Equal((0, 4), c.GetSelectionCharRange()); // インデントごと選択される
+            }
+        });
+
+    [Fact]
+    public void CtrlHome_IgnoresSmartHomeSetting() =>
+        Sta.Run(() =>
+        {
+            // Ctrl+Home は文書先頭固定=設定の影響を受けない(HandleHome の ctrl 分岐)。
+            // SmartHome=true(既定)で確かめると "たまたま 0" と区別できないので、
+            // 2 行目の本文内から押して 0 に飛ぶことを見る。
+            var (f, c) = MakeControl("abc\r\n  def");
+            using (f)
+            using (c)
+            {
+                c.SmartHome = true;
+                c.SetCaretCharOffset(8);
+                SendKey(c, Keys.Home | Keys.Control);
+                Assert.Equal(0, c.CaretCharOffset);
+            }
+        });
+
+    [Fact]
+    public void ApplyAppearance_AppliesSmartHomeFromSettings() =>
+        Sta.Run(() =>
+        {
+            // 配線の網: プロパティが存在しても ApplyAppearance が読まなければ設定は死ぬ。
+            var (f, c) = MakeControl("  hello");
+            using (f)
+            using (c)
+            {
+                c.ApplyAppearance(new AppSettings { SmartHome = false });
+                Assert.False(c.SmartHome);
+                c.ApplyAppearance(new AppSettings { SmartHome = true });
+                Assert.True(c.SmartHome);
             }
         });
 

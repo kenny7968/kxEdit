@@ -905,6 +905,15 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     }
 
     /// <summary>
+    /// Home キーで行頭の空白(インデント)を飛ばすか。true(既定)= 最初の非空白文字 ⇔ 行頭の
+    /// トグル。false = 常に行頭(折り返し ON では視覚行の先頭)。
+    /// <see cref="ApplyAppearance"/> で <c>AppSettings.SmartHome</c> から反映する。
+    /// Ctrl+Home(文書先頭)は本設定の対象外。再描画は不要(次の Home 押下から効く)。
+    /// </summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool SmartHome { get; set; } = true;
+
+    /// <summary>
     /// 折り返し桁数(半角換算)。0 以下で折り返し OFF。負値は 0 に丸める。
     /// ON: 水平スクロールバー非表示・視覚行を <c>WrapColumns × 半角1文字幅</c> で折り返す。
     /// OFF: 水平スクロールバー表示(必要な場合)+ <see cref="ScrollX"/> で表示原点を左右シフト。
@@ -2671,7 +2680,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     }
 
     /// <summary>
-    /// <see cref="AppSettings"/> からフォント/テーマ/表示設定を反映する。App 層の
+    /// <see cref="AppSettings"/> からフォント/テーマ/表示設定/入力挙動を反映する。App 層の
     /// <c>EditorAppearance.Apply</c>(Scintilla ホスト向け)の自作コントロール版で、
     /// P6 で App 層から呼ばれることを想定している(P2 時点では未接続=Task 14 の smoke で目視確認)。
     ///
@@ -2686,6 +2695,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     ///   /<see cref="WrapColumns"/> をフィールドへ直接反映(setter の Invalidate/HScroll 再計算に頼らず、
     ///   末尾でまとめて Update*Scrollbar/PositionCaret/Invalidate を 1 回ずつ呼ぶ)。
     ///   <see cref="ScrollX"/> は 0 にリセット(折り返し設定が変わっても不整合を残さないため)。
+    /// - 入力挙動: <see cref="SmartHome"/> を反映(Home キーの動作。再描画は不要)。
     /// - Task 13 では <c>TabWidth</c>/<c>TabsToSpaces</c> は反映しない(P3=編集入力タスクの担当・YAGNI)。
     /// </summary>
     public void ApplyAppearance(AppSettings settings)
@@ -2729,6 +2739,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _highlightCurrentLine = settings.HighlightCurrentLine;
         // キャレット太さ(弱視のキャレット視認性・kxedit-sighted-users-first-class)
         _caretWidthPx = Math.Clamp(settings.CaretWidth, 1, 5);
+        // 2026-09-04: Home キーの動作(再描画不要・次の Home 押下から効く)
+        SmartHome = settings.SmartHome;
         // WrapColumns の実値が変わったときだけ ScrollX をリセットする(フォント色だけ変更等で
         // 横スクロール位置が不用意にホームへ戻る副作用を避ける)。折り返し ON への遷移では
         // ScrollX=0 が必要=UpdateHorizontalScrollbar 内の HideAndResetHScroll でも 0 にされるが、

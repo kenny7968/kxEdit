@@ -51,6 +51,11 @@ public sealed class AppSettings
     /// <summary>Tab キー入力をスペースにするか（既存のタブ文字は変換しない）。</summary>
     public bool TabsToSpaces { get; set; }
 
+    /// <summary>Home キーで行頭の空白（インデント）を飛ばすか（true=スマート・既定）。
+    /// false のときは常に行頭（折り返し ON では視覚行の先頭）へ移動する。
+    /// 既存 settings.json にキーが無くても既定値が効くため、データ移行は不要。</summary>
+    public bool SmartHome { get; set; } = true;
+
     /// <summary>行番号マージンを表示するか。</summary>
     public bool ShowLineNumbers { get; set; }
 

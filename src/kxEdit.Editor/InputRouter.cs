@@ -192,7 +192,7 @@ internal sealed class InputRouter
                 ctx.Caret.Caret,
                 ctx.Host.WrapColumns,
                 ctx.Host.Metrics,
-                skipIndent: true // Task 2 で EditorControl.SmartHome に差し替える
+                skipIndent: ctx.Host.SmartHome
             );
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
