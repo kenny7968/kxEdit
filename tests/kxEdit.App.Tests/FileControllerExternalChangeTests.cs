@@ -482,7 +482,7 @@ public class FileControllerExternalChangeTests
             Assert.DoesNotContain("\u202E", text, StringComparison.Ordinal);
         });
 
-    // ===== Task 4: \u4FDD\u5B58\u76F4\u524D\u306E\u4E0A\u66F8\u304D\u78BA\u8A8D =====
+    // ===== Task 4: 保存直前の上書き確認 =====
 
     [Fact]
     public void Save_DiskChanged_Cancel_DoesNotWrite() =>
@@ -491,7 +491,7 @@ public class FileControllerExternalChangeTests
             using var host = new Host();
             using var tmp = new TempDir();
             var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
-            doc.Editor.ReplaceCharRange(0, 0, "mine "); // Text \u30BB\u30C3\u30BF\u30FC\u306F SetOrReplaceSource \u3067 Modified \u304C\u7ACB\u305F\u306A\u3044
+            doc.Editor.ReplaceCharRange(0, 0, "mine "); // Text セッターは SetOrReplaceSource で Modified が立たない
             ExternalWrite(host, path, "theirs", T1);
             host.Prompt.OkCancelResult = false;
 
@@ -499,12 +499,12 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal("theirs", File2.ReadAllText(path));
             Assert.True(doc.Editor.Modified);
-            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc); // \u78BA\u8A8D\u3067\u6B62\u3081\u305F\u306E\u3067\u89B3\u6E2C\u5024\u306F\u52D5\u304B\u3055\u306A\u3044
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc); // 確認で止めたので観測値は動かさない
             var call = Assert.Single(host.Prompt.OkCancelCalls);
-            Assert.Equal(("\u4E0A\u66F8\u304D\u306E\u78BA\u8A8D", true), call);
+            Assert.Equal(("上書きの確認", true), call);
             var text = Assert.Single(host.Prompt.Log, e => e.Kind == "OkCancel").Text;
             Assert.Equal(
-                "'a.txt' \u306F kxEdit \u3067\u958B\u3044\u305F\u5F8C\u306B\u5916\u3067\u5909\u66F4\u3055\u308C\u3066\u3044\u307E\u3059\u3002\u4E0A\u66F8\u304D\u3059\u308B\u3068\u3001\u305D\u306E\u5909\u66F4\u306F\u5931\u308F\u308C\u307E\u3059\u3002\u4E0A\u66F8\u304D\u3057\u307E\u3059\u304B?",
+                "'a.txt' は kxEdit で開いた後に外で変更されています。上書きすると、その変更は失われます。上書きしますか?",
                 text
             );
         });
@@ -524,7 +524,7 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal("mine v1", File2.ReadAllText(path));
             Assert.False(doc.Editor.Modified);
-            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc); // \u4FDD\u5B58\u5F8C\u306E\u518D\u53D6\u5F97(Fake \u306F T1 \u3092\u8FD4\u3057\u7D9A\u3051\u308B)
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc); // 保存後の再取得(Fake は T1 を返し続ける)
             Assert.Single(host.Prompt.OkCancelCalls);
         });
 
@@ -543,7 +543,7 @@ public class FileControllerExternalChangeTests
             Assert.Equal("mine v1", File2.ReadAllText(path));
         });
 
-    /// <summary>\u89B3\u6E2C\u5024\u304C\u7121\u3051\u308C\u3070\u5224\u5B9A\u3057\u306A\u3044(\u30C7\u30A3\u30B9\u30AF\u5074\u306B\u5024\u304C\u6709\u3063\u3066\u3082)\u3002</summary>
+    /// <summary>観測値が無ければ判定しない(ディスク側に値が有っても)。</summary>
     [Fact]
     public void Save_NoKnownStamp_NoPrompt() =>
         Sta.Run(() =>
@@ -557,9 +557,11 @@ public class FileControllerExternalChangeTests
             Assert.True(host.File.SaveDocument(doc));
 
             Assert.Empty(host.Prompt.OkCancelCalls);
+            // Open 1 + 書込後 1。観測値 null では保存直前の問い合わせが走らない(短絡順の網)。
+            Assert.Equal(2, host.Timestamps.Queries.Count);
         });
 
-    /// <summary>\u30BF\u30D6\u3092\u9589\u3058\u308B\u78BA\u8A8D\u306E\u300C\u306F\u3044\u300D\u2192 \u4FDD\u5B58 \u2192 \u4E0A\u66F8\u304D\u78BA\u8A8D\u3067\u30AD\u30E3\u30F3\u30BB\u30EB \u2192 \u9589\u3058\u306A\u3044(false)\u3002</summary>
+    /// <summary>タブを閉じる確認の「はい」→ 保存 → 上書き確認でキャンセル → 閉じない(false)。</summary>
     [Fact]
     public void ConfirmDiscardIfDirty_Yes_ThenOverwriteCancelled_ReturnsFalse() =>
         Sta.Run(() =>
@@ -577,9 +579,9 @@ public class FileControllerExternalChangeTests
             Assert.Equal("theirs", File2.ReadAllText(path));
         });
 
-    /// <summary>\u300C\u8AAD\u307F\u76F4\u3055\u306A\u3044\u300D(Kept)\u306F\u8AAD\u307F\u76F4\u3057\u306E\u78BA\u8A8D\u3060\u3051\u3092\u6291\u6B62\u3057\u3001\u4FDD\u5B58\u76F4\u524D\u306E\u78BA\u8A8D\u306F\u751F\u304D\u305F\u307E\u307E
-    /// (\u8A2D\u8A08\u306E\u7CBE\u5BC6\u5316: AcknowledgedWriteTimeUtc \u306F\u672C\u6587\u306E\u57FA\u6E96\u3067\u306F\u306A\u3044)\u3002\u672A\u7DE8\u96C6\u30BF\u30D6\u3067\u3082 Ctrl+S \u306F
-    /// \u53E4\u3044\u672C\u6587\u3067\u65B0\u3057\u3044\u30C7\u30A3\u30B9\u30AF\u3092\u4E0A\u66F8\u304D\u3057\u3046\u308B\u306E\u3067\u3001\u3053\u3053\u304C M-18 \u306E\u6700\u7D42\u9632\u885B\u7DDA\u3002</summary>
+    /// <summary>「読み直さない」(Kept)は読み直しの確認だけを抑止し、保存直前の確認は生きたまま
+    /// (設計の精密化: AcknowledgedWriteTimeUtc は本文の基準ではない)。未編集タブでも Ctrl+S は
+    /// 古い本文で新しいディスクを上書きしうるので、ここが M-18 の最終防衛線。</summary>
     [Fact]
     public void Save_AfterKept_StillPrompts() =>
         Sta.Run(() =>
@@ -595,12 +597,16 @@ public class FileControllerExternalChangeTests
             Assert.False(host.File.SaveDocument(doc));
 
             Assert.Equal("theirs", File2.ReadAllText(path));
-            Assert.Single(host.Prompt.OkCancelCalls);
+            // キャンセルはどちらの観測値にも触れない(本文の基準も「読み直さない」の記憶もそのまま)。
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc);
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc);
+            // A-10(文字コードの警告)の確認と弁別する。
+            Assert.Equal(("上書きの確認", true), Assert.Single(host.Prompt.OkCancelCalls));
         });
 
-    /// <summary>\u4FDD\u5B58\u3067\u672C\u6587\u306E\u57FA\u6E96\u304C\u66F4\u65B0\u3055\u308C\u308B\u3068\u3001\u61B6\u3048\u3066\u3044\u305F\u300C\u8AAD\u307F\u76F4\u3055\u306A\u3044\u300D\u306E\u5024\u306F\u6D88\u3048\u308B
-    /// (WriteToPath \u306E AcknowledgedWriteTimeUtc = null \u306E\u7DB2\u3002LoadInto \u5074\u306E\u5BFE\u306F
-    /// Check_Kept_ThenChangedAgain_PromptsAgain)\u3002</summary>
+    /// <summary>保存で本文の基準が更新されると、憶えていた「読み直さない」の値は消える
+    /// (WriteToPath の AcknowledgedWriteTimeUtc = null の網。LoadInto 側の対は
+    /// Check_Kept_ThenChangedAgain_PromptsAgain)。</summary>
     [Fact]
     public void Save_AfterKept_ResetsAcknowledged() =>
         Sta.Run(() =>
@@ -611,7 +617,7 @@ public class FileControllerExternalChangeTests
             ExternalWrite(host, path, "theirs", T1);
             host.Prompt.YesNoResult = false;
             Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
-            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // \u524D\u63D0: \u61B6\u3048\u3066\u3044\u308B
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // 前提: 憶えている
             host.Prompt.OkCancelResult = true;
 
             Assert.True(host.File.SaveDocument(doc));
