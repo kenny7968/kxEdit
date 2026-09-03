@@ -137,8 +137,11 @@ public class MainFormExternalChangeTests
             );
         });
 
-    /// <summary>自動モード ON では _openedFresh(AutoEnterCsvMode)が読み直しの中で先頭セルへ入り直す。
-    /// MainForm は TryEnterMode を飛ばし、セル位置だけ (row, col) で戻す。</summary>
+    /// <summary>自動モード ON でも手動モードと同じ経路で戻す(最終コード品質レビュー Q-1): 読み直しの中では
+    /// _openedFresh(AutoEnterCsvMode)を <c>_reloadingCsv</c> で飛ばし、MainForm が発声の後に TryEnterMode →
+    /// TryGoToCell で戻す。発声順は 読み直しました → CSVモード オン … → セル で手動と同じ、パースも 1 回。
+    /// この網が <c>_reloadingCsv</c> を固定する: 飛ばさないと自動モードが先に入り、TryEnterMode は
+    /// 既にモード中なので false → TryGoToCell が走らず (0, 0) に落ち、最後の発声も「読み直しました」になる。</summary>
     [Fact]
     public void Reloaded_AutoCsvMode_RestoresCell() =>
         Sta.Run(() =>
@@ -160,6 +163,30 @@ public class MainFormExternalChangeTests
             Assert.True(doc.State.CsvMode);
             Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
             Assert.Equal(CsvAnnounceFormatter.Cell("X", 2, 2), form.LastAnnouncementForTest);
+        });
+
+    /// <summary>自動モード ON で読み直し後に CSV として壊れていれば、手動モードと同じく通常モードのまま・
+    /// 最後の発声は解析不能の通知(「読み直しました」に埋もれない)。
+    /// 限界: 通知ラベルは最後の 1 件しか持たないので、AutoEnterCsvMode を飛ばした(= 解析不能の通知が
+    /// 1 回だけ)ことはここでは観測できない(飛ばさなくても最後は同じ通知になる)。飛ばすことの網は
+    /// <see cref="Reloaded_AutoCsvMode_RestoresCell"/>(飛ばさないとセル位置と最後の発声が変わる)。</summary>
+    [Fact]
+    public void Reloaded_AutoCsvMode_ParseFails_StaysInNormalMode() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var prompt = new FakePrompt { YesNoResult = true };
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: true), tmp, prompt);
+            string path = tmp.File("t.csv");
+            File2.WriteAllText(path, "a,b\r\nc,d\r\n");
+            var doc = form.FileForTest.TryOpenOrActivate(path)!;
+            Assert.True(doc.State.CsvMode); // 自動モードで入っている
+            ExternalWrite(path, "a,\"unterminated\r\n");
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, form.CheckExternalChangeOnActiveForTest());
+
+            Assert.False(doc.State.CsvMode);
+            Assert.Equal(CsvAnnounceFormatter.ParseError, form.LastAnnouncementForTest);
         });
 
     /// <summary>読み直し後に CSV モードへ戻れない(外部変更で CSV として壊れた)場合は通常モードのまま。

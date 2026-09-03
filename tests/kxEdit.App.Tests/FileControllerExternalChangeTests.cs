@@ -78,7 +78,7 @@ public class FileControllerExternalChangeTests
         host.Timestamps.Times[path] = stamp;
     }
 
-    // ===== Task 2: 観測値の捕捉 =====
+    // ===== 設計 §6.1: 観測値の捕捉 =====
 
     /// <summary>開くときは本文を読む<b>前</b>に取る(設計 §3.2)。問い合わせの瞬間に外部が書くと、
     /// 本文は書換後・観測値は書換前になる。読んだ後に取る実装では本文が "before" のまま。</summary>
@@ -100,6 +100,8 @@ public class FileControllerExternalChangeTests
             // 問い合わせは M-18 の 1 回だけ: 将来 read 前に別の問い合わせが足されて M-18 の問い合わせが
             // read 後へ動いても、OnQuery が同じ書込を 2 回するため緑のまま通ってしまうのを塞ぐ。
             Assert.Single(host.Timestamps.Queries);
+            // 開くは基準を捕捉する経路 = 到達不能記憶を素通りする側(最終脆弱性レビュー V-1)。
+            Assert.Single(host.Timestamps.ProbeQueries);
         });
 
     /// <summary>保存は書いた<b>後</b>に取る(設計 §3.2)。問い合わせの瞬間にディスクを読むと
@@ -114,7 +116,7 @@ public class FileControllerExternalChangeTests
             doc.Editor.ReplaceCharRange(0, 3, "new");
             string? seenAtQuery = null;
             // 実ファイルと同じく、新しい本文がディスクに載った時点で初めて更新時刻が動く。
-            // 先に Times[path] = T1 と置くと、保存直前ガード(M-18 Task 4)には「開いた後に外で変更された」
+            // 先に Times[path] = T1 と置くと、保存直前ガード(設計 §6.3)には「開いた後に外で変更された」
             // と見えて上書き確認が出てしまう(Fake の既定 OK で通るが、素の保存の網ではなくなる)。
             host.Timestamps.OnQuery = p =>
             {
@@ -132,6 +134,9 @@ public class FileControllerExternalChangeTests
             // OnQuery が同じ読取を繰り返し、「書いた後」の問い合わせが書く前へ動いても最後の読取で
             // 緑になってしまうのを塞ぐ。
             Assert.Equal(3, host.Timestamps.Queries.Count);
+            // 3 回とも基準を捕捉する経路 = 到達不能記憶を素通りする側(V-1): 開く(LoadInto の読む前)・
+            // 保存直前ガード・書いた後(WriteToPath)。記憶を使う側が 1 つでも混ざると 2 以下になる。
+            Assert.Equal(3, host.Timestamps.ProbeQueries.Count);
         });
 
     /// <summary>バックアップ復元は A-1 の陳腐化判定が取った値を流用する(設計 §3.2)。</summary>
@@ -160,6 +165,8 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
             Assert.Single(host.Timestamps.Queries); // A-1 の 1 回だけ。追加 I/O を作らない
+            // A-1 は一括で呼ばれる経路なので到達不能記憶を使う側(V-1 の分離で Probe 側へ動かさない)。
+            Assert.Empty(host.Timestamps.ProbeQueries);
         });
 
     /// <summary>hot exit 復元(RestoreSession → RestoreDirtyFromBackup = A-1 の主経路)でも
@@ -214,7 +221,7 @@ public class FileControllerExternalChangeTests
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
         });
 
-    // ===== Task 3: CheckExternalChange =====
+    // ===== 設計 §6.2: CheckExternalChange =====
 
     [Fact]
     public void Check_Untitled_Skipped_NoPrompt() =>
@@ -268,6 +275,10 @@ public class FileControllerExternalChangeTests
             Assert.Equal(ExternalChangeOutcome.NoChange, host.File.CheckExternalChange(doc));
             Assert.Empty(host.Prompt.YesNoCalls);
             Assert.Equal("v1", doc.Editor.Text);
+            // 復帰・タブ切替の検知は到達不能記憶を使う側(頻繁に呼ばれ 5 秒を繰り返し払えない)。
+            // Open ヘルパの 1 回(Probe 側)+検知の 1 回(記憶側)= Queries 2 / ProbeQueries 1。
+            Assert.Equal(2, host.Timestamps.Queries.Count);
+            Assert.Single(host.Timestamps.ProbeQueries);
         });
 
     /// <summary>未保存なし・はい: 読み直し、観測値更新、キャレット位置は非既定位置から保たれる。
@@ -418,7 +429,9 @@ public class FileControllerExternalChangeTests
         });
 
     /// <summary>読み直しに失敗(ロック中)したら <see cref="ExternalChangeOutcome.ReloadFailed"/>。
-    /// 観測値は更新しない(次の復帰でまた聞く)。本文は不変。エラーは LoadInto が出す。</summary>
+    /// 観測値は<b>両方とも</b>更新しない(次の復帰でまた聞く)。本文は不変。エラーは LoadInto が出す。
+    /// 「憶えた値が動かない」を既定値(null)と区別するため、先に「いいえ」で T1 を憶えた状態から始める
+    /// (CLAUDE.md §4-B: no-change は非既定状態から)。</summary>
     [Fact]
     public void Check_Changed_Yes_ReloadFails_KeepsStampAndText() =>
         Sta.Run(() =>
@@ -427,6 +440,11 @@ public class FileControllerExternalChangeTests
             using var tmp = new TempDir();
             var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
             ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = false;
+            Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // 前提: 非既定状態
+            DateTime t2 = T0.AddMinutes(2);
+            ExternalWrite(host, path, "theirs again", t2);
             host.Prompt.YesNoResult = true;
             using var locker = new FileStream(
                 path,
@@ -437,8 +455,10 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal(ExternalChangeOutcome.ReloadFailed, host.File.CheckExternalChange(doc));
 
+            Assert.Equal(2, host.Prompt.YesNoCalls.Count); // t2 は T0 とも憶えた T1 とも違うので聞いた
             Assert.Equal("v1", doc.Editor.Text);
             Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc);
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // 失敗では憶えた値も動かない(null にも t2 にもならない)
             Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
             // 読み直しに失敗したら _openedFresh は走らない(設計 §3.5 手順 2)。1 回 = Open ヘルパの分だけ。
             Assert.Equal(1, host.OpenedFresh.Count(d => ReferenceEquals(d, doc)));
@@ -463,7 +483,8 @@ public class FileControllerExternalChangeTests
             Assert.Single(host.Prompt.YesNoCalls);
         });
 
-    /// <summary>文言に載るファイル名は無害化する(BiDi 制御文字はファイル名に使える)。</summary>
+    /// <summary>文言に載るファイル名は無害化する(BiDi 制御文字はファイル名に使える)。
+    /// 「含まない」だけでは名前ごと落とす実装でも緑になるので、落とした後の名前が残ることも見る。</summary>
     [Fact]
     public void Check_PromptSanitizesDisplayName() =>
         Sta.Run(() =>
@@ -480,9 +501,10 @@ public class FileControllerExternalChangeTests
             // Ordinal 必須: 既定の culture 比較(ICU)は U+202E を「無視可能」として空一致させ、
             // 無害化の有無に関わらず常に「見つかった」になる(= 網として機能しない)。
             Assert.DoesNotContain("\u202E", text, StringComparison.Ordinal);
+            Assert.Contains("'ab.txt' は", text, StringComparison.Ordinal);
         });
 
-    // ===== Task 4: 保存直前の上書き確認 =====
+    // ===== 設計 §6.3: 保存直前の上書き確認 =====
 
     [Fact]
     public void Save_DiskChanged_Cancel_DoesNotWrite() =>

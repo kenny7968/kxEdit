@@ -7,7 +7,8 @@ namespace kxEdit.App.Tests;
 /// <see cref="FileTimestampProvider"/> の契約(設計 2026-08-22 §4.3 / M-18 設計 2026-09-03 §3.8)。
 /// 実ファイルの 3 本(存在/不在/不正パス)は、Fake で固定値を返すテストでは「実装が本当に null を
 /// 返すか」を検証できないため実 I/O で固定する。リモート経路(H-1 のプローブ前置)と到達不能記憶の
-/// TTL は <see cref="FakeReachabilityProbe"/> / <see cref="FakeTimeProvider"/> 駆動で固定する。
+/// TTL は <see cref="FakeReachabilityProbe"/> / <see cref="FakeTimeProvider"/> 駆動で固定する
+/// (リモートのテストはすべて Fake が「到達不能」か「到達できるが不在」を返す形にし、実 SMB へは触れない)。
 /// </summary>
 public class FileTimestampProviderTests
 {
@@ -21,11 +22,13 @@ public class FileTimestampProviderTests
             var before = DateTime.UtcNow.AddMinutes(-1);
             File.WriteAllText(path, "x");
 
-            var actual = new FileTimestampProvider().GetLastWriteTimeUtc(path);
+            var sut = new FileTimestampProvider();
+            var actual = sut.GetLastWriteTimeUtc(path);
 
             Assert.NotNull(actual);
             Assert.Equal(DateTimeKind.Utc, actual!.Value.Kind);
             Assert.True(actual.Value > before);
+            Assert.Equal(actual, sut.ProbeLastWriteTimeUtc(path)); // 記憶を使わない側も同じ核を通る
         }
         finally
         {
@@ -58,7 +61,7 @@ public class FileTimestampProviderTests
 
     // ===== レビュー H-1: リモートパスは 5 秒プローブを前置する =====
 
-    /// <summary>ローカルパスにプローブを挟まない(常時 5 秒の遅延を持ち込まない)。</summary>
+    /// <summary>ローカルパスにプローブを挟まない(常時 5 秒の遅延を持ち込まない)。記憶を使わない側も同じ。</summary>
     [Fact]
     public void LocalPath_DoesNotProbe()
     {
@@ -68,8 +71,10 @@ public class FileTimestampProviderTests
             var path = Path.Combine(dir, "a.txt");
             File.WriteAllText(path, "x");
             var probe = new FakeReachabilityProbe();
+            var sut = new FileTimestampProvider(probe);
 
-            _ = new FileTimestampProvider(probe).GetLastWriteTimeUtc(path);
+            _ = sut.GetLastWriteTimeUtc(path);
+            _ = sut.ProbeLastWriteTimeUtc(path);
 
             Assert.Equal(0, probe.CallCount);
             Assert.Equal(0, probe.SaveTargetCallCount);
@@ -185,9 +190,10 @@ public class FileTimestampProviderTests
 
     /// <summary>期限切れ後に到達できれば、記憶が到達可能を塞がないことを固定する
     /// (読みに進んだかは FileExists ゲートがあるので観測できない。プローブが走ったことだけを見る)。
-    /// この 1 本だけは Fake が (true, true) を返した後に実 <c>File.Exists</c> まで到達するので、
-    /// 名前解決で秒単位待つ架空ホストではなく即答する <c>\\localhost\</c> の存在しない共有を使う
-    /// (<c>IsRemote</c> は先頭 <c>\\</c> で true)。</summary>
+    /// Fake は「到達できるが不在」を返す = FileExists ゲートで止まり、実 <c>File.Exists</c>(実 SMB)へは
+    /// 進まない(最終コード品質レビュー Q-4: 以前は (true, true) で実 I/O へ到達していた)。パスは当時の
+    /// 名残で即答する <c>\\localhost\</c> の存在しない共有のまま(<c>IsRemote</c> は先頭 <c>\\</c> で true。
+    /// 今は I/O が起きないので何でもよい)。</summary>
     [Fact]
     public void UnreachableRoot_AfterTtl_ReachableAgain_IsNotBlockedByMemo()
     {
@@ -201,11 +207,38 @@ public class FileTimestampProviderTests
 
         Assert.Null(sut.GetLastWriteTimeUtc(path));
         clock.Advance(TimeSpan.FromSeconds(61));
-        probe.SaveTargetResult = new(Reachable: true, FileExists: true);
+        probe.SaveTargetResult = new(Reachable: true, FileExists: false);
 
-        // 到達できても実ファイルは無いので null。プローブが走ったこと(=記憶に塞がれなかったこと)だけを見る。
+        // 到達できても不在なので null。プローブが走ったこと(=記憶に塞がれなかったこと)だけを見る。
         Assert.Null(sut.GetLastWriteTimeUtc(path));
         Assert.Equal(2, probe.SaveTargetCallCount);
+    }
+
+    /// <summary>復旧を確認した根の記憶は明示的に捨てる(<c>Remove</c>)。捨てないと、期限切れ後に復旧を
+    /// 確認した後で壁時計が逆行した(手動変更・大幅 NTP 補正)とき、期限切れの記録が復活して再び抑止される。
+    /// 一般命題としては閉じていない(期限切れ後に一度も再照会されていない根は until を持ったまま残る。
+    /// 設計 §11.5「壁時計の逆行」)。</summary>
+    [Fact]
+    public void UnreachableRoot_RecoveredThenClockRegresses_IsNotSuppressed()
+    {
+        var probe = new FakeReachabilityProbe
+        {
+            SaveTargetResult = new(Reachable: false, FileExists: false),
+        };
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
+        var sut = new FileTimestampProvider(probe, clock);
+        const string path = @"\\unreachable-host\share\a.txt";
+
+        Assert.Null(sut.GetLastWriteTimeUtc(path)); // 到達不能 → 記憶(期限 = +60 秒)
+        clock.Advance(TimeSpan.FromSeconds(61));
+        probe.SaveTargetResult = new(Reachable: true, FileExists: false);
+        Assert.Null(sut.GetLastWriteTimeUtc(path)); // 期限切れ → 再プローブ → 復旧 → 記憶を捨てる(不在なので null)
+        Assert.Equal(2, probe.SaveTargetCallCount);
+
+        clock.Advance(TimeSpan.FromSeconds(-40)); // 壁時計の逆行: 計 21 秒 = 捨てていなければ期限(60 秒)内に戻る
+
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+        Assert.Equal(3, probe.SaveTargetCallCount); // Remove が無ければ 2 のまま(復活した記録に抑止される)
     }
 
     /// <summary>脆弱性レビュー L-1: 到達できる共有上でファイルが無いだけならルートを記憶しない。
@@ -225,5 +258,55 @@ public class FileTimestampProviderTests
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\reachable-host\share\other.txt"));
 
         Assert.Equal(2, probe.SaveTargetCallCount); // 2 件目も記憶に阻まれずプローブされる
+    }
+
+    // ===== 最終脆弱性レビュー V-1: 基準を捕捉する経路は到達不能記憶を素通りする =====
+
+    /// <summary>記憶が効いている間でも <c>ProbeLastWriteTimeUtc</c> はプローブし、到達できたら記憶を捨てる
+    /// (以後の <c>GetLastWriteTimeUtc</c> も TTL 内なのに抑止されない)。記憶を使うと、共有が落ちて記憶 →
+    /// 復旧 → 60 秒以内に開く/保存、で基準が null になり、その文書の検知が次の基準捕捉まで黙って止まる。</summary>
+    [Fact]
+    public void ProbeLastWriteTimeUtc_IgnoresMemo_AndClearsItWhenReachable()
+    {
+        var probe = new FakeReachabilityProbe
+        {
+            SaveTargetResult = new(Reachable: false, FileExists: false),
+        };
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
+        var sut = new FileTimestampProvider(probe, clock);
+        const string path = @"\\unreachable-host\share\a.txt";
+
+        Assert.Null(sut.GetLastWriteTimeUtc(path)); // 到達不能 → 記憶
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+        Assert.Equal(1, probe.SaveTargetCallCount); // 前提: 記憶が効いている
+        probe.SaveTargetResult = new(Reachable: true, FileExists: false); // 復旧(不在なので実 I/O へは進まない)
+
+        Assert.Null(sut.ProbeLastWriteTimeUtc(path));
+
+        Assert.Equal(2, probe.SaveTargetCallCount); // 記憶を無視してプローブした
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+        Assert.Equal(3, probe.SaveTargetCallCount); // 記憶は捨てられている(TTL 内でも抑止されない)
+    }
+
+    /// <summary><c>ProbeLastWriteTimeUtc</c> で到達不能と判れば記憶は書く(到達不能の事実は経路によらない)。
+    /// 以後の <c>GetLastWriteTimeUtc</c> は TTL 内は抑止される = 開く/保存で 5 秒払った直後の Alt+Tab で
+    /// もう 5 秒払わない。</summary>
+    [Fact]
+    public void ProbeLastWriteTimeUtc_Unreachable_RemembersRoot()
+    {
+        var probe = new FakeReachabilityProbe
+        {
+            SaveTargetResult = new(Reachable: false, FileExists: false),
+        };
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
+        var sut = new FileTimestampProvider(probe, clock);
+        const string path = @"\\unreachable-host\share\a.txt";
+
+        Assert.Null(sut.ProbeLastWriteTimeUtc(path));
+        Assert.Equal(1, probe.SaveTargetCallCount);
+
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+
+        Assert.Equal(1, probe.SaveTargetCallCount); // 記憶に抑止された
     }
 }

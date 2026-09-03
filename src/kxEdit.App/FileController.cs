@@ -351,8 +351,11 @@ public sealed class FileController
             // 書き換えた場合、観測値は本文より古くなり次回の検知で拾える。読んだ後に取ると、
             // その 1 回の変更を永久に見落とす(観測値が本文より新しくなる)。
             // TryProbeFileExists で到達可能と判った直後なので、プロバイダ内の追加プローブは短時間で
-            // 返る(想定・未実測)。到達不能ルートとして記憶されている間はプローブ自体が走らず null を返す。
-            DateTime? stamp = _fileTimestamps.GetLastWriteTimeUtc(path);
+            // 返る(想定・未実測)。到達不能記憶は使わない(ProbeLastWriteTimeUtc): 使うと、共有が落ちて
+            // 記憶 → 復旧 → 60 秒以内に開く、で基準が null になり、その文書の検知(復帰時の確認も
+            // 保存直前の確認も)が次の基準捕捉まで黙って止まる(最終脆弱性レビュー V-1)。
+            // 直前の TryProbeFileExists が実 I/O で到達可能を確かめているので、素通りしても待ちは増えない。
+            DateTime? stamp = _fileTimestamps.ProbeLastWriteTimeUtc(path);
 
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
             // 従来の TextFileService.Load(=byte 全読み + string 全文化)は選択肢から外し、
@@ -504,12 +507,16 @@ public sealed class FileController
         // 「読み直さない」で憶えた AcknowledgedWriteTimeUtc は読み直しの確認を抑止するためのもので、
         // ここで見ると「いいえ → Ctrl+S」が相手の変更を無言で上書きする(未編集タブでも起きる)。
         // キャンセルでは観測値を動かさない: 次の復帰で読み直しの確認が出るのが正しい
-        // (ユーザーは「上書きしない」と決めただけで、ディスクの内容はまだ見ていない)。
-        // リモートではここで 5 秒プローブが 1 本増える(WriteToPath の TryInspectSaveTarget と合わせて
-        // 最悪 10 秒)。FileTimestampProvider の到達不能記憶(設計 2026-09-03 §3.8 の 60 秒 TTL)が 2 回目以降を省く。
+        // (ユーザーは「上書きしない」と決めただけで、ディスクの内容はまだ見ていない)
+        // (直前に読み直しの確認へ「いいえ」と答えていれば AcknowledgedWriteTimeUtc が同じ値なので出ない。
+        // 保存直前の確認は生きたまま)。
+        // リモートではここで 5 秒プローブが 1 本増える。到達不能記憶は使わない(ProbeLastWriteTimeUtc。
+        // 使うと共有復旧直後の保存で基準が null になり保護が外れる。最終脆弱性レビュー V-1)。
+        // 落ちた共有では WriteToPath の TryInspectSaveTarget と合わせて最悪 10 秒: タイムアウトで止まる
+        // 経路は最悪 10 秒、通る経路はプローブ最大 3 本(保存直前・TryInspectSaveTarget・書いた後)。
         if (
             doc.State.LastKnownWriteTimeUtc is DateTime known
-            && _fileTimestamps.GetLastWriteTimeUtc(doc.State.Path) is DateTime disk
+            && _fileTimestamps.ProbeLastWriteTimeUtc(doc.State.Path) is DateTime disk
             && disk != known
             && !_prompt.OkCancel(
                 $"'{SanitizeForDisplay.OneLine(doc.State.DisplayName, 80)}' は kxEdit で開いた後に外で変更されています。"
@@ -916,7 +923,9 @@ public sealed class FileController
             );
             // M-18(設計 2026-09-03 §3.2): 自分の保存で mtime が変わるので、書いた**後**の値を
             // 一致の基準にする。書込と取得の間に外部が書く窓は残る(設計 §9)。
-            doc.State.LastKnownWriteTimeUtc = _fileTimestamps.GetLastWriteTimeUtc(path);
+            // 到達不能記憶は使わない(ProbeLastWriteTimeUtc): たった今書けた保存先なので記憶が残っていても
+            // 陳腐で、使うと基準が null になりこの文書の保護が外れる(最終脆弱性レビュー V-1)。
+            doc.State.LastKnownWriteTimeUtc = _fileTimestamps.ProbeLastWriteTimeUtc(path);
             doc.State.AcknowledgedWriteTimeUtc = null; // 本文の基準が更新された=「読み直さない」の記憶は捨てる
             doc.Editor.SetSavePoint();
             DocumentManager.UpdateLabel(doc);

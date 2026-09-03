@@ -22,6 +22,11 @@ public sealed partial class MainForm : Form
     private readonly KinsokuFormatController _kinsoku; // コンストラクタで生成(FormatWithKinsoku を委譲)
     private readonly DocumentInfoController _documentInfo; // コンストラクタで生成([ファイル]>文書情報)
     private bool _restoreOffered; // 起動時の復元提案を一度だけ行う
+
+    /// <summary>M-18: CSV モードのタブを読み直している間だけ true。<see cref="AutoEnterCsvMode"/>(自動モード)を
+    /// 読み直しの中では飛ばし、<see cref="CheckExternalChangeOnActive"/> が発声の後にモードへ戻す
+    /// (発声順を手動モードと揃え、二重パースを避ける。最終コード品質レビュー Q-1)。</summary>
+    private bool _reloadingCsv;
     private readonly ToolStripStatusLabel _posLabel = new("行 1, 桁 1");
     private readonly ToolStripStatusLabel _encLabel = new("UTF-8");
     private readonly ToolStripStatusLabel _eolLabel = new("CRLF");
@@ -411,6 +416,8 @@ public sealed partial class MainForm : Form
     /// <summary>開く系経路（開く/最近/開き直し）で新規ロードした直後の .csv 自動 CSV モード進入（設定 ON のときのみ）。</summary>
     private void AutoEnterCsvMode(Document doc)
     {
+        if (_reloadingCsv)
+            return; // M-18: 読み直し中は MainForm が発声の後にモードへ戻す(発声順を手動モードと揃え、二重パースを避ける)
         if (!_settings.CsvAutoModeOnOpen)
             return;
         if (
@@ -1594,9 +1601,12 @@ public sealed partial class MainForm : Form
     /// 最後に残すため(1 行の発声チャネルは最後の 1 件が残る。B5 の教訓)。
     /// CSV モード中はキャレットがセルに追従しないため、セル位置は (row, col) で戻す
     /// (<see cref="CsvController.TryGoToCell"/>。設計 §3.7 の「キャレットから導出するので近い位置に戻る」は
-    /// 偽だった: キャレット由来の TryEnterMode は先頭セルへ入る)。自動モード(<c>_openedFresh</c>)で
-    /// 読み直しの中に既に入り直している場合も同じ理由で戻す。発声は 読み直しました → CSVモード オン … →
-    /// セル、の順で最後にセルが残る(セルが無くなっていれば TryGoToCell は黙って false = 先頭セルの発声が残る)。
+    /// 偽だった: キャレット由来の TryEnterMode は先頭セルへ入る)。自動モード(<c>_openedFresh</c> =
+    /// <see cref="AutoEnterCsvMode"/>)は読み直しの中では <see cref="_reloadingCsv"/> で飛ばす: 自動で入り
+    /// 直させると発声が CSVモード オン … → 読み直しました の順になって手動モードと食い違い、本文も 2 度
+    /// パースする(最終コード品質レビュー Q-1)。手動・自動のどちらでも発声は 読み直しました → CSVモード オン … →
+    /// セル、の順で同期に連続し、UiaAnnouncer の 50 ms 窓により SR に届くのは 1 件目と最後
+    /// (セルが無くなっていれば TryGoToCell は黙って false = 先頭セルの発声が残る)。
     /// <see cref="ExternalChangeOutcome.ReloadFailed"/> は両方の観測値が不変なので、エラーダイアログを
     /// 閉じた直後の OnActivated で同じ確認が再び出る(一過性ロックの再試行。「いいえ」で止まる)。
     /// </summary>
@@ -1608,14 +1618,27 @@ public sealed partial class MainForm : Form
         bool wasCsv = doc.State.CsvMode;
         int row = doc.State.CsvRow; // 読み直しで (0, 0) に戻るので先に捕捉する
         int col = doc.State.CsvCol;
-        var outcome = _file.CheckExternalChange(doc);
+        // 再入(確認ダイアログのモーダル中に届いた切替由来の検知。FileController 側は Skipped を返す)で
+        // 外側の値を壊さないよう、上書きではなく退避して戻す。
+        bool wasReloadingCsv = _reloadingCsv;
+        _reloadingCsv = wasCsv;
+        ExternalChangeOutcome outcome;
+        try
+        {
+            outcome = _file.CheckExternalChange(doc);
+        }
+        finally
+        {
+            _reloadingCsv = wasReloadingCsv;
+        }
         if (outcome != ExternalChangeOutcome.Reloaded)
             return outcome;
         _announcer.Say("読み直しました");
         if (!wasCsv)
             return outcome;
-        // 自動モードで既に入り直していれば TryEnterMode は飛ばす。パース不能なら入らず TryEnterMode が発声する。
-        if (doc.State.CsvMode || _csv.TryEnterMode(doc))
+        // LoadInto が CsvMode を false に落とし、自動モードは飛ばしてあるので、ここで入り直す。
+        // パース不能なら入らず TryEnterMode が発声する(最後に残る)。
+        if (_csv.TryEnterMode(doc))
             _csv.TryGoToCell(doc, row, col);
         return outcome;
     }

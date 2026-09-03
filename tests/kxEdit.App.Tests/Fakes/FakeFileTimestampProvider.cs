@@ -10,14 +10,28 @@ public sealed class FakeFileTimestampProvider : IFileTimestampProvider
     /// <summary>パス → 最終更新時刻(UTC)。載っていないパスは null(不在)を返す。</summary>
     public Dictionary<string, DateTime> Times { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>問い合わせを受けたパスの履歴(順序保持)。</summary>
+    /// <summary>問い合わせを受けたパスの履歴(順序保持)。<see cref="ProbeLastWriteTimeUtc"/> もここに載る
+    /// (経路によらず「問い合わせた回数」を数えるテストのため)。</summary>
     public List<string> Queries { get; } = new();
 
+    /// <summary>M-18 V-1: 到達不能記憶を素通りする側(<see cref="ProbeLastWriteTimeUtc"/>)だけの履歴。
+    /// 基準を捕捉する経路(開く・保存・保存直前の確認)がこちらを使い、復帰・タブ切替の検知と A-1 の復元が
+    /// <see cref="GetLastWriteTimeUtc"/> を使うことを固定する観測点。</summary>
+    public List<string> ProbeQueries { get; } = new();
+
     /// <summary>M-18: 問い合わせの瞬間に呼ぶ(「読む前に取る」「書いた後に取る」の順序を、
-    /// この中でファイルを書き換える / 読むことで観測する)。</summary>
+    /// この中でファイルを書き換える / 読むことで観測する)。どちらの経路でも呼ぶ。</summary>
     public Action<string>? OnQuery { get; set; }
 
-    public DateTime? GetLastWriteTimeUtc(string path)
+    public DateTime? GetLastWriteTimeUtc(string path) => Query(path);
+
+    public DateTime? ProbeLastWriteTimeUtc(string path)
+    {
+        ProbeQueries.Add(path);
+        return Query(path);
+    }
+
+    private DateTime? Query(string path)
     {
         Queries.Add(path);
         OnQuery?.Invoke(path);
