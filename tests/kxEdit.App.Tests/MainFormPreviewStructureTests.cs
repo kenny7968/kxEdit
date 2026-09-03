@@ -52,4 +52,38 @@ public class MainFormPreviewStructureTests
         Assert.DoesNotContain(typeof(ArgumentException), catchTypes);
         Assert.DoesNotContain(typeof(Exception), catchTypes);
     }
+
+    /// <summary>
+    /// E-1 (最終レビュー): M-23 の価値は<b>順序</b>にある —— 上限判定
+    /// (<c>TextLength</c> → <c>ExceedsMaxChars</c>) が全文 string 化 (<c>SnapshotText</c>) より
+    /// <b>前</b>にあること。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: <c>Render</c> 内にも同じ cap が残っているので、
+    /// 順序を入れ替えても<b>観測可能な結果は変わらない</b>(投げる例外も文面も同じ)。
+    /// 差が出るのは 1G 文字級の文書で <c>SnapshotText</c> 自体が
+    /// <c>OutOfMemoryException</c> になるときだけで、それは自動テストで作れない。
+    /// 残る手段が IL 走査 (<see cref="IlCallees.Of"/> は IL 出現順のリストを返す)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ShowMarkdownPreview_ChecksSizeCapBeforeMaterializingText()
+    {
+        var callees = IlCallees.Of(ShowMarkdownPreview());
+
+        int textLength = callees.FindIndex(m => m.Name == "get_TextLength");
+        int exceeds = callees.FindIndex(m =>
+            m.DeclaringType == typeof(MarkdownRenderer)
+            && m.Name == nameof(MarkdownRenderer.ExceedsMaxChars)
+        );
+        int snapshot = callees.FindIndex(m => m.Name == "get_SnapshotText");
+
+        // 陽性対照: 3 つとも実在すること。FindIndex は見つからないと -1 を返すので、
+        // 比較だけだと片方が消えた状態が「-1 < n」で空虚に緑になる。
+        Assert.True(textLength >= 0, "TextLength の取得が見つからない");
+        Assert.True(exceeds >= 0, "ExceedsMaxChars の呼出が見つからない");
+        Assert.True(snapshot >= 0, "SnapshotText の取得が見つからない");
+
+        Assert.True(textLength < snapshot, "TextLength は SnapshotText より前で読むこと");
+        Assert.True(exceeds < snapshot, "ExceedsMaxChars は SnapshotText より前で判定すること");
+    }
 }

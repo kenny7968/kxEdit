@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace kxEdit.App.Tests;
 
 /// <summary>
@@ -77,5 +79,98 @@ public class MarkdownPreviewFormStructureTests
                 m.DeclaringType == typeof(IReachabilityProbe)
                 && m.Name == nameof(IReachabilityProbe.NormalizePathWithTimeout)
         );
+    }
+
+    /// <summary>
+    /// E-3 (最終レビュー): seam が<b>実際に呼ばれている</b>こと。
+    /// <para>
+    /// 上のテストは「MoveNext から直接呼んでいない」しか見ていないので、プローブを丸ごと
+    /// 落とす退化(<c>&amp;&amp; await Task.Run(() =&gt; true)</c>)は 3 つの
+    /// <c>DoesNotContain</c> も <c>Task.Run</c> の陽性対照も<b>すべて満たして緑になる</b>。
+    /// 実在確認が消えれば、不達な共有でも <c>SetVirtualHostNameToFolderMapping</c> へ
+    /// パスが渡り、UI スレッドが 21 秒止まる(設計書 §13.1 の実測)。
+    /// </para>
+    /// <para>
+    /// 走査対象は <see cref="MarkdownPreviewForm"/> 自身の宣言メソッド<b>と入れ子型</b>。
+    /// 正しい形では <c>RemoteAwareDirectory.Exists</c> はコンパイラ生成のラムダ
+    /// (<c>&lt;InitAsync&gt;b__…</c>・<see cref="MarkdownPreviewForm"/> のインスタンスメソッド)に
+    /// ちょうど 1 本ある。<c>Task.Run</c> を外すと呼出は状態機械の <c>MoveNext</c>(入れ子型)へ
+    /// 移動するので、「<c>MoveNext</c> ではないこと」の assert がその退行も捕まえる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void InitAsync_ActuallyCallsTheSeam_OutsideTheStateMachine()
+    {
+        var holders = DeclaredMethodsIncludingNested(typeof(MarkdownPreviewForm))
+            .Where(m =>
+                IlCallees
+                    .Of(m)
+                    .Any(c =>
+                        c.DeclaringType == typeof(RemoteAwareDirectory)
+                        && c.Name == nameof(RemoteAwareDirectory.Exists)
+                    )
+            )
+            .ToList();
+
+        Assert.Single(holders);
+        Assert.NotEqual("MoveNext", holders[0].Name);
+    }
+
+    /// <summary>
+    /// V-G (最終レビュー): <b>マッピングしてから描画する</b>順序を固定する。
+    /// <para>
+    /// V-2 の要はこれ。逆順にすると <c>NavigateToString</c> の直後に走る初回サブリソース要求が
+    /// 未マップ状態に当たり、絶対化済みの <c>https://kxedit.preview/…</c> が
+    /// <b>実 DNS 解決</b>へ出る(監査 §9 V-2)。ところが WebView2 実体が要るのでその差は
+    /// unit test では観測できない —— IL 上の呼出順で固定する
+    /// (<see cref="IlCallees.Of"/> は IL 出現順のリストを返す)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void InitAsync_MapsVirtualHostBeforeNavigating()
+    {
+        var callees = IlCallees.Of(IlCallees.AsyncBodyOf(typeof(MarkdownPreviewForm), "InitAsync"));
+
+        int apply = callees.FindIndex(m =>
+            m.DeclaringType == typeof(PreviewVirtualHostMapping)
+            && m.Name == nameof(PreviewVirtualHostMapping.Apply)
+        );
+        int navigate = callees.FindIndex(m =>
+            m.DeclaringType == typeof(Microsoft.Web.WebView2.Core.CoreWebView2)
+            && m.Name == nameof(Microsoft.Web.WebView2.Core.CoreWebView2.NavigateToString)
+        );
+
+        // 陽性対照: 両方が実在すること(FindIndex は不在で -1 を返すので、比較だけでは
+        // 片方が消えた状態が空虚に緑になる)。
+        Assert.True(apply >= 0, "PreviewVirtualHostMapping.Apply の呼出が見つからない");
+        Assert.True(navigate >= 0, "CoreWebView2.NavigateToString の呼出が見つからない");
+        Assert.True(apply < navigate, "仮想ホストのマッピングは NavigateToString より前に張ること");
+    }
+
+    /// <summary>
+    /// 型自身の宣言メソッド + 入れ子型(コンパイラ生成の状態機械・クロージャ)の宣言メソッド。
+    /// <para>
+    /// 本体を持たないもの(abstract / extern)は IL 走査できないので除く。コンストラクタも
+    /// 対象外にしてある —— <see cref="IlCallees.Of"/> は <c>MethodBase.GetGenericArguments</c>
+    /// を呼ぶが、<c>ConstructorInfo</c> はこれを <c>NotSupportedException</c> で拒む(実測)。
+    /// 走査したい呼出(ラムダ / 状態機械の <c>MoveNext</c>)はいずれもメソッド側にあるので
+    /// 実害は無い。
+    /// </para>
+    /// </summary>
+    private static IEnumerable<MethodBase> DeclaredMethodsIncludingNested(Type type)
+    {
+        const BindingFlags Flags =
+            BindingFlags.DeclaredOnly
+            | BindingFlags.Public
+            | BindingFlags.NonPublic
+            | BindingFlags.Instance
+            | BindingFlags.Static;
+
+        var types = new List<Type> { type };
+        types.AddRange(type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic));
+        return types
+            .SelectMany(t => t.GetMethods(Flags))
+            .Where(m => m.GetMethodBody() is not null)
+            .Cast<MethodBase>();
     }
 }

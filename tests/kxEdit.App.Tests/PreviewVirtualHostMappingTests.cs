@@ -133,6 +133,43 @@ public class PreviewVirtualHostMappingTests
         Assert.Equal(new[] { BaseDir, Fallback }, calls);
     }
 
+    /// <summary>
+    /// E-2 (最終レビュー): null ガードが try の<b>手前</b>にあること。
+    /// <para>
+    /// <c>ArgumentNullException</c> は <c>ArgumentException</c> の派生で、
+    /// <see cref="PreviewVirtualHostMapping.Apply"/> の catch フィルタは
+    /// <c>ArgumentException</c> を含む。よって 2 本の <c>ThrowIfNull</c> を try の内側へ
+    /// 移すと、<b>実装バグ由来の null 引数が「フォールバックへ倒す」に化ける</b>
+    /// (そして <c>emptyFallback</c> が null なら <c>map(emptyFallback())</c> で
+    /// <c>NullReferenceException</c> という別物になる)。
+    /// </para>
+    /// <para>
+    /// この配置には網が無く、<b>移設する変異が App.Tests 全件緑のまま通過していた</b>
+    /// (レビュアーの実測)。ここで 2 引数それぞれについて固定する。
+    /// <c>baseDirExists: true</c> + 実在する <c>baseDir</c> を渡して<b>try に入る経路</b>を
+    /// 通すのが要点(false だと try の手前で <c>map(emptyFallback())</c> に落ちてしまい、
+    /// ガードの位置を弁別できない)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void NullEmptyFallback_ThrowsArgumentNullException_NotSwallowedByCatchFilter()
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            PreviewVirtualHostMapping.Apply(BaseDir, baseDirExists: true, null!, _ => { })
+        );
+        Assert.Equal("emptyFallback", ex.ParamName);
+    }
+
+    /// <summary>E-2: <c>map</c> 側の null ガードも try の手前にあること。</summary>
+    [Fact]
+    public void NullMap_ThrowsArgumentNullException_NotSwallowedByCatchFilter()
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            PreviewVirtualHostMapping.Apply(BaseDir, baseDirExists: true, () => Fallback, null!)
+        );
+        Assert.Equal("map", ex.ParamName);
+    }
+
     [Fact]
     public void UnexpectedException_IsNotSwallowed()
     {
