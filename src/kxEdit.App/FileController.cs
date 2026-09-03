@@ -107,17 +107,15 @@ public sealed class FileController
     /// ディスク版を優先してバックアップを捨てる判断はしない。ディスクが新しい理由が
     /// 「kxEdit 自身の保存(A-1)」か「他アプリの更新」かを区別できず、捨てる実装は
     /// 新しい無言喪失経路になるため(設計 §4.2)。
+    /// <para>M-18(設計 2026-09-03 §3.2): 取ったディスク側の値をそのまま返す。復元タブの
+    /// <see cref="DocumentState.LastKnownWriteTimeUtc"/> に流用し、追加の I/O を作らない。</para>
     /// </remarks>
-    private void NoteIfBackupStale(string validatedPath, BackupRecord bk)
+    private DateTime? NoteIfBackupStale(string validatedPath, BackupRecord bk)
     {
-        if (
-            BackupStaleness.IsDiskNewer(
-                _fileTimestamps.GetLastWriteTimeUtc(validatedPath),
-                bk.TimestampUtc,
-                BackupStaleness.DefaultTolerance
-            )
-        )
+        DateTime? disk = _fileTimestamps.GetLastWriteTimeUtc(validatedPath);
+        if (BackupStaleness.IsDiskNewer(disk, bk.TimestampUtc, BackupStaleness.DefaultTolerance))
             _staleRestoredPaths.Add(validatedPath);
+        return disk;
     }
 
     /// <summary>
@@ -349,6 +347,12 @@ public sealed class FileController
             if (!TryProbeFileExists(path))
                 return false;
 
+            // M-18(設計 2026-09-03 §3.2): 更新時刻は本文を読む**前**に取る。読んでいる最中に外部が
+            // 書き換えた場合、観測値は本文より古くなり次回の検知で拾える。読んだ後に取ると、
+            // その 1 回の変更を永久に見落とす(観測値が本文より新しくなる)。
+            // TryProbeFileExists の後なので、リモートでもプロバイダ内の 2 度目のプローブは ms で返る。
+            DateTime? stamp = _fileTimestamps.GetLastWriteTimeUtc(path);
+
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
             // 従来の TextFileService.Load(=byte 全読み + string 全文化)は選択肢から外し、
             // LoadAsBufferAuto で prefix 検出 → LoadAsBuffer(chunk stream) → LineEnding 検出。
@@ -357,6 +361,7 @@ public sealed class FileController
             doc.State.Encoding = loaded.Encoding;
             doc.State.HasBom = loaded.HasBom;
             doc.State.LineEnding = loaded.LineEnding;
+            doc.State.LastKnownWriteTimeUtc = stamp;
 
             // CSV モードは自動判定しない（メニューから手動で有効化する）。
             // 既存タブへロードし直す場合に備え、読取専用とハイライトを解除しておく。
@@ -880,6 +885,9 @@ public sealed class FileController
                 doc.State.Encoding,
                 doc.State.HasBom
             );
+            // M-18(設計 2026-09-03 §3.2): 自分の保存で mtime が変わるので、書いた**後**の値を
+            // 一致の基準にする。書込と取得の間に外部が書く窓は残る(設計 §9)。
+            doc.State.LastKnownWriteTimeUtc = _fileTimestamps.GetLastWriteTimeUtc(path);
             doc.Editor.SetSavePoint();
             DocumentManager.UpdateLabel(doc);
             _metaChanged();
@@ -1111,6 +1119,7 @@ public sealed class FileController
         // ユーザ配下・UNC は Ok=そのまま復元先パスとして継続。
         bool useUntitled = rec.OriginalPath is null;
         string? safePath = null;
+        DateTime? stamp = null;
         if (!useUntitled)
         {
             // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
@@ -1122,7 +1131,7 @@ public sealed class FileController
             if (status == PathValidation.Ok)
             {
                 safePath = normalized;
-                NoteIfBackupStale(normalized, rec); // A-1 第 2 層(設計 2026-08-22 §4.3)
+                stamp = NoteIfBackupStale(normalized, rec); // A-1 第 2 層(設計 2026-08-22 §4.3)
             }
             else
             {
@@ -1161,6 +1170,7 @@ public sealed class FileController
         }
 
         doc.State.Path = safePath;
+        doc.State.LastKnownWriteTimeUtc = stamp;
 
         // 無題は元の連番を保ち、ダイアログ表示と復元後タブの番号を一致させる。連番カウンタは
         // 既存の最大値以上へ進め、以後の新規無題と衝突しないようにする。
@@ -1413,7 +1423,7 @@ public sealed class FileController
         {
             doc.State.Path = normalized;
             doc.State.UntitledNumber = 0;
-            NoteIfBackupStale(normalized, bk); // A-1 第 2 層(設計 2026-08-22 §4.3)
+            doc.State.LastKnownWriteTimeUtc = NoteIfBackupStale(normalized, bk); // A-1 第 2 層(設計 2026-08-22 §4.3)
         }
         else
         {

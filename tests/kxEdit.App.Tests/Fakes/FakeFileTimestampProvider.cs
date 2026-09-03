@@ -13,9 +13,14 @@ public sealed class FakeFileTimestampProvider : IFileTimestampProvider
     /// <summary>問い合わせを受けたパスの履歴(順序保持)。</summary>
     public List<string> Queries { get; } = new();
 
+    /// <summary>M-18: 問い合わせの瞬間に呼ぶ(「読む前に取る」「書いた後に取る」の順序を、
+    /// この中でファイルを書き換える / 読むことで観測する)。</summary>
+    public Action<string>? OnQuery { get; set; }
+
     public DateTime? GetLastWriteTimeUtc(string path)
     {
         Queries.Add(path);
+        OnQuery?.Invoke(path);
         return Times.TryGetValue(path, out var t) ? t : null;
     }
 }
