@@ -271,3 +271,85 @@ CLAUDE.md §3 の通常工程(3 プロジェクトに跨らないが、新しい
 5. Task 5: `FileTimestampProvider` の TTL + §6.4
 6. Task 6: MainForm 配線(復帰・切替・発声・CSV 復帰)+ §6.5 + L5 チェックリスト
 7. 最終ブランチレビュー 2 パス(別エージェント)→ `tools/pre-merge-check.ps1` EXIT 0 → PR
+
+## 11. 実施記録(2026-09-03)
+
+本節は追記であり、§1〜§10 の策定時スナップショットは書き換えていない(CLAUDE.md §8)。
+
+### 11.1 結果
+
+Task 1〜6 を計画どおり 1 タスク 1 実装エージェントで実施し、各タスクで仕様レビュー(別エージェント)、
+Task 1 / 2 / 3 / 5 でコード品質レビュー、Task 3 で前倒し脆弱性レビューを行った。指摘はすべて
+別 fixup commit で反映した(却下は §11.4)。**L5 は未実施**(§11.6)。
+
+テスト件数は `dotnet test tests/kxEdit.App.Tests -c Release` の実行結果が正であり、本書には引用しない
+(数字は網の増減で腐る。PR #62 §8.45 の教訓)。ビルドは `-warnaserror` で 0 警告。
+
+### 11.2 計画からの逸脱(すべてレビューまたは実装者のセルフレビューで判明・実測で確定)
+
+| # | 逸脱 | 理由 |
+|---|------|------|
+| 1 | `ExternalChangeOutcome` に **`ReloadFailed`** を足した(§3.4 は 4 値) | `LoadInto` 失敗時に `Reloaded` を返すと MainForm が「読み直しました」を発声して虚偽になり、`Kept` を返すと「次まで聞かない」と読める。観測値は両方とも不変なので、エラーダイアログを閉じた直後の `OnActivated` で同じ確認が再び出る(一過性ロックの再試行。「いいえ」で止まる) |
+| 2 | **`DocumentState.AcknowledgedWriteTimeUtc` を分離**した(§3.4 は「いいえ」で観測値を更新) | 実装者のセルフレビューで、「いいえ」が `LastKnownWriteTimeUtc` を更新すると直後の Ctrl+S が保存直前の確認を素通りし、**未編集タブでも古い本文が新しいディスクを無言で上書きする**ことが判明した(M-18 が塞ぐ喪失が 1 手ずれて残る)。「聞き直さない」ための値と「本文の基準」を分け、保存直前の確認は基準だけを見る。基準が更新される(開く・読み直す・保存する)たびに憶えた値は null へ戻す |
+| 3 | `FileTimestampProvider` のプローブを **`ProbeSaveTargetWithTimeout`** に替えた(§3.8 は TTL 化のみ) | 脆弱性レビュー L-1: `ProbeFileExistsWithTimeout` は `File.Exists` 意味論で「到達不能」と「到達できるが不在」を区別できず、別ツールの delete→recreate や rename 保存の途中でルート全体が記憶され、その共有の全文書の検知が黙って止まる。`(Reachable, FileExists)` を分けて返す保存先用プローブを読む側でも使い、`!Reachable` だけを記憶する。残余: `Reachable` は「ファイルまたは親フォルダーが在る」なので、親フォルダーごと消えた/改名された場合は TTL の間記憶される |
+| 4 | 到達できたら記憶を **`Remove`** する(計画は「消さなくてよい」) | 計画の根拠「期限後は必ず上書きされる」は復旧時には偽(上書きは到達不能分岐でしか起きない)。壁時計の逆行で期限切れの記録が復活する窓も同時に閉じる(ただし一度も再照会されていない根は残る。§11.5) |
+| 5 | `Check_PromptSanitizesDisplayName` を **`StringComparison.Ordinal`** に | xUnit の `Assert.DoesNotContain(string, string)` は culture 比較で U+202E を無視可能文字として扱い、**どんな文字列でも位置 0 で空一致する** = 計画の assertion は無害化の有無に関わらず常に赤で、網として成立していなかった |
+| 6 | 計画 Task 3 の `Assert.Contains(doc, host.OpenedFresh)` を回数固定に | `Open` ヘルパの `TryOpenOrActivate` が初回に `_openedFresh` を呼ぶため、検知前から入っていて空振りだった(仕様レビューが発見) |
+| 7 | Task 2 のテスト `Save_CapturesTimestampAfterWriting` の fixture を修正 | 保存前に Fake の更新時刻を進めていたため、Task 4 のガードには「開いた後に外で変更された」と見えていた(Fake 既定 OK で素通り)。実ファイルの意味論(新しい本文が載ってから mtime が動く)に揃え、`Assert.Empty(OkCancelCalls)` を足した |
+| 8 | `FileTimestampProviderTests` のリモート実 I/O を `\\localhost\<無い共有>` に | `\\unreachable-host` は名前解決で 1〜3 秒かかる(実測)。localhost は 5〜13 ms |
+| 9 | Task 4 のテスト 15 行が **`\uXXXX` エスケープ**で書かれていた(仕様レビューが発見・fixup で復号) | Edit ツールが、ファイル側が U+202E をバックスラッシュ u 形式のエスケープで持つ行を生の文字で照合したときに、new_string の非 ASCII を全部エスケープして書く。傘設計書 §11.1 の `BackupCoordinatorTests` 207 行の破損と同型。以後は commit 後に `grep -c '\\u[3-9]'` = 0 を確認する手順にした |
+
+| 10 | CSV モードの読み直し後、**セル位置を `(CsvRow, CsvCol)` で戻す**(`CsvController.TryGoToCell` を新設し MainForm が呼ぶ) | §3.7 の「`TryEnterMode` がキャレットから導出するので近い位置に戻る」は**偽**だった(Task 6 の仕様レビューが L5 項目 5 を 1 手ずつ追って発見)。CSV モード中はキャレットがセルに追従しない(`ApplyCell` は強調と可視化だけ。キャレットを動かすのは `ExitMode` のみ)ので、キャレット由来では常に先頭セルへ戻る。L5 項目 5 は正しいビルドで FAIL する形だった(PR #62 Critical-1 の裏返し)。自動 CSV モード ON の経路でも `_openedFresh` が先頭セルへ入り直すので同じ手で戻す。セルが無くなっていれば先頭セルのまま(`TryEnterMode` の発声が残る)。発声は「読み直しました → CSVモード オン … → セル」の順で同期に連続するため、`UiaAnnouncer` の窓により SR に届くのは 1 件目と最後(実測は L5) |
+
+### 11.3 「網が張れない」と判断したもの
+
+- **`OnActivated` / `ActiveDocumentChanged` からの実配線**。実際のウィンドウ活性化が要り、テストハーネスでは
+  `Form.ActiveForm` が null なので `BeginInvoke` 先が早期 return する。MainForm 側のテストは seam
+  (`CheckExternalChangeOnActiveForTest`)で本体(発声・CSV モード復帰)だけを叩く。配線は L5 項目 1 / 4 が担う。
+- **`MessageBox` の既定ボタン**(はい / いいえ / キャンセルのどちらが Enter で選ばれるか)。CLAUDE.md §4-A
+  により GUI は変異検証禁止で、`FakePrompt` は `defaultNo` / `defaultCancel` の値を記録するだけ。L5 項目 2 / 3。
+
+### 11.4 却下・受容した指摘
+
+| 指摘 | 扱い |
+|------|------|
+| `NoteIfBackupStale` の戻り値+副作用(command-query 混在) | YAGNI で受容。private・呼出 2 か所・`Assert.Single(Queries)` が追加 I/O なしを守る |
+| `_checkingExternalChange` をフィールド群の先頭へ / 基準更新と憶えた値のリセットをヘルパへ集約 | 現状維持。`AcknowledgedWriteTimeUtc` の xmldoc が「基準更新のたびに null へ戻す」を明記しており、代入 4 か所のうち復元 2 か所は新規 doc への代入(構築時 null) |
+| 読む側が保存先プローブの親フォルダー存在確認を余分に払う | 受容。同じ 5 秒境界の内側で SMB 往復が 1 回増えるだけ |
+| `YesNoResult` の既定 true(許可側) | 受容。`OkCancelResult` と同じ流儀で、拒否経路は明示的に false を入れる(doc に明記) |
+
+### 11.5 残余・申し送り(§9 への追加)
+
+- **TTL 内の盲目窓**: 共有が落ちて記憶 → 復旧 → 他者が編集 → TTL 内に Ctrl+S、の順では保存直前の確認が
+  null で判定しない = 上書きする。到達可能だが遅い共有で 5 秒タイムアウトした場合も同じ。§3.8 のトレードオフ
+  として受容(A-1 の復元では null = 従来どおり復元で安全側だが、M-18 では安全側ではない)。
+- **壁時計の逆行**: 期限切れ後に一度も再照会されていない根は `until` を持ったまま残るので、経過時間より大きい
+  逆行(手動変更・大幅 NTP 補正)があると再び抑止される。単調時計にすれば閉じるが Fake の改修が要り割に合わない。
+- **読み直しは `LoadInto` の副作用を継承する**: `RegisterRecent` で最近使ったファイルの先頭へ動く(ユーザー操作
+  でない「ウィンドウ復帰」で設定が永続化される)。開き直しと同じ挙動として受容。U+FFFD 警告が YesNo の直後に
+  2 枚目のダイアログとして出うる(既存挙動)。
+- **既存の穴の露出頻度が上がる**: ローカルディレクトリの junction / symlink が UNC を指す場合、
+  `RemotePathDetector.IsRemote` は `DriveType.Fixed` を見て false → プローブ無しで SMB タイムアウト(約 60 秒)。
+  従来は「開く/保存」時だけだったのが Alt+Tab ごとになる。A-15〜A-17 の残余で本ブランチでは扱わない。
+- **`FileTimestampProvider.cs` の「壁時計が逆行しても期限切れの記録が復活しない」**は「復旧を確認した根」に
+  限れば真、一般命題としては上記のとおり範囲が広い(Task 5 再確認の任意指摘)。最終レビューで文言を狭める。
+- Fake の `TimeProvider` 既定は `TimeProvider.System`(`UiaAnnouncer` と同型。`BackupCoordinator` は必須引数)。
+
+### 11.6 セキュリティ(前倒し脆弱性レビュー・Task 3)
+
+**Critical / High / Medium ゼロ。GHSA 不要**(新しい入力面・権限昇格・情報漏えい・無言喪失経路のいずれも
+生まれていない)。Low 2 件(不在と到達不能の混同 / 陳腐化コメント)は Task 5 に同梱して解消した。
+検証済み: 文言の外部由来文字列は `DisplayName` のみで `SanitizeForDisplay.OneLine(…, 80)` を通る /
+読み直しは `LoadInto` の防御(プローブ・512 MB 上限・例外フィルタ)をすべて通り、パスは検証済み `State.Path`
+を呼出冒頭でローカルに固定する / 新しい非有界 I/O は無い(リモートは 5 秒プローブ前置) / mtime は
+「本文を書ける」以上の能力を攻撃者に与えない(`AcknowledgedWriteTimeUtc` の抑止も同様) / 再入ガードは
+`try/finally` で戻り、モーダル中に文書を閉じる posted 経路は無い。
+レビュー時点で「まだ存在しない保護」(保存直前の確認)を現在形で書いていたコメント 4 か所は、Task 4 の着地で
+真になった(最終レビューで再確認する)。
+
+### 11.7 L5(実機 SR 検証)—— 未実施
+
+チェックリストは `docs/plans/2026-09-03-external-change-detection-l5-checklist.md`(9 項目)。§7 の 7 項目に、
+ロック中ファイルでの再試行ループ(逸脱 1)と、「開き直す」で直した文字コードが読み直し後も保たれること(§3.5-2)
+を足した。項目 7(OneDrive)と項目 8(TTL の秒数)は修正前と弁別できない観測項目として明記してある。
+傘設計書 §7.1 の台帳へは**このファイルの実数**を記録すること。
