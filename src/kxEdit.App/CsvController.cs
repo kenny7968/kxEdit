@@ -97,6 +97,32 @@ public sealed class CsvController : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// M-18(設計 2026-09-03 §3.7 の訂正): 読み直しの後にセル位置を (row, col) で戻す。CSV モード中は
+    /// キャレットがセルに追従しない(<see cref="ApplyCell"/> は強調と可視化だけで、キャレットを動かすのは
+    /// <see cref="ExitMode"/>)ので、キャレット由来の <see cref="TryEnterMode"/> は先頭セルへ入る。
+    /// 読み直し前の <c>State.CsvRow / CsvCol</c> を呼出側が捕捉して渡す。
+    /// <see cref="TryEnterMode"/> と同じく <paramref name="doc"/> はアクティブ文書である前提
+    /// (<see cref="ApplyCell"/> が <c>_docs.Active</c> の State に書く)。
+    /// モード外・F2 編集中・解析不能・セルが無くなっている(<see cref="CsvDocument.GoTo"/> は範囲外を
+    /// クランプせず null)なら何もせず false(先頭セルのまま。直前の TryEnterMode の発声が残る)。
+    /// 成功時は <see cref="GoToCell"/> と同じく値と位置を発声する。
+    /// </summary>
+    public bool TryGoToCell(Document doc, int row, int col)
+    {
+        ArgumentNullException.ThrowIfNull(doc);
+        if (!doc.State.CsvMode || _editor.IsEditing)
+            return false;
+        var csv = doc.ParseCsv();
+        if (!csv.Ok)
+            return false;
+        var t = csv.GoTo(row, col);
+        if (t is null)
+            return false;
+        ApplyCell(doc.Editor, csv, t.Value.row, t.Value.col, announce: true);
+        return true;
+    }
+
     /// <summary>CSVモードを抜けて通常編集へ戻す（既存 OFF 側の移設・無変更）。</summary>
     private void ExitMode(Document doc)
     {

@@ -1592,6 +1592,11 @@ public sealed partial class MainForm : Form
     /// BeforeActiveChange が AbortEdit する。
     /// 発声を TryEnterMode より先に出すのは、パース不能で入れなかったときの通知(TryEnterMode が出す)を
     /// 最後に残すため(1 行の発声チャネルは最後の 1 件が残る。B5 の教訓)。
+    /// CSV モード中はキャレットがセルに追従しないため、セル位置は (row, col) で戻す
+    /// (<see cref="CsvController.TryGoToCell"/>。設計 §3.7 の「キャレットから導出するので近い位置に戻る」は
+    /// 偽だった: キャレット由来の TryEnterMode は先頭セルへ入る)。自動モード(<c>_openedFresh</c>)で
+    /// 読み直しの中に既に入り直している場合も同じ理由で戻す。発声は 読み直しました → CSVモード オン … →
+    /// セル、の順で最後にセルが残る(セルが無くなっていれば TryGoToCell は黙って false = 先頭セルの発声が残る)。
     /// <see cref="ExternalChangeOutcome.ReloadFailed"/> は両方の観測値が不変なので、エラーダイアログを
     /// 閉じた直後の OnActivated で同じ確認が再び出る(一過性ロックの再試行。「いいえ」で止まる)。
     /// </summary>
@@ -1601,12 +1606,17 @@ public sealed partial class MainForm : Form
         if (doc is null)
             return ExternalChangeOutcome.Skipped;
         bool wasCsv = doc.State.CsvMode;
+        int row = doc.State.CsvRow; // 読み直しで (0, 0) に戻るので先に捕捉する
+        int col = doc.State.CsvCol;
         var outcome = _file.CheckExternalChange(doc);
         if (outcome != ExternalChangeOutcome.Reloaded)
             return outcome;
         _announcer.Say("読み直しました");
-        if (wasCsv && !doc.State.CsvMode)
-            _csv.TryEnterMode(doc); // 自動モードで既に入っていれば来ない。パース不能なら入らず TryEnterMode が発声する
+        if (!wasCsv)
+            return outcome;
+        // 自動モードで既に入り直していれば TryEnterMode は飛ばす。パース不能なら入らず TryEnterMode が発声する。
+        if (doc.State.CsvMode || _csv.TryEnterMode(doc))
+            _csv.TryGoToCell(doc, row, col);
         return outcome;
     }
 

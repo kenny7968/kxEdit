@@ -33,8 +33,8 @@ public class MainFormExternalChangeTests
         return form;
     }
 
-    private static AppSettings NewSettings() =>
-        new() { BackupEnabled = false, CsvAutoModeOnOpen = false };
+    private static AppSettings NewSettings(bool csvAutoModeOnOpen = false) =>
+        new() { BackupEnabled = false, CsvAutoModeOnOpen = csvAutoModeOnOpen };
 
     /// <summary>実ファイルを外部から書き換える。mtime は同一ティック内で同じ値になりうるので明示的に進める。</summary>
     private static void ExternalWrite(string path, string content)
@@ -81,7 +81,10 @@ public class MainFormExternalChangeTests
         });
 
     /// <summary>手動で入った CSV モード(自動モード OFF)は読み直し後も保たれる。
-    /// LoadInto が CsvMode を false に落とすので、MainForm が TryEnterMode で戻す(設計 §3.7)。</summary>
+    /// LoadInto が CsvMode を false に落とすので、MainForm が TryEnterMode で戻す(設計 §3.7)。
+    /// CSV モード中はキャレットがセルに追従しないので、キャレット由来の TryEnterMode は先頭セルへ入る
+    /// = (row, col) を TryGoToCell で戻さないと (0, 0) に落ちる(仕様レビュー Important-1)。
+    /// 非既定位置 (1, 1) から始める(CLAUDE.md §4-B)。最後の発声はセル(TryGoToCell の ApplyCell)。</summary>
     [Fact]
     public void Reloaded_ManualCsvMode_ReentersCsvMode() =>
         Sta.Run(() =>
@@ -90,16 +93,73 @@ public class MainFormExternalChangeTests
             var prompt = new FakePrompt { YesNoResult = true };
             using var form = ShowMainForm(NewSettings(), tmp, prompt);
             string path = tmp.File("t.csv");
-            File2.WriteAllText(path, "a,b\r\nc,d\r\n");
+            File2.WriteAllText(path, "a,b\r\nc,d\r\ne,f\r\n");
             var doc = form.FileForTest.TryOpenOrActivate(path)!;
             Assert.True(form.CsvForTest.TryEnterMode(doc));
-            Assert.True(doc.State.CsvMode);
-            ExternalWrite(path, "a,b\r\nc,d\r\ne,f\r\n");
+            form.CsvForTest.Move(Direction.Down);
+            form.CsvForTest.Move(Direction.Right);
+            Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
+            ExternalWrite(path, "a,b\r\nc,X\r\ne,f\r\n");
 
             Assert.Equal(ExternalChangeOutcome.Reloaded, form.CheckExternalChangeOnActiveForTest());
 
             Assert.True(doc.State.CsvMode);
-            Assert.Equal("a,b\r\nc,d\r\ne,f\r\n", doc.Editor.Text);
+            Assert.Equal("a,b\r\nc,X\r\ne,f\r\n", doc.Editor.Text);
+            Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
+            Assert.Equal(CsvAnnounceFormatter.Cell("X", 2, 2), form.LastAnnouncementForTest);
+        });
+
+    /// <summary>読み直しでセルが無くなっていれば先頭セルのまま(TryGoToCell は黙って false)。
+    /// 最後の発声は TryEnterMode のもの(モード オン + 先頭セル)で、「移動できません」等は出ない。</summary>
+    [Fact]
+    public void Reloaded_ManualCsvMode_CellGone_FallsBackToFirstCell() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var prompt = new FakePrompt { YesNoResult = true };
+            using var form = ShowMainForm(NewSettings(), tmp, prompt);
+            string path = tmp.File("t.csv");
+            File2.WriteAllText(path, "a,b\r\nc,d\r\ne,f\r\n");
+            var doc = form.FileForTest.TryOpenOrActivate(path)!;
+            Assert.True(form.CsvForTest.TryEnterMode(doc));
+            form.CsvForTest.Move(Direction.Down);
+            form.CsvForTest.Move(Direction.Right);
+            Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
+            ExternalWrite(path, "a,b\r\n");
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, form.CheckExternalChangeOnActiveForTest());
+
+            Assert.True(doc.State.CsvMode);
+            Assert.Equal((0, 0), (doc.State.CsvRow, doc.State.CsvCol));
+            Assert.Equal(
+                CsvAnnounceFormatter.ModeOn + " " + CsvAnnounceFormatter.Cell("a", 1, 1),
+                form.LastAnnouncementForTest
+            );
+        });
+
+    /// <summary>自動モード ON では _openedFresh(AutoEnterCsvMode)が読み直しの中で先頭セルへ入り直す。
+    /// MainForm は TryEnterMode を飛ばし、セル位置だけ (row, col) で戻す。</summary>
+    [Fact]
+    public void Reloaded_AutoCsvMode_RestoresCell() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            var prompt = new FakePrompt { YesNoResult = true };
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: true), tmp, prompt);
+            string path = tmp.File("t.csv");
+            File2.WriteAllText(path, "a,b\r\nc,d\r\ne,f\r\n");
+            var doc = form.FileForTest.TryOpenOrActivate(path)!;
+            Assert.True(doc.State.CsvMode); // 自動モードで入っている(手動 TryEnterMode は呼ばない)
+            form.CsvForTest.Move(Direction.Down);
+            form.CsvForTest.Move(Direction.Right);
+            Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
+            ExternalWrite(path, "a,b\r\nc,X\r\ne,f\r\n");
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, form.CheckExternalChangeOnActiveForTest());
+
+            Assert.True(doc.State.CsvMode);
+            Assert.Equal((1, 1), (doc.State.CsvRow, doc.State.CsvCol));
+            Assert.Equal(CsvAnnounceFormatter.Cell("X", 2, 2), form.LastAnnouncementForTest);
         });
 
     /// <summary>読み直し後に CSV モードへ戻れない(外部変更で CSV として壊れた)場合は通常モードのまま。
@@ -126,12 +186,14 @@ public class MainFormExternalChangeTests
         });
 
     [Fact]
-    public void NoActiveDocument_Skipped() =>
+    public void UntitledActiveDocument_Skipped() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
-            using var form = ShowMainForm(NewSettings(), tmp, new FakePrompt());
-            // 起動直後の無題タブは Path=null → FileController 側が Skipped を返す
+            var prompt = new FakePrompt();
+            using var form = ShowMainForm(NewSettings(), tmp, prompt);
+            // 起動直後の無題タブは Path=null → FileController 側が Skipped を返す(何も聞かない)
             Assert.Equal(ExternalChangeOutcome.Skipped, form.CheckExternalChangeOnActiveForTest());
+            Assert.Empty(prompt.Log);
         });
 }
