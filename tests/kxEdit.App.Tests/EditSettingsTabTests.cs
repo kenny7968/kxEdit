@@ -159,7 +159,8 @@ public class EditSettingsTabTests
             using (var host = new Form { Size = new Size(800, 600) })
             {
                 host.Controls.Add(page);
-                host.CreateControl();
+                // Form を表示しないためハンドルは生成されない(CreateControl は Visible=false では
+                // 何もしない)。レイアウト計算はハンドル不要なので PerformLayout だけで足りる。
                 host.PerformLayout();
 
                 var group = Descendants(page).OfType<GroupBox>().Single();
