@@ -711,3 +711,82 @@ F-3 により、`http://kxedit.preview./leak`(末尾ドット 1 文字)は F-7 �
 5. `![g](https://%6bxedit.preview/pic.png)` —— Chromium のホスト正規化がマッピングに一致するか。
 6. `![h](https://kxedit.preview/pic.png?x=%2f../secret.txt)` —— query がフォルダー解決に
    使われないという**未実測の前提**の確認。
+
+## 16. 実施記録(2026-09-03)
+
+### 16.1 結果
+
+コード 12 commit + docs 10 commit。テストは Core 1477→**1505** / App 806→**829** / Editor 516(不変)。
+ビルド警告 0。実装は全 5 タスク(+ Task 2b)完了、**L5 は未実施**。
+
+| タスク | 内容 | commit |
+|--------|------|--------|
+| 0 | スパイク | `175bfb9`(docs のみ) |
+| 1 | V-2 + PR #57 申し送り | `56a5103` / `d7fb100` |
+| 2 | V-3 | `da05496` / `cb1fe93` |
+| 2b | F-7 | `1a26f57` / `2724e79` |
+| 3 | V-4 / V-5 / V-6 | `415e4e6` |
+| 4 | M-23 | `0090f6b` |
+| 最終レビュー反映 | A〜F | `1f81fd7` / `20bd049` / `c0b980d` / `b261b31` / `41a9655` / `9c1dd1b` |
+
+### 16.2 本設計書と実装計画が含んでいた誤り(4 件)
+
+**計画のコードは正解ではない**の実例。いずれも実測で覆った。
+
+1. **§4 の前提が偽**(Task 0)。`SetVirtualHostNameToFolderMapping` は実在確認を内蔵しており、
+   不存在フォルダーは投げ、不達 UNC では 21 秒返らない。「存在確認せずに渡す」も
+   「登録を `Task.Run` へ逃がす」(UI スレッド専有)も成立しない。→ §13.2 で作り直し。
+2. **§5 のガード位置が偽**(Task 1 の脆弱性レビュー)。`TryResolve` は絶対 URL に early return
+   するので、事後条件をそこに置くと `![x](https://kxedit.preview/..%2f..%2f…)` が素通りする。
+   → §14 で作り直し。
+3. **§14.2 のガード位置も不十分**(Task 2 の脆弱性レビュー)。ホスト判定が `Uri.Host` だったため
+   非 ASCII ホスト(U+3002)/ percent-encoded ホスト / 末尾ドットで迂回でき、生バックスラッシュは
+   Markdig が**ガードの後で** `%5C` へエスケープしていた。→ §14.6 で作り直し。
+4. **§14.6 の根拠の一部が偽**。「`LinkRewriter` への移設が F-4 と F-5 を同時に塞ぐ」は変異検証で
+   反証された(AST 段へ戻す変異で落ちるのは autolink 1 本のみ)。F-4 を塞いだのは resolver 側の
+   2 修正。**結論は正しく根拠が偽**だった型。
+
+### 16.3 セキュリティ修正が作った退行(最終レビューで発見)
+
+**F-1 / F-3 の修正で導入した `Uri.IdnHost` が、IDNA 不正ホストで `UriFormatException` を投げる。**
+`MainForm.ShowMarkdownPreview` は `DocumentTooLargeException` しか捕まえないため、
+`![x](https://xn--あ/pic.png)` を含む .md を開いてプレビューを押すと**アプリが落ちる**(実測)。
+`U+FFFD` は文字コード誤検出でも混入しうるので攻撃者不在でも踏む。main は `Uri.Host` で投げなかった。
+
+倒す向きを 2 か所で逆にして塞いだ(resolver = 判断不能なら無害化 / `Classify` = 判断不能なら Block)。
+**セキュリティ修正それ自体が可用性の退行を作りうる**という教訓として残す。
+
+同じ経路で、**main 既存**の欠陥も 1 件見つかった: Markdig の `MaximumNestingDepth`(既定 128)超過が
+素の `ArgumentException` で抜け、`"> " × 200`(**400 バイト**)で同じくアプリが落ちる。
+`MarkdownTooComplexException` へ翻訳して塞いだ。MD-L-3 のコメント「入口一箇所の cap で
+pathological な入力を封じる」も**実態と違った**(封じているのは Markdig 側の深度制限で、
+その失敗様式はアプリ終了)ので訂正した。
+
+### 16.4 「張れるのに張っていなかった」網(4 件)
+
+いずれも最終レビューで指摘され、変異で kill を確認して追加した。
+
+- `ShowMarkdownPreview` が `SnapshotText` **より前**に cap 判定する順序(IL 出現順で固定)
+- `Apply` の `ThrowIfNull` が try の**手前**にある不変条件(移設する変異が 806 本全緑で生存していた)
+- `InitAsync` が実際に `RemoteAwareDirectory.Exists` を**呼んでいる**こと(プローブを落とす退化を検出)
+- `Apply` → `NavigateToString` の**呼出順**(V-2 の要)
+
+### 16.5 受容した残余・申し送り
+
+- **到達可能だが 5 秒より遅い共有では画像が黙って出ない**(従来は「長く固まってから出る」)。
+  「B6 で画像が出なくなった」報告の第一容疑者。
+- **`http://kxedit.preview/…` の Block は無音**。従来は既定ブラウザが名前解決エラーを出していた。
+  ただし `https` の preview ホスト Block は元から無音なので、**既存の沈黙を http へ広げた**形。
+- `MarkdownPreviewForm` の ctor 変更は**公開 API の破壊的変更**(呼び出し元はリポジトリ内 1 か所)。
+- **画像 URL の関門は 1 か所**(`LinkRewriter`)。`MediaLinkExtension` は `WriteEscapeUrl` を通らない
+  ため本ブランチでパイプラインから除去した(出力バイト一致を実測確認)。
+- `mailto:…@kxedit.preview` のローカル部と、preview 宛 URL の query / fragment は無害化に
+  巻き込まれる(安全側)。
+- **`Allow` → `DenyCors`** の見直しは次リリース候補(§9)。
+
+### 16.6 L5(実機 SR 検証)—— 未実施
+
+**項目数は当初の「3 項目 + MD-L-3」から大きく増えた**(§13.2 / §14.4 / §14.5 / §14.6 / 最終レビュー)。
+チェックリストは `docs/plans/2026-09-03-preview-csp-virtual-host-l5-checklist.md` に起こした。
+傘設計書 §7.1 の台帳へは**そのファイルの実数**を記録すること
+(§10 / §12 に残る「3 項目」をそのまま転記しない —— L5 台帳の数え違いは過去に実際に起きている)。
