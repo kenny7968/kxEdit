@@ -1,3 +1,4 @@
+using System.IO;
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Session;
@@ -68,6 +69,13 @@ public class FileControllerExternalChangeTests
         var doc = host.File.TryOpenOrActivate(path);
         Assert.NotNull(doc);
         return (doc!, path);
+    }
+
+    /// <summary>外部プロセスの書換を模す: 本文と、プロバイダが返す更新時刻の両方を変える。</summary>
+    private static void ExternalWrite(Host host, string path, string content, DateTime stamp)
+    {
+        File2.WriteAllText(path, content);
+        host.Timestamps.Times[path] = stamp;
     }
 
     // ===== Task 2: 観測値の捕捉 =====
@@ -195,5 +203,215 @@ public class FileControllerExternalChangeTests
             Assert.Equal(path, doc.State.Path);
             Assert.True(doc.Editor.Modified); // dirty 復元であること(RestoreDirtyFromBackup を通った)
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+        });
+
+    // ===== Task 3: CheckExternalChange =====
+
+    [Fact]
+    public void Check_Untitled_Skipped_NoPrompt() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.Docs.CreateNew();
+            doc.Editor.Text = "x";
+
+            Assert.Equal(ExternalChangeOutcome.Skipped, host.File.CheckExternalChange(doc));
+            Assert.Empty(host.Prompt.YesNoCalls);
+        });
+
+    /// <summary>観測値が無い(開いた時に取れなかった)なら判定しない。ディスク側に値が有っても聞かない。</summary>
+    [Fact]
+    public void Check_NoKnownStamp_Skipped() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", stamp: null);
+            host.Timestamps.Times[path] = T1;
+
+            Assert.Equal(ExternalChangeOutcome.Skipped, host.File.CheckExternalChange(doc));
+            Assert.Empty(host.Prompt.YesNoCalls);
+        });
+
+    /// <summary>ディスク側が取れない(削除・到達不能)なら判定しない(設計 §3.3 / §9)。</summary>
+    [Fact]
+    public void Check_DiskUnavailable_Skipped() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            host.Timestamps.Times.Remove(path);
+
+            Assert.Equal(ExternalChangeOutcome.Skipped, host.File.CheckExternalChange(doc));
+            Assert.Empty(host.Prompt.YesNoCalls);
+        });
+
+    [Fact]
+    public void Check_SameStamp_NoChange_NoPrompt() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            File2.WriteAllText(path, "v2"); // 本文だけ変えても mtime(観測値)が同じなら変更とみなさない
+
+            Assert.Equal(ExternalChangeOutcome.NoChange, host.File.CheckExternalChange(doc));
+            Assert.Empty(host.Prompt.YesNoCalls);
+            Assert.Equal("v1", doc.Editor.Text);
+        });
+
+    /// <summary>未保存なし・はい: 読み直し、観測値更新、キャレット位置は非既定位置から保たれる。
+    /// 文言に「失われます」を含まず、既定は「はい」(defaultNo=false)。</summary>
+    [Fact]
+    public void Check_Changed_Clean_Yes_ReloadsAndKeepsCaret() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1 text", T0);
+            doc.Editor.SetCaretCharOffset(3); // 非既定位置(CLAUDE.md §4-B)
+            ExternalWrite(host, path, "v2 longer text", T1);
+            host.Prompt.YesNoResult = true;
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal("v2 longer text", doc.Editor.Text);
+            Assert.False(doc.Editor.Modified);
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            Assert.Equal(3, doc.Editor.CaretCharOffset);
+            var call = Assert.Single(host.Prompt.YesNoCalls);
+            Assert.Equal(("ファイルの変更", false), call);
+            var text = Assert.Single(host.Prompt.Log, e => e.Kind == "YesNo").Text;
+            Assert.Equal("'a.txt' は kxEdit の外で変更されました。読み直しますか?", text);
+            Assert.Contains(doc, host.OpenedFresh); // 開き直しと同じく .csv 自動モードの対象
+        });
+
+    /// <summary>新しい本文が短ければキャレットは末尾へクランプされる。</summary>
+    [Fact]
+    public void Check_Changed_Clean_Yes_ClampsCaret() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "0123456789", T0);
+            doc.Editor.SetCaretCharOffset(8);
+            ExternalWrite(host, path, "ab", T1);
+            host.Prompt.YesNoResult = true;
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal(2, doc.Editor.CaretCharOffset);
+        });
+
+    /// <summary>未保存あり・いいえ: 文言が損失を伝え、既定は「いいえ」。本文も Modified も不変。
+    /// 観測値はディスクの値になり、<b>2 回目は聞かない</b>。</summary>
+    [Fact]
+    public void Check_Changed_Dirty_No_KeepsAndAcknowledges() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+            Assert.True(doc.Editor.Modified);
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = false;
+
+            Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
+
+            Assert.Equal("mine v1", doc.Editor.Text);
+            Assert.True(doc.Editor.Modified);
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            var call = Assert.Single(host.Prompt.YesNoCalls);
+            Assert.Equal(("ファイルの変更", true), call);
+            var text = Assert.Single(host.Prompt.Log, e => e.Kind == "YesNo").Text;
+            Assert.Equal(
+                "'a.txt' は kxEdit の外で変更されました。読み直すと、このタブの未保存の変更は失われます。読み直しますか?",
+                text
+            );
+
+            Assert.Equal(ExternalChangeOutcome.NoChange, host.File.CheckExternalChange(doc));
+            Assert.Single(host.Prompt.YesNoCalls); // 2 回目は出ない
+        });
+
+    [Fact]
+    public void Check_Changed_Dirty_Yes_DiscardsEdits() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = true;
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal("theirs", doc.Editor.Text);
+            Assert.False(doc.Editor.Modified);
+        });
+
+    /// <summary>読み直しに失敗(ロック中)したら <see cref="ExternalChangeOutcome.ReloadFailed"/>。
+    /// 観測値は更新しない(次の復帰でまた聞く)。本文は不変。エラーは LoadInto が出す。</summary>
+    [Fact]
+    public void Check_Changed_Yes_ReloadFails_KeepsStampAndText() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = true;
+            using var locker = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None
+            );
+
+            Assert.Equal(ExternalChangeOutcome.ReloadFailed, host.File.CheckExternalChange(doc));
+
+            Assert.Equal("v1", doc.Editor.Text);
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc);
+            Assert.Contains(host.Prompt.Log, e => e.Kind == "Error");
+        });
+
+    /// <summary>確認ダイアログのモーダルループの中で届いた 2 本目は何もしない(設計 §3.4 再入ガード)。</summary>
+    [Fact]
+    public void Check_Reentrant_InnerCallSkipped() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            ExternalWrite(host, path, "v2", T1);
+            host.Prompt.YesNoResult = true;
+            ExternalChangeOutcome? inner = null;
+            host.Prompt.OnYesNo = () => inner = host.File.CheckExternalChange(doc);
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal(ExternalChangeOutcome.Skipped, inner);
+            Assert.Single(host.Prompt.YesNoCalls);
+        });
+
+    /// <summary>文言に載るファイル名は無害化する(BiDi 制御文字はファイル名に使える)。</summary>
+    [Fact]
+    public void Check_PromptSanitizesDisplayName() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a\u202Eb.txt", "v1", T0);
+            ExternalWrite(host, path, "v2", T1);
+            host.Prompt.YesNoResult = false;
+
+            _ = host.File.CheckExternalChange(doc);
+
+            var text = Assert.Single(host.Prompt.Log, e => e.Kind == "YesNo").Text;
+            // Ordinal 必須: 既定の culture 比較(ICU)は U+202E を「無視可能」として空一致させ、
+            // 無害化の有無に関わらず常に「見つかった」になる(= 網として機能しない)。
+            Assert.DoesNotContain("\u202E", text, StringComparison.Ordinal);
         });
 }

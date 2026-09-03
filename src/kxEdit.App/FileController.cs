@@ -993,6 +993,82 @@ public sealed class FileController
         }
     }
 
+    // ==================== 外部変更(M-18) ====================
+
+    /// <summary>M-18 の再入ガード。確認ダイアログ(モーダル)の message loop の中で、タブ切替由来の
+    /// BeginInvoke 済み検知が届いても 2 枚目を出さない(設計 2026-09-03 §3.4)。</summary>
+    private bool _checkingExternalChange;
+
+    /// <summary>
+    /// ウィンドウ復帰・タブ切替時の外部変更検知(設計 2026-09-03 §3.4)。ディスクの更新時刻が
+    /// 観測値(<see cref="DocumentState.LastKnownWriteTimeUtc"/>)と違えば読み直すか確認する。
+    /// 比較は完全一致(§3.3)。「いいえ」なら観測値をディスクの値へ更新し、次の変更まで聞き直さない。
+    /// 読み直しは <see cref="LoadInto"/>(現在の文字コードで固定)+キャレット位置の復元(§3.5)。
+    /// 発声と CSV モードの復帰は呼出側(MainForm)が <see cref="ExternalChangeOutcome.Reloaded"/> を見て行う。
+    /// 保存直前の確認は別経路(<see cref="SaveDocument"/>)。
+    /// </summary>
+    public ExternalChangeOutcome CheckExternalChange(Document doc)
+    {
+        ArgumentNullException.ThrowIfNull(doc);
+        if (_checkingExternalChange)
+            return ExternalChangeOutcome.Skipped;
+        if (
+            doc.State.Path is not string path
+            || doc.State.LastKnownWriteTimeUtc is not DateTime known
+        )
+            return ExternalChangeOutcome.Skipped;
+
+        _checkingExternalChange = true;
+        try
+        {
+            // 削除・到達不能・取得失敗は判定しない(設計 §3.3 / §9)。
+            if (_fileTimestamps.GetLastWriteTimeUtc(path) is not DateTime disk)
+                return ExternalChangeOutcome.Skipped;
+            if (disk == known)
+                return ExternalChangeOutcome.NoChange;
+
+            // 名前を先頭・問いを末尾に置く(SR は頭から読む。A-10 と同じ語順)。名前は外部由来なので無害化。
+            string name = SanitizeForDisplay.OneLine(doc.State.DisplayName, 80);
+            bool reload = doc.Editor.Modified
+                ? _prompt.YesNo(
+                    $"'{name}' は kxEdit の外で変更されました。読み直すと、このタブの未保存の変更は失われます。読み直しますか?",
+                    "ファイルの変更",
+                    defaultNo: true // 本文を失う側の確認 = 既定は安全側
+                )
+                : _prompt.YesNo(
+                    $"'{name}' は kxEdit の外で変更されました。読み直しますか?",
+                    "ファイルの変更",
+                    defaultNo: false // 失うのは Undo 履歴とキャレット位置だけ
+                );
+            if (!reload)
+            {
+                doc.State.LastKnownWriteTimeUtc = disk; // 次の変更まで聞き直さない
+                return ExternalChangeOutcome.Kept;
+            }
+            return ReloadFromDisk(doc, path)
+                ? ExternalChangeOutcome.Reloaded
+                : ExternalChangeOutcome.ReloadFailed;
+        }
+        finally
+        {
+            _checkingExternalChange = false;
+        }
+    }
+
+    /// <summary>設計 §3.5。キャレットの文字位置を先に取り、読み直した後にクランプして戻す。
+    /// 失敗時は <see cref="LoadInto"/> がエラーを出し、State は変わらない(読込前に throw する)。</summary>
+    private bool ReloadFromDisk(Document doc, string path)
+    {
+        int caret = doc.Editor.CaretCharOffset;
+        // 自動判定に戻さない: ユーザーが「開き直す」で直した文字コードを勝手に覆さないため。
+        // 外で文字コードが変わっていれば LoadInto の U+FFFD 警告が出る(既存)。
+        if (!LoadInto(doc, path, forcedCodePage: doc.State.Encoding.CodePage))
+            return false;
+        doc.Editor.SetCaretCharOffset(caret); // SnapAndClamp + BringCaretIntoView を内蔵
+        _openedFresh(doc); // 開き直し(ReopenWithEncoding)と同じ: 設定次第で .csv の自動モード
+        return true;
+    }
+
     // ==================== 確認 / 復元 ====================
 
     /// <summary>
