@@ -279,6 +279,7 @@ public class FileControllerExternalChangeTests
             Assert.Equal("v2 longer text", doc.Editor.Text);
             Assert.False(doc.Editor.Modified);
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            // 既定値の確認。リセットの網は Check_Kept_ThenChangedAgain_PromptsAgain 側。
             Assert.Null(doc.State.AcknowledgedWriteTimeUtc);
             Assert.Equal(3, doc.Editor.CaretCharOffset);
             var call = Assert.Single(host.Prompt.YesNoCalls);
@@ -305,6 +306,31 @@ public class FileControllerExternalChangeTests
             Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
 
             Assert.Equal(2, doc.Editor.CaretCharOffset);
+        });
+
+    /// <summary>読み直しは現在の文字コードで固定する(自動判定に戻さない = 設計 §3.5)。ユーザーが
+    /// 「開き直す」で 932 にした ASCII 本文は、外部変更後の読み直しでも 932 のまま。
+    /// <c>forcedCodePage</c> を null(自動判定)に変異させると、ASCII は EncodingDetector の
+    /// ②(厳格 UTF-8 デコード成功)で 65001 へ戻るので弁別できる。</summary>
+    [Fact]
+    public void Check_Reload_KeepsUserChosenEncoding() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "ascii v1", T0);
+            Assert.Equal(65001, doc.State.Encoding.CodePage); // 自動判定の既定(ASCII → UTF-8)
+            host.Dialogs.EncodingCodePage = 932;
+            host.File.ReopenWithEncoding(); // アクティブタブ = 開いた直後の doc
+            Assert.Equal(932, doc.State.Encoding.CodePage);
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc); // LoadInto が取り直すが Times は不変
+            ExternalWrite(host, path, "ascii v2", T1);
+            host.Prompt.YesNoResult = true;
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal(932, doc.State.Encoding.CodePage);
+            Assert.Equal("ascii v2", doc.Editor.Text);
         });
 
     /// <summary>未保存あり・いいえ: 文言が損失を伝え、既定は「いいえ」。本文も Modified も不変。

@@ -1033,17 +1033,12 @@ public sealed class FileController
 
             // 名前を先頭・問いを末尾に置く(SR は頭から読む。A-10 と同じ語順)。名前は外部由来なので無害化。
             string name = SanitizeForDisplay.OneLine(doc.State.DisplayName, 80);
-            bool reload = doc.Editor.Modified
-                ? _prompt.YesNo(
-                    $"'{name}' は kxEdit の外で変更されました。読み直すと、このタブの未保存の変更は失われます。読み直しますか?",
-                    "ファイルの変更",
-                    defaultNo: true // 本文を失う側の確認 = 既定は安全側
-                )
-                : _prompt.YesNo(
-                    $"'{name}' は kxEdit の外で変更されました。読み直しますか?",
-                    "ファイルの変更",
-                    defaultNo: false // 失うのは Undo 履歴とキャレット位置だけ
-                );
+            bool dirty = doc.Editor.Modified;
+            string text = dirty
+                ? $"'{name}' は kxEdit の外で変更されました。読み直すと、このタブの未保存の変更は失われます。読み直しますか?"
+                : $"'{name}' は kxEdit の外で変更されました。読み直しますか?";
+            // 本文を失う側(未保存あり)だけ既定を安全側(いいえ)へ。未保存なしで失うのは Undo 履歴とキャレット位置だけ。
+            bool reload = _prompt.YesNo(text, "ファイルの変更", defaultNo: dirty);
             if (!reload)
             {
                 // 次の変更まで聞き直さない。本文の基準(LastKnownWriteTimeUtc)は動かさない
@@ -1062,7 +1057,9 @@ public sealed class FileController
     }
 
     /// <summary>設計 §3.5。キャレットの文字位置を先に取り、読み直した後にクランプして戻す。
-    /// 失敗時は <see cref="LoadInto"/> がエラーを出し、State は変わらない(読込前に throw する)。</summary>
+    /// 失敗時は <see cref="LoadInto"/> がエラーを出し、State は変わらない(読込前に throw する)。
+    /// <see cref="LoadInto"/> 経由なので開き直しと同じ副作用を持つ(<see cref="RegisterRecent"/> で
+    /// 最近使ったファイルの先頭へ動く・CSV モードは解除され <c>_openedFresh</c> が設定次第で自動モードへ戻す)。</summary>
     private bool ReloadFromDisk(Document doc, string path)
     {
         int caret = doc.Editor.CaretCharOffset;
