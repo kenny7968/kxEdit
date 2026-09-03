@@ -4,7 +4,8 @@ using kxEdit.Core.IO;
 namespace kxEdit.App;
 
 /// <summary>
-/// A-17: 「フォルダーが在るか」を UI スレッドから聞くときの、<b>grep 経路の</b>唯一の入口。
+/// A-17: 「フォルダーが在るか」を<b>境界付きで</b>聞くときの共通入口
+/// (導入時は grep 経路専用だった。現在の呼出点は下の「grep 専用ではなくなった」の段落を参照)。
 /// <see cref="RemotePathDetector.IsRemote"/> が true(UNC / <c>DriveType=Network</c> のドライブ)の
 /// ときだけ境界付きプローブへ回し、ローカルは <see cref="Directory.Exists"/> 直呼び
 /// = <b>挙動不変・退避スレッドも作らない</b>。
@@ -29,24 +30,25 @@ namespace kxEdit.App;
 /// <c>Directory.Exists</c> は <b>2 ms</b> で返るので実害はない。つまり「マップドネットワーク
 /// ドライブもプローブ対象」が成り立つのは<b>マッピングが名前空間に生きている間だけ</b>。</para>
 ///
-/// <para>2 呼出点(<c>GrepController.RunAsync</c> / <c>GrepDialog.InitialBrowsePath</c>)で
-/// 同じ判断を繰り返さないために切り出す。タイムアウトの 5 秒は HIGH-6 / CSV-M-1 /
+/// <para>切り出し当時の 2 呼出点(<c>GrepController.RunAsync</c> /
+/// <c>GrepDialog.InitialBrowsePath</c>)で同じ判断を繰り返さないために切り出した
+/// (現在の呼出点は下の「grep 専用ではなくなった」の段落を参照)。
+/// タイムアウトの 5 秒は HIGH-6 / CSV-M-1 /
 /// <see cref="FileTimestampProvider"/> / <see cref="FileMetaProvider"/> と同じ契約。</para>
 ///
-/// <para><b>「唯一の入口」は grep 経路に限った話で、App 全体ではない</b>(最終レビュー I-2)。
-/// <c>MarkdownPreviewForm.InitAsync</c> が <c>Directory.Exists(_baseDir)</c> を
-/// <b>UI スレッドで無境界に</b>呼んでいる(<c>Shown += async … await InitAsync()</c> の継続は
-/// WinForms の SynchronizationContext で UI スレッドへ戻る)。<c>_baseDir</c> は
-/// <c>MainForm</c> が <c>Path.GetDirectoryName(doc.State.Path)</c> で作るので、
-/// <b>共有上の .md を開いた後にその共有が不達になるとプレビュー表示で同じ 21 秒が起きる</b> ——
-/// つまり<b>同じバグクラスの未修正箇所</b>である。A-17 の定義は grep の 2 か所なので
-/// <b>本ブランチのスコープ外</b>とし、プレビュー系の別ブランチ(監査 §9 の V-2〜V-6)で回収する。</para>
-///
-/// <para><b>プレビュー側を「ついでに」境界付きにしてはいけない</b>(申し送りの前提):
-/// ここを false へ倒すと <c>SetVirtualHostNameToFolderMapping</c> を張らなくなり、
-/// <c>.preview</c> 仮想ホストの<b>実 DNS 解決</b>が起きる V-2 の経路を踏ませうる。
-/// 到達不能を「フォルダーが無い」に畳む本クラスの意味論は、そのフェイルセーフとは
-/// 向きが逆なので、<b>プレビュー側の設計判断とセットで扱う</b>。</para>
+/// <para><b>grep 専用ではなくなった</b>(2026-09-03・B6)。
+/// <c>MarkdownPreviewForm.InitAsync</c> も本クラスを使う —— ただし
+/// <b>UI スレッドから直接ではなく <c>Task.Run</c> 越しに await する</b>形で、
+/// <b>実在確認では</b> UI スレッドをブロックしない(grep は同期呼び出しのまま)。
+/// なお実在確認の直後に来る登録
+/// (<c>SetVirtualHostNameToFolderMapping</c>) は <c>CoreWebView2</c> が UI スレッド専有の
+/// ため逃がせず、確認と登録の間に共有が落ちる競合では<b>登録そのものが 21 秒
+/// ブロックしうる</b>(設計書 §13.2 の残余リスクとして受容)。
+/// かつての申し送り「プレビュー側を『ついでに』境界付きにしてはいけない
+/// (到達不能を『フォルダーが無い』に畳むと未マップになり監査 §9 V-2 を踏む)」は、
+/// <b>プレビュー側が空フォルダーへ倒すフェイルセーフを持ったことで解消した</b>
+/// (<c>docs/plans/2026-09-03-preview-csp-virtual-host-design.md</c> §13.2)。
+/// 警告の本旨は「境界付きにするな」ではなく「フェイルセーフとセットでなければするな」だった。</para>
 ///
 /// <para><b>手前で正規化しない</b>(Task 4 の実測に基づく意図的な設計):
 /// <see cref="Directory.Exists"/> は内部で <c>Path.GetFullPath</c> を通してから存在確認するので

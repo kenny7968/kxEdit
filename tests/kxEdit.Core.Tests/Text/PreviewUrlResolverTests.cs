@@ -72,4 +72,58 @@ public class PreviewUrlResolverTests
         Assert.False(PreviewUrlResolver.TryResolve(input, out string? actual));
         Assert.Null(actual);
     }
+
+    [Theory]
+    // preview 仮想ホスト宛の URL に残った %2f / %5c / 生 '\' は % 自身をエスケープして
+    // 無害化する (区切り文字を含まない 1 つのファイル名への要求になる)。
+    // System.Uri はこれらを復号しない (AbsoluteUri / AbsolutePath いずれもエスケープを大小
+    // 込みで保つ・実測) ので、ここで潰さない限り WebView2 まで生のまま届く。
+    [InlineData("https://kxedit.preview/..%2f..%2fx", "https://kxedit.preview/..%252f..%252fx")]
+    // 大小保存 (%2F → %252F)。IgnoreCase の検出と、置換で元の大小を保つことの両方を固定する。
+    [InlineData("https://kxedit.preview/..%2F..%2Fx", "https://kxedit.preview/..%252F..%252Fx")]
+    [InlineData("https://kxedit.preview/a%5cb", "https://kxedit.preview/a%255cb")]
+    [InlineData("https://kxedit.preview/a%5Cb", "https://kxedit.preview/a%255Cb")]
+    // --- 脆弱性レビュー (2026-09-03) で実測された迂回形 ---
+    // F-1: 非 ASCII ホスト。Uri.Host は Unicode を保つので Host 比較では外れるが、
+    // Markdig の WriteEscapeUrl は IdnHost で ASCII 化して出力する = 実質 preview 宛。
+    // 判定を Uri.Host に戻すとこの 2 本が落ちる。
+    [InlineData("https://kxedit。preview/..%2f..%2fx", "https://kxedit。preview/..%252f..%252fx")]
+    [InlineData("https://ｋxedit.preview/..%2f..%2fx", "https://ｋxedit.preview/..%252f..%252fx")]
+    // F-2: percent-encode されたホスト。.NET は Uri.TryCreate(Absolute) に失敗するが
+    // WHATWG (Chromium) は percent-decode → domain-to-ASCII で kxedit.preview に解決する。
+    // parse 不能を「そのまま返す」へ戻すとこの 2 本が落ちる。
+    [InlineData("https://%6bxedit.preview/..%2f..%2fx", "https://%6bxedit.preview/..%252f..%252fx")]
+    [InlineData("https://kxedit%2epreview/..%2f..%2fx", "https://kxedit%2epreview/..%252f..%252fx")]
+    // F-3: 末尾ドット。Uri.Host も Uri.IdnHost も末尾ドットを保持するので明示的に削る。
+    // TrimEnd('.') を外すとこの 1 本が落ちる。
+    [InlineData("https://kxedit.preview./..%2f..%2fx", "https://kxedit.preview./..%252f..%252fx")]
+    // F-4: 生のバックスラッシュ。LinkRewriter は Markdig がエスケープする前の URL を渡すので
+    // ここには生 '\' が届く。素通りさせると直後の WriteEscapeUrl が %5C を作る。
+    // 正規表現から `|\\` を外すとこの 2 本が落ちる。
+    [InlineData(
+        "https://kxedit.preview/..\\..\\secret.txt",
+        "https://kxedit.preview/..%255C..%255Csecret.txt"
+    )]
+    [InlineData("..\\..\\secret.txt", "..%255C..%255Csecret.txt")] // 相対形 (parse 不能側)
+    // 対象外はそのまま返す (退化していないことの対照)
+    [InlineData("https://kxedit.preview/my%20file.png", "https://kxedit.preview/my%20file.png")]
+    [InlineData("https://example.com/a%2fb", "https://example.com/a%2fb")] // 外部 origin
+    [InlineData("https://example.com/a%5cb", "https://example.com/a%5cb")] // 外部 origin
+    [InlineData("https://example.com/a\\b", "https://example.com/a\\b")] // 外部 origin の生 '\'
+    // 末尾ドットが付いた外部ホストも外部のまま (TrimEnd('.') が preview 側だけに効くこと)。
+    [InlineData("https://example.com./a%2fb", "https://example.com./a%2fb")]
+    // mailto: は「parse できてホストが preview でない」で除外される (default-deny の穴埋めが
+    // 正当な scheme を巻き込んでいないことの対照)。
+    [InlineData("mailto:a%2fb@example.com", "mailto:a%2fb@example.com")]
+    [InlineData("#anchor", "#anchor")]
+    // 裸のフラグメントは同一文書内スクロール。# ガードを外すとこの 1 本が落ちる
+    // (default-deny により parse 不能側へ落ちて %252f 化されるため)。
+    [InlineData("#a%2fb", "#a%2fb")]
+    // 相対 URL は絶対 URL として parse できない。default-deny 側へ落ちるが、対象文字を
+    // 含まないので replace は no-op になり結果は不変。
+    [InlineData("pic.png", "pic.png")]
+    [InlineData("", "")]
+    [InlineData(null, null)]
+    public void NeutralizeEncodedSeparators_Cases(string? input, string? expected) =>
+        Assert.Equal(expected, PreviewUrlResolver.NeutralizeEncodedSeparators(input));
 }

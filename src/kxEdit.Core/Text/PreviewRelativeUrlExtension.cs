@@ -6,11 +6,18 @@ using Markdig.Syntax.Inlines;
 namespace kxEdit.Core.Text;
 
 /// <summary>
-/// 本文中の相対 URL を <see cref="PreviewUrlResolver"/> で絶対化する Markdig 拡張。
-/// <c>LinkInline</c> はリンクと画像の両方を表すので 1 箇所で足りる。
-/// 書き換えは <c>DocumentProcessed</c> (描画前) で行うため、描画時に効く
-/// <see cref="SafeLinkExtension"/> の scheme whitelist より前段になる。
-/// scheme 付き URL は <see cref="PreviewUrlResolver"/> が触らないので whitelist の判定は不変。
+/// preview 経路の URL 書き換えを担う Markdig 拡張。役割は 2 つあり、<b>適用段が違う</b>。
+/// <list type="number">
+///   <item><b>相対 URL の絶対化</b> (A-2) —— AST 段 (<c>DocumentProcessed</c>) で
+///     <c>LinkInline</c> を走査する。<c>LinkInline</c> はリンクと画像の両方を表し、
+///     CommonMark autolink は定義上 scheme 必須 (= 相対になりえない) ので、
+///     絶対化にはこの 1 箇所で足りる。描画時に効く <see cref="SafeLinkExtension"/> の
+///     scheme whitelist より前段になるが、scheme 付き URL は
+///     <see cref="PreviewUrlResolver.TryResolve"/> が触らないので whitelist の判定は不変。</item>
+///   <item><b>区切り文字の密輸の無害化</b> (V-3) —— 描画段
+///     (<c>HtmlRenderer.LinkRewriter</c>) で行う。理由は
+///     <see cref="Setup(MarkdownPipeline, IMarkdownRenderer)"/> のコメント参照。</item>
+/// </list>
 /// </summary>
 internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
 {
@@ -23,7 +30,67 @@ internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
         pipeline.DocumentProcessed += OnDocumentProcessed;
     }
 
-    public void Setup(MarkdownPipeline pipeline, IMarkdownRenderer renderer) { }
+    /// <summary>
+    /// V-3: 区切り文字の密輸 (<c>%2f</c> / <c>%5c</c> / 生の <c>\</c>) を潰すガードを
+    /// Markdig の <c>LinkRewriter</c> として登録する。
+    /// <para>
+    /// <b>AST 段 (<c>DocumentProcessed</c>) ではなくここに置く理由。</b>
+    /// 主張と実測をきっちり分けて書く (ここを曖昧にすると「実在しない防御を謳う」ことになる):
+    /// <list type="number">
+    ///   <item><b>これだけが実測で必須</b> —— <c>Descendants&lt;LinkInline&gt;()</c> は
+    ///     <c>AutolinkInline</c> (<c>&lt;https://…&gt;</c>) を拾わないので、AST 段のガードでは
+    ///     autolink が素通りする (F-5)。<c>LinkRewriter</c> は autolink 経路でも発火する
+    ///     (実測)。ガードを AST 段へ戻す変異を掛けると、落ちるのは
+    ///     <c>Preview_EncodedSeparators_NeverReachOutput</c> の autolink ケース<b>1 本だけ</b>
+    ///     だった (実測)。</item>
+    ///   <item><b>設計上の整合 (現時点では穴ではない)</b> —— 主張は「出力 HTML に区切り
+    ///     エスケープを載せない」であり、<c>LinkRewriter</c> は <c>WriteEscapeUrl</c> の中
+    ///     = 出力を書く直前で適用されるので、主張と適用点が一致する。
+    ///     F-4 (生の <c>\</c> を <c>WriteEscapeUrl</c> が <c>%5C</c> にする) を実際に塞いだのは
+    ///     この移設ではなく <see cref="PreviewUrlResolver"/> 側の 2 つの修正
+    ///     (<c>AbsolutePath</c> 前置チェックの撤去と、生 <c>\</c> の対象化) である ——
+    ///     上記の変異で F-4 のケースは落ちなかった。<br/>
+    ///     旧実装が F-4 を取り逃がしていた原因自体は AST 段固有ではあった:
+    ///     <c>Uri.AbsolutePath</c> が <c>\</c> を <c>/</c> へ正規化して dot-segment を畳むため
+    ///     「区切りは無い」と見えていた。</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// 上書き衝突は無い: Markdig の既定値は null で、本リポジトリで
+    /// <c>LinkRewriter</c> を設定するのはここだけ (grep 済み・既定値 null は実測)。
+    /// </para>
+    /// <para>
+    /// <b>訂正 (F-2・2026-09-03)</b>: 旧記述「<c>Setup</c> は描画のたびに新しい
+    /// <c>HtmlRenderer</c> に対して呼ばれるので、代入が renderer 間で共有されることもない」は
+    /// <b>偽</b>だった。Markdig の <c>MarkdownPipeline</c> は <c>HtmlRendererCache</c> で
+    /// renderer をプールしており、<b>逐次 10 回の render で <c>Setup</c> の呼び出しは 1 回</b>、
+    /// そのあと 200 並列で +9 回だった (実測。並列側の増分は同時実行数に依存する)。
+    /// つまり代入は renderer 間で<b>共有される</b>。
+    /// </para>
+    /// <para>
+    /// それでも安全な根拠は次の 3 点:
+    /// <list type="number">
+    ///   <item>代入するのが<b>静的メソッドへの参照</b>であること (インスタンス状態を
+    ///     持ち込まないので、renderer が使い回されても書き換え規則は同じ)。</item>
+    ///   <item>pool が <b>pipeline ごと</b>であること (preview パイプラインの renderer が
+    ///     空 baseHref パイプラインへ流れることはない)。</item>
+    ///   <item>Markdig の pooled reset が <c>LinkRewriter</c> を<b>消さない</b>こと ——
+    ///     1 回目の <c>Setup</c> でだけ <c>LinkRewriter</c> を設定する拡張を作って
+    ///     3 回連続で render すると、2 回目以降も書き換えが効いた (実測)。
+    ///     <b>これは Markdig の未文書化挙動への依存</b>である。</item>
+    /// </list>
+    /// 3 点目が崩れたら (pooled reset が <c>LinkRewriter</c> を消すようになったら)、
+    /// <c>MarkdownRendererTests.Preview_EncodedSeparators_NeverReachOutput</c> の 14 ケースは
+    /// 同一 pipeline を使い回すので<b>2 本目以降の 13 本が落ちて検知できる</b>。
+    /// </para>
+    /// </summary>
+    public void Setup(MarkdownPipeline pipeline, IMarkdownRenderer renderer)
+    {
+        if (renderer is HtmlRenderer html)
+        {
+            html.LinkRewriter = PreviewUrlResolver.NeutralizeEncodedSeparators;
+        }
+    }
 
     private static void OnDocumentProcessed(MarkdownDocument document)
     {

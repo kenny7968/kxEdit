@@ -46,6 +46,38 @@ internal static class IlCallees
     public static List<MethodBase> OfIncludingNewobj(MethodBase method) =>
         Scan(method, includeNewobj: true);
 
+    /// <summary>
+    /// <c>async</c> メソッドは、本体がコンパイラ生成の状態機械の <c>MoveNext</c> に入っている。
+    /// 元のメソッドを <see cref="Of"/> に掛けても状態機械の起動しか見えないので、走査対象を
+    /// <c>MoveNext</c> へ解決する。<c>[AsyncStateMachine]</c> 属性の欠落や改名は
+    /// <c>Assert.NotNull</c> で止める(走査ゼロ件が「呼んでいない」と読める形にしない)。
+    /// <para>
+    /// <see cref="Of"/> と同じ理由でここに置く: 以前は <c>GrepControllerTests</c> の private
+    /// コピー 1 本だけだったが、B6 で <c>MarkdownPreviewForm.InitAsync</c> にも同型の構造網が
+    /// 要ったため、走査補助を 2 本に分岐させずこの型へ集約した。
+    /// </para>
+    /// </summary>
+    public static MethodInfo AsyncBodyOf(Type type, string name)
+    {
+        var m = type.GetMethod(
+            name,
+            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(m);
+        var attr = (System.Runtime.CompilerServices.AsyncStateMachineAttribute?)
+            Attribute.GetCustomAttribute(
+                m!,
+                typeof(System.Runtime.CompilerServices.AsyncStateMachineAttribute)
+            );
+        Assert.NotNull(attr);
+        var move = attr!.StateMachineType.GetMethod(
+            "MoveNext",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
+        Assert.NotNull(move);
+        return move!;
+    }
+
     private static List<MethodBase> Scan(MethodBase method, bool includeNewobj)
     {
         byte[] il = method.GetMethodBody()!.GetILAsByteArray()!;

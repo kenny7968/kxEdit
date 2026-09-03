@@ -39,6 +39,31 @@ internal sealed class PreviewUserDataFolder : IDisposable
         System.IO.Directory.CreateDirectory(Path);
     }
 
+    /// <summary>
+    /// V-2: 仮想ホストのマッピング先にする空フォルダー(<c>{Path}\empty-base</c>)を作って返す。
+    /// <para>
+    /// <b>契約: このフォルダーには何も置かない。</b> マッピング専用であり、ここに置いた
+    /// ファイルは <c>https://kxedit.preview/</c> でプレビューから読める。
+    /// </para>
+    /// <para>
+    /// WebView2 のプロファイル実体は <see cref="Path"/> 直下に作られるので、マッピング先を
+    /// サブフォルダーにして<b>プロファイルを直接のルートにはしない</b>。ただし
+    /// <c>..%2f</c> 等のエスケープ密輸でこのフォルダーの外(= 親のプロファイル)へ
+    /// 出られるかは<b>未確認</b>(監査 V-3 / L5 項目 1 で確認する)。WebView2 が
+    /// <c>%2f</c> をパス区切りとしてデコードするなら届きうるため、<b>「プロファイルは
+    /// 露出しない」と断定できる実測はまだ無い</b>。
+    /// 置き場所を変えても <c>..</c> の反復回数が変わるだけで traversal の成否は変わらないため、
+    /// 対処は V-3 側(密輸そのものを塞ぐ)で行う。
+    /// </para>
+    /// <para>後始末は <see cref="Dispose"/> が親ごと消すので専用の経路を持たない。</para>
+    /// </summary>
+    public string EnsureEmptyBaseFolder()
+    {
+        string path = System.IO.Path.Combine(Path, "empty-base");
+        System.IO.Directory.CreateDirectory(path); // idempotent: 既存でも throw しない
+        return path;
+    }
+
     public void Dispose()
     {
         try

@@ -1673,13 +1673,26 @@ public sealed partial class MainForm : Form
     /// <remarks>
     /// MD-L-3 L5 検証: 4M 文字超の .md を開いて Preview 起動 → エラーダイアログが出て
     /// プレビュー窓は開かないこと。MainForm には IUserPrompt が注入されていないため、
-    /// MarkdownPreviewForm.cs:135 と同様に MessageBox.Show を直接使う。
+    /// <c>MarkdownPreviewForm.InitAsync</c> の catch と同様に MessageBox.Show を直接使う
+    /// (行番号ではなくメソッド名で指す —— 旧記述の "MarkdownPreviewForm.cs:135" は
+    /// 既に陳腐化していた)。
+    /// M-23: cap 判定は TextLength で行い SnapshotText を呼ばない。
+    /// B: Markdig のネスト深度上限超過 (MarkdownTooComplexException) も同様に提示する。
     /// </remarks>
     private void ShowMarkdownPreview()
     {
         var doc = _docs.Active;
         if (doc is null)
             return;
+
+        // M-23: cap 超過は SnapshotText を呼ぶ前に弾く。全文 string 化してから Render 内で
+        // 判定すると、1G 文字級の文書では string 化そのものが OutOfMemoryException になり
+        // 未捕捉で落ちる。TextLength は材料化せずに文字数を返す。
+        if (MarkdownRenderer.ExceedsMaxChars(doc.Editor.TextLength))
+        {
+            ShowPreviewTooLarge(MarkdownRenderer.TooLargeDetail(doc.Editor.TextLength));
+            return;
+        }
 
         string markdown = doc.Editor.SnapshotText; // 編集中バッファ（未保存も反映）
         string? dir = System.IO.Path.GetDirectoryName(doc.State.Path);
@@ -1691,20 +1704,66 @@ public sealed partial class MainForm : Form
         catch (DocumentTooLargeException ex)
         {
             // MD-L-3: 入力サイズ cap 超過時はユーザに提示してプレビュー窓は開かない。
-            MessageBox.Show(
-                this,
-                $"プレビューを表示できません。マークダウン本文が大きすぎます。\n\n詳細: {ex.Message}",
-                "プレビューを表示できません",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning
-            );
-            _docs.Active?.FocusTarget.Focus(); // 成功パスと対称: 戻り後は編集領域へフォーカス
+            // M-23: 事前判定 (上の ExceedsMaxChars) と同じ提示を通るよう共通化した。
+            ShowPreviewTooLarge(ex.Message);
+            return;
+        }
+        catch (MarkdownTooComplexException ex)
+        {
+            // B: Markdig のネスト深度上限 (既定 128) 超過。"> " × 200 = 400 バイトで発火する
+            // ので 4M 文字 cap のはるか下で起きる。翻訳前は未捕捉例外として
+            // Application.ThreadException → CrashHandler → アプリ終了になっていた。
+            // baseHref allow-list 違反 (MD-L-4) の ArgumentException はここへ来ない
+            // (Render 側で型が分かれている) ので、実装バグは引き続き伝播する。
+            ShowPreviewNotRenderable(ex.Message);
             return;
         }
 
-        using var f = new MarkdownPreviewForm(html, dir, doc.State.DisplayName);
+        using var f = new MarkdownPreviewForm(
+            html,
+            dir,
+            doc.State.DisplayName,
+            new FileReachabilityProbe()
+        );
         f.ShowDialog(this);
         _docs.Active?.FocusTarget.Focus(); // 戻り後は編集領域へフォーカス
+    }
+
+    /// <summary>
+    /// M-23: プレビューが上限超過で開けないことをユーザへ提示する（提示後は編集領域へフォーカス）。
+    /// <para>
+    /// 呼び出し元は 2 つ: ① <see cref="ShowMarkdownPreview"/> の事前判定
+    /// (<c>MarkdownRenderer.ExceedsMaxChars</c>) ② <c>MarkdownRenderer.Render</c> が投げる
+    /// <see cref="DocumentTooLargeException"/> の catch。<b>両者で文面・タイトル・アイコン・
+    /// フォーカス復帰を同一にする</b>ためにここへ切り出してある
+    /// (detail はどちらも <c>MarkdownRenderer.TooLargeDetail</c> 由来)。
+    /// </para>
+    /// </summary>
+    private void ShowPreviewTooLarge(string detail) =>
+        ShowPreviewUnavailable("マークダウン本文が大きすぎます。", detail);
+
+    /// <summary>
+    /// B: プレビューが<b>構造の複雑さ</b>で開けないことをユーザへ提示する。
+    /// 「大きすぎます」とは別文言にする —— 400 バイトの .md でも起きるので、
+    /// サイズの話にすると原因を取り違えさせる (実際 <c>"&gt; " × 200</c> で発火する)。
+    /// </summary>
+    private void ShowPreviewNotRenderable(string detail) =>
+        ShowPreviewUnavailable("マークダウンの構造が深すぎて表示できません。", detail);
+
+    /// <summary>
+    /// プレビューを開けなかったことの提示 (文面・タイトル・アイコン・フォーカス復帰を
+    /// 全経路で同一にするための 1 箇所)。
+    /// </summary>
+    private void ShowPreviewUnavailable(string reason, string detail)
+    {
+        MessageBox.Show(
+            this,
+            $"プレビューを表示できません。{reason}\n\n詳細: {detail}",
+            "プレビューを表示できません",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning
+        );
+        _docs.Active?.FocusTarget.Focus(); // 成功パスと対称: 戻り後は編集領域へフォーカス
     }
 
     /// <summary>選択範囲（無ければ全文）を WrapColumn 桁で禁則整形する（Stage 8 で <see cref="KinsokuFormatController"/> へ委譲）。

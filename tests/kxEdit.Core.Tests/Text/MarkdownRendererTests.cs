@@ -1,11 +1,71 @@
+using System.Reflection;
 using System.Text.RegularExpressions;
 using kxEdit.Core.Text;
+using Markdig;
+using Markdig.Extensions.Abbreviations;
+using Markdig.Extensions.GenericAttributes;
+using Markdig.Extensions.MediaLinks;
 
 namespace kxEdit.Core.Tests.Text;
 
 public class MarkdownRendererTests
 {
     private const string Base = "https://kxedit.preview/";
+
+    /// <summary>
+    /// C (最終レビュー): <c>LinkRewriter</c> (V-3 の無害化) を通らないレンダラを持つ拡張が
+    /// パイプラインに<b>居ないこと</b>を構造で固定する。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: 現状 <c>MediaLinkExtension</c> が居ても出力は
+    /// 変わらない —— <c>SafeLinkExtension.Setup</c> の
+    /// <c>ObjectRenderers.Replace&lt;LinkInlineRenderer&gt;()</c> が MediaLinks の
+    /// <c>TryWriters</c> を刺した renderer インスタンスごと差し替えているため。
+    /// つまり関門が効いているのは<b>拡張の登録順への偶然の依存</b>で、順序が変われば
+    /// <c>&lt;video&gt;&lt;source src="…%2f…"&gt;</c> が黙って出る (SafeLinkExtension を外した
+    /// 同一構成で実測)。観測できる差が無いので構造で固定するしかない。
+    /// </para>
+    /// <para>
+    /// GenericAttributes (A-21) と Abbreviations (FINDING 1) の除去も同じ理由でここに置く
+    /// (あちらは出力差があるので挙動テストもあるが、除去の事実自体はここが唯一の直接の網)。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("PreviewPipeline")]
+    [InlineData("Pipeline")]
+    public void Pipelines_DoNotContainRewriterBypassingExtensions(string fieldName)
+    {
+        var field = typeof(MarkdownRenderer).GetField(
+            fieldName,
+            BindingFlags.NonPublic | BindingFlags.Static
+        );
+        Assert.NotNull(field); // 改名で走査ゼロ件=「無い」と読めるのを防ぐ
+        var pipeline = Assert.IsType<MarkdownPipeline>(field!.GetValue(null));
+
+        // 陽性対照: 走査が実際に拡張を拾えていること (空リストなら以下は空虚に緑になる)。
+        Assert.NotEmpty(pipeline.Extensions);
+        Assert.Contains(pipeline.Extensions, e => e is SafeLinkExtension);
+
+        Assert.DoesNotContain(pipeline.Extensions, e => e is MediaLinkExtension);
+        Assert.DoesNotContain(pipeline.Extensions, e => e is GenericAttributesExtension);
+        Assert.DoesNotContain(pipeline.Extensions, e => e is AbbreviationExtension);
+    }
+
+    /// <summary>
+    /// C の陽性対照: preview パイプラインにだけ
+    /// <c>PreviewRelativeUrlExtension</c> (= <c>LinkRewriter</c> の設定元) が入っていること。
+    /// 上のテストが「拡張を消す方向」だけを見ているので、対で置く。
+    /// </summary>
+    [Theory]
+    [InlineData("PreviewPipeline", true)]
+    [InlineData("Pipeline", false)]
+    public void PreviewRelativeUrlExtension_IsPreviewPipelineOnly(string fieldName, bool expected)
+    {
+        var pipeline = (MarkdownPipeline)
+            typeof(MarkdownRenderer)
+                .GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)!
+                .GetValue(null)!;
+        Assert.Equal(expected, pipeline.Extensions.Any(e => e is PreviewRelativeUrlExtension));
+    }
 
     [Fact]
     public void Heading_becomes_h1() =>
@@ -319,6 +379,92 @@ public class MarkdownRendererTests
         Assert.Equal((long)(MarkdownRenderer.MaxMarkdownChars + 1) * 2L, ex.AttemptedBytes);
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(MarkdownRenderer.MaxMarkdownChars - 1, false)]
+    [InlineData(MarkdownRenderer.MaxMarkdownChars, false)] // 境界ちょうどは通す
+    [InlineData(MarkdownRenderer.MaxMarkdownChars + 1, true)]
+    public void ExceedsMaxChars_UsesSameBoundaryAsRenderCap(int charCount, bool expected)
+    {
+        // M-23: caller が全文 string 化の前に判定するための述語。Render 内の cap と
+        // 不等号がずれると「事前判定は通ったのに Render が投げる」二重基準になる。
+        Assert.Equal(expected, MarkdownRenderer.ExceedsMaxChars(charCount));
+    }
+
+    /// <summary>
+    /// B (最終レビュー): Markdig のネスト深度上限 (既定 128) 超過は
+    /// <see cref="MarkdownTooComplexException"/> になる。
+    /// <para>
+    /// 素の <see cref="ArgumentException"/> のままだと caller (MainForm.ShowMarkdownPreview) は
+    /// <c>DocumentTooLargeException</c> しか捕まえないので未捕捉例外 →
+    /// <c>Application.ThreadException</c> → <c>CrashHandler</c> → アプリ終了になる。
+    /// <b>400 バイト</b>の .md で起きるので 4M 文字 cap では止まらない (実測)。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(200, 0, 0)] // "> " × 200 = 400 バイト
+    [InlineData(0, 20000, 0)] // "[" × 20000
+    [InlineData(0, 0, 200)] // 字下げで入れ子にしたリスト
+    public void Render_DeeplyNested_ThrowsMarkdownTooComplex(
+        int quoteDepth,
+        int brackets,
+        int listDepth
+    )
+    {
+        string md =
+            string.Concat(Enumerable.Repeat("> ", quoteDepth))
+            + new string('[', brackets)
+            + string.Concat(
+                Enumerable.Range(0, listDepth).Select(i => new string(' ', i * 2) + "- x\n")
+            );
+        // 入口の文字数 cap では止まらないことを同時に固定する (止まると理由が入れ替わる)。
+        Assert.False(MarkdownRenderer.ExceedsMaxChars(md.Length));
+        var ex = Assert.Throws<MarkdownTooComplexException>(() =>
+            MarkdownRenderer.Render(md, Base)
+        );
+        Assert.Equal(MarkdownRenderer.TooComplexDetail, ex.Message);
+        // 原因を捨てない (診断のため Markdig 側のメッセージを内側に残す)。
+        Assert.IsType<ArgumentException>(ex.InnerException);
+    }
+
+    /// <summary>
+    /// B の非退化対照: 深さが上限内なら従来どおり描画される。
+    /// (レビュアーが挙げた <c>"- " × 200</c> は<b>投げない</b> —— CommonMark の
+    /// thematic break として解釈されるため。実測で確認した差分。)
+    /// </summary>
+    [Theory]
+    [InlineData("> > > > > 深い引用")]
+    [InlineData("- - - - - - - - - -")] // "- " の繰り返しは <hr /> になる
+    public void Render_ShallowNesting_StillRenders(string md) =>
+        Assert.Contains("<body>", MarkdownRenderer.Render(md, Base), StringComparison.Ordinal);
+
+    /// <summary>
+    /// B: <c>ArgumentException</c> を無差別に捕まえていないことの網。baseHref の
+    /// allow-list 違反 (MD-L-4) は<b>呼び出し側の実装バグ</b>なので、
+    /// <see cref="MarkdownTooComplexException"/> へ翻訳せずそのまま抜けること。
+    /// </summary>
+    [Fact]
+    public void Render_UnknownBaseHref_StillThrowsArgumentException_NotTooComplex()
+    {
+        // Assert.Throws は型が完全一致でないと失敗する = 翻訳された瞬間にここが赤くなる。
+        var ex = Assert.Throws<ArgumentException>(() =>
+            MarkdownRenderer.Render("x", "https://evil.example/")
+        );
+        Assert.Equal("baseHref", ex.ParamName);
+    }
+
+    [Fact]
+    public void Render_TooLargeMessage_ComesFromTooLargeDetail()
+    {
+        // M-23: 事前判定した caller のダイアログと Render の例外で文面を一致させる。
+        var md = new string('a', MarkdownRenderer.MaxMarkdownChars + 1);
+        var ex = Assert.Throws<DocumentTooLargeException>(() => MarkdownRenderer.Render(md, ""));
+        Assert.Equal(
+            MarkdownRenderer.TooLargeDetail(MarkdownRenderer.MaxMarkdownChars + 1),
+            ex.Message
+        );
+    }
+
     // ---------------------------------------------------------------------
     // MD-M-2 + MD-L-1: CSP を HTTP ヘッダで配信 + img-src data: 削除 + CSS 外部化。
     //
@@ -330,6 +476,8 @@ public class MarkdownRendererTests
     //   - A-2 (2026-08-22・案 B): base-uri は 'none' のまま。文書に <base> を出力せず、
     //     相対 URL は PreviewRelativeUrlExtension が描画前に絶対化する (設計書 §7)
     //   - style-src から 'unsafe-inline' を削除し 'self' https://kxedit.preview のみに
+    //     (V-4・2026-09-03: 'self' も削除した。data: 文書の origin は opaque で
+    //      'self' は何にもマッチせず、防御として機能していなかったため)
     //   - <style>{Css}</style> を <link rel="stylesheet"> へ外部化 (href は A-2 案 B で
     //     絶対 URL https://kxedit.preview/_kxedit/styles.css へ変更・<base> 非依存にするため。
     //     実 file は PreviewCspHeaderInjector が virtual response で供給)
@@ -436,10 +584,29 @@ public class MarkdownRendererTests
         Assert.Contains("connect-src 'none'", csp);
         Assert.Contains("img-src https://kxedit.preview", csp);
         Assert.Contains("media-src https://kxedit.preview", csp);
-        Assert.Contains("style-src 'self' https://kxedit.preview", csp);
+        // V-4: data: 文書の origin は opaque なので 'self' は何にもマッチしない。
+        // <link> を実際に通しているのは https://kxedit.preview の方なので 'self' は置かない。
+        Assert.Contains("style-src https://kxedit.preview", csp);
+        Assert.DoesNotContain("'self'", csp);
         Assert.Contains("font-src https://kxedit.preview data:", csp);
         Assert.DoesNotContain("'unsafe-inline'", csp);
         Assert.DoesNotContain("img-src https://kxedit.preview data:", csp);
+    }
+
+    [Fact]
+    public void StyleSrc_Covers_StylesheetLinkOrigin_WithoutSelf()
+    {
+        // V-4: 'self' を外しても <link rel="stylesheet"> が通ることを、href の origin と
+        // style-src ディレクティブの突き合わせで固定する。data: 文書の origin は opaque なので
+        // 'self' は何にもマッチせず、<link> を実際に通しているのは https://kxedit.preview の側。
+        // directive 全体を切り出すので "style-src https://kxedit.preview 'self'" のような
+        // insertion mutation も落ちる。
+        var m = Regex.Match(MarkdownRenderer.PreviewCspHeader, @"style-src\s+([^;]*)(;|$)");
+        Assert.True(m.Success, "style-src directive が見つからない");
+        string directive = m.Groups[1].Value.Trim();
+        Assert.Equal("https://" + MarkdownRenderer.PreviewVirtualHost, directive);
+        // 実際に読み込む CSS の URL がこの source の配下にある = 防御は落ちていない。
+        Assert.StartsWith(directive + "/", MarkdownRenderer.PreviewStylesheetUrl);
     }
 
     [Fact]
@@ -656,5 +823,208 @@ public class MarkdownRendererTests
         Assert.Contains("href=\"other.md\"", html);
         Assert.DoesNotContain("https://kxedit.preview/pic.png", html);
         Assert.DoesNotContain("https://kxedit.preview/other.md", html);
+    }
+
+    [Theory]
+    // V-3 (監査 §9): 区切り文字を密輸する形。相対・絶対の両方を潰す。
+    // 絶対形は TryResolve が触らない経路なので、ガードを resolver の絶対化側に置くと素通りする
+    // (設計書 §14.1 の実測)。ここは Render の出力で固定する。
+    [InlineData("![x](..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit.preview/..%2F..%2FEBWebView/Default/Preferences)")]
+    [InlineData("[a](https://kxedit.preview/..%5c..%5cx)")]
+    [InlineData("[a](..%5C..%5Cx)")]
+    // --- 脆弱性レビュー (2026-09-03) で実測された迂回形 ---
+    // F-1: 非 ASCII ホスト。Uri.Host は Unicode を保つので Host 比較では一致しないが、
+    // Markdig の WriteEscapeUrl は IdnHost で ASCII 化して出力するため、最終的な HTML は
+    // 本物の preview ホスト宛になる。ホスト判定を IdnHost にしないとここだけ素通りする。
+    [InlineData("![x](https://kxedit。preview/..%2f..%2fsecret.txt)")] // U+3002 全角句点
+    [InlineData("![x](https://ｋxedit.preview/..%2f..%2fsecret.txt)")] // U+FF4B 全角 k
+    // F-2: percent-encode されたホスト。.NET は Uri.TryCreate(Absolute) 自体に失敗するが、
+    // WHATWG (Chromium) のホスト解析は percent-decode → domain-to-ASCII なので
+    // kxedit.preview に解決される。parse 不能を「そのまま返す」に倒すと素通りする。
+    [InlineData("![x](https://%6bxedit.preview/..%2f..%2fsecret.txt)")]
+    [InlineData("![x](https://kxedit%2epreview/..%2f..%2fsecret.txt)")]
+    // F-3: 末尾ドット。Uri.Host も Uri.IdnHost も末尾ドットを保持するので明示的に削る必要がある。
+    [InlineData("![x](https://kxedit.preview./..%2f..%2fsecret.txt)")]
+    // F-4: 生のバックスラッシュ。Uri.AbsolutePath 上では '\' が '/' へ正規化されて
+    // dot-segment が畳まれるため AST 段では「区切りは無い」と見えるのに、そのあと
+    // WriteEscapeUrl が %5C を作って出力する。ガードを LinkRewriter 段へ置き、かつ
+    // 生の '\' を対象に含めて初めて塞がる。
+    //
+    // 注意 (二重エスケープ): ここは C# 文字列と CommonMark の両方でエスケープが効く。
+    // C# の "\\\\" は markdown ソース上の `\\` = CommonMark のバックスラッシュエスケープで
+    // 1 個の生 '\' になる。C# の "\\" は markdown 上の `\` で、後続が '.' (ASCII 句読点) だと
+    // CommonMark が食べてしまい URL は `....\secret.txt` になる。どちらも生 '\' が
+    // LinkRewriter に届くので両方を網に入れる (実測)。
+    [InlineData("![x](https://kxedit.preview/..\\\\..\\\\secret.txt)")] // URL は ..\..\secret.txt
+    [InlineData("![x](https://kxedit.preview/..\\..\\secret.txt)")] // URL は ....\secret.txt
+    // F-5: AutolinkInline は LinkInline ではないので Descendants<LinkInline>() に掛からない。
+    // LinkRewriter は autolink 経路でも発火する (実測)。
+    [InlineData("<https://kxedit.preview/..%2f..%2fa>")] // CommonMark autolink
+    [InlineData("[a](<https://kxedit.preview/..%2f..%2fa>)")] // 角括弧宛先 (これは LinkInline)
+    public void Preview_EncodedSeparators_NeverReachOutput(string markdown)
+    {
+        string html = MarkdownRenderer.Render(markdown, Base);
+        string[] urls = BodyUrlAttributes(html);
+        // 網が空振りしていないこと (URL 属性が 1 つも無ければ以下の Assert.All は空虚)。
+        Assert.NotEmpty(urls);
+        Assert.All(
+            urls,
+            url =>
+            {
+                Assert.DoesNotContain("%2f", url, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("%5c", url, StringComparison.OrdinalIgnoreCase);
+                // 生の '\' も残さない (残ると WebView2 側が区切りとして解釈しうる)。
+                Assert.DoesNotContain("\\", url, StringComparison.Ordinal);
+                // 無害化の形も固定する (URL を空にはしない = <img src=""> の解決はブラウザ依存。
+                // LinkRewriter が null を返すと実際に src="" になる・実測)。
+                Assert.Contains("%25", url, StringComparison.Ordinal);
+            }
+        );
+        // 検証対象は URL 属性のみ。autolink はリンクテキストにも生 URL を出すため
+        // (<a href="…%252f…">https://kxedit.preview/..%2f..%2fa</a>)、HTML 全文に対する
+        // DoesNotContain("%2f") は成立しない。テキストは要求を発生させないので対象外
+        // ——「どこを見て安全と言っているか」を取り違えないためにここへ明記する。
+    }
+
+    /// <summary>
+    /// F-9: V-3 の無害化が preview 経路<b>専用</b>であることの対照。
+    /// <para>
+    /// <c>LinkRewriter</c> を設定するのは <c>PreviewRelativeUrlExtension</c> で、
+    /// その拡張は preview パイプラインにしか入らない。よって空 baseHref 経路では
+    /// 区切りエスケープはそのまま出力される。これは穴ではなく境界:
+    /// 空 baseHref 経路の出力を WebView2 へ渡す caller が存在せず
+    /// (Render の唯一の caller = MainForm.ShowMarkdownPreview は常に PreviewBaseHref を渡す)、
+    /// 仮想ホストマッピングによるフォルダー解決自体が起きないため。
+    /// 「ここでは無害化されない」ことを明示的に固定して、将来 caller が増えたときに
+    /// この前提が黙って崩れないようにする。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void EmptyBaseHref_EncodedSeparators_AreNotNeutralized()
+    {
+        string html = MarkdownRenderer.Render(
+            "![x](https://kxedit.preview/..%2f..%2fsecret.txt)",
+            ""
+        );
+        Assert.Contains(
+            "src=\"https://kxedit.preview/..%2f..%2fsecret.txt\"",
+            html,
+            StringComparison.Ordinal
+        );
+        Assert.DoesNotContain("%252f", html, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// <c>&lt;body&gt;</c> 内の <c>href</c> / <c>src</c> 属性値をすべて取り出す。
+    /// head の stylesheet <c>&lt;link&gt;</c> は本文由来ではないので範囲外に置く。
+    /// </summary>
+    private static string[] BodyUrlAttributes(string html)
+    {
+        int start = html.IndexOf("<body>", StringComparison.Ordinal);
+        int end = html.IndexOf("</body>", StringComparison.Ordinal);
+        Assert.InRange(start, 0, int.MaxValue);
+        Assert.InRange(end, start, int.MaxValue);
+        string body = html[(start + "<body>".Length)..end];
+        return Regex
+            .Matches(body, "(?:href|src)=\"([^\"]*)\"", RegexOptions.CultureInvariant)
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// A (最終レビュー): ホストの IDNA 変換に失敗する URL で <see cref="MarkdownRenderer.Render"/>
+    /// が<b>投げないこと</b>。
+    /// <para>
+    /// <c>Uri.TryCreate(..., Absolute)</c> は成功するのに <see cref="Uri.IdnHost"/> だけが
+    /// <see cref="UriFormatException"/> を投げる形が実在する (実測)。本ブランチの F-1 / F-3 で
+    /// ホスト判定を <c>Uri.Host</c> から <c>IdnHost</c> へ変えた際、この例外が
+    /// <c>Render</c> から抜けて <c>MainForm.ShowMarkdownPreview</c> の
+    /// <c>DocumentTooLargeException</c> だけの catch をすり抜け、
+    /// <c>Application.ThreadException</c> → <c>CrashHandler</c> → <b>アプリ終了</b>になっていた。
+    /// U+FFFD は文字コード誤検出でも本文へ混入しうるので、攻撃者不在でも踏む。
+    /// </para>
+    /// <para>
+    /// あわせて「例外を潰したせいで preview 宛へ化ける」退行も止める: これらは preview 宛では
+    /// ないので、出力 URL に preview 仮想ホストが現れてはならない。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("![x](https://xn--あ/pic.png)")] // 不正な punycode ラベル
+    [InlineData("[a](https://xn--あ/pic.png)")]
+    [InlineData("<https://xn--あ/x>")] // autolink 経路 (LinkRewriter のみが通る)
+    // 次の 2 本のホストラベルは目に見えない / 化けて見える文字そのものを含む
+    // (エディタ上は "https://.example/…" に見える)。読めないので codepoint を併記する。
+    [InlineData("![x](https://\U0000200B.example/pic.png)")] // U+200B ZERO WIDTH SPACE
+    [InlineData("![x](https://\U0000FFFD.example/pic.png)")] // U+FFFD REPLACEMENT CHARACTER
+    public void Preview_IdnaUnconvertibleHost_DoesNotThrowAndStaysExternal(string markdown)
+    {
+        string html = MarkdownRenderer.Render(markdown, Base); // ここが投げないことが主眼
+        string[] urls = BodyUrlAttributes(html);
+        Assert.NotEmpty(urls); // 網が空振りしていないこと
+        Assert.All(
+            urls,
+            url =>
+                Assert.DoesNotContain(
+                    MarkdownRenderer.PreviewVirtualHost,
+                    url,
+                    StringComparison.OrdinalIgnoreCase
+                )
+        );
+    }
+
+    /// <summary>
+    /// A の非退化対照: 正常な外部ホストは従来どおり素通しで、preview 宛にも
+    /// 無害化対象にもならない (例外安全化が全部を「判断不能」に倒していないこと)。
+    /// </summary>
+    [Fact]
+    public void Preview_NormalExternalHost_IsUntouched()
+    {
+        string html = MarkdownRenderer.Render("![x](https://example.com/pic.png)", Base);
+        Assert.Contains("src=\"https://example.com/pic.png\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// D (最終レビュー): ホスト一致判定の唯一の実装。倒す向き (判断不能時) は呼び出し側の
+    /// 責務なので、ここで固定するのは「判定できたか」と「一致したか」の 2 値だけ。
+    /// </summary>
+    [Theory]
+    [InlineData("https://kxedit.preview/x", true, true)]
+    [InlineData("http://kxedit.preview/x", true, true)] // scheme は判定に含めない
+    [InlineData("https://KXEDIT.PREVIEW/x", true, true)]
+    [InlineData("https://kxedit.preview./x", true, true)] // F-3: 末尾ドット
+    [InlineData("https://kxedit。preview/x", true, true)] // F-1: U+3002
+    [InlineData("https://ｋxedit.preview/x", true, true)] // F-1: 全角 k
+    [InlineData("https://example.com/x", true, false)]
+    [InlineData("https://kxedit.preview.evil.com/x", true, false)]
+    [InlineData("https://example.com./x", true, false)] // 末尾ドット除去は preview 側だけに効く
+    // A: TryCreate は成功するのに IdnHost が投げる形 = 判定不能 (false, false)。
+    [InlineData("https://xn--あ/x", false, false)]
+    [InlineData("https://\U0000200B.example/x", false, false)] // U+200B
+    [InlineData("https://\U0000FFFD.example/x", false, false)] // U+FFFD
+    public void TryIsPreviewHost_Cases(string uri, bool expectedDecided, bool expectedIsPreview)
+    {
+        Assert.True(Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed)); // 前提の明示
+        Assert.Equal(
+            expectedDecided,
+            MarkdownRenderer.TryIsPreviewHost(parsed!, out bool isPreviewHost)
+        );
+        Assert.Equal(expectedIsPreview, isPreviewHost);
+    }
+
+    [Theory]
+    // 非退化の対照: 他の percent-escape と通常の相対パスは従来どおり絶対化される。
+    [InlineData("![x](my%20file.png)", "https://kxedit.preview/my%20file.png")]
+    [InlineData("![x](sub/dir/pic.png)", "https://kxedit.preview/sub/dir/pic.png")]
+    // 外部 URL は我々のマッピングではないので触らない。
+    [InlineData("[a](https://example.com/a%2fb)", "https://example.com/a%2fb")]
+    public void Preview_OtherUrls_AreUntouched(string markdown, string expectedUrl)
+    {
+        Assert.Contains(
+            expectedUrl,
+            MarkdownRenderer.Render(markdown, Base),
+            StringComparison.Ordinal
+        );
     }
 }
