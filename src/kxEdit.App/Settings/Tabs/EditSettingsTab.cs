@@ -3,7 +3,8 @@ using kxEdit.Core.Settings;
 
 namespace kxEdit.App.Settings.Tabs;
 
-/// <summary>「編集」タブ。表示折り返しの ON/OFF と桁数を扱う。</summary>
+/// <summary>「編集」タブ。表示折り返しの ON/OFF と桁数、タブ幅・タブ→スペース、
+/// Home キーの動作を扱う。</summary>
 public sealed class EditSettingsTab : ISettingsTab
 {
     public string Title => "編集";
@@ -30,6 +31,22 @@ public sealed class EditSettingsTab : ISettingsTab
     private readonly CheckBox _tabsToSpaces = new()
     {
         Text = "タブをスペースに変換(&S)",
+        AutoSize = true,
+    };
+    private readonly GroupBox _homeGroup = new()
+    {
+        Text = "Home キーの動作",
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+    };
+    private readonly RadioButton _homeSmart = new()
+    {
+        Text = "行の最初の文字へ移動する(もう一度押すと行頭)(&F)",
+        AutoSize = true,
+    };
+    private readonly RadioButton _homeLineStart = new()
+    {
+        Text = "常に行頭へ移動する(&B)",
         AutoSize = true,
     };
 
@@ -85,6 +102,34 @@ public sealed class EditSettingsTab : ISettingsTab
         _tabsToSpaces.TabIndex = 5;
         root.Controls.Add(_tabsToSpaces, 0, 2);
 
+        // 4 行目: Home キーの動作(2 択)。GroupBox で囲うのは 2 つの理由から:
+        // ① WinForms の RadioButton の排他は「直上の親の Controls コレクション」内でのみ
+        //    働く。既存 CheckBox 群と同じ TableLayoutPanel に直置きすると、将来別のラジオを
+        //    足したときに同じ親を共有して混線する。
+        // ② SR がフォーカス時にグループ名(GroupBox.Text)を読む。
+        var homePanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            // Dock は必須。省くと FlowLayoutPanel が GroupBox の (0,0) に置かれ、
+            // 1 つ目のラジオがキャプション帯(DisplayRectangle より上の領域)に重なって
+            // グループ名の文字を潰す(既定 DPI での実測では、省略時のラジオ上端が Y=3、
+            // DisplayRectangle は Y=19 から)。AutoSize な GroupBox でも Dock=Fill の子の
+            // 推奨サイズは正しく伝わるため、グループは中身に合わせて伸縮する。
+            // 退行は EditSettingsTabTests.Radios_are_laid_out_below_the_group_caption が拾う。
+            Dock = DockStyle.Fill,
+        };
+        _homeSmart.TabIndex = 0;
+        _homeLineStart.TabIndex = 1;
+        homePanel.Controls.Add(_homeSmart);
+        homePanel.Controls.Add(_homeLineStart);
+        _homeGroup.Controls.Add(homePanel);
+        _homeGroup.TabIndex = 6; // 既存の末尾(5 = タブ→スペース)に続く
+        root.Controls.Add(_homeGroup, 0, 3);
+        root.SetColumnSpan(_homeGroup, 2);
+
         return root;
     }
 
@@ -99,6 +144,8 @@ public sealed class EditSettingsTab : ISettingsTab
         _wrapColumn.Enabled = _wrapEnabled.Checked; // 初期状態でも ON/OFF を反映
         _tabWidth.Value = Math.Clamp(s.TabWidth, (int)_tabWidth.Minimum, (int)_tabWidth.Maximum);
         _tabsToSpaces.Checked = s.TabsToSpaces;
+        _homeSmart.Checked = s.SmartHome;
+        _homeLineStart.Checked = !s.SmartHome;
     }
 
     public void SaveTo(AppSettings r)
@@ -107,6 +154,7 @@ public sealed class EditSettingsTab : ISettingsTab
         r.WrapColumn = (int)_wrapColumn.Value;
         r.TabWidth = (int)_tabWidth.Value;
         r.TabsToSpaces = _tabsToSpaces.Checked;
+        r.SmartHome = _homeSmart.Checked;
     }
 
     // CA1001 対応(Sub 3.4-B): BuildPage() 経由で Form の Controls ツリーに接続された
@@ -118,5 +166,8 @@ public sealed class EditSettingsTab : ISettingsTab
         _wrapColumn.Dispose();
         _tabWidth.Dispose();
         _tabsToSpaces.Dispose();
+        _homeSmart.Dispose();
+        _homeLineStart.Dispose();
+        _homeGroup.Dispose();
     }
 }
