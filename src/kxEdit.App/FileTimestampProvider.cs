@@ -8,7 +8,7 @@ namespace kxEdit.App;
 /// M-18 の外部変更検知(開く・保存・ウィンドウ復帰・タブ切替の各チェック)。どちらの経路でも、
 /// どんな入力でも例外を上位へ伝播させない(1 件の異常で全タブの復元を巻き添えにしない
 /// = FileController.RestoreFromBackup のフォールバック方針と同じ。M-18 側は null を
-/// 「変更なし」として扱い、聞かない)。
+/// 「判定しない」(<see cref="ExternalChangeOutcome.Skipped"/>)として扱い、聞かない)。
 /// </summary>
 /// <remarks>
 /// 脆弱性レビュー H-1: リモートパス(UNC / マップドネットワークドライブ)は
@@ -33,7 +33,7 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
     /// A-1 の起動時復元だけならプロセス寿命でよかったが、M-18 が開く・保存・ウィンドウ復帰・タブ切替の
     /// たびに呼ぶため (1) 永久に憶えると一度落ちた共有の文書は再起動まで検知が黙って止まり、
     /// (2) 憶えないと Alt+Tab のたびに 5 秒止まる。60 秒で「最悪 1 分に 1 回 5 秒」。</summary>
-    public static readonly TimeSpan DefaultUnreachableTtl = TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan DefaultUnreachableTtl = TimeSpan.FromSeconds(60);
 
     private readonly IReachabilityProbe _probe;
     private readonly TimeProvider _clock;
@@ -42,7 +42,10 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
     /// <summary>到達不能と判明したリモートルート(<c>\\server\share</c> / <c>Z:\</c>)→ 記憶の期限。
     /// 起動時復元は同じ共有上の文書を何件も含みうるため、これを憶えないと
     /// 「5 秒 × レコード数」が積み上がる(レビュー H-1 の増幅点)。
-    /// 記録の効果は「その根の判定をあきらめる = null を返す」だけで、安全側にしか倒れない。</summary>
+    /// 記録の効果は「その根の判定をあきらめる = null を返す」。A-1(復元)では null = 従来どおり復元
+    /// なので安全側にしか倒れない。一方 M-18 の保存直前の確認では、記憶が効いている TTL 内
+    /// (共有が落ちて記憶 → 復旧 → 他者が編集 → Ctrl+S)は外部変更を見落とす窓になる。
+    /// これは設計 2026-09-03 §3.8 が受容したトレードオフ(憶えないと Alt+Tab のたびに 5 秒止まる)。</summary>
     private readonly Dictionary<string, DateTimeOffset> _unreachableUntil = new(
         StringComparer.OrdinalIgnoreCase
     );
@@ -68,21 +71,26 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
                 DateTimeOffset now = _clock.GetUtcNow();
                 if (_unreachableUntil.TryGetValue(root, out var until) && now < until)
                     return null;
-                // 脆弱性レビュー L-1(2026-09-03): 「到達不能」と「到達できるが不在」を分ける。
+                // 脆弱性レビュー L-1(2026-09-03): 「到達不能」と「到達できるが不在」を区別する。
                 // ProbeFileExistsWithTimeout は File.Exists 意味論で両者を区別しないため、到達可能な
                 // 共有上の一時的な不在(別ツールの delete→recreate・rename 保存の途中)でルート全体を
                 // 到達不能として記憶し、以後その共有の全文書で検知が黙って止まっていた。
                 // 保存先用のプローブは (Reachable, FileExists) を分けて返すので読む側でもこれを使う。
+                // ただし Reachable は「ファイルが在る、または親フォルダーが在る」(FileReachabilityProbe の
+                // 定義)なので、記憶しないのは「ファイルは無いが親フォルダーは在る」場合だけ。
+                // 親フォルダーごと消えた/改名された場合は到達不能として TTL の間記憶される残余がある。
                 var probe = _probe.ProbeSaveTargetWithTimeout(path, ProbeTimeout);
                 if (!probe.Reachable)
                 {
                     _unreachableUntil[root] = now + _unreachableTtl;
                     return null;
                 }
+                // 復旧を確認した時点で記憶を捨てる(壁時計が逆行しても期限切れの記録が復活しない)。
+                // 期限切れの記録は到達不能なら上で上書きされるが、復旧したときは上書きされないので
+                // ここで消す。
+                _unreachableUntil.Remove(root);
                 if (!probe.FileExists)
                     return null; // 不在は記憶しない(次の問い合わせで再び見る)
-                // 期限切れの記録は消さなくてよい: 期限内は上で return し、期限後は必ずここへ来て
-                // 上書きされるので、残っていても判定に影響しない。
             }
 
             // 不在時の File.GetLastWriteTimeUtc は 1601-01-01 を返す(例外を投げない)。

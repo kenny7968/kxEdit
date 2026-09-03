@@ -506,7 +506,7 @@ public sealed class FileController
         // キャンセルでは観測値を動かさない: 次の復帰で読み直しの確認が出るのが正しい
         // (ユーザーは「上書きしない」と決めただけで、ディスクの内容はまだ見ていない)。
         // リモートではここで 5 秒プローブが 1 本増える(WriteToPath の TryInspectSaveTarget と合わせて
-        // 最悪 10 秒)。FileTimestampProvider の到達不能記憶(Task 5 で 60 秒 TTL)が 2 回目以降を省く。
+        // 最悪 10 秒)。FileTimestampProvider の到達不能記憶(設計 2026-09-03 §3.8 の 60 秒 TTL)が 2 回目以降を省く。
         if (
             doc.State.LastKnownWriteTimeUtc is DateTime known
             && _fileTimestamps.GetLastWriteTimeUtc(doc.State.Path) is DateTime disk
