@@ -24,4 +24,12 @@ public interface IUserPrompt
 
     /// <summary>はい/いいえ/キャンセル(警告アイコン)。未保存確認。</summary>
     DialogResult YesNoCancel(string text, string caption);
+
+    /// <summary>
+    /// はい/いいえ(警告アイコン)。はいで true。M-18 の読み直し確認(設計 2026-09-03 §3.6)など。
+    /// <paramref name="defaultNo"/> = true でフォーカス既定を「いいえ」側に置く。
+    /// <see cref="OkCancel"/> と同じく**既定値を持たせない**: 破壊的(未保存の変更を捨てる)なら true、
+    /// 押し間違えても失うものが無いなら false を、呼出のたびにコンパイラが選ばせる。
+    /// </summary>
+    bool YesNo(string text, string caption, bool defaultNo);
 }

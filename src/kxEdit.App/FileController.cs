@@ -24,7 +24,7 @@ public sealed class FileController
     private readonly IUserPrompt _prompt; // 確認・警告の注入点（テストでは FakePrompt）
     private readonly IFileDialogService _fileDialogs; // ファイル系ダイアログの注入点（テストでは FakeFileDialogService）
     private readonly IReachabilityProbe _reachabilityProbe; // HIGH-6: UNC ロードの短タイムアウトプローブ(テストでは Fake)
-    private readonly IFileTimestampProvider _fileTimestamps; // A-1: 復元時の陳腐化検出(テストでは Fake)
+    private readonly IFileTimestampProvider _fileTimestamps; // A-1: 復元時の陳腐化検出 / M-18: 開く・保存・復帰・タブ切替の外部変更検知(テストでは Fake)
     private int _untitledSeq; // 無題タブの連番（新規作成毎に増加・セッション内で再利用しない）
 
     /// <summary>A-1 第 2 層(設計 2026-08-22 §4): 直近の復元で「ディスク側がバックアップより
@@ -107,17 +107,15 @@ public sealed class FileController
     /// ディスク版を優先してバックアップを捨てる判断はしない。ディスクが新しい理由が
     /// 「kxEdit 自身の保存(A-1)」か「他アプリの更新」かを区別できず、捨てる実装は
     /// 新しい無言喪失経路になるため(設計 §4.2)。
+    /// <para>M-18(設計 2026-09-03 §3.2): 取ったディスク側の値をそのまま返す。復元タブの
+    /// <see cref="DocumentState.LastKnownWriteTimeUtc"/> に流用し、追加の I/O を作らない。</para>
     /// </remarks>
-    private void NoteIfBackupStale(string validatedPath, BackupRecord bk)
+    private DateTime? NoteIfBackupStale(string validatedPath, BackupRecord bk)
     {
-        if (
-            BackupStaleness.IsDiskNewer(
-                _fileTimestamps.GetLastWriteTimeUtc(validatedPath),
-                bk.TimestampUtc,
-                BackupStaleness.DefaultTolerance
-            )
-        )
+        DateTime? disk = _fileTimestamps.GetLastWriteTimeUtc(validatedPath);
+        if (BackupStaleness.IsDiskNewer(disk, bk.TimestampUtc, BackupStaleness.DefaultTolerance))
             _staleRestoredPaths.Add(validatedPath);
+        return disk;
     }
 
     /// <summary>
@@ -349,6 +347,16 @@ public sealed class FileController
             if (!TryProbeFileExists(path))
                 return false;
 
+            // M-18(設計 2026-09-03 §3.2): 更新時刻は本文を読む**前**に取る。読んでいる最中に外部が
+            // 書き換えた場合、観測値は本文より古くなり次回の検知で拾える。読んだ後に取ると、
+            // その 1 回の変更を永久に見落とす(観測値が本文より新しくなる)。
+            // TryProbeFileExists で到達可能と判った直後なので、プロバイダ内の追加プローブは短時間で
+            // 返る(想定・未実測)。到達不能記憶は使わない(ProbeLastWriteTimeUtc): 使うと、共有が落ちて
+            // 記憶 → 復旧 → 60 秒以内に開く、で基準が null になり、その文書の検知(復帰時の確認も
+            // 保存直前の確認も)が次の基準捕捉まで黙って止まる(最終脆弱性レビュー V-1)。
+            // 直前の TryProbeFileExists が実 I/O で到達可能を確かめているので、素通りしても待ちは増えない。
+            DateTime? stamp = _fileTimestamps.ProbeLastWriteTimeUtc(path);
+
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
             // 従来の TextFileService.Load(=byte 全読み + string 全文化)は選択肢から外し、
             // LoadAsBufferAuto で prefix 検出 → LoadAsBuffer(chunk stream) → LineEnding 検出。
@@ -357,6 +365,8 @@ public sealed class FileController
             doc.State.Encoding = loaded.Encoding;
             doc.State.HasBom = loaded.HasBom;
             doc.State.LineEnding = loaded.LineEnding;
+            doc.State.LastKnownWriteTimeUtc = stamp;
+            doc.State.AcknowledgedWriteTimeUtc = null; // 本文の基準が更新された=「読み直さない」の記憶は捨てる
 
             // CSV モードは自動判定しない（メニューから手動で有効化する）。
             // 既存タブへロードし直す場合に備え、読取専用とハイライトを解除しておく。
@@ -486,6 +496,37 @@ public sealed class FileController
                     + SanitizeForDisplay.OneLine(doc.State.Path, 200),
                 "エラー"
             );
+            return false;
+        }
+
+        // M-18(設計 2026-09-03 §3.4): 保存直前の外部変更検知 = 無言上書きの最終防衛線。
+        // 位置は重複タブガードの後(重複は保存させないので I/O を無駄打ちしない)、A-10 の
+        // 符号化確認の前(「上書きするか」を先に決めてから劣化の確認に進む)。
+        // 観測値かディスク側が null(無題・到達不能・削除)なら判定しない(§3.3)。
+        // 完全一致で比べる(§3.3)。比べる相手は本文の基準 LastKnownWriteTimeUtc だけ:
+        // 「読み直さない」で憶えた AcknowledgedWriteTimeUtc は読み直しの確認を抑止するためのもので、
+        // ここで見ると「いいえ → Ctrl+S」が相手の変更を無言で上書きする(未編集タブでも起きる)。
+        // キャンセルでは観測値を動かさない: 次の復帰で読み直しの確認が出るのが正しい
+        // (ユーザーは「上書きしない」と決めただけで、ディスクの内容はまだ見ていない)
+        // (直前に読み直しの確認へ「いいえ」と答えていれば AcknowledgedWriteTimeUtc が同じ値なので出ない。
+        // 保存直前の確認は生きたまま)。
+        // リモートではここで 5 秒プローブが 1 本増える。到達不能記憶は使わない(ProbeLastWriteTimeUtc。
+        // 使うと共有復旧直後の保存で基準が null になり保護が外れる。最終脆弱性レビュー V-1)。
+        // 落ちた共有では WriteToPath の TryInspectSaveTarget と合わせて最悪 10 秒: タイムアウトで止まる
+        // 経路は最悪 10 秒、通る経路はプローブ最大 3 本(保存直前・TryInspectSaveTarget・書いた後)。
+        if (
+            doc.State.LastKnownWriteTimeUtc is DateTime known
+            && _fileTimestamps.ProbeLastWriteTimeUtc(doc.State.Path) is DateTime disk
+            && disk != known
+            && !_prompt.OkCancel(
+                $"'{SanitizeForDisplay.OneLine(doc.State.DisplayName, 80)}' は kxEdit で開いた後に外で変更されています。"
+                    + "上書きすると、その変更は失われます。上書きしますか?",
+                "上書きの確認",
+                defaultCancel: true
+            )
+        )
+        {
+            // 保存しない。ConfirmDiscardIfDirty の「はい」経路でも false が伝播してタブを閉じない。
             return false;
         }
 
@@ -880,6 +921,12 @@ public sealed class FileController
                 doc.State.Encoding,
                 doc.State.HasBom
             );
+            // M-18(設計 2026-09-03 §3.2): 自分の保存で mtime が変わるので、書いた**後**の値を
+            // 一致の基準にする。書込と取得の間に外部が書く窓は残る(設計 §9)。
+            // 到達不能記憶は使わない(ProbeLastWriteTimeUtc): たった今書けた保存先なので記憶が残っていても
+            // 陳腐で、使うと基準が null になりこの文書の保護が外れる(最終脆弱性レビュー V-1)。
+            doc.State.LastKnownWriteTimeUtc = _fileTimestamps.ProbeLastWriteTimeUtc(path);
+            doc.State.AcknowledgedWriteTimeUtc = null; // 本文の基準が更新された=「読み直さない」の記憶は捨てる
             doc.Editor.SetSavePoint();
             DocumentManager.UpdateLabel(doc);
             _metaChanged();
@@ -982,6 +1029,83 @@ public sealed class FileController
             );
             return false;
         }
+    }
+
+    // ==================== 外部変更(M-18) ====================
+
+    /// <summary>M-18 の再入ガード。確認ダイアログ(モーダル)の message loop の中で、タブ切替由来の
+    /// BeginInvoke 済み検知が届いても 2 枚目を出さない(設計 2026-09-03 §3.4)。</summary>
+    private bool _checkingExternalChange;
+
+    /// <summary>
+    /// ウィンドウ復帰・タブ切替時の外部変更検知(設計 2026-09-03 §3.4)。ディスクの更新時刻が
+    /// 観測値(<see cref="DocumentState.LastKnownWriteTimeUtc"/>)と違えば読み直すか確認する。
+    /// 比較は完全一致(§3.3)。「いいえ」ならその値を憶えて(<see cref="DocumentState.AcknowledgedWriteTimeUtc"/>)
+    /// 次の変更まで聞き直さない。観測値(本文の基準)は動かさない=保存直前の確認は生きたまま。
+    /// 読み直しは <see cref="LoadInto"/>(現在の文字コードで固定)+キャレット位置の復元(§3.5)。
+    /// 発声と CSV モードの復帰は呼出側(MainForm)が <see cref="ExternalChangeOutcome.Reloaded"/> を見て行う。
+    /// 保存直前の確認は別経路(<see cref="SaveDocument"/>)。
+    /// </summary>
+    public ExternalChangeOutcome CheckExternalChange(Document doc)
+    {
+        ArgumentNullException.ThrowIfNull(doc);
+        if (_checkingExternalChange)
+            return ExternalChangeOutcome.Skipped;
+        if (
+            doc.State.Path is not string path
+            || doc.State.LastKnownWriteTimeUtc is not DateTime known
+        )
+            return ExternalChangeOutcome.Skipped;
+
+        _checkingExternalChange = true;
+        try
+        {
+            // 削除・到達不能・取得失敗は判定しない(設計 §3.3 / §9)。
+            if (_fileTimestamps.GetLastWriteTimeUtc(path) is not DateTime disk)
+                return ExternalChangeOutcome.Skipped;
+            // 「読み直さない」と答えた値のままなら聞き直さない(本文の基準 known とは別に持つ)。
+            if (disk == known || disk == doc.State.AcknowledgedWriteTimeUtc)
+                return ExternalChangeOutcome.NoChange;
+
+            // 名前を先頭・問いを末尾に置く(SR は頭から読む。A-10 と同じ語順)。名前は外部由来なので無害化。
+            string name = SanitizeForDisplay.OneLine(doc.State.DisplayName, 80);
+            bool dirty = doc.Editor.Modified;
+            string text = dirty
+                ? $"'{name}' は kxEdit の外で変更されました。読み直すと、このタブの未保存の変更は失われます。読み直しますか?"
+                : $"'{name}' は kxEdit の外で変更されました。読み直しますか?";
+            // 本文を失う側(未保存あり)だけ既定を安全側(いいえ)へ。未保存なしで失うのは Undo 履歴とキャレット位置だけ。
+            bool reload = _prompt.YesNo(text, "ファイルの変更", defaultNo: dirty);
+            if (!reload)
+            {
+                // 次の変更まで聞き直さない。本文の基準(LastKnownWriteTimeUtc)は動かさない
+                // = 保存直前の確認は生きたまま(「いいえ」→ Ctrl+S で相手の変更を無言で上書きしない)。
+                doc.State.AcknowledgedWriteTimeUtc = disk;
+                return ExternalChangeOutcome.Kept;
+            }
+            return ReloadFromDisk(doc, path)
+                ? ExternalChangeOutcome.Reloaded
+                : ExternalChangeOutcome.ReloadFailed;
+        }
+        finally
+        {
+            _checkingExternalChange = false;
+        }
+    }
+
+    /// <summary>設計 §3.5。キャレットの文字位置を先に取り、読み直した後にクランプして戻す。
+    /// 失敗時は <see cref="LoadInto"/> がエラーを出し、State は変わらない(読込前に throw する)。
+    /// <see cref="LoadInto"/> 経由なので開き直しと同じ副作用を持つ(<see cref="RegisterRecent"/> で
+    /// 最近使ったファイルの先頭へ動く・CSV モードは解除され <c>_openedFresh</c> が設定次第で自動モードへ戻す)。</summary>
+    private bool ReloadFromDisk(Document doc, string path)
+    {
+        int caret = doc.Editor.CaretCharOffset;
+        // 自動判定に戻さない: ユーザーが「開き直す」で直した文字コードを勝手に覆さないため。
+        // 外で文字コードが変わっていれば LoadInto の U+FFFD 警告が出る(既存)。
+        if (!LoadInto(doc, path, forcedCodePage: doc.State.Encoding.CodePage))
+            return false;
+        doc.Editor.SetCaretCharOffset(caret); // SnapAndClamp + BringCaretIntoView を内蔵
+        _openedFresh(doc); // 開き直し(ReopenWithEncoding)と同じ: 設定次第で .csv の自動モード
+        return true;
     }
 
     // ==================== 確認 / 復元 ====================
@@ -1111,6 +1235,7 @@ public sealed class FileController
         // ユーザ配下・UNC は Ok=そのまま復元先パスとして継続。
         bool useUntitled = rec.OriginalPath is null;
         string? safePath = null;
+        DateTime? stamp = null;
         if (!useUntitled)
         {
             // A-16 (ii): 正規化を境界付きにしてから検証する(理由は CheckRestoreTarget の doc)。
@@ -1122,7 +1247,7 @@ public sealed class FileController
             if (status == PathValidation.Ok)
             {
                 safePath = normalized;
-                NoteIfBackupStale(normalized, rec); // A-1 第 2 層(設計 2026-08-22 §4.3)
+                stamp = NoteIfBackupStale(normalized, rec); // A-1 第 2 層(設計 2026-08-22 §4.3)
             }
             else
             {
@@ -1161,6 +1286,7 @@ public sealed class FileController
         }
 
         doc.State.Path = safePath;
+        doc.State.LastKnownWriteTimeUtc = stamp;
 
         // 無題は元の連番を保ち、ダイアログ表示と復元後タブの番号を一致させる。連番カウンタは
         // 既存の最大値以上へ進め、以後の新規無題と衝突しないようにする。
@@ -1413,7 +1539,7 @@ public sealed class FileController
         {
             doc.State.Path = normalized;
             doc.State.UntitledNumber = 0;
-            NoteIfBackupStale(normalized, bk); // A-1 第 2 層(設計 2026-08-22 §4.3)
+            doc.State.LastKnownWriteTimeUtc = NoteIfBackupStale(normalized, bk); // A-1 第 2 層(設計 2026-08-22 §4.3)
         }
         else
         {

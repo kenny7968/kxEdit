@@ -22,6 +22,11 @@ public sealed partial class MainForm : Form
     private readonly KinsokuFormatController _kinsoku; // コンストラクタで生成(FormatWithKinsoku を委譲)
     private readonly DocumentInfoController _documentInfo; // コンストラクタで生成([ファイル]>文書情報)
     private bool _restoreOffered; // 起動時の復元提案を一度だけ行う
+
+    /// <summary>M-18: CSV モードのタブを読み直している間だけ true。<see cref="AutoEnterCsvMode"/>(自動モード)を
+    /// 読み直しの中では飛ばし、<see cref="CheckExternalChangeOnActive"/> が発声の後にモードへ戻す
+    /// (発声順を手動モードと揃え、解析不能なら本文を 2 度パースしていたのを避ける。最終コード品質レビュー Q-1)。</summary>
+    private bool _reloadingCsv;
     private readonly ToolStripStatusLabel _posLabel = new("行 1, 桁 1");
     private readonly ToolStripStatusLabel _encLabel = new("UTF-8");
     private readonly ToolStripStatusLabel _eolLabel = new("CRLF");
@@ -241,6 +246,8 @@ public sealed partial class MainForm : Form
     /// 2026-09-02 §5.4)。null=警告なし。<paramref name="quarantineSettingsBeforeFirstSave"/> =
     /// 最初の保存の直前に読み取れなかった原本を退避するか(B5・設計 §6.3)。どちらも
     /// <c>Program.CreateMainForm</c> が <c>SettingsStartup.Prepare</c> の戻り値をそのまま渡す。
+    /// <paramref name="prompt"/> = 確認ダイアログの seam(テスト用。null = <c>MessageBoxUserPrompt</c>)。
+    /// M-18 の MainForm 側配線をモーダル無しで検証するため。
     /// <b>public ctor には足していない</b>
     /// —— 足すと 2 引数の位置指定呼出が <c>(settings, settingsPath)</c> ではなくそちらへ
     /// 黙って束縛される(省略した任意引数が少ない方が優先される)。
@@ -252,7 +259,8 @@ public sealed partial class MainForm : Form
         string? backupDirectory = null,
         string? sessionLayoutPath = null,
         string? settingsWarning = null,
-        bool quarantineSettingsBeforeFirstSave = false
+        bool quarantineSettingsBeforeFirstSave = false,
+        IUserPrompt? prompt = null
     )
     {
         _settingsPath = settingsPath;
@@ -273,6 +281,19 @@ public sealed partial class MainForm : Form
         {
             UpdateTitle();
             UpdateStatus();
+            // M-18(設計 2026-09-03 §3.4): TabControl の選択変更ハンドラの中でモーダルを出さない
+            // (WinForms の再入)。BeginInvoke 先で「まだそのタブがアクティブ」「フォームがアクティブ」を
+            // 再確認する。ctor 中(ハンドル未生成)の発火は BeginInvoke できないので見送る
+            // (起動直後の無題タブは Path=null で判定対象にならない)。
+            var doc = _docs.Active;
+            if (doc is null || !IsHandleCreated)
+                return;
+            BeginInvoke(() =>
+            {
+                if (IsDisposed || ActiveForm != this || !ReferenceEquals(_docs.Active, doc))
+                    return;
+                CheckExternalChangeOnActive();
+            });
         };
         _docs.KeyBasedSwitch += (_, doc) => _announcer.Say(doc.TabLabel);
         // A-13(設計 2026-08-29 §4.3): クリップボードが他プロセスに保持されていると
@@ -296,7 +317,7 @@ public sealed partial class MainForm : Form
                 UpdateStatus();
             },
             openedFresh: AutoEnterCsvMode,
-            prompt: new MessageBoxUserPrompt(),
+            prompt: prompt ?? new MessageBoxUserPrompt(),
             fileDialogs: new WinFormsFileDialogService(),
             reachabilityProbe: new FileReachabilityProbe(),
             fileTimestamps: new FileTimestampProvider()
@@ -395,6 +416,8 @@ public sealed partial class MainForm : Form
     /// <summary>開く系経路（開く/最近/開き直し）で新規ロードした直後の .csv 自動 CSV モード進入（設定 ON のときのみ）。</summary>
     private void AutoEnterCsvMode(Document doc)
     {
+        if (_reloadingCsv)
+            return; // M-18: 読み直し中は MainForm が発声の後にモードへ戻す(発声順を手動モードと揃え、解析不能時の 2 度目のパースを避ける)
         if (!_settings.CsvAutoModeOnOpen)
             return;
         if (
@@ -672,9 +695,15 @@ public sealed partial class MainForm : Form
         {
             if (IsDisposed || ActiveForm != this || _menuActive)
                 return;
-            if (_docs.TabHost.ContainsFocus)
-                return;
-            _docs.Active?.FocusTarget.Focus();
+            if (!_docs.TabHost.ContainsFocus)
+                _docs.Active?.FocusTarget.Focus();
+            // M-18(設計 2026-09-03 §3.4): フォーカスを戻した後に外部変更を見る。確認ダイアログが閉じると
+            // OnActivated が再び来るが、Reloaded / Kept なら観測値が更新済みで NoChange で終わる。
+            // ReloadFailed は意図的に再び聞く(CheckExternalChangeOnActive の doc)。
+            // 上の ActiveForm != this ガードは検知の前に置くこと: 別のモーダル(保存直前の上書き確認・
+            // A-10 の符号化確認)の message loop で BeginInvoke 済みの検知が走り、保存の途中に
+            // 読み直しの確認が重なるのを防ぐ(FileController の再入ガードは「検知の中の検知」しか防がない)。
+            CheckExternalChangeOnActive();
         });
     }
 
@@ -1558,6 +1587,65 @@ public sealed partial class MainForm : Form
     /// (MainForm 内では _file を直接使い、テスト側は FileForTest を通す)。
     /// </summary>
     internal FileController FileForTest => _file;
+
+    /// <summary>テスト専用: CSV モードの手動切替(M-18 の読み直し後のモード復帰を検証する)。</summary>
+    internal CsvController CsvForTest => _csv;
+
+    /// <summary>
+    /// M-18(設計 2026-09-03 §3.4 / §3.7): ウィンドウ復帰・タブ切替時の外部変更検知。
+    /// 判定と確認は <see cref="FileController.CheckExternalChange"/>。ここは配線と、読み直した後の
+    /// 発声・CSV モードの復帰(<c>LoadInto</c> が CsvMode を false に落とすため)だけを担う。
+    /// F2 編集中は起こらない: ウィンドウを離れた時点で OnLostFocus → CancelEdit、タブ切替は
+    /// BeforeActiveChange が AbortEdit する。
+    /// 発声を TryEnterMode より先に出すのは、パース不能で入れなかったときの通知(TryEnterMode が出す)を
+    /// 最後に残すため(1 行の発声チャネルは最後の 1 件が残る。B5 の教訓)。
+    /// CSV モード中はキャレットがセルに追従しないため、セル位置は (row, col) で戻す
+    /// (<see cref="CsvController.TryGoToCell"/>。設計 §3.7 の「キャレットから導出するので近い位置に戻る」は
+    /// 偽だった: キャレット由来の TryEnterMode は先頭セルへ入る)。自動モード(<c>_openedFresh</c> =
+    /// <see cref="AutoEnterCsvMode"/>)は読み直しの中では <see cref="_reloadingCsv"/> で飛ばす: 自動で入り
+    /// 直させると発声が CSVモード オン … → 読み直しました の順になって手動モードと食い違い、解析不能なら
+    /// 本文を 2 度パースする(成功経路は ParseCsv のキャッシュで 1 回。最終コード品質レビュー Q-1)。手動・自動のどちらでも発声は 読み直しました → CSVモード オン … →
+    /// セル、の順で同期に連続し、UiaAnnouncer の 50 ms 窓により SR に届くのは 1 件目と最後
+    /// (セルが無くなっていれば TryGoToCell は黙って false = 先頭セルの発声が残る)。
+    /// <see cref="ExternalChangeOutcome.ReloadFailed"/> は両方の観測値が不変なので、エラーダイアログを
+    /// 閉じた直後の OnActivated で同じ確認が再び出る(一過性ロックの再試行。「いいえ」で止まる)。
+    /// </summary>
+    private ExternalChangeOutcome CheckExternalChangeOnActive()
+    {
+        var doc = _docs.Active;
+        if (doc is null)
+            return ExternalChangeOutcome.Skipped;
+        bool wasCsv = doc.State.CsvMode;
+        int row = doc.State.CsvRow; // 読み直しで (0, 0) に戻るので先に捕捉する
+        int col = doc.State.CsvCol;
+        // 再入(確認ダイアログのモーダル中に届いた切替由来の検知。FileController 側は Skipped を返す)で
+        // 外側の値を壊さないよう、上書きではなく退避して戻す。
+        bool wasReloadingCsv = _reloadingCsv;
+        _reloadingCsv = wasCsv;
+        ExternalChangeOutcome outcome;
+        try
+        {
+            outcome = _file.CheckExternalChange(doc);
+        }
+        finally
+        {
+            _reloadingCsv = wasReloadingCsv;
+        }
+        if (outcome != ExternalChangeOutcome.Reloaded)
+            return outcome;
+        _announcer.Say("読み直しました");
+        if (!wasCsv)
+            return outcome;
+        // LoadInto が CsvMode を false に落とし、自動モードは飛ばしてあるので、ここで入り直す。
+        // パース不能なら入らず TryEnterMode が発声する(最後に残る)。
+        if (_csv.TryEnterMode(doc))
+            _csv.TryGoToCell(doc, row, col);
+        return outcome;
+    }
+
+    /// <summary>テスト専用: <see cref="CheckExternalChangeOnActive"/> を活性化イベント無しで叩く。</summary>
+    internal ExternalChangeOutcome CheckExternalChangeOnActiveForTest() =>
+        CheckExternalChangeOnActive();
 
     /// <summary>
     /// grep ジャンプ用: <paramref name="hit"/> のファイルを開き（既存タブがあれば再利用）、

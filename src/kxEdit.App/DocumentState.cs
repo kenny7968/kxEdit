@@ -61,6 +61,22 @@ public sealed class DocumentState
     public int CsvRow { get; set; }
     public int CsvCol { get; set; }
 
+    /// <summary>
+    /// M-18(設計 2026-09-03 §3.1): 本文がディスクと一致していた(と kxEdit が信じている)時点の
+    /// ディスク側 LastWriteTimeUtc。無題・取得失敗(到達不能・権限)は null = 判定しない。
+    /// 開くときは本文を読む<b>前</b>に、保存は書いた<b>後</b>に取る(§3.2)。
+    /// 比較は完全一致(同じ FS が同じファイルに返す値同士なので許容差を置かない。§3.3)。
+    /// </summary>
+    public DateTime? LastKnownWriteTimeUtc { get; set; }
+
+    /// <summary>
+    /// M-18: 「読み直さない」と答えたときのディスク側 LastWriteTimeUtc。ディスクがこの値のままの
+    /// あいだは復帰・タブ切替で聞き直さない。<b>本文の基準ではない</b> —— 保存直前の上書き確認は
+    /// <see cref="LastKnownWriteTimeUtc"/> だけを見るので、「読み直さない」のあとの Ctrl+S でも
+    /// 相手の変更を無言で上書きしない。本文の基準が更新される(開く・読み直す・保存する)たびに null へ戻す。
+    /// </summary>
+    public DateTime? AcknowledgedWriteTimeUtc { get; set; }
+
     public string DisplayName =>
         Path is not null ? System.IO.Path.GetFileName(Path)
         : UntitledNumber > 0 ? $"無題 {UntitledNumber}"

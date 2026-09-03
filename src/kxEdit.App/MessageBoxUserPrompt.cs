@@ -3,8 +3,10 @@ namespace kxEdit.App;
 /// <summary>
 /// <see cref="IUserPrompt"/> の本番実装。従来 FileController 内に直書きされていた
 /// MessageBox.Show を同一引数のまま包むだけの薄い Adapter(ロジックなし=挙動不変)。
-/// 唯一の写像が <c>OkCancel</c> の <c>defaultCancel</c> → <see cref="MessageBoxDefaultButton"/>
-/// (S-12。既定値は持たない=呼出側が必ず側を選ぶ。<see cref="IUserPrompt.OkCancel"/> の doc 参照)。
+/// <c>YesNo</c> だけは M-18 で新設した呼出で、直書きの移設ではない。
+/// 写像は <c>OkCancel</c> の <c>defaultCancel</c> と <c>YesNo</c> の <c>defaultNo</c>
+/// → <see cref="MessageBoxDefaultButton"/> の 2 つだけ
+/// (S-12 / M-18。既定値は持たない=呼出側が必ず側を選ぶ。<see cref="IUserPrompt.OkCancel"/> の doc 参照)。
 /// </summary>
 internal sealed class MessageBoxUserPrompt : IUserPrompt
 {
@@ -28,4 +30,13 @@ internal sealed class MessageBoxUserPrompt : IUserPrompt
 
     public DialogResult YesNoCancel(string text, string caption) =>
         MessageBox.Show(text, caption, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+
+    public bool YesNo(string text, string caption, bool defaultNo) =>
+        MessageBox.Show(
+            text,
+            caption,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            defaultNo ? MessageBoxDefaultButton.Button2 : MessageBoxDefaultButton.Button1
+        ) == DialogResult.Yes;
 }
