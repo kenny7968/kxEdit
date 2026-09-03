@@ -5,7 +5,7 @@ namespace kxEdit.Core.Editing;
 
 /// <summary>
 /// 文字クラス(単語境界判定用)。
-/// - Whitespace: 半角空白(' ')/ タブ('\t')。全角空白(U+3000)は Other 扱い(NavigationCommands.SmartHome と同方針)。
+/// - Whitespace: 半角空白(' ')/ タブ('\t')。全角空白(U+3000)は Other 扱い(NavigationCommands.MoveLineHome と同方針)。
 /// - LineBreak: '\r' / '\n'。CRLF は連続 LineBreak として自然にまとまる。
 /// - Latin: [A-Za-z_]。アンダースコアも識別子扱い。
 /// - Digit: [0-9]。

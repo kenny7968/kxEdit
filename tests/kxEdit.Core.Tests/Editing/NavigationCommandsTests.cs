@@ -113,34 +113,34 @@ public class NavigationCommandsTests
     }
 
     [Fact]
-    public void MoveHomeSmart_TogglesBetweenFirstNonWsAndLineStart()
+    public void MoveLineHome_Smart_TogglesBetweenFirstNonWsAndLineStart()
     {
         var s = Snap("  hello");
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 4)); // 本文内(4='l')→ firstNonWs(2)
-        Assert.Equal(0, NavigationCommands.MoveHomeSmart(s, 2)); // firstNonWs → lineStart
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 0)); // lineStart → firstNonWs
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 4, skipIndent: true)); // 本文内(4='l')→ firstNonWs(2)
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 2, skipIndent: true)); // firstNonWs → lineStart
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 0, skipIndent: true)); // lineStart → firstNonWs
     }
 
     [Fact]
-    public void MoveHomeSmart_TabsAsWhitespace()
+    public void MoveLineHome_Smart_TabsAsWhitespace()
     {
         var s = Snap("\t\thello");
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 4));
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 4, skipIndent: true));
     }
 
     [Fact]
-    public void MoveHomeSmart_EmptyLine_ReturnsLineStart()
+    public void MoveLineHome_Smart_EmptyLine_ReturnsLineStart()
     {
         var s = Snap("abc\n\nxyz"); // 行1 は空行(lineStart=lineEnd=4)
-        Assert.Equal(4, NavigationCommands.MoveHomeSmart(s, 4)); // firstNonWs=lineEnd=4=lineStart相当
+        Assert.Equal(4, NavigationCommands.MoveLineHome(s, 4, skipIndent: true)); // firstNonWs=lineEnd=4=lineStart相当
     }
 
     [Fact]
-    public void MoveHomeSmart_LineWithOnlyWhitespace_TogglesLineStartLineEnd()
+    public void MoveLineHome_Smart_LineWithOnlyWhitespace_TogglesLineStartLineEnd()
     {
         var s = Snap("   "); // 空白のみ(firstNonWs=lineEnd=3)
-        Assert.Equal(3, NavigationCommands.MoveHomeSmart(s, 0)); // lineStart(0) → firstNonWs(3)
-        Assert.Equal(0, NavigationCommands.MoveHomeSmart(s, 3)); // firstNonWs(3) → lineStart(0)
+        Assert.Equal(3, NavigationCommands.MoveLineHome(s, 0, skipIndent: true)); // lineStart(0) → firstNonWs(3)
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 3, skipIndent: true)); // firstNonWs(3) → lineStart(0)
     }
 
     [Fact]
@@ -161,11 +161,11 @@ public class NavigationCommandsTests
     }
 
     [Fact]
-    public void MoveHomeSmart_OnEmptyBuffer_ReturnsZero()
+    public void MoveLineHome_Smart_OnEmptyBuffer_ReturnsZero()
     {
         // 空文書での不変性(暗黙成立を明文化)
         var s = Snap("");
-        Assert.Equal(0, NavigationCommands.MoveHomeSmart(s, 0));
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 0, skipIndent: true));
     }
 
     [Fact]
@@ -178,57 +178,150 @@ public class NavigationCommandsTests
         Assert.Equal(2, NavigationCommands.MoveRightChar(s, 1));
     }
 
-    // ===== P8-1a: 視覚行ベース Home キー(wrapColumns/metrics 版) =====
+    // ===== 2026-09-04: skipIndent=false(常に行頭)モード =====
 
     [Fact]
-    public void MoveHomeSmart_WithWrap_WrapDisabled_SameAsLogicalLine()
+    public void MoveLineHome_NoSkipIndent_AlwaysReturnsLineStart()
     {
-        // wrapColumns<=0 は既存論理行挙動と同じ=既存 3 パターンを再現
+        // 非既定位置(本文内)から始める。1 回目で行頭へ、2 回目は動かない
+        // (行頭から始めると「既定位置と同じ」なのか「動かなかった」のか区別できない)。
         var s = Snap("  hello");
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 4, wrapColumns: 0, M));
-        Assert.Equal(0, NavigationCommands.MoveHomeSmart(s, 2, wrapColumns: 0, M));
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 0, wrapColumns: 0, M));
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 4, skipIndent: false));
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 0, skipIndent: false)); // no-op(トグルしない)
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 2, skipIndent: false)); // firstNonWs でもトグルしない
     }
 
     [Fact]
-    public void MoveHomeSmart_WithWrap_FirstVisualSegment_TogglesFirstNonWsAndLineStart()
+    public void MoveLineHome_NoSkipIndent_SecondLine_ReturnsThatLineStart()
+    {
+        // 論理行 1 本目だけで検証すると lineStart==0 になり、"0 を返すだけ" の実装と区別できない。
+        var s = Snap("abc\r\n  def");
+        Assert.Equal(5, NavigationCommands.MoveLineHome(s, 8, skipIndent: false)); // 行1 の先頭
+        Assert.Equal(5, NavigationCommands.MoveLineHome(s, 7, skipIndent: false)); // 行1 の firstNonWs でも
+    }
+
+    [Fact]
+    public void MoveLineHome_NoSkipIndent_LineWithOnlyWhitespace_ReturnsLineStart()
+    {
+        // スマート版はここで lineStart ⇔ lineEnd をトグルする。非トグルであることを固定する。
+        var s = Snap("   ");
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 3, skipIndent: false));
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 0, skipIndent: false));
+    }
+
+    [Fact]
+    public void MoveLineHome_NoSkipIndent_EmptyLine_ReturnsLineStart()
+    {
+        var s = Snap("abc\n\nxyz"); // 行1 は空行(lineStart=lineEnd=4)
+        Assert.Equal(4, NavigationCommands.MoveLineHome(s, 4, skipIndent: false));
+    }
+
+    [Fact]
+    public void MoveLineHome_NoSkipIndent_WithWrap_FirstVisualSegment_ReturnsLineStart()
+    {
+        // "  hello world" を wrapColumns=8 で折り返し(seg 0=[0..8) / seg 1=[8..13))。
+        // 第 1 セグメントでは firstNonWs(2)へ行かず lineStart(0)へ。
+        var s = Snap("  hello world");
+        Assert.Equal(
+            0,
+            NavigationCommands.MoveLineHome(s, 4, wrapColumns: 8, M, skipIndent: false)
+        );
+        Assert.Equal(
+            0,
+            NavigationCommands.MoveLineHome(s, 2, wrapColumns: 8, M, skipIndent: false)
+        );
+    }
+
+    [Fact]
+    public void MoveLineHome_NoSkipIndent_WithWrap_SecondVisualSegment_StaysOnVisualSegmentStart()
+    {
+        // 「常に行頭」でも継続セグメントでは論理行頭(0)へ飛ばず視覚行頭(8)に留まる。
+        // = P8-1a(NVDA が視覚行の先頭から読む)の特性が両モードで保たれる、が本テストの主張。
+        var s = Snap("  hello world");
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 10, wrapColumns: 8, M, skipIndent: false)
+        );
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 8, wrapColumns: 8, M, skipIndent: false)
+        );
+    }
+
+    [Fact]
+    public void MoveLineHome_NoSkipIndent_WithWrap_Disabled_SameAsLogicalLine()
+    {
+        // wrapColumns<=0 は論理行版へ委譲される(委譲が skipIndent を落としていないことの網)。
+        var s = Snap("  hello");
+        Assert.Equal(
+            0,
+            NavigationCommands.MoveLineHome(s, 4, wrapColumns: 0, M, skipIndent: false)
+        );
+    }
+
+    // ===== P8-1a: 視覚行ベース Home キー(wrapColumns/metrics 版) =====
+
+    [Fact]
+    public void MoveLineHome_Smart_WithWrap_WrapDisabled_SameAsLogicalLine()
+    {
+        // wrapColumns<=0 は既存論理行挙動と同じ=既存 3 パターンを再現
+        var s = Snap("  hello");
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 4, wrapColumns: 0, M, skipIndent: true));
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 2, wrapColumns: 0, M, skipIndent: true));
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 0, wrapColumns: 0, M, skipIndent: true));
+    }
+
+    [Fact]
+    public void MoveLineHome_Smart_WithWrap_FirstVisualSegment_TogglesFirstNonWsAndLineStart()
     {
         // "  hello world"(ASCII 8px×13=104px)を wrapColumns=8(=64px)で折り返し
         // 視覚 seg 0: [0..8)="  hello "、視覚 seg 1: [8..13)="world"
         // 第 1 セグメントは既存 smart 挙動(firstNonWs=2 ⇔ lineStart=0)
         var s = Snap("  hello world");
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 4, wrapColumns: 8, M)); // 'l'→firstNonWs(2)
-        Assert.Equal(0, NavigationCommands.MoveHomeSmart(s, 2, wrapColumns: 8, M)); // firstNonWs→lineStart(0)
-        Assert.Equal(2, NavigationCommands.MoveHomeSmart(s, 0, wrapColumns: 8, M)); // lineStart→firstNonWs
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 4, wrapColumns: 8, M, skipIndent: true)); // 'l'→firstNonWs(2)
+        Assert.Equal(0, NavigationCommands.MoveLineHome(s, 2, wrapColumns: 8, M, skipIndent: true)); // firstNonWs→lineStart(0)
+        Assert.Equal(2, NavigationCommands.MoveLineHome(s, 0, wrapColumns: 8, M, skipIndent: true)); // lineStart→firstNonWs
     }
 
     [Fact]
-    public void MoveHomeSmart_WithWrap_SecondVisualSegment_GoesToVisualSegmentStart()
+    public void MoveLineHome_Smart_WithWrap_SecondVisualSegment_GoesToVisualSegmentStart()
     {
         // 継続セグメント(seg 1=[8..13)="world")では常に視覚 seg 先頭へ・トグルなし
         // 論理行先頭(0)へ行かない=これが N-3 の本質的修正
         var s = Snap("  hello world");
-        Assert.Equal(8, NavigationCommands.MoveHomeSmart(s, 10, wrapColumns: 8, M)); // 'r'→seg 1 先頭(8)
-        Assert.Equal(8, NavigationCommands.MoveHomeSmart(s, 8, wrapColumns: 8, M)); // 'w'(既に seg 先頭)→動かず
-        Assert.Equal(8, NavigationCommands.MoveHomeSmart(s, 12, wrapColumns: 8, M)); // 末尾直前→seg 1 先頭
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 10, wrapColumns: 8, M, skipIndent: true)
+        ); // 'r'→seg 1 先頭(8)
+        Assert.Equal(8, NavigationCommands.MoveLineHome(s, 8, wrapColumns: 8, M, skipIndent: true)); // 'w'(既に seg 先頭)→動かず
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 12, wrapColumns: 8, M, skipIndent: true)
+        ); // 末尾直前→seg 1 先頭
     }
 
     [Fact]
-    public void MoveHomeSmart_WithWrap_EmptyLine_ReturnsLineStart()
+    public void MoveLineHome_Smart_WithWrap_EmptyLine_ReturnsLineStart()
     {
         // 空行は視覚セグメントも [(0,0)] 1 個(LineLayout 契約)=lineStart そのまま
         var s = Snap("abc\n\ndef");
-        Assert.Equal(4, NavigationCommands.MoveHomeSmart(s, 4, wrapColumns: 8, M)); // 空行(line 1)先頭
+        Assert.Equal(4, NavigationCommands.MoveLineHome(s, 4, wrapColumns: 8, M, skipIndent: true)); // 空行(line 1)先頭
     }
 
     [Fact]
-    public void MoveHomeSmart_WithWrap_ThirdVisualSegment_GoesToVisualSegmentStart()
+    public void MoveLineHome_Smart_WithWrap_ThirdVisualSegment_GoesToVisualSegmentStart()
     {
         // 3 セグメント跨ぎ=第 3 セグメントでも同じ挙動を保証
         // "aaaaaaaabbbbbbbbcccccccc"(24 chars ASCII=192px)を wrapColumns=8(=64px)で
         // 視覚 seg 0: [0..8)="aaaaaaaa"、seg 1: [8..16)="bbbbbbbb"、seg 2: [16..24)="cccccccc"
         var s = Snap("aaaaaaaabbbbbbbbcccccccc");
-        Assert.Equal(16, NavigationCommands.MoveHomeSmart(s, 20, wrapColumns: 8, M)); // 'c'→seg 2 先頭
-        Assert.Equal(8, NavigationCommands.MoveHomeSmart(s, 12, wrapColumns: 8, M)); // 'b'→seg 1 先頭
+        Assert.Equal(
+            16,
+            NavigationCommands.MoveLineHome(s, 20, wrapColumns: 8, M, skipIndent: true)
+        ); // 'c'→seg 2 先頭
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 12, wrapColumns: 8, M, skipIndent: true)
+        ); // 'b'→seg 1 先頭
     }
 }
