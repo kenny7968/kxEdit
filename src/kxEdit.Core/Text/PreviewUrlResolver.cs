@@ -144,7 +144,16 @@ internal static class PreviewUrlResolver
     /// <b>覆わない経路 (実測)</b>: 脚注リンク (<c>#fn:1</c> / <c>#fnref:1</c>)。
     /// <c>HtmlFootnoteLinkRenderer</c> が href を直書きし <c>WriteEscapeUrl</c> を通らないため
     /// <c>LinkRewriter</c> が発火しない。ただしこの href は Markdig が採番する固定形式で
-    /// ユーザ入力が入らないので攻撃面にならない。
+    /// ユーザ入力が入らないので攻撃面にならない。<br/>
+    /// <b>MediaLinks は経路自体を除去した (C・2026-09-03)</b>。
+    /// <c>HtmlMediaLinkRenderer</c> も <c>WriteEscapeUrl</c> を通らないので、
+    /// <c>&lt;video&gt;&lt;source src="…%2f…"&gt;</c> の形で区切りエスケープが出力へ残る
+    /// (SafeLinkExtension を外した同一構成で実測)。実 pipeline でそれが起きていなかったのは
+    /// <c>SafeLinkExtension.Setup</c> の <c>ObjectRenderers.Replace&lt;LinkInlineRenderer&gt;()</c> が
+    /// MediaLinks の <c>TryWriters</c> ごと renderer を差し替えていたからで、
+    /// <b>関門が効いていること自体が拡張の登録順への偶然の依存</b>だった。
+    /// そのため <c>MarkdownRenderer.BuildPipeline</c> で <c>MediaLinkExtension</c> を除去した
+    /// (出力差はゼロ・実測)。
     /// </para>
     /// <para>
     /// <b>判定は default-deny</b>。「parse できてホストが preview と一致したときだけ対象」に

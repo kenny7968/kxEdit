@@ -1,6 +1,7 @@
 using Markdig;
 using Markdig.Extensions.Abbreviations;
 using Markdig.Extensions.GenericAttributes;
+using Markdig.Extensions.MediaLinks;
 
 namespace kxEdit.Core.Text;
 
@@ -240,8 +241,21 @@ public static class MarkdownRenderer
         // meta refresh は、プレビューを開くだけで App 側の LaunchExternal 経路を発火させ
         // 既定ブラウザに攻撃者 URL を開かせうる。
         // 代償: 略語が <abbr> へ展開されなくなる (`*[...]: ...` 定義行はそのまま表示される)。
+        //
+        // C (最終レビュー・2026-09-03): MediaLinks も外す。UseAdvancedExtensions 同梱の
+        // MediaLinkExtension は HtmlMediaLinkRenderer を TryWriters へ刺す形で <video>/<audio>/
+        // <iframe> を出すが、そのレンダラは WriteEscapeUrl を通らない = LinkRewriter
+        // (V-3 の無害化) が発火しない。実測: SafeLinkExtension を外した同一構成では
+        // <video><source src="https://kxedit.preview/..%2f..%2fmovie.mp4"> のように
+        // 区切りエスケープが出力へ残る。
+        // 実 pipeline でそれが起きないのは SafeLinkExtension.Setup が
+        // ObjectRenderers.Replace<LinkInlineRenderer>() で MediaLinks が TryWriters を刺した
+        // renderer インスタンスごと差し替えているためで、つまり<b>関門が効いていること自体が
+        // 拡張の登録順への偶然の依存</b>だった。順序が変われば黙って穴になるので経路ごと消す。
+        // 除去による出力差はゼロ (代表的な .mp4 / YouTube / 通常画像を含む 41 サンプル ×
+        // 2 パイプラインのコーパスで before/after がバイト一致・実測)。
         builder.Extensions.RemoveAll(e =>
-            e is GenericAttributesExtension || e is AbbreviationExtension
+            e is GenericAttributesExtension || e is AbbreviationExtension || e is MediaLinkExtension
         );
         // A-2 (2026-08-22・案 B): 相対 URL を描画前 (DocumentProcessed) に絶対化する。
         // SafeLinkExtension は描画時に効くため、こちらが必ず前段になる。scheme 付き URL は

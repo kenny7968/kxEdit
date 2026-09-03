@@ -1,11 +1,71 @@
+using System.Reflection;
 using System.Text.RegularExpressions;
 using kxEdit.Core.Text;
+using Markdig;
+using Markdig.Extensions.Abbreviations;
+using Markdig.Extensions.GenericAttributes;
+using Markdig.Extensions.MediaLinks;
 
 namespace kxEdit.Core.Tests.Text;
 
 public class MarkdownRendererTests
 {
     private const string Base = "https://kxedit.preview/";
+
+    /// <summary>
+    /// C (最終レビュー): <c>LinkRewriter</c> (V-3 の無害化) を通らないレンダラを持つ拡張が
+    /// パイプラインに<b>居ないこと</b>を構造で固定する。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: 現状 <c>MediaLinkExtension</c> が居ても出力は
+    /// 変わらない —— <c>SafeLinkExtension.Setup</c> の
+    /// <c>ObjectRenderers.Replace&lt;LinkInlineRenderer&gt;()</c> が MediaLinks の
+    /// <c>TryWriters</c> を刺した renderer インスタンスごと差し替えているため。
+    /// つまり関門が効いているのは<b>拡張の登録順への偶然の依存</b>で、順序が変われば
+    /// <c>&lt;video&gt;&lt;source src="…%2f…"&gt;</c> が黙って出る (SafeLinkExtension を外した
+    /// 同一構成で実測)。観測できる差が無いので構造で固定するしかない。
+    /// </para>
+    /// <para>
+    /// GenericAttributes (A-21) と Abbreviations (FINDING 1) の除去も同じ理由でここに置く
+    /// (あちらは出力差があるので挙動テストもあるが、除去の事実自体はここが唯一の直接の網)。
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("PreviewPipeline")]
+    [InlineData("Pipeline")]
+    public void Pipelines_DoNotContainRewriterBypassingExtensions(string fieldName)
+    {
+        var field = typeof(MarkdownRenderer).GetField(
+            fieldName,
+            BindingFlags.NonPublic | BindingFlags.Static
+        );
+        Assert.NotNull(field); // 改名で走査ゼロ件=「無い」と読めるのを防ぐ
+        var pipeline = Assert.IsType<MarkdownPipeline>(field!.GetValue(null));
+
+        // 陽性対照: 走査が実際に拡張を拾えていること (空リストなら以下は空虚に緑になる)。
+        Assert.NotEmpty(pipeline.Extensions);
+        Assert.Contains(pipeline.Extensions, e => e is SafeLinkExtension);
+
+        Assert.DoesNotContain(pipeline.Extensions, e => e is MediaLinkExtension);
+        Assert.DoesNotContain(pipeline.Extensions, e => e is GenericAttributesExtension);
+        Assert.DoesNotContain(pipeline.Extensions, e => e is AbbreviationExtension);
+    }
+
+    /// <summary>
+    /// C の陽性対照: preview パイプラインにだけ
+    /// <c>PreviewRelativeUrlExtension</c> (= <c>LinkRewriter</c> の設定元) が入っていること。
+    /// 上のテストが「拡張を消す方向」だけを見ているので、対で置く。
+    /// </summary>
+    [Theory]
+    [InlineData("PreviewPipeline", true)]
+    [InlineData("Pipeline", false)]
+    public void PreviewRelativeUrlExtension_IsPreviewPipelineOnly(string fieldName, bool expected)
+    {
+        var pipeline = (MarkdownPipeline)
+            typeof(MarkdownRenderer)
+                .GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)!
+                .GetValue(null)!;
+        Assert.Equal(expected, pipeline.Extensions.Any(e => e is PreviewRelativeUrlExtension));
+    }
 
     [Fact]
     public void Heading_becomes_h1() =>
