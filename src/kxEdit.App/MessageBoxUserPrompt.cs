@@ -28,4 +28,13 @@ internal sealed class MessageBoxUserPrompt : IUserPrompt
 
     public DialogResult YesNoCancel(string text, string caption) =>
         MessageBox.Show(text, caption, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+
+    public bool YesNo(string text, string caption, bool defaultNo) =>
+        MessageBox.Show(
+            text,
+            caption,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            defaultNo ? MessageBoxDefaultButton.Button2 : MessageBoxDefaultButton.Button1
+        ) == DialogResult.Yes;
 }

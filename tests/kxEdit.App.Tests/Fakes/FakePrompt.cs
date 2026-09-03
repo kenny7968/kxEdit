@@ -35,4 +35,20 @@ public sealed class FakePrompt : IUserPrompt
         Log.Add(("YesNoCancel", text, caption));
         return YesNoCancelResult;
     }
+
+    public bool YesNoResult { get; set; } = true;
+
+    public List<(string Caption, bool DefaultNo)> YesNoCalls { get; } = new();
+
+    /// <summary>M-18 再入テスト用: 応答を返す直前に呼ぶ(ダイアログのモーダルループの中で
+    /// 別の検知が届く状況を再現する)。</summary>
+    public Action? OnYesNo { get; set; }
+
+    public bool YesNo(string text, string caption, bool defaultNo)
+    {
+        Log.Add(("YesNo", text, caption));
+        YesNoCalls.Add((caption, defaultNo));
+        OnYesNo?.Invoke();
+        return YesNoResult;
+    }
 }
