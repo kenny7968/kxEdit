@@ -279,7 +279,13 @@ exit code を見る**(メモリー「変異ハーネスの exit code 罠」: gre
 各変異ごとに `dotnet test tests/kxEdit.Core.Tests` を実行し、**exit code != 0** と
 **落ちたテスト名**を記録する。生存した変異があれば網を足す。**検証後は必ず src を元に戻し、
 戻したうえで再度 `dotnet test` が緑になることを確認する**(`Copy-Item` での復元はタイムスタンプ
-引き継ぎで古い DLL を叩くことがある。`git checkout -- <path>` で戻す)。
+引き継ぎで古い DLL を叩くことがある)。
+
+> ⚠️ **`git checkout -- <path>` で戻さない**。この時点では実装がまだ未コミットなので、
+> 実装ごと HEAD へ巻き戻して消える(Task 1 実行時に実際に踏んだ)。**変異を入れる前に
+> 対象ファイルをスクラッチパッドへ退避し、そこから書き戻す**。実装がコミット済みなら
+> `git checkout -- <path>` でよい。どちらの場合も、復元後に `dotnet test` が緑に戻ることを
+> 必ず確認する(タイムスタンプ引き継ぎで古い DLL を叩くことがあるため)。
 
 **Step 8: コミット**
 
@@ -486,7 +492,11 @@ Expected: 両方 **Passed / 失敗 0**。
 `Home_WithSmartHomeOff_AlwaysMovesToLineStart` と `ShiftHome_FollowsSmartHomeSetting` が赤になること、
 `ApplyAppearance` の `SmartHome = settings.SmartHome;` を削ると
 `ApplyAppearance_AppliesSmartHomeFromSettings` が赤になることを、
-それぞれ `dotnet test` の **exit code と落ちたテスト名**で確認する。確認後 `git checkout -- <path>`。
+それぞれ `dotnet test` の **exit code と落ちたテスト名**で確認する。
+
+> ⚠️ 復元は Task 1 Step 7 と同じ注意。**この時点では実装が未コミット**なので
+> `git checkout -- <path>` は使わない。変異前にスクラッチパッドへ退避し、そこから書き戻して
+> `dotnet test` が緑に戻ることを確認する。
 
 **Step 9: コミット**
 
