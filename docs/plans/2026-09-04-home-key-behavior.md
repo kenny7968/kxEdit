@@ -42,8 +42,12 @@ L3 = kxEdit.App.Tests)。設計書は `docs/plans/2026-09-04-home-key-behavior-d
 - Test: `tests/kxEdit.Core.Tests/Editing/NavigationCommandsTests.cs`
 
 **なぜリネームするか**: `skipIndent=false` は「スマートではない」ので、`MoveHomeSmart` という名前が
-嘘になる。`MoveHome`(空白を見ない既存の別メソッド・UIA 等が使う)とは別物なので、
-`MoveLineHome` にする。
+嘘になる。`MoveHome`(空白を見ない既存の別メソッド)とは別物なので、`MoveLineHome` にする。
+
+> 訂正(2026-09-04 実施時): 当初ここに「`MoveHome` は UIA 等が使う」と書いていたが**事実誤り**。
+> `MoveHome` の本番呼び出し元は当時ゼロで、参照はテスト 5 箇所のみだった
+> (レビュー指摘で判明)。Task 1 の fixup で `MoveLineHome(..., skipIndent: false)` が
+> `MoveHome` へ委譲する形になり、以後は本番呼び出し元 1 件になる。
 
 **Step 1: 新しい挙動の失敗テストを書く**
 
