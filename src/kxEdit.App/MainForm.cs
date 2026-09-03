@@ -25,7 +25,7 @@ public sealed partial class MainForm : Form
 
     /// <summary>M-18: CSV モードのタブを読み直している間だけ true。<see cref="AutoEnterCsvMode"/>(自動モード)を
     /// 読み直しの中では飛ばし、<see cref="CheckExternalChangeOnActive"/> が発声の後にモードへ戻す
-    /// (発声順を手動モードと揃え、二重パースを避ける。最終コード品質レビュー Q-1)。</summary>
+    /// (発声順を手動モードと揃え、解析不能なら本文を 2 度パースしていたのを避ける。最終コード品質レビュー Q-1)。</summary>
     private bool _reloadingCsv;
     private readonly ToolStripStatusLabel _posLabel = new("行 1, 桁 1");
     private readonly ToolStripStatusLabel _encLabel = new("UTF-8");
@@ -417,7 +417,7 @@ public sealed partial class MainForm : Form
     private void AutoEnterCsvMode(Document doc)
     {
         if (_reloadingCsv)
-            return; // M-18: 読み直し中は MainForm が発声の後にモードへ戻す(発声順を手動モードと揃え、二重パースを避ける)
+            return; // M-18: 読み直し中は MainForm が発声の後にモードへ戻す(発声順を手動モードと揃え、解析不能時の 2 度目のパースを避ける)
         if (!_settings.CsvAutoModeOnOpen)
             return;
         if (
@@ -1603,8 +1603,8 @@ public sealed partial class MainForm : Form
     /// (<see cref="CsvController.TryGoToCell"/>。設計 §3.7 の「キャレットから導出するので近い位置に戻る」は
     /// 偽だった: キャレット由来の TryEnterMode は先頭セルへ入る)。自動モード(<c>_openedFresh</c> =
     /// <see cref="AutoEnterCsvMode"/>)は読み直しの中では <see cref="_reloadingCsv"/> で飛ばす: 自動で入り
-    /// 直させると発声が CSVモード オン … → 読み直しました の順になって手動モードと食い違い、本文も 2 度
-    /// パースする(最終コード品質レビュー Q-1)。手動・自動のどちらでも発声は 読み直しました → CSVモード オン … →
+    /// 直させると発声が CSVモード オン … → 読み直しました の順になって手動モードと食い違い、解析不能なら
+    /// 本文を 2 度パースする(成功経路は ParseCsv のキャッシュで 1 回。最終コード品質レビュー Q-1)。手動・自動のどちらでも発声は 読み直しました → CSVモード オン … →
     /// セル、の順で同期に連続し、UiaAnnouncer の 50 ms 窓により SR に届くのは 1 件目と最後
     /// (セルが無くなっていれば TryGoToCell は黙って false = 先頭セルの発声が残る)。
     /// <see cref="ExternalChangeOutcome.ReloadFailed"/> は両方の観測値が不変なので、エラーダイアログを
