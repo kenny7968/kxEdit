@@ -29,7 +29,9 @@ public static class NavigationCommands
     public static int MoveRightChar(TextSnapshot s, int caret) =>
         TextBoundary.NextLogicalChar(s, caret);
 
-    /// <summary>現在行の先頭(char offset)。</summary>
+    /// <summary>現在行の先頭(char offset)。
+    /// <see cref="MoveLineHome(TextSnapshot, int, bool)"/> に <c>skipIndent: false</c> を渡したときと等価
+    /// (行頭算出はここが唯一の出所で、論理行版はこれへ委譲する)。</summary>
     public static int MoveHome(TextSnapshot s, int caret)
     {
         int line = s.GetLineIndexOfChar(caret);
@@ -48,21 +50,25 @@ public static class NavigationCommands
     /// のトグル)。false=常に行頭(<c>lineStart</c>)。設定 <c>AppSettings.SmartHome</c> に対応する。</param>
     /// <remarks>
     /// <para><paramref name="skipIndent"/> = true のとき:</para>
-    /// - キャレットが行頭(lineStart)にいる → 先頭空白の後(firstNonWs)へ
-    /// - キャレットが firstNonWs にいる → 行頭(lineStart)へ
-    /// - それ以外(本文内) → firstNonWs へ
-    /// 空白のみの行では firstNonWs == lineEnd。トグルは lineStart ↔ lineEnd 相当だが問題なし。
+    /// <list type="bullet">
+    /// <item>キャレットが行頭(lineStart)にいる → 先頭空白の後(firstNonWs)へ</item>
+    /// <item>キャレットが firstNonWs にいる → 行頭(lineStart)へ</item>
+    /// <item>それ以外(本文内) → firstNonWs へ</item>
+    /// <item>空白のみの行では firstNonWs == lineEnd。トグルは lineStart ↔ lineEnd 相当だが問題なし。</item>
+    /// <item>ここでの空白判定は半角空白(' ')とタブ('\t')のみ。全角空白(U+3000)や他の
+    /// Unicode 空白は含めない(Scintilla 版 M6 と同じ挙動。char.IsWhiteSpace は改行を
+    /// 巻き込むため使わない)。</item>
+    /// </list>
     /// <para><paramref name="skipIndent"/> = false のとき: 常に lineStart(トグルしない=
-    /// 行頭で押しても動かない)。</para>
-    /// 空白判定は半角空白(' ')とタブ('\t')のみ。全角空白(U+3000)や他の Unicode 空白は含めない
-    /// (Scintilla 版 M6 と同じ挙動。char.IsWhiteSpace は改行を巻き込むため使わない)。
+    /// 行頭で押しても動かない)。<see cref="MoveHome"/> へ委譲するだけで本文は 1 文字も読まないため、
+    /// 上記の空白判定は false モードには一切関与しない。</para>
     /// </remarks>
     public static int MoveLineHome(TextSnapshot s, int caret, bool skipIndent)
     {
+        if (!skipIndent)
+            return MoveHome(s, caret); // 行頭算出の唯一の出所
         int line = s.GetLineIndexOfChar(caret);
         int lineStart = s.GetLineStart(line);
-        if (!skipIndent)
-            return lineStart;
         int lineEnd = s.GetLineEnd(line, includeBreak: false);
         int firstNonWs = lineStart;
         while (firstNonWs < lineEnd)
@@ -82,7 +88,8 @@ public static class NavigationCommands
     /// <param name="wrapColumns">折り返し桁数(半角換算)。&lt;=0 で折り返し無し=<see cref="MoveLineHome(TextSnapshot, int, bool)"/> と同じ論理行挙動。</param>
     /// <param name="metrics">文字幅計測(<see cref="LineLayout.Wrap"/> と同じ流儀)。</param>
     /// <param name="skipIndent">true=第 1 視覚セグメントで先頭空白を飛ばすスマート挙動。
-    /// false=常に視覚セグメント先頭(論理行頭ではない)。値の意味は
+    /// false=常に視覚セグメント先頭(第 1 セグメントでは論理行頭と一致するが、継続セグメントでは
+    /// 一致しない=論理行頭とは限らない)。値の意味は
     /// <see cref="MoveLineHome(TextSnapshot, int, bool)"/> の同名パラメータと同じ。</param>
     /// <remarks>
     /// <para>折り返し ON 時: キャレットが属する視覚セグメントの先頭を返す=NVDA/ナレーターが
@@ -93,8 +100,10 @@ public static class NavigationCommands
     /// <item>第 1 視覚セグメント(=論理行先頭を含む)は <paramref name="skipIndent"/> = true なら
     /// smart トグル(視覚 seg 内の firstNonWs ⇔ 視覚 seg 先頭=lineStart)、
     /// false なら常に視覚 seg 先頭。</item>
-    /// <item>継続視覚セグメント(2 つ目以降)は視覚 seg 先頭に固定=トグルなし
-    /// (継続 seg は通常 leading whitespace を持たないため firstNonWs 判定不要)。</item>
+    /// <item>継続視覚セグメント(2 つ目以降)は <paramref name="skipIndent"/> の値によらず
+    /// 視覚 seg 先頭に固定=トグルなし。<b>継続 seg が空白で始まることは普通に起きる</b>
+    /// (<see cref="LineLayout.Wrap"/> は語境界も空白トリムも持たない純 code-point 貪欲のため)が、
+    /// それでも空白を飛ばさないのは P8-1a の不変条件(SR が視覚行の先頭から読む)を優先するため。</item>
     /// <item>空行は視覚セグメントも [(0,0)] 1 個(<see cref="LineLayout.Wrap"/> 契約)=lineStart を返す。</item>
     /// </list>
     /// </remarks>
@@ -128,7 +137,9 @@ public static class NavigationCommands
         int visualStart = lineStart + seg.OffsetInLine;
         int visualEnd = lineStart + seg.OffsetInLine + seg.Length;
 
-        // 継続セグメント: 視覚 seg 先頭固定(トグルなし)
+        // 継続セグメント: 視覚 seg 先頭固定(トグルなし)。
+        // 継続 seg が空白で始まる場合(char 貪欲折り返しでは普通に起きる)も飛ばさない
+        // —— P8-1a(SR が視覚行の先頭から読む)を smart トグルより優先するため。
         if (segIdx > 0)
             return visualStart;
 

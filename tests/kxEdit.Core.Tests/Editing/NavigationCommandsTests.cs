@@ -212,6 +212,10 @@ public class NavigationCommandsTests
     [Fact]
     public void MoveLineHome_NoSkipIndent_EmptyLine_ReturnsLineStart()
     {
+        // 注意: 空行では smart 側も同じ 4 を返す(MoveLineHome_Smart_EmptyLine_ReturnsLineStart と
+        // fixture・caret・期待値が同一)。よって本テストは<b>モード差を区別しない</b>——
+        // false 側の早期 return を空行(lineStart==lineEnd)で踏んでも throw しない、という
+        // 境界の網である。false モードの挙動差の網として数えないこと。
         var s = Snap("abc\n\nxyz"); // 行1 は空行(lineStart=lineEnd=4)
         Assert.Equal(4, NavigationCommands.MoveLineHome(s, 4, skipIndent: false));
     }
@@ -256,6 +260,80 @@ public class NavigationCommandsTests
         Assert.Equal(
             0,
             NavigationCommands.MoveLineHome(s, 4, wrapColumns: 0, M, skipIndent: false)
+        );
+    }
+
+    [Fact]
+    public void MoveLineHome_WithWrap_NonFirstLogicalLine_UsesThatLineStart()
+    {
+        // 折り返し版のテストが全て論理行 0(lineStart==0)だと、visualStart / visualEnd の
+        // "lineStart +" を落とした実装(seg.OffsetInLine をそのまま返す)と区別できない。
+        // 行頭が 0 でない論理行 1 で検証する。
+        //
+        // "abc\r\n    hello world"
+        //   論理行 1: lineStart=5 / lineEnd=20 / 本文 "    hello world"(15 文字)
+        //   wrapColumns=8(=64px・ASCII 8px)→ seg 0=行内[0..8)="    hell"、seg 1=行内[8..15)="o world"
+        //   絶対 offset では seg 0=[5..13)、seg 1=[13..20)
+        //   先頭空白は 4 文字(5,6,7,8)なので firstNonWs=9。
+        //   ※ インデントを 4 文字にしているのは意図的 —— 2 文字だと firstNonWs(7)が
+        //     seg.Length(8)未満に収まり、visualEnd の "lineStart +" 落ちを検出できない。
+        var s = Snap("abc\r\n    hello world");
+        Assert.Equal(20, s.CharLength);
+
+        // 継続セグメント(caret=15='w')→ 視覚 seg 1 先頭=13。両モードとも。
+        Assert.Equal(
+            13,
+            NavigationCommands.MoveLineHome(s, 15, wrapColumns: 8, M, skipIndent: true)
+        );
+        Assert.Equal(
+            13,
+            NavigationCommands.MoveLineHome(s, 15, wrapColumns: 8, M, skipIndent: false)
+        );
+
+        // 第 1 セグメント(caret=11='l')→ smart は firstNonWs(9)、常に行頭は lineStart(5)。
+        Assert.Equal(
+            9,
+            NavigationCommands.MoveLineHome(s, 11, wrapColumns: 8, M, skipIndent: true)
+        );
+        Assert.Equal(
+            5,
+            NavigationCommands.MoveLineHome(s, 11, wrapColumns: 8, M, skipIndent: false)
+        );
+    }
+
+    [Fact]
+    public void MoveLineHome_WithWrap_ContinuationSegmentStartingWithSpaces_StaysOnSegmentStart()
+    {
+        // LineLayout.Wrap は語境界も空白トリムも持たない純 code-point 貪欲なので、
+        // 継続セグメントが空白で始まることは普通に起きる。そのとき smart モードでも
+        // firstNonWs へ飛ばず視覚 seg 先頭に留まる = P8-1a を smart トグルより優先する、が本テストの主張。
+        //   "aaaaaaaa    bbbb"(16 文字)→ seg 0=[0..8)="aaaaaaaa"、seg 1=[8..16)="    bbbb"
+        //   seg 1 内の firstNonWs は 12('b')。ガードが無ければ 12 が返る。
+        var s = Snap("aaaaaaaa    bbbb");
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 10, wrapColumns: 8, M, skipIndent: true)
+        );
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, 10, wrapColumns: 8, M, skipIndent: false)
+        );
+    }
+
+    [Fact]
+    public void MoveLineHome_WithWrap_AtCharLength_ReturnsLastVisualSegmentStart()
+    {
+        // EOF キャレット(caret == CharLength)で throw しない契約を折り返し版でも固定する。
+        // 行末位置は最終セグメント扱い(VisualSegments.FindContaining 契約)なので seg 1 先頭=8。
+        var s = Snap("  hello world");
+        Assert.Equal(13, s.CharLength);
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, s.CharLength, wrapColumns: 8, M, skipIndent: true)
+        );
+        Assert.Equal(
+            8,
+            NavigationCommands.MoveLineHome(s, s.CharLength, wrapColumns: 8, M, skipIndent: false)
         );
     }
 
