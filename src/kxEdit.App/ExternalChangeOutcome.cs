@@ -16,7 +16,8 @@ public enum ExternalChangeOutcome
     /// <summary>変更あり → 読み直した。呼出側は発声と CSV モードの復帰を行う。</summary>
     Reloaded,
 
-    /// <summary>変更あり → 読み直さなかった(観測値をディスクの値へ更新済み = 次の変更まで聞かない)。</summary>
+    /// <summary>変更あり → 読み直さなかった(ディスクの値を <c>AcknowledgedWriteTimeUtc</c> に憶えた
+    /// = 次の変更まで聞かない。観測値=本文の基準は不変で、保存直前の確認は生きたまま)。</summary>
     Kept,
 
     /// <summary>変更あり → 読み直そうとして失敗(<c>LoadInto</c> がエラーを出した)。観測値は不変。</summary>

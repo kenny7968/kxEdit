@@ -69,6 +69,14 @@ public sealed class DocumentState
     /// </summary>
     public DateTime? LastKnownWriteTimeUtc { get; set; }
 
+    /// <summary>
+    /// M-18: 「読み直さない」と答えたときのディスク側 LastWriteTimeUtc。ディスクがこの値のままの
+    /// あいだは復帰・タブ切替で聞き直さない。<b>本文の基準ではない</b> —— 保存直前の上書き確認は
+    /// <see cref="LastKnownWriteTimeUtc"/> だけを見るので、「読み直さない」のあとの Ctrl+S でも
+    /// 相手の変更を無言で上書きしない。本文の基準が更新される(開く・読み直す・保存する)たびに null へ戻す。
+    /// </summary>
+    public DateTime? AcknowledgedWriteTimeUtc { get; set; }
+
     public string DisplayName =>
         Path is not null ? System.IO.Path.GetFileName(Path)
         : UntitledNumber > 0 ? $"無題 {UntitledNumber}"

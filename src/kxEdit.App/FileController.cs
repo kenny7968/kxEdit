@@ -363,6 +363,7 @@ public sealed class FileController
             doc.State.HasBom = loaded.HasBom;
             doc.State.LineEnding = loaded.LineEnding;
             doc.State.LastKnownWriteTimeUtc = stamp;
+            doc.State.AcknowledgedWriteTimeUtc = null; // 本文の基準が更新された=「読み直さない」の記憶は捨てる
 
             // CSV モードは自動判定しない（メニューから手動で有効化する）。
             // 既存タブへロードし直す場合に備え、読取専用とハイライトを解除しておく。
@@ -889,6 +890,7 @@ public sealed class FileController
             // M-18(設計 2026-09-03 §3.2): 自分の保存で mtime が変わるので、書いた**後**の値を
             // 一致の基準にする。書込と取得の間に外部が書く窓は残る(設計 §9)。
             doc.State.LastKnownWriteTimeUtc = _fileTimestamps.GetLastWriteTimeUtc(path);
+            doc.State.AcknowledgedWriteTimeUtc = null; // 本文の基準が更新された=「読み直さない」の記憶は捨てる
             doc.Editor.SetSavePoint();
             DocumentManager.UpdateLabel(doc);
             _metaChanged();
@@ -1002,7 +1004,8 @@ public sealed class FileController
     /// <summary>
     /// ウィンドウ復帰・タブ切替時の外部変更検知(設計 2026-09-03 §3.4)。ディスクの更新時刻が
     /// 観測値(<see cref="DocumentState.LastKnownWriteTimeUtc"/>)と違えば読み直すか確認する。
-    /// 比較は完全一致(§3.3)。「いいえ」なら観測値をディスクの値へ更新し、次の変更まで聞き直さない。
+    /// 比較は完全一致(§3.3)。「いいえ」ならその値を憶えて(<see cref="DocumentState.AcknowledgedWriteTimeUtc"/>)
+    /// 次の変更まで聞き直さない。観測値(本文の基準)は動かさない=保存直前の確認は生きたまま。
     /// 読み直しは <see cref="LoadInto"/>(現在の文字コードで固定)+キャレット位置の復元(§3.5)。
     /// 発声と CSV モードの復帰は呼出側(MainForm)が <see cref="ExternalChangeOutcome.Reloaded"/> を見て行う。
     /// 保存直前の確認は別経路(<see cref="SaveDocument"/>)。
@@ -1024,7 +1027,8 @@ public sealed class FileController
             // 削除・到達不能・取得失敗は判定しない(設計 §3.3 / §9)。
             if (_fileTimestamps.GetLastWriteTimeUtc(path) is not DateTime disk)
                 return ExternalChangeOutcome.Skipped;
-            if (disk == known)
+            // 「読み直さない」と答えた値のままなら聞き直さない(本文の基準 known とは別に持つ)。
+            if (disk == known || disk == doc.State.AcknowledgedWriteTimeUtc)
                 return ExternalChangeOutcome.NoChange;
 
             // 名前を先頭・問いを末尾に置く(SR は頭から読む。A-10 と同じ語順)。名前は外部由来なので無害化。
@@ -1042,7 +1046,9 @@ public sealed class FileController
                 );
             if (!reload)
             {
-                doc.State.LastKnownWriteTimeUtc = disk; // 次の変更まで聞き直さない
+                // 次の変更まで聞き直さない。本文の基準(LastKnownWriteTimeUtc)は動かさない
+                // = 保存直前の確認は生きたまま(「いいえ」→ Ctrl+S で相手の変更を無言で上書きしない)。
+                doc.State.AcknowledgedWriteTimeUtc = disk;
                 return ExternalChangeOutcome.Kept;
             }
             return ReloadFromDisk(doc, path)

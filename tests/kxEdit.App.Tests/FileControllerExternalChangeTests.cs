@@ -279,6 +279,7 @@ public class FileControllerExternalChangeTests
             Assert.Equal("v2 longer text", doc.Editor.Text);
             Assert.False(doc.Editor.Modified);
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            Assert.Null(doc.State.AcknowledgedWriteTimeUtc);
             Assert.Equal(3, doc.Editor.CaretCharOffset);
             var call = Assert.Single(host.Prompt.YesNoCalls);
             Assert.Equal(("ファイルの変更", false), call);
@@ -305,7 +306,7 @@ public class FileControllerExternalChangeTests
         });
 
     /// <summary>未保存あり・いいえ: 文言が損失を伝え、既定は「いいえ」。本文も Modified も不変。
-    /// 観測値はディスクの値になり、<b>2 回目は聞かない</b>。</summary>
+    /// 観測値(本文の基準)は動かず、ディスクの値は別に憶えて <b>2 回目は聞かない</b>。</summary>
     [Fact]
     public void Check_Changed_Dirty_No_KeepsAndAcknowledges() =>
         Sta.Run(() =>
@@ -322,7 +323,8 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal("mine v1", doc.Editor.Text);
             Assert.True(doc.Editor.Modified);
-            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc); // 本文の基準は動かない(保存直前の確認が生きる)
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // 「読み直さない」の値だけ憶える
             var call = Assert.Single(host.Prompt.YesNoCalls);
             Assert.Equal(("ファイルの変更", true), call);
             var text = Assert.Single(host.Prompt.Log, e => e.Kind == "YesNo").Text;
@@ -333,6 +335,32 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal(ExternalChangeOutcome.NoChange, host.File.CheckExternalChange(doc));
             Assert.Single(host.Prompt.YesNoCalls); // 2 回目は出ない
+        });
+
+    /// <summary>「読み直さない」のあとにディスクが<b>さらに</b>変われば聞き直す(憶えた値と一致しない)。
+    /// 読み直せば憶えた値は null に戻る=次の判定は本文の基準だけで行う。未編集タブで「いいえ」→ 後で
+    /// 読み直す、という一番ありふれた流れ。</summary>
+    [Fact]
+    public void Check_Kept_ThenChangedAgain_PromptsAgain() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            ExternalWrite(host, path, "v2", T1);
+            host.Prompt.YesNoResult = false;
+            Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
+
+            DateTime t2 = T0.AddMinutes(2);
+            ExternalWrite(host, path, "v3", t2);
+            host.Prompt.YesNoResult = true;
+
+            Assert.Equal(ExternalChangeOutcome.Reloaded, host.File.CheckExternalChange(doc));
+
+            Assert.Equal(2, host.Prompt.YesNoCalls.Count);
+            Assert.Equal("v3", doc.Editor.Text);
+            Assert.Equal(t2, doc.State.LastKnownWriteTimeUtc);
+            Assert.Null(doc.State.AcknowledgedWriteTimeUtc); // 読み直しで戻る
         });
 
     [Fact]
