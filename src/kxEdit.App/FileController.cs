@@ -24,7 +24,7 @@ public sealed class FileController
     private readonly IUserPrompt _prompt; // 確認・警告の注入点（テストでは FakePrompt）
     private readonly IFileDialogService _fileDialogs; // ファイル系ダイアログの注入点（テストでは FakeFileDialogService）
     private readonly IReachabilityProbe _reachabilityProbe; // HIGH-6: UNC ロードの短タイムアウトプローブ(テストでは Fake)
-    private readonly IFileTimestampProvider _fileTimestamps; // A-1: 復元時の陳腐化検出(テストでは Fake)
+    private readonly IFileTimestampProvider _fileTimestamps; // A-1: 復元時の陳腐化検出 / M-18: 開く・保存・復帰・タブ切替の外部変更検知(テストでは Fake)
     private int _untitledSeq; // 無題タブの連番（新規作成毎に増加・セッション内で再利用しない）
 
     /// <summary>A-1 第 2 層(設計 2026-08-22 §4): 直近の復元で「ディスク側がバックアップより
