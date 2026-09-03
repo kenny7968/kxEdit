@@ -112,17 +112,26 @@ public class FileControllerExternalChangeTests
             using var tmp = new TempDir();
             var (doc, path) = Open(host, tmp, "a.txt", "old", T0);
             doc.Editor.ReplaceCharRange(0, 3, "new");
-            host.Timestamps.Times[path] = T1; // 保存後のディスクが返す値
             string? seenAtQuery = null;
-            host.Timestamps.OnQuery = p => seenAtQuery = File2.ReadAllText(p);
+            // 実ファイルと同じく、新しい本文がディスクに載った時点で初めて更新時刻が動く。
+            // 先に Times[path] = T1 と置くと、保存直前ガード(M-18 Task 4)には「開いた後に外で変更された」
+            // と見えて上書き確認が出てしまう(Fake の既定 OK で通るが、素の保存の網ではなくなる)。
+            host.Timestamps.OnQuery = p =>
+            {
+                seenAtQuery = File2.ReadAllText(p);
+                if (seenAtQuery == "new")
+                    host.Timestamps.Times[path] = T1;
+            };
 
             Assert.True(host.File.SaveDocument(doc));
 
             Assert.Equal("new", seenAtQuery);
-            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
-            // Open ヘルパの 1 回+保存の 1 回。問い合わせが増えると OnQuery が同じ読取を繰り返し、
-            // 「書いた後」の問い合わせが書く前へ動いても最後の読取で緑になってしまうのを塞ぐ。
-            Assert.Equal(2, host.Timestamps.Queries.Count);
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc); // T1 は "new" を見た問い合わせしか返さない=書いた後に取った証拠
+            Assert.Empty(host.Prompt.OkCancelCalls); // 書く前の問い合わせは T0 のまま=自分の保存を外部変更と誤認しない
+            // Open ヘルパの 1 回+保存直前ガード(書く前)の 1 回+書いた後の 1 回。問い合わせが増えると
+            // OnQuery が同じ読取を繰り返し、「書いた後」の問い合わせが書く前へ動いても最後の読取で
+            // 緑になってしまうのを塞ぐ。
+            Assert.Equal(3, host.Timestamps.Queries.Count);
         });
 
     /// <summary>バックアップ復元は A-1 の陳腐化判定が取った値を流用する(設計 §3.2)。</summary>
@@ -471,5 +480,143 @@ public class FileControllerExternalChangeTests
             // Ordinal 必須: 既定の culture 比較(ICU)は U+202E を「無視可能」として空一致させ、
             // 無害化の有無に関わらず常に「見つかった」になる(= 網として機能しない)。
             Assert.DoesNotContain("\u202E", text, StringComparison.Ordinal);
+        });
+
+    // ===== Task 4: \u4FDD\u5B58\u76F4\u524D\u306E\u4E0A\u66F8\u304D\u78BA\u8A8D =====
+
+    [Fact]
+    public void Save_DiskChanged_Cancel_DoesNotWrite() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine "); // Text \u30BB\u30C3\u30BF\u30FC\u306F SetOrReplaceSource \u3067 Modified \u304C\u7ACB\u305F\u306A\u3044
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.OkCancelResult = false;
+
+            Assert.False(host.File.SaveDocument(doc));
+
+            Assert.Equal("theirs", File2.ReadAllText(path));
+            Assert.True(doc.Editor.Modified);
+            Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc); // \u78BA\u8A8D\u3067\u6B62\u3081\u305F\u306E\u3067\u89B3\u6E2C\u5024\u306F\u52D5\u304B\u3055\u306A\u3044
+            var call = Assert.Single(host.Prompt.OkCancelCalls);
+            Assert.Equal(("\u4E0A\u66F8\u304D\u306E\u78BA\u8A8D", true), call);
+            var text = Assert.Single(host.Prompt.Log, e => e.Kind == "OkCancel").Text;
+            Assert.Equal(
+                "'a.txt' \u306F kxEdit \u3067\u958B\u3044\u305F\u5F8C\u306B\u5916\u3067\u5909\u66F4\u3055\u308C\u3066\u3044\u307E\u3059\u3002\u4E0A\u66F8\u304D\u3059\u308B\u3068\u3001\u305D\u306E\u5909\u66F4\u306F\u5931\u308F\u308C\u307E\u3059\u3002\u4E0A\u66F8\u304D\u3057\u307E\u3059\u304B?",
+                text
+            );
+        });
+
+    [Fact]
+    public void Save_DiskChanged_Ok_WritesAndRefreshesStamp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.OkCancelResult = true;
+
+            Assert.True(host.File.SaveDocument(doc));
+
+            Assert.Equal("mine v1", File2.ReadAllText(path));
+            Assert.False(doc.Editor.Modified);
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc); // \u4FDD\u5B58\u5F8C\u306E\u518D\u53D6\u5F97(Fake \u306F T1 \u3092\u8FD4\u3057\u7D9A\u3051\u308B)
+            Assert.Single(host.Prompt.OkCancelCalls);
+        });
+
+    [Fact]
+    public void Save_DiskUnchanged_NoPrompt() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+
+            Assert.True(host.File.SaveDocument(doc));
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+            Assert.Equal("mine v1", File2.ReadAllText(path));
+        });
+
+    /// <summary>\u89B3\u6E2C\u5024\u304C\u7121\u3051\u308C\u3070\u5224\u5B9A\u3057\u306A\u3044(\u30C7\u30A3\u30B9\u30AF\u5074\u306B\u5024\u304C\u6709\u3063\u3066\u3082)\u3002</summary>
+    [Fact]
+    public void Save_NoKnownStamp_NoPrompt() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", stamp: null);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+            host.Timestamps.Times[path] = T1;
+
+            Assert.True(host.File.SaveDocument(doc));
+
+            Assert.Empty(host.Prompt.OkCancelCalls);
+        });
+
+    /// <summary>\u30BF\u30D6\u3092\u9589\u3058\u308B\u78BA\u8A8D\u306E\u300C\u306F\u3044\u300D\u2192 \u4FDD\u5B58 \u2192 \u4E0A\u66F8\u304D\u78BA\u8A8D\u3067\u30AD\u30E3\u30F3\u30BB\u30EB \u2192 \u9589\u3058\u306A\u3044(false)\u3002</summary>
+    [Fact]
+    public void ConfirmDiscardIfDirty_Yes_ThenOverwriteCancelled_ReturnsFalse() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            doc.Editor.ReplaceCharRange(0, 0, "mine ");
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoCancelResult = DialogResult.Yes;
+            host.Prompt.OkCancelResult = false;
+
+            Assert.False(host.File.ConfirmDiscardIfDirty(doc));
+
+            Assert.Equal("theirs", File2.ReadAllText(path));
+        });
+
+    /// <summary>\u300C\u8AAD\u307F\u76F4\u3055\u306A\u3044\u300D(Kept)\u306F\u8AAD\u307F\u76F4\u3057\u306E\u78BA\u8A8D\u3060\u3051\u3092\u6291\u6B62\u3057\u3001\u4FDD\u5B58\u76F4\u524D\u306E\u78BA\u8A8D\u306F\u751F\u304D\u305F\u307E\u307E
+    /// (\u8A2D\u8A08\u306E\u7CBE\u5BC6\u5316: AcknowledgedWriteTimeUtc \u306F\u672C\u6587\u306E\u57FA\u6E96\u3067\u306F\u306A\u3044)\u3002\u672A\u7DE8\u96C6\u30BF\u30D6\u3067\u3082 Ctrl+S \u306F
+    /// \u53E4\u3044\u672C\u6587\u3067\u65B0\u3057\u3044\u30C7\u30A3\u30B9\u30AF\u3092\u4E0A\u66F8\u304D\u3057\u3046\u308B\u306E\u3067\u3001\u3053\u3053\u304C M-18 \u306E\u6700\u7D42\u9632\u885B\u7DDA\u3002</summary>
+    [Fact]
+    public void Save_AfterKept_StillPrompts() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = false;
+            Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
+            host.Prompt.OkCancelResult = false;
+
+            Assert.False(host.File.SaveDocument(doc));
+
+            Assert.Equal("theirs", File2.ReadAllText(path));
+            Assert.Single(host.Prompt.OkCancelCalls);
+        });
+
+    /// <summary>\u4FDD\u5B58\u3067\u672C\u6587\u306E\u57FA\u6E96\u304C\u66F4\u65B0\u3055\u308C\u308B\u3068\u3001\u61B6\u3048\u3066\u3044\u305F\u300C\u8AAD\u307F\u76F4\u3055\u306A\u3044\u300D\u306E\u5024\u306F\u6D88\u3048\u308B
+    /// (WriteToPath \u306E AcknowledgedWriteTimeUtc = null \u306E\u7DB2\u3002LoadInto \u5074\u306E\u5BFE\u306F
+    /// Check_Kept_ThenChangedAgain_PromptsAgain)\u3002</summary>
+    [Fact]
+    public void Save_AfterKept_ResetsAcknowledged() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            var (doc, path) = Open(host, tmp, "a.txt", "v1", T0);
+            ExternalWrite(host, path, "theirs", T1);
+            host.Prompt.YesNoResult = false;
+            Assert.Equal(ExternalChangeOutcome.Kept, host.File.CheckExternalChange(doc));
+            Assert.Equal(T1, doc.State.AcknowledgedWriteTimeUtc); // \u524D\u63D0: \u61B6\u3048\u3066\u3044\u308B
+            host.Prompt.OkCancelResult = true;
+
+            Assert.True(host.File.SaveDocument(doc));
+
+            Assert.Null(doc.State.AcknowledgedWriteTimeUtc);
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
         });
 }

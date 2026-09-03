@@ -496,6 +496,33 @@ public sealed class FileController
             return false;
         }
 
+        // M-18(設計 2026-09-03 §3.4): 保存直前の外部変更検知 = 無言上書きの最終防衛線。
+        // 位置は重複タブガードの後(重複は保存させないので I/O を無駄打ちしない)、A-10 の
+        // 符号化確認の前(「上書きするか」を先に決めてから劣化の確認に進む)。
+        // 観測値かディスク側が null(無題・到達不能・削除)なら判定しない(§3.3)。
+        // 完全一致で比べる(§3.3)。比べる相手は本文の基準 LastKnownWriteTimeUtc だけ:
+        // 「読み直さない」で憶えた AcknowledgedWriteTimeUtc は読み直しの確認を抑止するためのもので、
+        // ここで見ると「いいえ → Ctrl+S」が相手の変更を無言で上書きする(未編集タブでも起きる)。
+        // キャンセルでは観測値を動かさない: 次の復帰で読み直しの確認が出るのが正しい
+        // (ユーザーは「上書きしない」と決めただけで、ディスクの内容はまだ見ていない)。
+        // リモートではここで 5 秒プローブが 1 本増える(WriteToPath の TryInspectSaveTarget と合わせて
+        // 最悪 10 秒)。FileTimestampProvider の到達不能記憶(Task 5 で 60 秒 TTL)が 2 回目以降を省く。
+        if (
+            doc.State.LastKnownWriteTimeUtc is DateTime known
+            && _fileTimestamps.GetLastWriteTimeUtc(doc.State.Path) is DateTime disk
+            && disk != known
+            && !_prompt.OkCancel(
+                $"'{SanitizeForDisplay.OneLine(doc.State.DisplayName, 80)}' は kxEdit で開いた後に外で変更されています。"
+                    + "上書きすると、その変更は失われます。上書きしますか?",
+                "上書きの確認",
+                defaultCancel: true
+            )
+        )
+        {
+            // 保存しない。ConfirmDiscardIfDirty の「はい」経路でも false が伝播してタブを閉じない。
+            return false;
+        }
+
         // A-10: 上書き保存経路にも符号化劣化の事前確認を置く(SaveAs の C-2 追補 I-2 と対称)。
         // 従来は CanEncodeBuffer の呼出元が SaveAsDocument だけで、Ctrl+S は
         // TextFileService.Save の EncoderFallback.ReplacementFallback に素通りしていた
