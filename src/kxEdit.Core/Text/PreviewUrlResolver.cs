@@ -80,6 +80,13 @@ internal static class PreviewUrlResolver
             // Scheme 検査だけは現状到達不能 (変異させても全緑)。相対解決で scheme が変わるには
             // url 自身が scheme を持つ必要があり、それは上の Uri.TryCreate(Absolute) が
             // 先に捕まえるため。System.Uri の解釈が将来変わったときの保険として残す。
+            //
+            // D: ここを MarkdownRenderer.TryIsPreviewHost へ寄せないのは、判断している対象が
+            // 違うから。あちらは「著者が書いたホスト表記がブラウザ解釈で preview を指すか」
+            // (IDNA 正規化が要る) で、こちらは「我々自身が PreviewBase から解決した結果が
+            // origin を変えていないか」——Host / Port / UserInfo / Scheme の 4 条件で
+            // origin 全体を見る必要があり、ホスト 1 条件では足りない。解決基準が
+            // PreviewBase (ASCII の定数) なので IdnHost は不要で、投げる経路も無い。
             if (
                 !string.Equals(resolved.Scheme, PreviewBase.Scheme, StringComparison.Ordinal)
                 || !string.Equals(
