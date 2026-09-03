@@ -58,8 +58,30 @@ internal sealed class PreviewRelativeUrlExtension : IMarkdownExtension
     /// <para>
     /// 上書き衝突は無い: Markdig の既定値は null で、本リポジトリで
     /// <c>LinkRewriter</c> を設定するのはここだけ (grep 済み・既定値 null は実測)。
-    /// <c>Setup</c> は描画のたびに新しい <c>HtmlRenderer</c> に対して呼ばれるので、
-    /// 代入が renderer 間で共有されることもない。
+    /// </para>
+    /// <para>
+    /// <b>訂正 (F-2・2026-09-03)</b>: 旧記述「<c>Setup</c> は描画のたびに新しい
+    /// <c>HtmlRenderer</c> に対して呼ばれるので、代入が renderer 間で共有されることもない」は
+    /// <b>偽</b>だった。Markdig の <c>MarkdownPipeline</c> は <c>HtmlRendererCache</c> で
+    /// renderer をプールしており、<b>逐次 10 回の render で <c>Setup</c> の呼び出しは 1 回</b>、
+    /// そのあと 200 並列で +9 回だった (実測。並列側の増分は同時実行数に依存する)。
+    /// つまり代入は renderer 間で<b>共有される</b>。
+    /// </para>
+    /// <para>
+    /// それでも安全な根拠は次の 3 点:
+    /// <list type="number">
+    ///   <item>代入するのが<b>静的メソッドへの参照</b>であること (インスタンス状態を
+    ///     持ち込まないので、renderer が使い回されても書き換え規則は同じ)。</item>
+    ///   <item>pool が <b>pipeline ごと</b>であること (preview パイプラインの renderer が
+    ///     空 baseHref パイプラインへ流れることはない)。</item>
+    ///   <item>Markdig の pooled reset が <c>LinkRewriter</c> を<b>消さない</b>こと ——
+    ///     1 回目の <c>Setup</c> でだけ <c>LinkRewriter</c> を設定する拡張を作って
+    ///     3 回連続で render すると、2 回目以降も書き換えが効いた (実測)。
+    ///     <b>これは Markdig の未文書化挙動への依存</b>である。</item>
+    /// </list>
+    /// 3 点目が崩れたら (pooled reset が <c>LinkRewriter</c> を消すようになったら)、
+    /// <c>MarkdownRendererTests.Preview_EncodedSeparators_NeverReachOutput</c> の 14 ケースは
+    /// 同一 pipeline を使い回すので<b>2 本目以降の 13 本が落ちて検知できる</b>。
     /// </para>
     /// </summary>
     public void Setup(MarkdownPipeline pipeline, IMarkdownRenderer renderer)

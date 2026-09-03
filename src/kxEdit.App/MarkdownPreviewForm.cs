@@ -91,8 +91,10 @@ public sealed class MarkdownPreviewForm : Form
 
             // MD-M-2: WebResourceRequested に CSP header injector を装着。
             // filter/handler を装着してから NavigateToString しないと初回サブリソース要求
-            // (styles.css) で virtual CSS response を返す機会を失うため、順序が重要
-            // (SetVirtualHostNameToFolderMapping と NavigateToString の間に挟む)。
+            // (styles.css) で virtual CSS response を返す機会を失うため、順序が重要。
+            // 実際の順序は Attach → PreviewVirtualHostMapping.Apply → NavigateToString で、
+            // 要件は「NavigateToString より前」だけ (旧記述の「SetVirtualHostNameToFolder-
+            // Mapping と NavigateToString の間に挟む」は実際の位置と食い違っていた)。
             // Attach 後は event delegate が Injector を root で保持するため、
             // ローカル変数のみで OK (WebView2 Dispose で購読が切れると GC 対象になる)。
             new PreviewCspHeaderInjector(env).Attach(core);

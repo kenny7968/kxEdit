@@ -339,10 +339,13 @@ public static class MarkdownRenderer
         {
             throw new MarkdownTooComplexException(TooComplexDetail, ex);
         }
-        // MD-M-2: CSP は HTTP header (PreviewCspHeaderInjector) 側が第一防御で、
-        // meta http-equiv は WebResourceRequested 未サポート環境および
-        // NavigateToString(html) 初回 bootstrap の data:text/html origin (header 注入不可) 用の
-        // fallback。同じ PreviewCspHeader 定数を参照して食い違いを防ぐ。
+        // MD-M-2 / V-6 (訂正・2026-09-03): この meta http-equiv が CSP の<b>唯一の担保</b>。
+        // 旧記述「HTTP header (PreviewCspHeaderInjector) 側が第一防御で meta は fallback」は
+        // 偽で、PreviewCspHeaderInjector の doc と正反対のことを言っていた。実際には
+        //   - プレビュー文書は NavigateToString の data:text/html 起点なので header を注入できない
+        //   - Injector が CSP header を付けているのは CSS レスポンスだけで、CSP はドキュメントと
+        //     ワーカーにしか適用されない仕様のため、そのヘッダは強制されない
+        // 定数 (PreviewCspHeader) を共有しているのは一貫性のためで、防御層は 1 枚しかない。
         // MD-M-2: <style>{Css}</style> を撤去し <link> で外部化。CSS 実体は
         // App 層の Injector が virtual response で供給する (PreviewStylesheetPath 経由)。
         // A-2 (案 B): href は <base> に依存させないため絶対 URL (PreviewStylesheetUrl)。

@@ -39,9 +39,17 @@ public static class PreviewNavigationPolicy
         /// <summary>
         /// 既定ブラウザ/アプリで開く安全 scheme (http/https で preview 仮想ホストを指さないもの, mailto)。
         /// <para>
-        /// 「preview を指さない」の判定は <c>Uri.IdnHost</c> の末尾ドット除去で行う。
+        /// 「preview を指さない」の判定は <c>Uri.IdnHost</c> の末尾ドット除去で行う
+        /// (実装は <see cref="MarkdownRenderer.TryIsPreviewHost"/>)。
         /// F-3 以前は <c>Uri.Host</c> の直比較だったため、<c>http://kxedit.preview./leak</c> が
-        /// ここへ落ちて既定ブラウザに実 DNS 解決させていた (実測)。
+        /// ここへ落ちていた。
+        /// </para>
+        /// <para>
+        /// <b>実測と推定の切り分け (F-3・訂正)</b>: 実測しているのは
+        /// 「<c>Classify</c> がこの形に <see cref="LaunchExternal"/> を返していた」ところまで。
+        /// そこから先の「既定ブラウザが <c>kxedit.preview</c> を実 DNS 解決する」は
+        /// <b>推測 (未実測)</b> —— DNS クエリが実際に出たことは測っていない。
+        /// 旧記述はこの 2 つをまとめて「(実測)」と書いていた。
         /// </para>
         /// </summary>
         LaunchExternal,

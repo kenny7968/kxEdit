@@ -1673,8 +1673,11 @@ public sealed partial class MainForm : Form
     /// <remarks>
     /// MD-L-3 L5 検証: 4M 文字超の .md を開いて Preview 起動 → エラーダイアログが出て
     /// プレビュー窓は開かないこと。MainForm には IUserPrompt が注入されていないため、
-    /// MarkdownPreviewForm.cs:135 と同様に MessageBox.Show を直接使う。
+    /// <c>MarkdownPreviewForm.InitAsync</c> の catch と同様に MessageBox.Show を直接使う
+    /// (行番号ではなくメソッド名で指す —— 旧記述の "MarkdownPreviewForm.cs:135" は
+    /// 既に陳腐化していた)。
     /// M-23: cap 判定は TextLength で行い SnapshotText を呼ばない。
+    /// B: Markdig のネスト深度上限超過 (MarkdownTooComplexException) も同様に提示する。
     /// </remarks>
     private void ShowMarkdownPreview()
     {
