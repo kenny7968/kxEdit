@@ -1,5 +1,6 @@
 using kxEdit.App.Tests.Fakes;
 using kxEdit.Core.Backup;
+using kxEdit.Core.Session;
 using kxEdit.Core.Settings;
 using File2 = System.IO.File;
 
@@ -88,6 +89,9 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal("after", doc.Editor.Text);
             Assert.Equal(T0, doc.State.LastKnownWriteTimeUtc);
+            // 問い合わせは M-18 の 1 回だけ: 将来 read 前に別の問い合わせが足されて M-18 の問い合わせが
+            // read 後へ動いても、OnQuery が同じ書込を 2 回するため緑のまま通ってしまうのを塞ぐ。
+            Assert.Single(host.Timestamps.Queries);
         });
 
     /// <summary>保存は書いた<b>後</b>に取る(設計 §3.2)。問い合わせの瞬間にディスクを読むと
@@ -108,6 +112,9 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal("new", seenAtQuery);
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
+            // Open ヘルパの 1 回+保存の 1 回。問い合わせが増えると OnQuery が同じ読取を繰り返し、
+            // 「書いた後」の問い合わせが書く前へ動いても最後の読取で緑になってしまうのを塞ぐ。
+            Assert.Equal(2, host.Timestamps.Queries.Count);
         });
 
     /// <summary>バックアップ復元は A-1 の陳腐化判定が取った値を流用する(設計 §3.2)。</summary>
@@ -136,5 +143,57 @@ public class FileControllerExternalChangeTests
 
             Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
             Assert.Single(host.Timestamps.Queries); // A-1 の 1 回だけ。追加 I/O を作らない
+        });
+
+    /// <summary>hot exit 復元(RestoreSession → RestoreDirtyFromBackup = A-1 の主経路)でも
+    /// A-1 の値が入る(設計 §3.2)。<see cref="RestoreFromBackup_CapturesDiskTimestamp"/> は
+    /// ダイアログ経路(RestoreFromBackup)だけを通るので、RestoreDirtyFromBackup 側の代入を
+    /// 固定する網はこの 1 本だけ。</summary>
+    [Fact]
+    public void RestoreSession_DirtyRestore_CapturesDiskTimestamp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            string path = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "kxEdit-m18-session.txt")
+            );
+            host.Timestamps.Times[path] = T1;
+            var bk = new BackupRecord(
+                Id: Guid.NewGuid().ToString("N"),
+                OriginalPath: path,
+                UntitledNumber: 0,
+                CodePage: 65001,
+                HasBom: false,
+                LineEndingId: 0,
+                Content: "backup content",
+                TimestampUtc: T0
+            );
+            var layout = new SessionLayout(
+                new List<SessionLayoutRecord>
+                {
+                    new(
+                        Path: path,
+                        UntitledNumber: 0,
+                        BackupId: bk.Id,
+                        IsActive: true,
+                        CaretLine: 0,
+                        CaretColumn: 0,
+                        LineEnding: 0
+                    ),
+                },
+                T0
+            );
+
+            _ = host.File.RestoreSession(
+                layout,
+                new[] { bk },
+                initialEmpty: null,
+                adoptRestored: null
+            );
+
+            var doc = host.Docs.Active!;
+            Assert.Equal(path, doc.State.Path);
+            Assert.True(doc.Editor.Modified); // dirty 復元であること(RestoreDirtyFromBackup を通った)
+            Assert.Equal(T1, doc.State.LastKnownWriteTimeUtc);
         });
 }

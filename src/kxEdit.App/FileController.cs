@@ -350,7 +350,8 @@ public sealed class FileController
             // M-18(設計 2026-09-03 §3.2): 更新時刻は本文を読む**前**に取る。読んでいる最中に外部が
             // 書き換えた場合、観測値は本文より古くなり次回の検知で拾える。読んだ後に取ると、
             // その 1 回の変更を永久に見落とす(観測値が本文より新しくなる)。
-            // TryProbeFileExists の後なので、リモートでもプロバイダ内の 2 度目のプローブは ms で返る。
+            // TryProbeFileExists で到達可能と判った直後なので、プロバイダ内の追加プローブは短時間で
+            // 返る(想定・未実測)。到達不能ルートとして記憶されている間はプローブ自体が走らず null を返す。
             DateTime? stamp = _fileTimestamps.GetLastWriteTimeUtc(path);
 
             // P6 Task 10: Stream I/O 経路で TextBuffer に直接読み込む(1GB 級 UTF-8 の OOM 回避)。
