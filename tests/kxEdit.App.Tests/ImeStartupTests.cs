@@ -128,7 +128,7 @@ public class ImeStartupTests
         // IME が閉じているとき GetImeMode が返すセル = 本対策の核心。
         Assert.Equal(ImeMode.NoControl, table[imeClosed]);
         // 塗り始めの位置が、読まれる最初のセルより後ろへずれていないこと。
-        // (FirstInferredCell を imeClosed より大きくする変異がここで死ぬ)
+        // (FirstInferredCell を imeDirectInput より大きくする変異がここで死ぬ)
         Assert.True(imeDirectInput <= imeClosed);
         Assert.Equal(ImeMode.NoControl, table[imeDirectInput]);
     }

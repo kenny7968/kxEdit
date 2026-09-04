@@ -60,7 +60,10 @@ internal readonly record struct ImeSuppressionResult(
 /// <c>ImeContext.SetImeStatus</c> は <c>ImeMode.Disable</c> を <c>Disable(handle)</c>
 /// (= <c>ImmAssociateContext</c> で入力コンテキストを外す)へ回し、その後の
 /// <c>switch</c> でも <c>break</c> するだけでテーブルを読まない。
-/// よってテーブルを塗っても <c>ImeMode.Disable</c> の往復は無傷。</para>
+/// よってテーブルを塗っても <c>ImeMode.Disable</c> による IME の切り離しそのものは無傷。
+/// ただし「<c>Disable</c> の欄から戻ったときに WinForms が IME を開き直す」復元動作は
+/// 本対策で止まる —— 日本語入力中に「行へ移動」等を使うと戻っても IME が切れたままになる
+/// (設計 2026-09-05 §6.2 の受容事項。実測済み)。</para>
 /// </summary>
 internal static class ImeStartup
 {
@@ -82,10 +85,11 @@ internal static class ImeStartup
     /// フレームワーク側の構造セル(<c>ImeMode.Inherit</c> / <c>ImeMode.Disable</c>)を
     /// 無意味に壊すだけなので広げない。</para>
     ///
-    /// <para><b>ここを 3 以上へ狭めてはいけない</b>: 読まれる最初のセルは
-    /// <c>ImeClosed</c>(3)なので、3 を塗り残すと IME が閉じているときの推測が生き返り、
-    /// <c>PropagatingImeMode</c> が再び記録されて発声が戻る。
-    /// この不変条件は <c>ImeStartupTests.フレームワークが実際に読むセルが中和される</c> が固定する。</para>
+    /// <para><b>ここを 4 以上へ狭めてはいけない</b>: 読まれる最初のセルは <c>ImeClosed</c>(3)で、
+    /// 3 を塗り残すと IME が閉じているときの推測が生き返り、<c>PropagatingImeMode</c> が
+    /// 再び記録されて発声が戻る(変異 4 は実測で KILLED)。
+    /// 3 は機能的には 2 と等価だが、<c>ImeStartupTests.フレームワークが実際に読むセルが中和される</c> が
+    /// <c>ImeDirectInput</c>(2)まで塗ることを固定しているため、そこでも赤くなる。</para>
     /// </summary>
     private const int FirstInferredCell = 2;
 
