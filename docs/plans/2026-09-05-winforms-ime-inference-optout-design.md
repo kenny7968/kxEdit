@@ -271,6 +271,32 @@ IME を奪う理由にはならない、という整理。2 ファイル + 正�
 (`Main` は `[STAThread]` + `Application.Run` で叩けない。既存の `SetUnhandledExceptionMode` /
 `EncodingCatalog.EnsureRegistered` と同じ)。起動時に `Trace` へ 1 行残し、L5 で確認する。
 
+> **追記(Task 2 実装時に判明・2026-09-05)**: 上の受容は**前提が誤っていた**。
+> `Main` を**実行**して観測できないのは事実だが、観測手段は実行だけではない。
+> このリポジトリには `tests/kxEdit.App.Tests/IlCallees.cs`(IL から `call` / `callvirt` /
+> `newobj` の対象を集める)という既存の道具と、`MainFormSmokeTests` の
+> `ProgramMain_builds_the_form_through_the_tested_composition_point` という
+> **まさに `Main` に対して同じ言い訳を反証している稼働中の前例**がある。
+> **呼び出しの有無と順序は固定できる。**
+>
+> しかも本対策の核心は「呼ぶこと」ではなく **「最初のウィンドウを作る前に呼ぶこと」**である
+> (§5.2 の実測 `[2,0,0,0,0]`)。そこで Task 2 で `MainFormSmokeTests` に
+> `ProgramMain_suppresses_ime_mode_inference_before_creating_any_window` を 1 本追加し、
+> `ImeStartup.SuppressWinFormsImeModeInference` の呼び出しが `Program.CreateMainForm`
+> (= `MainForm` を組み立てる合成点 = 最初のウィンドウ)**より前**にあることを IL 上の
+> 順序で固定した(`IlCallees.Scan` は IL を先頭から走査して追加するため、返却リストは
+> オフセット昇順=実行順)。`Contains` / 位置比較は走査の偽陽性で緑になりうるので、
+> 「呼び出しを合成点の後ろへ移す」「呼び出しを丸ごと削除する」の 2 変異を当てて
+> 実際に赤くなることを確認してある。
+>
+> ただし IL 走査で**固定できないもの**は残る —— **渡した引数の値**と、
+> **実際に推測抑止が効いたかどうか**。前者は呼出集合では原理的に観測できず、後者は
+> `ImeStartupTests`(テーブルが塗られたことの観測)と **L5(実発声)** の担当である。
+> `Trace` へ 1 行残す方針も変えない。
+>
+> これは CLAUDE.md §4「**『網が無い』という主張も検証対象**」の実例である。
+> 「観測できない」と書く前に、既にあるツールと前例を探すこと。
+
 ### L5 (実機 SR 検証・**必須**)
 
 SR 経路に触れる変更のため必須。チェックリストは

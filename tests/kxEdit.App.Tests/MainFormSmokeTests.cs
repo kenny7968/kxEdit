@@ -1470,6 +1470,79 @@ public class MainFormSmokeTests
         );
     }
 
+    /// <summary>
+    /// IME モード推測の無効化(設計 2026-09-05)を <b>最初のウィンドウを作る前</b>に呼んでいること。
+    /// <para>
+    /// <b>設計書 §7 の「カバレッジの穴(受容)」は前提が誤っていた</b>。<c>Main</c> を<b>実行</b>して
+    /// 観測できないのは事実だが、<see cref="IlCallees"/> という既存の道具と、すぐ上の
+    /// <see cref="ProgramMain_builds_the_form_through_the_tested_composition_point"/> という
+    /// 稼働中の前例がある。「網が無い」という主張も検証対象(CLAUDE.md §4)。
+    /// </para>
+    /// <para>
+    /// <b>この修正の核心は「呼ぶこと」ではなく「ウィンドウ生成より前に呼ぶこと」</b>である
+    /// (設計 §5.2: <c>Form.Shown</c> の時点で当てると、起動時に既に武装済みの分が
+    /// 1 回だけ鳴った ——<c>[2,0,0,0,0]</c>)。だから<b>呼出の有無ではなく順序</b>を固定する。
+    /// <see cref="IlCallees"/> の走査は IL を先頭から 1 バイトずつ進めて追加するので、
+    /// 返却リストは IL オフセットの昇順=ソース上の実行順である。
+    /// </para>
+    /// <para>
+    /// <b>アンカーの選び方</b>: 「<c>Main</c> の最初の <c>call</c> であること」は厳しすぎて、
+    /// 無害な追加(ログ 1 行)でも赤くなる。実際に発声が戻るのは<b>最初のウィンドウが
+    /// 作られた後</b>なので、その合成点である <see cref="Program.CreateMainForm"/> を
+    /// アンカーにする。<c>ApplicationConfiguration.Initialize</c> は<b>アンカーにしない</b>
+    /// ——ウィンドウを作らない(<c>EnableVisualStyles</c> 等の静的設定)ので、実測の根拠が
+    /// 無いまま順序を縛ると「動く形」を赤にするだけになる。<c>Main</c> が
+    /// <c>CreateMainForm</c> を迂回して <c>MainForm</c> を直に組み立てないことは、
+    /// すぐ上のテストの <c>DoesNotContain</c> が既に固定しているので、
+    /// このアンカーは「最初のウィンドウ」の代理として成立する。
+    /// </para>
+    /// <para>
+    /// <b>守らないもの</b>: 渡した引数の値、そして<b>実際に IME 推測が抑止されたかどうか</b>。
+    /// 前者は呼出集合では観測できず(すぐ上のテストの xmldoc と同じ話)、後者は
+    /// <c>ImeStartupTests</c>(テーブルが塗られたことの観測)と L5(実発声)の担当である。
+    /// </para>
+    /// <para>
+    /// 向きに注意: 走査の偽陽性は「呼んでいないものが混ざる」向きにしか働かないので
+    /// <c>DoesNotContain</c> は健全だが、<c>Contains</c> / 位置比較は偽陽性で緑になりうる。
+    /// そのため本テストは変異を 2 つ当てて赤くなることを確認してある ——
+    /// (1) 呼び出しを <c>CreateMainForm</c> の後ろへ移す、(2) 呼び出しを丸ごと削除する。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProgramMain_suppresses_ime_mode_inference_before_creating_any_window()
+    {
+        var main = typeof(Program).GetMethod(
+            "Main",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(main);
+        // どちらのアンカーも call なので newobj は要らない。拾う命令が少ないほど
+        // 偽陽性が混ざる余地も小さい(位置比較は偽陽性に弱いため、狭いほうを選ぶ)。
+        var called = IlCallees.Of(main!);
+
+        int ime = called.FindIndex(m =>
+            m.DeclaringType == typeof(ImeStartup)
+            && m.Name == nameof(ImeStartup.SuppressWinFormsImeModeInference)
+        );
+        int compose = called.FindIndex(m =>
+            m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
+        );
+
+        Assert.True(
+            ime >= 0,
+            "Program.Main が ImeStartup.SuppressWinFormsImeModeInference を呼んでいない(設計 2026-09-05 §5.2)"
+        );
+        Assert.True(
+            compose >= 0,
+            "Program.Main が Program.CreateMainForm を呼んでいない(アンカーが消えた=このテストの前提が壊れている)"
+        );
+        Assert.True(
+            ime < compose,
+            $"IME 推測の無効化は最初のウィンドウを作る合成点より前でなければならない(設計 §5.2)。"
+                + $"実際の IL 上の順序: ImeStartup={ime}, CreateMainForm={compose}"
+        );
+    }
+
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
 
     // ON×BackupON+dirty → 確認なし(silent close)+FinalFlush が本文バックアップとレイアウトを
