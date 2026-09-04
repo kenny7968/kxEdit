@@ -95,4 +95,67 @@ public class SettingsDialogLayoutTests
                 );
             }
         });
+
+    /// <summary>
+    /// 寸法がフォントに追従することを固定する。ダイアログの ClientSize は ctor で確定するため、
+    /// フォントを差し替えて測り直す網はヘルパ経由でしか張れない。
+    /// 「両方の倍率で内容を包含する」だけでは即値実装(十分大きい定数)が生き残るので、
+    /// 「倍率を上げたら寸法も増える」ことまで見る。
+    /// </summary>
+    [Fact]
+    public void Client_size_follows_the_font_rather_than_hard_coded_pixels() =>
+        Sta.Run(() =>
+        {
+            var normal = MeasureWithFontScale(1.0f);
+            var large = MeasureWithFontScale(1.5f);
+
+            Assert.True(
+                large.Width > normal.Width,
+                $"フォントを 1.5 倍にしても幅が増えない ({normal.Width} → {large.Width})"
+            );
+            Assert.True(
+                large.Height > normal.Height,
+                $"フォントを 1.5 倍にしても高さが増えない ({normal.Height} → {large.Height})"
+            );
+        });
+
+    /// <summary>指定倍率のフォントでヘルパを呼び、戻り値が内容を包含することを確かめて返す。</summary>
+    private static Size MeasureWithFontScale(float scale)
+    {
+        using var font = new Font(Control.DefaultFont.FontFamily, Control.DefaultFont.Size * scale);
+        using var tabs = new TabControl { Font = font };
+        using var buttons = new FlowLayoutPanel { AutoSize = true, Font = font };
+
+        var page = new TabPage("ページ");
+        var body = new Label
+        {
+            AutoSize = true,
+            Text = "設定項目のラベル",
+            Font = font,
+        };
+        page.Controls.Add(body);
+        tabs.TabPages.Add(page);
+        buttons.Controls.Add(
+            new Button
+            {
+                Text = "OK",
+                AutoSize = true,
+                Font = font,
+            }
+        );
+
+        var size = SettingsTabLayoutHelper.ComputeDialogClientSize(tabs, buttons);
+        var wantBody = body.GetPreferredSize(Size.Empty);
+        var wantButtons = buttons.GetPreferredSize(Size.Empty);
+
+        Assert.True(
+            size.Width >= wantBody.Width,
+            $"幅 {size.Width} が本体の希望幅 {wantBody.Width} に足りない"
+        );
+        Assert.True(
+            size.Height >= wantBody.Height + wantButtons.Height,
+            $"高さ {size.Height} が本体 {wantBody.Height} + ボタン列 {wantButtons.Height} に足りない"
+        );
+        return size;
+    }
 }
