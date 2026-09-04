@@ -15,8 +15,16 @@ namespace kxEdit.App.Tests;
 /// </summary>
 public class SettingsDialogLayoutTests
 {
-    /// <summary>フォームを画面外に可視化する(レイアウト確定に Show が要る)。</summary>
-    private static SettingsDialog ShowOffScreen(AppSettings settings)
+    /// <summary>
+    /// フォームを画面外に可視化し、<b>ctor が決めた寸法</b>(= 開いた瞬間の寸法)を併せて返す。
+    /// 寸法を測るのは必ず <see cref="Control.Show"/> の<b>前</b>。実行時の追随拡大
+    /// (SettingsDialog.OnPageBodyLayout)は Show の中でも走るため、Show の後に測ると
+    /// 初期寸法が間違っていても既に補正済みの値しか見えない
+    /// (実測: 欠陥寸法 390x207 を与えても Show 直後には 496x290 に戻っている)。
+    /// </summary>
+    private static (SettingsDialog dlg, Size sizeFromConstructor) ShowOffScreenMeasured(
+        AppSettings settings
+    )
     {
         var dlg = new SettingsDialog(settings)
         {
@@ -24,9 +32,14 @@ public class SettingsDialogLayoutTests
             Location = new Point(-32000, -32000),
             ShowInTaskbar = false,
         };
+        var sizeFromConstructor = dlg.ClientSize;
         dlg.Show();
-        return dlg;
+        return (dlg, sizeFromConstructor);
     }
+
+    /// <summary>フォームを画面外に可視化する(レイアウト確定に Show が要る)。</summary>
+    private static SettingsDialog ShowOffScreen(AppSettings settings) =>
+        ShowOffScreenMeasured(settings).dlg;
 
     private static T Child<T>(Control root)
         where T : Control => root.Controls.OfType<T>().Single();
@@ -71,17 +84,32 @@ public class SettingsDialogLayoutTests
     public void Every_tab_page_fits_its_content(string fontName) =>
         Sta.Run(() =>
         {
-            using var dlg = ShowOffScreen(new AppSettings { FontName = fontName });
-            var tabs = Child<TabControl>(dlg);
-            Assert.NotEmpty(tabs.TabPages);
-
-            foreach (TabPage page in tabs.TabPages)
+            var (dlg, initial) = ShowOffScreenMeasured(new AppSettings { FontName = fontName });
+            using (dlg)
             {
-                var (_, want) = LayoutPage(dlg, tabs, page);
-                Assert.True(
-                    page.ClientSize.Width >= want.Width && page.ClientSize.Height >= want.Height,
-                    $"タブ「{page.Text}」の表示領域 {page.ClientSize} が本体の希望サイズ {want} を収められない"
-                );
+                var tabs = Child<TabControl>(dlg);
+                Assert.NotEmpty(tabs.TabPages);
+
+                foreach (TabPage page in tabs.TabPages)
+                {
+                    var (_, want) = LayoutPage(dlg, tabs, page);
+
+                    // 実行時の追随拡大(SettingsDialog.OnPageBodyLayout)は Show とページ選択の
+                    // どちらでも走る。fit だけを見ると、初期寸法が間違っていてもその場の成長で
+                    // 辻褄が合い、テストが緑になってしまう。固定したい不変条件は
+                    // 「開いた瞬間の寸法で全ページが収まる」であって「各タブを訪問した後なら
+                    // 収まる」ではないので、ctor 時点の寸法から動いていないことを併せて見る。
+                    Assert.True(
+                        dlg.ClientSize == initial,
+                        $"タブ「{page.Text}」を選ぶまで寸法が足りず、その場で {initial} -> {dlg.ClientSize} に広がって辻褄を合わせている"
+                    );
+
+                    Assert.True(
+                        page.ClientSize.Width >= want.Width
+                            && page.ClientSize.Height >= want.Height,
+                        $"タブ「{page.Text}」の表示領域 {page.ClientSize} が本体の希望サイズ {want} を収められない"
+                    );
+                }
             }
         });
 
