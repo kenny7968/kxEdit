@@ -102,11 +102,11 @@ public sealed class EditSettingsTab : ISettingsTab
         _tabsToSpaces.TabIndex = 5;
         root.Controls.Add(_tabsToSpaces, 0, 2);
 
-        // 4 行目: Home キーの動作(2 択)。GroupBox で囲うのは 2 つの理由から:
-        // ① WinForms の RadioButton の排他は「直上の親の Controls コレクション」内でのみ
-        //    働く。既存 CheckBox 群と同じ TableLayoutPanel に直置きすると、将来別のラジオを
-        //    足したときに同じ親を共有して混線する。
-        // ② SR がフォーカス時にグループ名(GroupBox.Text)を読む。
+        // 4 行目: Home キーの動作(2 択)。
+        // ① 排他を与えているのは直下の homePanel。WinForms の RadioButton の排他は
+        //    「直上の親の Controls コレクション」内でのみ働くため、既存 CheckBox 群と同じ
+        //    TableLayoutPanel に直置きせず専用コンテナに閉じる(将来別のラジオを足しても混線しない)。
+        // ② GroupBox が担うのはグループ名。SR がフォーカス時に GroupBox.Text を読む。
         var homePanel = new FlowLayoutPanel
         {
             AutoSize = true,

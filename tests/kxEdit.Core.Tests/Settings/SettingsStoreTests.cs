@@ -295,7 +295,8 @@ public class SettingsStoreTests
                 path,
                 "{\"TabWidth\":8,\"CaretWidth\":5,"
                     + "\"CsvAutoModeOnOpen\":true,\"TabsToSpaces\":true,\"ShowLineNumbers\":true,"
-                    + "\"HighlightCurrentLine\":true,\"ShowWhitespace\":true,\"ConfirmRestoreOnStartup\":false}"
+                    + "\"HighlightCurrentLine\":true,\"ShowWhitespace\":true,\"ConfirmRestoreOnStartup\":false,"
+                    + "\"SmartHome\":false}"
             );
             var s = SettingsStore.Load(path, out _);
             Assert.Equal(8, s.TabWidth);
@@ -306,6 +307,7 @@ public class SettingsStoreTests
             Assert.True(s.HighlightCurrentLine);
             Assert.True(s.ShowWhitespace);
             Assert.False(s.ConfirmRestoreOnStartup);
+            Assert.False(s.SmartHome); // 既定 true の非既定側。落ちると「常に行頭」が再起動で黙って戻る
         }
         finally
         {

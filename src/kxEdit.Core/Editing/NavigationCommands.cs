@@ -31,7 +31,8 @@ public static class NavigationCommands
 
     /// <summary>現在行の先頭(char offset)。
     /// <see cref="MoveLineHome(TextSnapshot, int, bool)"/> に <c>skipIndent: false</c> を渡したときと等価
-    /// (行頭算出はここが唯一の出所で、論理行版はこれへ委譲する)。</summary>
+    /// (論理行版の false 分岐はここへ委譲する。smart 分岐と折り返し版は同じ
+    /// <c>GetLineStart</c> を自分で呼ぶので、行頭算出の出所はこれ 1 つではない)。</summary>
     public static int MoveHome(TextSnapshot s, int caret)
     {
         int line = s.GetLineIndexOfChar(caret);
@@ -66,7 +67,7 @@ public static class NavigationCommands
     public static int MoveLineHome(TextSnapshot s, int caret, bool skipIndent)
     {
         if (!skipIndent)
-            return MoveHome(s, caret); // 行頭算出の唯一の出所
+            return MoveHome(s, caret); // 論理行版の false 分岐はここへ委譲
         int line = s.GetLineIndexOfChar(caret);
         int lineStart = s.GetLineStart(line);
         int lineEnd = s.GetLineEnd(line, includeBreak: false);

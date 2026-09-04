@@ -207,6 +207,12 @@ Expected: **ビルドエラー**(`'NavigationCommands' に 'MoveLineHome' の定
             return MoveLineHome(s, caret, skipIndent);
 ```
 
+> 訂正(2026-09-04 実施時): 上の xmldoc 案に含めた「継続 seg は通常 leading whitespace を
+> 持たないため firstNonWs 判定不要」は**偽**。`LineLayout.Wrap` は語境界も空白トリムも持たない
+> 純 code-point 貪欲なので、継続 seg が空白で始まるのは普通に起きる。ガードの真の根拠は
+> P8-1a(SR が視覚行の先頭から読む)を smart トグルより優先すること。src では fixup
+> `93b90f2` で訂正済み。
+
 以降は既存のまま。**変更点は 2 箇所だけ**:
 
 ```csharp
