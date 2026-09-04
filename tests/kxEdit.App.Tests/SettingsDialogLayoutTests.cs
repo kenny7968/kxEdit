@@ -16,9 +16,9 @@ namespace kxEdit.App.Tests;
 public class SettingsDialogLayoutTests
 {
     /// <summary>フォームを画面外に可視化する(レイアウト確定に Show が要る)。</summary>
-    private static SettingsDialog ShowOffScreen()
+    private static SettingsDialog ShowOffScreen(AppSettings settings)
     {
-        var dlg = new SettingsDialog(new AppSettings())
+        var dlg = new SettingsDialog(settings)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-32000, -32000),
@@ -31,28 +31,90 @@ public class SettingsDialogLayoutTests
     private static T Child<T>(Control root)
         where T : Control => root.Controls.OfType<T>().Single();
 
-    [Fact]
-    public void Every_tab_page_fits_its_content() =>
+    private static IEnumerable<Control> Descendants(Control root)
+    {
+        foreach (Control c in root.Controls)
+        {
+            yield return c;
+            foreach (var d in Descendants(c))
+                yield return d;
+        }
+    }
+
+    /// <summary>選択して確定させたページ本体と、その希望サイズを返す。</summary>
+    private static (Control body, Size want) LayoutPage(
+        SettingsDialog dlg,
+        TabControl tabs,
+        TabPage page
+    )
+    {
+        // 未選択のページはレイアウトされない(実測: 選択するまで 112x22 のまま)。
+        // 全ページを検査するには必ず選択してから測る。
+        tabs.SelectedTab = page;
+        dlg.PerformLayout();
+
+        // 本体(ComputeDialogClientSize)は 1 ページに複数コントロールを許す(max で処理する)が、
+        // このテストは「本体は 1 つ」を前提に測っている。前提が崩れたら Single() の
+        // 読めない InvalidOperationException ではなく、ここで明示的に落とす。
+        Assert.Single(page.Controls);
+        var body = page.Controls[0];
+        return (body, body.GetPreferredSize(Size.Empty));
+    }
+
+    // 既定の「ＭＳ ゴシック」は実測でちょうど余白 0 で収まるため、既定だけで検査すると
+    // 「LoadFrom より前に測っていて中身が空」という欠陥を原理的に区別できない
+    // (CLAUDE.md §4-B「no-change のテストは非既定状態から始める」と同型)。
+    // 既定より長いフォント名も回す(実測: body 幅 488 -> 518)。
+    [Theory]
+    [InlineData("ＭＳ ゴシック")] // 既定
+    [InlineData("UD デジタル 教科書体 NK-R")] // 既定より長い名前
+    public void Every_tab_page_fits_its_content(string fontName) =>
         Sta.Run(() =>
         {
-            using var dlg = ShowOffScreen();
+            using var dlg = ShowOffScreen(new AppSettings { FontName = fontName });
             var tabs = Child<TabControl>(dlg);
             Assert.NotEmpty(tabs.TabPages);
 
             foreach (TabPage page in tabs.TabPages)
             {
-                // 未選択のページはレイアウトされない(実測: 選択するまで 112x22 のまま)。
-                // 全ページを検査するには必ず選択してから測る。
-                tabs.SelectedTab = page;
-                dlg.PerformLayout();
-
-                var body = page.Controls.OfType<Control>().Single();
-                var want = body.GetPreferredSize(Size.Empty);
+                var (_, want) = LayoutPage(dlg, tabs, page);
                 Assert.True(
                     page.ClientSize.Width >= want.Width && page.ClientSize.Height >= want.Height,
                     $"タブ「{page.Text}」の表示領域 {page.ClientSize} が本体の希望サイズ {want} を収められない"
                 );
             }
+        });
+
+    /// <summary>
+    /// ダイアログを開いたまま[表示]タブでフォントを選び直すと、フォント名ラベルがその場で伸びる。
+    /// 開いた時点の寸法で固定してしまうと、そこで切れて読めなくなる(Issue #68 の同型 2 件目)。
+    /// 実測では Form / TabControl の Layout はこの変化で発火しないため、
+    /// 追随できているかはページ本体の包含関係でしか見られない。
+    /// </summary>
+    [Fact]
+    public void Dialog_grows_when_a_label_gets_longer_at_run_time() =>
+        Sta.Run(() =>
+        {
+            using var dlg = ShowOffScreen(new AppSettings());
+            var tabs = Child<TabControl>(dlg);
+            var page = tabs.TabPages.Cast<TabPage>().Single(p => p.Text == "表示");
+            LayoutPage(dlg, tabs, page);
+
+            // フォント名ラベル(このタブで唯一、設定値によって長さが変わるラベル)を、
+            // FontDialog で長い名前のフォントを選んだのと同じ状態にする。
+            var fontLabel = Descendants(page)
+                .OfType<Label>()
+                .Where(l => l.AutoSize)
+                .OrderByDescending(l => l.Text.Length)
+                .First();
+            fontLabel.Text = "UD デジタル 教科書体 NK-R, 12 pt";
+            dlg.PerformLayout();
+
+            var (_, want) = LayoutPage(dlg, tabs, page);
+            Assert.True(
+                page.ClientSize.Width >= want.Width && page.ClientSize.Height >= want.Height,
+                $"ラベルが伸びた後の表示領域 {page.ClientSize} が本体の希望サイズ {want} を収められない"
+            );
         });
 
     [Fact]
@@ -62,7 +124,7 @@ public class SettingsDialogLayoutTests
             // Dock は子インデックスの大きい方から確定する。Dock=Bottom のボタン列を先に Add すると
             // Dock=Fill の TabControl がクライアント全面を取りボタン列を覆う。
             // (潰れていた間は表面化していなかった 2 つ目の欠陥。DocumentInfoDialog は正しい順序。)
-            using var dlg = ShowOffScreen();
+            using var dlg = ShowOffScreen(new AppSettings());
             var tabs = Child<TabControl>(dlg);
             var buttons = Child<FlowLayoutPanel>(dlg);
             var client = new Rectangle(Point.Empty, dlg.ClientSize);

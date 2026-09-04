@@ -18,6 +18,17 @@ public sealed class SettingsDialog : Form
     // タブヘッダ（TabPage.Text）＝カテゴリ名で識別は十分。
     private readonly TabControl _tabControl = new() { Dock = DockStyle.Fill };
 
+    private readonly FlowLayoutPanel _buttons = new()
+    {
+        Dock = DockStyle.Bottom,
+        AutoSize = true,
+        FlowDirection = FlowDirection.RightToLeft,
+        Padding = new Padding(8),
+    };
+
+    /// <summary>再入ガード。<see cref="OnPageBodyLayout"/> 参照。</summary>
+    private bool _resizing;
+
     public SettingsDialog(AppSettings s)
     {
         _baseline = s.Clone();
@@ -40,6 +51,12 @@ public sealed class SettingsDialog : Form
         BuildLayout();
         foreach (var t in _tabs)
             t.LoadFrom(_baseline); // BuildPage の後に必ず呼ぶ
+
+        // 寸法は必ず LoadFrom の後に測る。[表示]タブのフォント名ラベルのように、設定値を
+        // 流し込んで初めて中身が決まる項目があるため(BuildLayout 末尾で測ると空文字列のまま
+        // 測ることになり、既定の「ＭＳ ゴシック」でたまたま余白 0 で収まっていただけで、
+        // より長いフォント名の設定では毎回溢れる。実測: body 幅 488 -> 518)。
+        ClientSize = SettingsTabLayoutHelper.ComputeDialogClientSize(_tabControl, _buttons);
         ActiveControl = _tabControl; // 先頭タブ「基本」の位置に居る
     }
 
@@ -65,6 +82,12 @@ public sealed class SettingsDialog : Form
             var page = new TabPage(t.Title) { UseVisualStyleBackColor = true };
             var body = t.BuildPage();
             body.Dock = DockStyle.Fill;
+            // ページ本体の Layout を購読して、開いたまま内容が伸びたときに追随する
+            // (例: [表示]タブでフォントを選び直すとフォント名ラベルがその場で伸びる)。
+            // Form / TabControl の Layout はこの変化では発火しない(実測: Form=0 回・
+            // TabControl=0 回・body=1 回)ため、body を購読するしかない。
+            // ここを「Form の Layout を見れば足りる」と整理すると静かに壊れる。
+            body.Layout += OnPageBodyLayout;
             page.Controls.Add(body);
             _tabControl.TabPages.Add(page);
         }
@@ -81,26 +104,46 @@ public sealed class SettingsDialog : Form
             DialogResult = DialogResult.Cancel,
             AutoSize = true,
         };
-        var buttons = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Bottom,
-            AutoSize = true,
-            FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(8),
-        };
-        buttons.Controls.AddRange(ok, cancel);
+        _buttons.Controls.AddRange(ok, cancel);
 
         // Dock は「子インデックスが大きい方」から確定する。したがって Dock=Fill を先に Add し、
         // Dock=Bottom を後に Add する(逆順にすると Fill の TabControl がクライアント全面を
         // 取ってボタン列を覆う)。DocumentInfoDialog も同じ順序。
         Controls.Add(_tabControl);
-        Controls.Add(buttons);
+        Controls.Add(_buttons);
         AcceptButton = ok;
         CancelButton = cancel;
+    }
 
-        // Controls.Add の後に測る(親に接続して初めて Form の Font を継承するため。
-        // 高 DPI では Form.Font が拡大されており、接続前に測ると小さすぎる値になる)。
-        ClientSize = SettingsTabLayoutHelper.ComputeDialogClientSize(_tabControl, buttons);
+    /// <summary>
+    /// ページ本体の内容が伸びたときにダイアログを広げる。開いた時点の寸法で固定すると、
+    /// [表示]タブでフォントを選び直したときにフォント名ラベルがその場で切れる。
+    /// <b>広げる方向にのみ</b>更新する(縮めるとユーザーの操作中に座標が跳ぶ・ちらつく)。
+    /// <see cref="Form.ClientSize"/> の代入が再びレイアウトを起こすため再入ガードを置く
+    /// (広げる方向のみなので放っておいても収束するが、意図として明示する)。
+    /// </summary>
+    private void OnPageBodyLayout(object? sender, LayoutEventArgs e)
+    {
+        if (_resizing)
+            return;
+
+        _resizing = true;
+        try
+        {
+            var want = SettingsTabLayoutHelper.ComputeDialogClientSize(_tabControl, _buttons);
+            var now = ClientSize;
+            if (want.Width > now.Width || want.Height > now.Height)
+            {
+                ClientSize = new Size(
+                    Math.Max(now.Width, want.Width),
+                    Math.Max(now.Height, want.Height)
+                );
+            }
+        }
+        finally
+        {
+            _resizing = false;
+        }
     }
 
     // CA1001 対応(Sub 3.4-B): ISettingsTab 実装は Control フィールドを保持するため

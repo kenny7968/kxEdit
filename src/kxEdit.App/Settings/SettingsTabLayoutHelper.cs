@@ -60,7 +60,7 @@ internal static class SettingsTabLayoutHelper
             }
         }
 
-        var frame = MeasureTabFrame(tabs.Font);
+        var frame = MeasureTabFrame(tabs);
         var buttonRow = buttons.GetPreferredSize(Size.Empty);
         return new Size(
             Math.Max(body.Width + frame.Width, buttonRow.Width),
@@ -71,16 +71,41 @@ internal static class SettingsTabLayoutHelper
     /// <summary>
     /// タブ枠(ヘッダ帯＋境界)の実測。親に接続していない probe で測るのは、Dock 済みの実物へ
     /// Size を代入してもレイアウトが即座に上書きしてしまい測れないため(実測)。
-    /// 枠はフォントだけで決まり、ページ枚数にもキャプション文字列にも依存しない
-    /// (実測: 1 枚と 5 枚・文字列違いで同値)。ただし 0 枚だとヘッダ帯が現れず測れないので 1 枚載せる。
-    /// Multiline=false(既定)なのでヘッダは常に 1 段であり、幅による段数変動は起きない。
+    /// <para>
+    /// 枠は <see cref="Control.Font"/> だけで決まるわけではない。実測では
+    /// <see cref="TabControl.Alignment"/> = Left で枠が {31,8}、
+    /// <see cref="TabControl.Appearance"/> = Buttons で {8,31}、
+    /// <see cref="TabControl.Padding"/> = (20,20) で {8,62} と、いずれも既定の {8,28} から動く。
+    /// probe が実物と食い違わないよう、枠に効く設定を複写し、実物と同じ枚数・同じキャプションの
+    /// ページを載せる(Alignment = Left ではヘッダ帯の幅がキャプション長に依存するため)。
+    /// 0 枚だとヘッダ帯が現れず測れないので、その場合だけダミーを 1 枚載せる。
+    /// </para>
+    /// <para>
+    /// <b>限界</b>: <see cref="TabControl.Multiline"/> = true にされると、ヘッダの段数が
+    /// 与えられた幅に依存する(幅が狭いほど段数が増える)。この 1 段測定では正しく測れず、
+    /// 確定した幅で測り直す 2 段測定が要る。現在の <see cref="SettingsDialog"/> は
+    /// Multiline = false(既定)なので成立している。
+    /// </para>
     /// </summary>
-    private static Size MeasureTabFrame(Font font)
+    private static Size MeasureTabFrame(TabControl tabs)
     {
         const int Probe = 1000; // 枠より十分大きければ測定値は変わらない
-        using var probe = new TabControl { Font = font, Size = new Size(Probe, Probe) };
-        using var page = new TabPage("A"); // probe.Dispose でも解放されるが二重解放は安全
-        probe.TabPages.Add(page);
+        using var probe = new TabControl
+        {
+            Font = tabs.Font,
+            Multiline = tabs.Multiline,
+            Alignment = tabs.Alignment,
+            Appearance = tabs.Appearance,
+            SizeMode = tabs.SizeMode,
+            Padding = tabs.Padding,
+            Size = new Size(Probe, Probe),
+        };
+
+        foreach (TabPage page in tabs.TabPages)
+            probe.TabPages.Add(page.Text);
+        if (probe.TabPages.Count == 0)
+            probe.TabPages.Add("A");
+
         var display = probe.DisplayRectangle;
         return new Size(Probe - display.Width, Probe - display.Height);
     }
