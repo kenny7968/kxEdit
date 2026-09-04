@@ -33,4 +33,55 @@ internal static class SettingsTabLayoutHelper
             ColumnCount = 2,
             Padding = new Padding(12),
         };
+
+    /// <summary>
+    /// 設定ダイアログのクライアント寸法を、全タブページの希望サイズから算出する。
+    /// <see cref="TabControl"/> はページの中身から推奨サイズを算出せず常に既定の 200x100 を
+    /// 返すため、Form の AutoSize に委ねると 136x89 に潰れる(Issue #68・実測)。
+    /// Form.AutoSize は Dock=Fill の子の希望サイズを見ないので、TabControl 側に
+    /// MinimumSize を与えても直らない(実測で否定済み)。
+    /// 即値は一切使わず枠も実測するため、フォント・DPI に自動追従する。
+    /// </summary>
+    public static Size ComputeDialogClientSize(TabControl tabs, Control buttons)
+    {
+        ArgumentNullException.ThrowIfNull(tabs);
+        ArgumentNullException.ThrowIfNull(buttons);
+
+        var body = Size.Empty;
+        foreach (TabPage page in tabs.TabPages)
+        {
+            foreach (Control c in page.Controls)
+            {
+                var want = c.GetPreferredSize(Size.Empty);
+                body = new Size(
+                    Math.Max(body.Width, want.Width),
+                    Math.Max(body.Height, want.Height)
+                );
+            }
+        }
+
+        var frame = MeasureTabFrame(tabs.Font);
+        var buttonRow = buttons.GetPreferredSize(Size.Empty);
+        return new Size(
+            Math.Max(body.Width + frame.Width, buttonRow.Width),
+            body.Height + frame.Height + buttonRow.Height
+        );
+    }
+
+    /// <summary>
+    /// タブ枠(ヘッダ帯＋境界)の実測。親に接続していない probe で測るのは、Dock 済みの実物へ
+    /// Size を代入してもレイアウトが即座に上書きしてしまい測れないため(実測)。
+    /// 枠はフォントだけで決まり、ページ枚数にもキャプション文字列にも依存しない
+    /// (実測: 1 枚と 5 枚・文字列違いで同値)。ただし 0 枚だとヘッダ帯が現れず測れないので 1 枚載せる。
+    /// Multiline=false(既定)なのでヘッダは常に 1 段であり、幅による段数変動は起きない。
+    /// </summary>
+    private static Size MeasureTabFrame(Font font)
+    {
+        const int Probe = 1000; // 枠より十分大きければ測定値は変わらない
+        using var probe = new TabControl { Font = font, Size = new Size(Probe, Probe) };
+        using var page = new TabPage("A"); // probe.Dispose でも解放されるが二重解放は安全
+        probe.TabPages.Add(page);
+        var display = probe.DisplayRectangle;
+        return new Size(Probe - display.Width, Probe - display.Height);
+    }
 }

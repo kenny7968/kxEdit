@@ -36,8 +36,6 @@ public sealed class SettingsDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = false;
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
         BuildLayout();
         foreach (var t in _tabs)
@@ -92,11 +90,17 @@ public sealed class SettingsDialog : Form
         };
         buttons.Controls.AddRange(ok, cancel);
 
-        // Dock.Bottom を先に Add してから Dock.Fill を Add する順で下部固定＋残り全部を実現。
-        Controls.Add(buttons);
+        // Dock は「子インデックスが大きい方」から確定する。したがって Dock=Fill を先に Add し、
+        // Dock=Bottom を後に Add する(逆順にすると Fill の TabControl がクライアント全面を
+        // 取ってボタン列を覆う)。DocumentInfoDialog も同じ順序。
         Controls.Add(_tabControl);
+        Controls.Add(buttons);
         AcceptButton = ok;
         CancelButton = cancel;
+
+        // Controls.Add の後に測る(親に接続して初めて Form の Font を継承するため。
+        // 高 DPI では Form.Font が拡大されており、接続前に測ると小さすぎる値になる)。
+        ClientSize = SettingsTabLayoutHelper.ComputeDialogClientSize(_tabControl, buttons);
     }
 
     // CA1001 対応(Sub 3.4-B): ISettingsTab 実装は Control フィールドを保持するため
