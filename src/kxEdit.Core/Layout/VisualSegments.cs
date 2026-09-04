@@ -4,7 +4,7 @@ namespace kxEdit.Core.Layout;
 
 /// <summary>視覚セグメント列(<see cref="LineLayout.Wrap"/> 出力)への共通照会を集約する。
 /// UiaTextHostAdapter の TryFindVisualSegmentCore / VerticalNavigation.FindSegIndex /
-/// NavigationCommands.MoveHomeSmart(wrap overload) から共有する。</summary>
+/// NavigationCommands.MoveLineHome(wrap overload) から共有する。</summary>
 public static class VisualSegments
 {
     /// <summary>offsetInLine を含む視覚セグメントの (index, segment) を返す。</summary>

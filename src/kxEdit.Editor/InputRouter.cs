@@ -187,11 +187,12 @@ internal sealed class InputRouter
         // P8-1a: 折り返し ON では視覚行(折り返し行)の先頭へ(NVDA が視覚行先頭から読むよう App 層挙動を統一)
         int target = ctrl
             ? 0
-            : NavigationCommands.MoveHomeSmart(
+            : NavigationCommands.MoveLineHome(
                 snap,
                 ctx.Caret.Caret,
                 ctx.Host.WrapColumns,
-                ctx.Host.Metrics
+                ctx.Host.Metrics,
+                skipIndent: ctx.Host.SmartHome
             );
         ApplyNavMove(ctx, e, target, resetDesired: true);
         return true;
