@@ -48,10 +48,30 @@ public class ImeStartupTests
             table[i] = ImeMode.Off;
     }
 
+    /// <summary>
+    /// 番兵で汚したテーブルを、テストが失敗しても呼び出し前の内容へ戻す。
+    /// これが無いと Suppress の失敗時に、後続テスト全部が製品に存在しない状態
+    /// (IME 推測が Off 固定)で走る。
+    /// </summary>
+    private sealed class TableGuard : IDisposable
+    {
+        private readonly ImeMode[] _table;
+        private readonly ImeMode[] _saved;
+
+        internal TableGuard(ImeMode[] table)
+        {
+            _table = table;
+            _saved = (ImeMode[])table.Clone();
+        }
+
+        public void Dispose() => Array.Copy(_saved, _table, _saved.Length);
+    }
+
     [Fact]
     public void 推測セルだけが_NoControl_に塗られる()
     {
         var table = JapaneseTable;
+        using var guard = new TableGuard(table);
         Arm(table);
         Assert.Equal(ImeMode.Off, table[^1]); // 番兵が効いていることの確認(前提の検査)
 
@@ -65,23 +85,60 @@ public class ImeStartupTests
         Assert.All(table.Skip(2), m => Assert.Equal(ImeMode.NoControl, m));
     }
 
+    /// <summary>
+    /// 設計 §5.3 は「現在の入力言語に依存しない(全 CJK テーブルを塗るため CI が en-US でも
+    /// 成立する)」と宣言している。日本語テーブルだけを見ていると
+    /// 「s_japaneseTable だけ塗る」変異が生き残るので、3 テーブル全部と総数を固定する。
+    /// 総数の固定は .NET 側でテーブルが増えたときの検知も兼ねる(設計 §6.3)。
+    /// </summary>
     [Fact]
-    public void 日本語テーブルが対象に含まれ_UnsupportedTable_は含まれない()
+    public void CJK_3テーブルが対象になり_UnsupportedTable_は含まれない()
     {
         var result = ImeStartup.SuppressWinFormsImeModeInference();
 
         Assert.True(result.Succeeded, result.FailureReason);
         Assert.Contains("s_japaneseTable", result.PatchedTables);
+        Assert.Contains("s_koreanTable", result.PatchedTables);
+        Assert.Contains("s_chineseTable", result.PatchedTables);
+        Assert.Equal(3, result.PatchedTables.Count);
         Assert.DoesNotContain(
             result.PatchedTables,
             n => n.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
         );
     }
 
+    /// <summary>
+    /// 本対策の核心は「IME が閉じているときに <c>ImeContext.GetImeMode</c> が読むセル
+    /// (<c>ImeClosed</c>)が中和されていること」。ここが <c>NoControl</c> でなければ
+    /// <c>PropagatingImeMode</c> が記録され、発声が戻る。
+    /// 添字の出典はフレームワーク側の定数に取る(手書きの 2 / 3 を信じない)。
+    /// </summary>
+    [Fact]
+    public void フレームワークが実際に読むセルが中和される()
+    {
+        int imeClosed = (int)ConversionType.GetField("ImeClosed", Any)!.GetValue(null)!;
+        int imeDirectInput = (int)ConversionType.GetField("ImeDirectInput", Any)!.GetValue(null)!;
+
+        var table = JapaneseTable;
+        using var guard = new TableGuard(table);
+        Arm(table);
+        var result = ImeStartup.SuppressWinFormsImeModeInference();
+
+        Assert.True(result.Succeeded, result.FailureReason);
+        // IME が閉じているとき GetImeMode が返すセル = 本対策の核心。
+        Assert.Equal(ImeMode.NoControl, table[imeClosed]);
+        // 塗り始めの位置が、読まれる最初のセルより後ろへずれていないこと。
+        // (FirstInferredCell を imeClosed より大きくする変異がここで死ぬ)
+        Assert.True(imeDirectInput <= imeClosed);
+        Assert.Equal(ImeMode.NoControl, table[imeDirectInput]);
+    }
+
     [Fact]
     public void 二回呼んでも成功する()
     {
-        Arm(JapaneseTable);
+        var table = JapaneseTable;
+        using var guard = new TableGuard(table);
+        Arm(table);
 
         var first = ImeStartup.SuppressWinFormsImeModeInference();
         var second = ImeStartup.SuppressWinFormsImeModeInference();
@@ -108,5 +165,6 @@ public class ImeStartupTests
 
         Assert.False(result.Succeeded);
         Assert.NotNull(result.FailureReason);
+        Assert.Empty(result.PatchedTables);
     }
 }
