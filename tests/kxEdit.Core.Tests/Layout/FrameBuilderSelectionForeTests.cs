@@ -235,17 +235,14 @@ public class FrameBuilderSelectionForeTests
     private const string SurrogateLine = "a😀b";
 
     // pair の high 側(offset 1)から low 側(offset 2)までの選択は、両端とも pair 先頭へ寄って
-    // 空区間になり、選択色の op が 1 本も出ない(選択矩形も幅 0)。pair が割れないのが要点。
+    // 空区間になり、選択矩形の幅も 0 になる。選択が 1px も塗られないので分割せず、
+    // 選択が無いときと完全に同じ 1 op を出す(pair が割れないのが要点)。
     [Fact]
-    public void Selection_within_surrogate_pair_emits_no_selection_run()
+    public void Selection_within_surrogate_pair_renders_row_unsplit()
     {
         var frame = Build(SurrogateLine, new SelectionRange(1, 2), SelFore);
 
-        Assert.Collection(
-            BodyText(frame),
-            op => AssertRun(op, "a", x: 0, w: 1, Fore),
-            op => AssertRun(op, "😀b", x: 1, w: 3, Fore)
-        );
+        Assert.Collection(BodyText(frame), op => AssertRun(op, "a😀b", x: 0, w: 4, Fore));
     }
 
     // pair の途中で終わる選択は pair 先頭まで縮む(pair は選択外=本文色でまとめて描かれる)。
@@ -314,6 +311,58 @@ public class FrameBuilderSelectionForeTests
         Assert.Equal(selRect.Width, selRun.Width);
         Assert.Equal(selRect.Y, selRun.Y);
         Assert.Equal(selRect.Height, selRun.Height);
+    }
+
+    // --- ピクセル幅 0 の選択(結合文字)---
+
+    // 2026-09-14 の L5 実機目視で検出した不具合の回帰網。
+    // GDI は結合列("か"+U+3099 等)を合成してマークに advance を与えないため、マークだけを
+    // 選択すると OffsetToPx の差分が 0 になり、選択矩形が 1px も塗られない。それでも本文を
+    // 分割すると、マークが選択文字色(黒地テーマでは黒)で塗られていない背景の上に描かれ、
+    // 背景に溶けて消える(実機では「濁点だけを選択すると濁点が消える」として現れた)。
+    // 選択が見えないなら描画も選択なしと完全に同じであること。
+    [Fact]
+    public void Zero_width_selection_renders_row_unsplit()
+    {
+        // "e" + U+0301(advance 0 の結合文字)+ "b"。選択は結合文字だけ。
+        var frame = Build("éb", new SelectionRange(1, 2), SelFore, metrics: new ZeroWidthMark());
+
+        Assert.Collection(BodyText(frame), op => AssertRun(op, "éb", x: 0, w: 20, Fore));
+    }
+
+    // 対: 同じメトリクスでも、幅を持つ区間を含む選択はこれまでどおり分割される
+    // (上のガードが「選択が見えていても分割しない」まで広がっていないこと)。
+    [Fact]
+    public void Visible_selection_still_splits_with_zero_width_marks_present()
+    {
+        // 結合文字を含めて "e" ごと選択する = 幅 10px の選択。
+        var frame = Build("éb", new SelectionRange(0, 2), SelFore, metrics: new ZeroWidthMark());
+
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "é", x: 0, w: 10, SelFore),
+            op => AssertRun(op, "b", x: 10, w: 10, Fore)
+        );
+    }
+
+    /// <summary>
+    /// U+0301(結合アキュート)の advance を 0 にするメトリクス。GDI が結合列を合成して
+    /// マークに幅を与えないときの挙動を、GDI 抜きで決定的に再現するための道具。
+    /// </summary>
+    private sealed class ZeroWidthMark : ICharMetrics
+    {
+        public int LineHeightPx => 10;
+
+        public int MeasureRun(ReadOnlySpan<char> text)
+        {
+            int px = 0;
+            foreach (char c in text)
+            {
+                if (c != '́')
+                    px += 10;
+            }
+            return px;
+        }
     }
 
     /// <summary>

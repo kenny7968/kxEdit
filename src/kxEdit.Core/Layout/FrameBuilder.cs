@@ -418,6 +418,8 @@ internal static class FrameBuilder
     /// 最大 3 つの DrawText へ分けて発行する
     /// (prefix=<paramref name="fore"/> / 選択内=<paramref name="selectionFore"/> /
     /// suffix=<paramref name="fore"/>)。空の区間は発行しないので、行まるごとの選択なら 1 op になる。
+    /// <b>選択矩形が 1px も塗られない</b>(ピクセル幅 0 の)選択では分割せず、選択が無いときと
+    /// 完全に同じ 1 op を出す = 塗られていない背景の上に選択文字色を置いて文字を消さない。
     /// </summary>
     /// <param name="selStartInRow">
     /// 選択開始の<b>行内</b>オフセット。<see cref="TryComputeRowIntersection"/> の契約により
@@ -456,6 +458,32 @@ internal static class FrameBuilder
 
         int pxSelStart = PixelMapper.OffsetToPx(span, selStart, metrics);
         int pxSelEnd = PixelMapper.OffsetToPx(span, selEnd, metrics);
+
+        // 選択矩形(工程 3)が 1px も塗られない区間では、選択の内外で色を分けない。
+        // 分けると「選択文字色で描いた文字が、塗られていない背景の上に乗る」ことになり、
+        // ハイコントラストテーマでは文字が背景に溶けて消える。
+        // これは advance 0 のコードポイントで実際に起きる: GDI は結合列("か"+U+3099 等)を
+        // 合成してマークに幅を与えないため、マークだけを選択すると OffsetToPx の差分が 0 になる
+        // (2026-09-14 の L5 実機目視で「濁点だけを選択すると濁点が消える」として検出)。
+        // サロゲートペアの内側へ落ちた選択がスナップで潰れる場合も同じ経路を通り、
+        // 「選択が見えないなら描画も選択なしと完全に同じ」に揃う。
+        if (pxSelStart == pxSelEnd)
+        {
+            int fullWidth = PixelMapper.OffsetToPx(span, text.Length, metrics);
+            ops.Add(
+                new PaintOp(
+                    PaintOpKind.DrawText,
+                    bodyX,
+                    yPx,
+                    fullWidth,
+                    lineHeight,
+                    Text: text,
+                    Fore: fore
+                )
+            );
+            return;
+        }
+
         // 行末まで選択されている(Ctrl+A の大半の行)なら pxEnd は pxSelEnd と必ず同値。
         // OffsetToPx は非 ASCII を含む run を GDI で一括計測するため、長大行では 1 回が高い
         // (docs/plans/2026-08-02-large-line-resilience-design.md §2.1 が特定した重い経路)。
