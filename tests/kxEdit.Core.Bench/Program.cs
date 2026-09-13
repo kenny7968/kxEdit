@@ -785,6 +785,7 @@ static ViewportStyle BuildLayoutBenchStyle() =>
         Background: new PaintColor(0xFFFFFF),
         CurrentLineBack: new PaintColor(0xF0F0F0),
         SelectionBack: new PaintColor(0xADD8E6),
+        SelectionFore: null,
         LineNumberFore: new PaintColor(0x777777),
         HighlightOutline: new PaintColor(0xD77800),
         WhitespaceGlyph: new PaintColor(0xCCCCCC)

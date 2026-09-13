@@ -140,6 +140,7 @@ public sealed partial class EditorControl
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0xF0F0F0),
             SelectionBack: new PaintColor(0xADD8E6),
+            SelectionFore: null,
             LineNumberFore: new PaintColor(0x777777),
             HighlightOutline: new PaintColor(0xD77800),
             WhitespaceGlyph: new PaintColor(0xCCCCCC)
@@ -165,6 +166,7 @@ public sealed partial class EditorControl
             Background: new PaintColor(theme.BackRgb),
             CurrentLineBack: currentLineBack,
             SelectionBack: new PaintColor(0xADD8E6),
+            SelectionFore: null,
             LineNumberFore: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.5)),
             HighlightOutline: new PaintColor(0xD77800),
             WhitespaceGlyph: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.3))

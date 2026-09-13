@@ -45,11 +45,17 @@ public sealed record Frame(IReadOnlyList<PaintOp> Ops, int ClientWidth, int Clie
 /// ビューポート描画のパレット(前景/背景/現在行/選択/行番号/ハイライト枠/空白グリフ)。
 /// すべての色を明示的に指定する(既定=default(PaintColor) は使わない=RGB 0 と混同されないように)。
 /// </summary>
+/// <param name="SelectionFore">
+/// 選択範囲の文字色。<c>null</c> は「指定しない」= 選択範囲も <see cref="Foreground"/> で描く
+/// (VS Code の <c>editor.selectionForeground</c> と同じ意味論)。
+/// 非 null のときだけ <c>FrameBuilder</c> が本文テキスト op を選択境界で分割する。
+/// </param>
 public sealed record ViewportStyle(
     PaintColor Foreground,
     PaintColor Background,
     PaintColor CurrentLineBack,
     PaintColor SelectionBack,
+    PaintColor? SelectionFore,
     PaintColor LineNumberFore,
     PaintColor HighlightOutline,
     PaintColor WhitespaceGlyph

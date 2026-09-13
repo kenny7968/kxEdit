@@ -10,12 +10,15 @@ public class FrameBuilderTests
 
     // テスト用スタイル: 全フィールドを識別可能な RGB で埋める。
     // (実装が style から色を拾わずに default を返しているとテストが落ちる)
+    // SelectionFore は null = 標準テーマ相当(選択中も本文色のまま=本文 op を分割しない)。
+    // 分割側の網は FrameBuilderSelectionForeTests が持つ。
     private static ViewportStyle TestStyle() =>
         new(
             Foreground: new PaintColor(0x000000),
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0x88FF88),
             SelectionBack: new PaintColor(0xADD8E6),
+            SelectionFore: null,
             LineNumberFore: new PaintColor(0x777777),
             HighlightOutline: new PaintColor(0xFF8800),
             WhitespaceGlyph: new PaintColor(0xCCCCCC)

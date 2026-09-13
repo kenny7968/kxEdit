@@ -14,7 +14,8 @@ namespace kxEdit.Core.Layout;
 ///   2) 現在行強調(<see cref="ViewportStyle.CurrentLineBack"/>)
 ///   3) 選択矩形(<see cref="ViewportStyle.SelectionBack"/>・視覚行ごとに分割)
 ///   4) セルハイライト半透明背景(<see cref="ViewportStyle.HighlightOutline"/> + Alpha=<see cref="HighlightBackAlpha"/>)
-///   5) 本文 DrawText(行番号ぶんオフセット済み)
+///   5) 本文 DrawText(行番号ぶんオフセット済み・<see cref="ViewportStyle.SelectionFore"/> 指定時は
+///      選択境界で最大 3 分割)
 ///   6) 空白可視化グリフ(showWhitespace=true・本文と別 op で重ね塗り)
 ///   7) 行番号(SegmentIndex=0 の視覚行のみ・右寄せ・現在行のみ <see cref="ViewportStyle.Foreground"/>・
 ///      他は <see cref="ViewportStyle.LineNumberFore"/>)
@@ -158,6 +159,9 @@ internal static class FrameBuilder
         }
 
         // 5) 本文
+        // SelectionFore が指定されているテーマ(ハイコントラスト)では、選択境界でテキスト op を
+        // 分割して選択範囲だけ別色で描く。未指定(null)または選択と交差しない行では
+        // 従来どおり 1 op を出す = 標準テーマの PaintOp 列は一切変わらない(設計書 §5.2)。
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
@@ -165,6 +169,29 @@ internal static class FrameBuilder
                 row.SegmentLength == 0
                     ? string.Empty
                     : snapshot.GetText(row.SegmentStartChar, row.SegmentLength);
+
+            if (
+                style.SelectionFore is PaintColor selFore
+                && selection is SelectionRange sel2
+                && sel2.Start < sel2.End
+                && TryComputeRowIntersection(row, sel2, out int interStart, out int interEnd)
+            )
+            {
+                EmitSplitBodyText(
+                    text,
+                    bodyX,
+                    row.YPx,
+                    lineHeight,
+                    interStart - row.SegmentStartChar,
+                    interEnd - row.SegmentStartChar,
+                    style.Foreground,
+                    selFore,
+                    metrics,
+                    ops
+                );
+                continue;
+            }
+
             int width = text.Length == 0 ? 0 : metrics.MeasureRun(text);
             ops.Add(
                 new PaintOp(
@@ -275,6 +302,24 @@ internal static class FrameBuilder
     }
 
     /// <summary>
+    /// 視覚行と char 範囲の交差を求める。交差が空なら false。
+    /// 選択矩形(工程 3)と本文の分割(工程 5)が必ず同じ境界を使うよう、計算はここ 1 箇所に置く。
+    /// </summary>
+    private static bool TryComputeRowIntersection(
+        VisualRow row,
+        SelectionRange range,
+        out int interStart,
+        out int interEnd
+    )
+    {
+        int rowStart = row.SegmentStartChar;
+        int rowEnd = rowStart + row.SegmentLength;
+        interStart = Math.Max(range.Start, rowStart);
+        interEnd = Math.Min(range.End, rowEnd);
+        return interStart < interEnd;
+    }
+
+    /// <summary>
     /// 視覚行と char 範囲 <paramref name="range"/> の交差をピクセル矩形に変換する。
     /// 交差が空なら false(呼び出し側はスキップ)。
     /// </summary>
@@ -291,11 +336,7 @@ internal static class FrameBuilder
         out int h
     )
     {
-        int rowStart = row.SegmentStartChar;
-        int rowEnd = rowStart + row.SegmentLength;
-        int interStart = Math.Max(range.Start, rowStart);
-        int interEnd = Math.Min(range.End, rowEnd);
-        if (interStart >= interEnd)
+        if (!TryComputeRowIntersection(row, range, out int interStart, out int interEnd))
         {
             x = 0;
             y = 0;
@@ -304,6 +345,7 @@ internal static class FrameBuilder
             return false;
         }
 
+        int rowStart = row.SegmentStartChar;
         string text = snapshot.GetText(rowStart, row.SegmentLength);
         var span = text.AsSpan();
         int xStart = PixelMapper.OffsetToPx(span, interStart - rowStart, metrics);
@@ -354,6 +396,67 @@ internal static class FrameBuilder
 
             // サロゲートペアなら 2 進める(空白判定を安全にスキップ)
             i += TextBoundary.CodePointLengthAt(span, i);
+        }
+    }
+
+    /// <summary>
+    /// 1 視覚行の本文を選択境界で最大 3 つの DrawText に分割して発行する
+    /// (prefix=Foreground / 選択内=selectionFore / suffix=Foreground)。空の区間は発行しない。
+    /// </summary>
+    /// <remarks>
+    /// X と幅は必ず <see cref="PixelMapper.OffsetToPx"/>(行頭からの prefix 計測)の差分で出す。
+    /// <c>ICharMetrics.MeasureRun</c> は非 ASCII を含む run を一括計測するため加算的ではなく、
+    /// 部分文字列を個別に測ると選択矩形(工程 3)と文字がずれる。
+    /// オフセットは <see cref="TextBoundary.SnapToCodePointStart"/> で前方スナップする。
+    /// OffsetToPx も同じスナップを行うため、ここで揃えないと x と文字がずれ、
+    /// サロゲートペアが割れた文字列を描くことになる。
+    /// </remarks>
+    private static void EmitSplitBodyText(
+        string text,
+        int bodyX,
+        int yPx,
+        int lineHeight,
+        int selStartInRow,
+        int selEndInRow,
+        PaintColor fore,
+        PaintColor selectionFore,
+        ICharMetrics metrics,
+        List<PaintOp> ops
+    )
+    {
+        var span = text.AsSpan();
+        int selStart = TextBoundary.SnapToCodePointStart(
+            span,
+            Math.Clamp(selStartInRow, 0, text.Length)
+        );
+        int selEnd = TextBoundary.SnapToCodePointStart(
+            span,
+            Math.Clamp(selEndInRow, 0, text.Length)
+        );
+
+        int pxSelStart = PixelMapper.OffsetToPx(span, selStart, metrics);
+        int pxSelEnd = PixelMapper.OffsetToPx(span, selEnd, metrics);
+        int pxEnd = PixelMapper.OffsetToPx(span, text.Length, metrics);
+
+        Emit(0, selStart, 0, pxSelStart, fore);
+        Emit(selStart, selEnd, pxSelStart, pxSelEnd, selectionFore);
+        Emit(selEnd, text.Length, pxSelEnd, pxEnd, fore);
+
+        void Emit(int from, int to, int pxFrom, int pxTo, PaintColor color)
+        {
+            if (from >= to)
+                return;
+            ops.Add(
+                new PaintOp(
+                    PaintOpKind.DrawText,
+                    bodyX + pxFrom,
+                    yPx,
+                    pxTo - pxFrom,
+                    lineHeight,
+                    Text: text[from..to],
+                    Fore: color
+                )
+            );
         }
     }
 }
