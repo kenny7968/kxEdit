@@ -39,17 +39,28 @@ public class ImeOverlayColorTests
                 (expectedRgb >> 8) & 0xFF,
                 expectedRgb & 0xFF
             );
-            Assert.Equal(expected, ((IImeOverlayHost)c).OverlayForeColor);
+            // Color.Equals は ARGB だけでなく known color 同一性も見る (Color.Black.Equals(
+            // Color.FromArgb(255, 0, 0, 0)) は false)。実装が挙動同一のまま返し方を変えたときに
+            // 偽の赤を出さないよう、色の比較は常に ToArgb() で行う。
+            Assert.Equal(expected.ToArgb(), ((IImeOverlayHost)c).OverlayForeColor.ToArgb());
         });
 
     // 対象節は固定水色 (0xADD8E6) の選択背景の上に描くため、テーマ色に連動させると
     // 黒地テーマで低コントラストになる(設計書 §3)。全テーマで黒のままであることを固定する。
+    //
+    // no-change テストなので「テーマが確かに効いている」アンカーを同居させる (CLAUDE.md §4-B)。
+    // 実装が Color.Black リテラルである以上、アンカーが無いと ApplyAppearance の行を丸ごと
+    // 削っても 4 ケース緑のままで、このテストは何も主張しなくなる。
+    // themeForeIsNonBlack: default テーマは本文前景自体が黒なのでアンカーの対象外にする。
     [Theory]
-    [InlineData("default")]
-    [InlineData("white-on-black")]
-    [InlineData("yellow-on-black")]
-    [InlineData("green-on-black")]
-    public void OverlayTargetForeColor_StaysBlackForAllThemes(string themeId) =>
+    [InlineData("default", false)]
+    [InlineData("white-on-black", true)]
+    [InlineData("yellow-on-black", true)]
+    [InlineData("green-on-black", true)]
+    public void OverlayTargetForeColor_StaysBlackForAllThemes(
+        string themeId,
+        bool themeForeIsNonBlack
+    ) =>
         Sta.Run(() =>
         {
             using var f = new Form { Visible = false };
@@ -60,7 +71,13 @@ public class ImeOverlayColorTests
 
             c.ApplyAppearance(new AppSettings { Theme = themeId });
 
-            Assert.Equal(Color.Black, ((IImeOverlayHost)c).OverlayTargetForeColor);
+            var host = (IImeOverlayHost)c;
+            // 比較を ToArgb() に統一する理由は OverlayForeColor_FollowsThemeForeground のコメント参照。
+            Assert.Equal(Color.Black.ToArgb(), host.OverlayTargetForeColor.ToArgb());
+
+            // アンカー: 同じ ApplyAppearance がもう一方の seam は確かに動かしている。
+            if (themeForeIsNonBlack)
+                Assert.NotEqual(Color.Black.ToArgb(), host.OverlayForeColor.ToArgb());
         });
 
     // === (2) Draw がどちらの色を使うか ===
@@ -102,7 +119,40 @@ public class ImeOverlayColorTests
             HasPixelNear(bmp, TargetMarker),
             "対象節が OverlayTargetForeColor で描かれていない"
         );
+        // 設計書 §3 の前提(対象節は選択背景の上に描く=だから前景は黒を維持する)自体の網。
+        // これが無いと FillRectangle が消えても緑のままで、前提が崩れたことに気づけない。
+        Assert.True(HasPixelNear(bmp, Color.LightBlue), "対象節の選択背景が塗られていない");
+        // 対象節だけの bitmap に通常節の色が混ざらないことの念押し(不変条件の明文化)。
+        // 単独でこれだけが落ちる実装ミスは構成しにくく、「2 色が同値」を実際に捕まえているのは
+        // OverlayTargetForeColor_StaysBlackForAllThemes の方であることに注意。
         Assert.False(HasPixelNear(bmp, ForeMarker), "対象節に通常節の色が使われている");
+    }
+
+    /// <summary>
+    /// Issue #72 の実症状そのものの構成: 1 つの未確定文字列に通常節と対象節が混在し、
+    /// 「対象節は見えるのに通常節だけ消える」状態。<c>ImeController.Draw</c> のループが
+    /// 2 回以上回るのはこのケースだけなので、
+    /// (a) 節ごとに <c>_ime.Attrs[s]</c> を引き直して色を選んでいること(節先頭固定の
+    ///     <c>Attrs[0]</c> に退化していないこと)と、
+    /// (b) 節を描くたびに <c>curX</c> を進めて 2 節目を別位置に置いていること
+    /// をまとめて固定する。節が 1 個の 3 テストではこの 2 点は網に掛からない。
+    /// </summary>
+    [Fact]
+    public void Draw_MixedNormalAndTargetClauses_UsesBothColors()
+    {
+        using var bmp = DrawOverlay(
+            attrs: [ImeAttribute.Input, ImeAttribute.TargetConverted],
+            clauses: [0, 1, 2]
+        );
+
+        Assert.True(
+            HasPixelNear(bmp, ForeMarker),
+            "混在時に通常節が OverlayForeColor で描かれていない"
+        );
+        Assert.True(
+            HasPixelNear(bmp, TargetMarker),
+            "混在時に対象節が OverlayTargetForeColor で描かれていない"
+        );
     }
 
     // === ヘルパ ===
@@ -134,7 +184,10 @@ public class ImeOverlayColorTests
 
         var caret = new CaretController();
         var ctrl = new ImeController(() => new FakeImeContext(), caret, host, _ => { });
-        ctrl.__TestApplyComposition("あい", 2, attrs, clauses);
+        // 検証対象は「どちらの色 seam が使われたか」であって字形ではないので、本文は ASCII にする。
+        // 和文文字にすると、和文グリフを持つフォントが無い環境 (CI の英語ロケール windows ランナー)
+        // で何も描かれず偽の赤になる。2 文字なのは clauses を [0,1,2] に割れるようにするため。
+        ctrl.__TestApplyComposition("Wm", 2, attrs, clauses);
 
         var bmp = new Bitmap(400, 60);
         using (var g = Graphics.FromImage(bmp))
