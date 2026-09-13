@@ -30,9 +30,10 @@ public class FrameBuilderSelectionForeTests
         );
 
     /// <summary>
-    /// 本文 DrawText を抽出する。<see cref="Build"/> は行番号マージン 0・空白可視化 OFF で組むので、
+    /// 本文 DrawText を抽出する。<see cref="Build"/> は既定で行番号マージン 0・空白可視化 OFF なので、
     /// フレーム中の DrawText は本文だけ。<b>色で絞らない</b>のは、想定外の色で増えた余計な op を
     /// フィルタで消さないため(色で絞ると「op が 1 本足りない」という遠い形でしか落ちない)。
+    /// 行番号マージンを付けて撃つテストだけは行番号 op が混ざるので、そちらで別途絞る。
     /// </summary>
     private static List<PaintOp> BodyText(Frame frame) =>
         frame.Ops.Where(op => op.Kind == PaintOpKind.DrawText).ToList();
@@ -42,7 +43,8 @@ public class FrameBuilderSelectionForeTests
         SelectionRange? selection,
         PaintColor? selectionFore,
         int wrapCols = 0,
-        ICharMetrics? metrics = null
+        ICharMetrics? metrics = null,
+        int lineNumberMarginPx = 0
     )
     {
         var m = metrics ?? M;
@@ -60,7 +62,7 @@ public class FrameBuilderSelectionForeTests
             rows,
             clientWidth: 200,
             clientHeight: 100,
-            lineNumberMarginPx: 0,
+            lineNumberMarginPx: lineNumberMarginPx,
             currentLineLogical: -1,
             selection: selection,
             cellHighlight: null,
@@ -171,8 +173,33 @@ public class FrameBuilderSelectionForeTests
         );
     }
 
-    // 選択の<b>内側</b>にある空行(SegmentLength == 0)も分割経路に入らず、
+    // 分割 run も行番号マージンぶん右へずれること。他のテストは行番号マージン 0 で撃つので、
+    // bodyX の加算が落ちても 1 本も落ちない = 「黒地テーマ + 行番号表示 ON で本文が行番号の上に
+    // 重なって描かれる」という実害のある改変が素通りする(2026-09-14 最終レビューの実測)。
+    // 非分割経路は FrameBuilderTests.Line_number_margin_offsets_body_and_emits_right_aligned_numbers
+    // が押さえているので、分割経路にも同じ網を張って非対称を解消する。
+    [Fact]
+    public void Split_runs_are_offset_by_line_number_margin()
+    {
+        var frame = Build("abcdef", new SelectionRange(2, 4), SelFore, lineNumberMarginPx: 30);
+
+        // このテストだけは行番号の DrawText が混ざるので、本文色 / 選択色で絞る。
+        var body = BodyText(frame).Where(op => op.Fore == Fore || op.Fore == SelFore).ToList();
+
+        Assert.Collection(
+            body,
+            op => AssertRun(op, "ab", x: 30, w: 2, Fore),
+            op => AssertRun(op, "cd", x: 32, w: 2, SelFore),
+            op => AssertRun(op, "ef", x: 34, w: 2, Fore)
+        );
+    }
+
+    // 選択の内側にある空行(SegmentLength == 0)も分割経路に入らず、
     // 従来どおり空 Text の op が 1 本出る(不変条件のもう一方の端点)。
+    //
+    // このテストは単独で「交差判定の < を <= に緩める」改変を殺している唯一の網でもある
+    // (空行では startInRow == endInRow == 0 になり、分割経路へ入ると 3 本とも空区間で弾かれて
+    // 本文 op が消える)。折り返しの隣接行を含め、他のテストはこの改変を素通りする。消さないこと。
     [Fact]
     public void Empty_row_inside_selection_keeps_single_empty_run()
     {
@@ -202,7 +229,7 @@ public class FrameBuilderSelectionForeTests
     // "a" + U+1F600(サロゲートペア=2 code unit・幅 2)+ "b" = 4 code unit・全幅 4。
     // OffsetToPx は pair 先頭へ前方スナップするので、文字の切り出しも同じ位置でスナップしないと
     // x と文字がずれるか pair が割れる。
-    // <b>連結文字列の一致では検証にならない</b>: スナップを外しても "a" / "\uD83D" / "\uDE00b" を
+    // 連結文字列の一致では検証にならない: スナップを外しても "a" / "\uD83D" / "\uDE00b" を
     // 連結すれば元の文字列に等しくなり、pair が割れた状態を素通りさせてしまう(レビュー指摘)。
     // そのため op ごとに Text / X / Width / 色を固定する。
     private const string SurrogateLine = "a😀b";
@@ -282,8 +309,11 @@ public class FrameBuilderSelectionForeTests
             op => op.Kind == PaintOpKind.FillRect && op.Back == SelBack
         );
 
+        // 4 辺すべてを突き合わせる。X / Width だけだと、矩形が別の行に出ている改変が通る。
         Assert.Equal(selRect.X, selRun.X);
         Assert.Equal(selRect.Width, selRun.Width);
+        Assert.Equal(selRect.Y, selRun.Y);
+        Assert.Equal(selRect.Height, selRun.Height);
     }
 
     /// <summary>
@@ -324,5 +354,9 @@ public class FrameBuilderSelectionForeTests
         Assert.Equal(w, op.Width);
         Assert.Equal(y, op.Y);
         Assert.Equal(fore, op.Fore);
+        // Height も見る。RenderFrame では op.Height が縦のクリップ幅なので、0 に化けると
+        // 本文が一切描かれない。ここを見ないと lineHeight の受け渡しを落とす改変が素通りする。
+        // M / NonAdditive とも LineHeightPx は 10。
+        Assert.Equal(10, op.Height);
     }
 }

@@ -108,7 +108,7 @@ public sealed partial class EditorControl
                     break;
                 case PaintOpKind.DrawText:
                     // 矩形の幅は「レイアウト上この run が占める幅」(op.Width)ではなく、右端までを
-                    // 与える。TextFormatFlags に NoClipping が無いため矩形幅は<b>クリップ幅</b>として
+                    // 与える。TextFormatFlags に NoClipping が無いため矩形幅はクリップ幅として
                     // 効き、op.Width をそのまま渡すと文字の右端が削れることがある:
                     // 選択境界で分割された本文 run の op.Width は PixelMapper.OffsetToPx の差分
                     // (行頭からの prefix 計測の引き算)であって、その run 単独を測った幅ではない。

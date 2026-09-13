@@ -72,13 +72,21 @@ public sealed record ViewportStyle(
 );
 
 /// <summary>
-/// 選択/セルハイライトの char 範囲。End は排他。<c>Start &lt;= End</c> を invariant として構築時に検証する
-/// (上流バグの silent no-op 化を防ぐ)。
+/// 選択/セルハイライトの char 範囲。End は排他。<c>0 &lt;= Start &lt;= End</c> を invariant として
+/// 構築時に検証する(上流バグの silent no-op 化を防ぐ)。
 /// </summary>
+/// <remarks>
+/// <b>非負の検証が要る理由</b>: <c>FrameBuilder</c> は交差を
+/// <c>Math.Min(End, rowStart + SegmentLength) - rowStart</c> で行内オフセットへ落とす。
+/// <see cref="Start"/> が大きく負だとこの減算が unchecked で正へラップし、行の長さを超える
+/// 添字になって別の場所で例外になる(原因から遠い位置で落ちる)。範囲の invariant は
+/// <b>入口で</b>守る。
+/// </remarks>
 public readonly record struct SelectionRange
 {
     public SelectionRange(int start, int end)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(start);
         if (start > end)
             throw new ArgumentException($"Start ({start}) must be <= End ({end}).", nameof(start));
         Start = start;

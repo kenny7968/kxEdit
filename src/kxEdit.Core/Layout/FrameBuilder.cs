@@ -421,9 +421,11 @@ internal static class FrameBuilder
     /// </summary>
     /// <param name="selStartInRow">
     /// 選択開始の<b>行内</b>オフセット。<see cref="TryComputeRowIntersection"/> の契約により
-    /// <c>[0, text.Length]</c> に収まっている前提で、ここでは再クランプしない
-    /// (<see cref="TextBoundary"/> の「クランプで隠さず throw させる」方針に合わせ、
-    /// 契約違反は添字の例外として露出させる)。
+    /// <c>[0, text.Length]</c> に収まっている前提。ここで再クランプしないのは、直後に呼ぶ
+    /// <see cref="TextBoundary.SnapToCodePointStart"/>(span 版)が<b>両端クランプ済み</b>で
+    /// 二重になるため。<b>契約違反は throw せず黙って縮退する</b>
+    /// (範囲の invariant を守る責任は <see cref="TryComputeRowIntersection"/> と
+    /// <see cref="SelectionRange"/> の ctor 側にある)。
     /// </param>
     /// <param name="selEndInRow">選択終了の行内オフセット。同上。</param>
     /// <remarks>
@@ -454,7 +456,12 @@ internal static class FrameBuilder
 
         int pxSelStart = PixelMapper.OffsetToPx(span, selStart, metrics);
         int pxSelEnd = PixelMapper.OffsetToPx(span, selEnd, metrics);
-        int pxEnd = PixelMapper.OffsetToPx(span, text.Length, metrics);
+        // 行末まで選択されている(Ctrl+A の大半の行)なら pxEnd は pxSelEnd と必ず同値。
+        // OffsetToPx は非 ASCII を含む run を GDI で一括計測するため、長大行では 1 回が高い
+        // (docs/plans/2026-08-02-large-line-resilience-design.md §2.1 が特定した重い経路)。
+        // selStart == 0 の側は OffsetToPx の早期 return で 0 が返るのでコストゼロ。
+        int pxEnd =
+            selEnd >= text.Length ? pxSelEnd : PixelMapper.OffsetToPx(span, text.Length, metrics);
 
         EmitRun(charFrom: 0, charTo: selStart, pxFrom: 0, pxTo: pxSelStart, color: fore);
         EmitRun(

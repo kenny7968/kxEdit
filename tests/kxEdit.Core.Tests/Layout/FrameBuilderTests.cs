@@ -592,6 +592,17 @@ public class FrameBuilderTests
         Assert.Throws<ArgumentException>(() => new SelectionRange(5, 3));
     }
 
+    // 非負も invariant。FrameBuilder は交差を End - rowStart で行内オフセットへ落とすので、
+    // 大きく負の値は unchecked で正へラップし、行の長さを超える添字になって原因から遠い場所で
+    // 落ちる。範囲の invariant は入口で守る(2026-09-14 の脆弱性レビュー指摘)。
+    [Theory]
+    [InlineData(-1, 0)]
+    [InlineData(int.MinValue, int.MinValue + 5)]
+    public void SelectionRange_throws_when_start_is_negative(int start, int end)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SelectionRange(start, end));
+    }
+
     [Fact]
     public void SelectionRange_allows_equal_start_end_for_empty_range()
     {
