@@ -145,6 +145,16 @@ public sealed partial class EditorControl
     private static Color ToColor(PaintColor c) =>
         Color.FromArgb(c.Alpha, (c.Rgb >> 16) & 0xFF, (c.Rgb >> 8) & 0xFF, c.Rgb & 0xFF);
 
+    /// <summary>
+    /// <c>_style</c> を直接読む唯一の窓口 (TestHook_* 規約)。
+    /// <see cref="IImeOverlayHost"/> 経由では <see cref="ViewportStyle.SelectionFore"/> の
+    /// <b>null 性が <c>?? Foreground</c> で潰れて観測できない</b>
+    /// (標準テーマは SelectionFore も Foreground も黒なので seam の値が同じになる)。
+    /// 「標準テーマは選択文字色を持たない = 本文 op を分割しない = 描画完全不変」という
+    /// 2026-09-14 設計書 §5.2 の不変条件は Editor 層でここからしか固定できない。
+    /// </summary>
+    internal static ViewportStyle TestHook_ViewportStyle(EditorControl c) => c._style;
+
     private static ViewportStyle DefaultStyle() =>
         new(
             Foreground: new PaintColor(0x000000),
