@@ -10,12 +10,15 @@ public class FrameBuilderTests
 
     // テスト用スタイル: 全フィールドを識別可能な RGB で埋める。
     // (実装が style から色を拾わずに default を返しているとテストが落ちる)
+    // SelectionFore は null = 標準テーマ相当(選択中も本文色のまま=本文 op を分割しない)。
+    // 分割側の網は FrameBuilderSelectionForeTests が持つ。
     private static ViewportStyle TestStyle() =>
         new(
             Foreground: new PaintColor(0x000000),
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0x88FF88),
             SelectionBack: new PaintColor(0xADD8E6),
+            SelectionFore: null,
             LineNumberFore: new PaintColor(0x777777),
             HighlightOutline: new PaintColor(0xFF8800),
             WhitespaceGlyph: new PaintColor(0xCCCCCC)
@@ -587,6 +590,17 @@ public class FrameBuilderTests
     public void SelectionRange_throws_when_start_greater_than_end()
     {
         Assert.Throws<ArgumentException>(() => new SelectionRange(5, 3));
+    }
+
+    // 非負も invariant。FrameBuilder は交差を End - rowStart で行内オフセットへ落とすので、
+    // 大きく負の値は unchecked で正へラップし、行の長さを超える添字になって原因から遠い場所で
+    // 落ちる。範囲の invariant は入口で守る(2026-09-14 の脆弱性レビュー指摘)。
+    [Theory]
+    [InlineData(-1, 0)]
+    [InlineData(int.MinValue, int.MinValue + 5)]
+    public void SelectionRange_throws_when_start_is_negative(int start, int end)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SelectionRange(start, end));
     }
 
     [Fact]

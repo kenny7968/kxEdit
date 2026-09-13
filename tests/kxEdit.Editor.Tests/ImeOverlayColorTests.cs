@@ -45,12 +45,16 @@ public class ImeOverlayColorTests
             Assert.Equal(expected.ToArgb(), ((IImeOverlayHost)c).OverlayForeColor.ToArgb());
         });
 
-    // 対象節は固定水色 (0xADD8E6) の選択背景の上に描くため、テーマ色に連動させると
-    // 黒地テーマで低コントラストになる(設計書 §3)。全テーマで黒のままであることを固定する。
+    // 対象節は選択背景 (_style.SelectionBack) の上に描くため、文字色は選択中テキストと
+    // 同じ色 (_style.SelectionFore ?? _style.Foreground) を使う。2026-09-14 時点のテーマ表では
+    // 4 テーマとも結果が黒になり、#74 の固定黒から挙動は変わらない(設計書 §5.3)。
+    // 全テーマで黒のままであることを固定する。
     //
-    // no-change テストなので「テーマが確かに効いている」アンカーを同居させる (CLAUDE.md §4-B)。
-    // 実装が Color.Black リテラルである以上、アンカーが無いと ApplyAppearance の行を丸ごと
-    // 削っても 4 ケース緑のままで、このテストは何も主張しなくなる。
+    // no-change テストだが、実装は _style.SelectionFore ?? _style.Foreground を返す派生値なので、
+    // 黒地 3 テーマの黒は「テーマ表の SelectionForeRgb=0x000000 が ViewportStyle に載っている」
+    // ことの網でもある (BuildStyle の SelectionFore 行を落とすと白/黄/緑になって落ちる)。
+    // 一方 ApplyAppearance を丸ごと削っても DefaultStyle 経由で 4 ケースとも黒のままなので、
+    // 「テーマが確かに効いている」アンカーは引き続き必要 (CLAUDE.md §4-B)。
     // themeForeIsNonBlack: default テーマは本文前景自体が黒なのでアンカーの対象外にする。
     [Theory]
     [InlineData("default", false)]
@@ -119,7 +123,7 @@ public class ImeOverlayColorTests
             HasPixelNear(bmp, TargetMarker),
             "対象節が OverlayTargetForeColor で描かれていない"
         );
-        // 設計書 §3 の前提(対象節は選択背景の上に描く=だから前景は黒を維持する)自体の網。
+        // 前提(対象節は選択背景の上に描く=だから前景は選択中テキストの文字色に揃える)自体の網。
         // これが無いと FillRectangle が消えても緑のままで、前提が崩れたことに気づけない。
         Assert.True(HasPixelNear(bmp, Color.LightBlue), "対象節の選択背景が塗られていない");
         // 対象節だけの bitmap に通常節の色が混ざらないことの念押し(不変条件の明文化)。

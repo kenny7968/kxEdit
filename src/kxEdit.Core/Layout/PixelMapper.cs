@@ -13,6 +13,14 @@ internal static class PixelMapper
     /// - charOffset&lt;=0 → 0 / charOffset&gt;=segment.Length → 全幅
     /// - low サロゲート位置に落ちた場合は前方スナップ(pair 先頭 = charOffset-1 に寄せる)
     /// </summary>
+    /// <remarks>
+    /// <b>このスナップ方針に外部が依存している</b>:
+    /// <c>FrameBuilder.EmitBodyTextWithSelection</c> は選択境界で本文テキストを切り出す際に
+    /// <see cref="TextBoundary.SnapToCodePointStart"/> を<b>自前で</b>掛け、その結果が本メソッドの
+    /// 内部スナップと一致することを前提に x と文字を合わせている。
+    /// スナップ方針を変える(後方スナップにする・論理文字単位にする等)ときは、
+    /// <b>必ずあちらも一緒に直すこと</b>。放置すると選択矩形と文字が黙ってずれる。
+    /// </remarks>
     public static int OffsetToPx(ReadOnlySpan<char> segment, int charOffset, ICharMetrics metrics)
     {
         if (charOffset <= 0)

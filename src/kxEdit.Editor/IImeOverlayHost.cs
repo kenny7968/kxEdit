@@ -64,9 +64,17 @@ internal interface IImeOverlayHost
     Color OverlayForeColor { get; }
 
     /// <summary>
-    /// 変換対象節の文字色。<see cref="SelectionBackColor"/> の上に描くので、テーマ前景ではなく
-    /// その背景に対してコントラストが取れる色を返す (設計書 §3 の退行回避)。
+    /// 変換対象節の文字色。対象節は <see cref="SelectionBackColor"/> の上に描くので、
+    /// <b>選択中テキストと同じ文字色</b> (<c>_style.SelectionFore ?? _style.Foreground</c>) を返す
+    /// = 選択表示と同じ「前景 / 背景」の組を使う (2026-09-14 設計書 §5.3)。
+    /// <b>実装者が独自にコントラストの取れる色を選ばないこと</b>: 選択表示と分岐すると、
+    /// 同じ背景の上で 2 種類の文字色が使われることになる。
     /// </summary>
+    /// <remarks>
+    /// 旧実装は黒固定だった (2026-09-13 設計書 §3)。<see cref="SelectionBackColor"/> がテーマ
+    /// 非連動の固定水色だった当時は、テーマ前景に連動させると黒地テーマで読めなくなったため。
+    /// 選択背景がテーマ連動になった今は上記の規則に置き換わっている (結果は 4 テーマとも黒で不変)。
+    /// </remarks>
     Color OverlayTargetForeColor { get; }
 
     /// <summary>target 節背景色 (通常は <c>_style.SelectionBack</c> を Color 化したもの)。</summary>

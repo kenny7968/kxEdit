@@ -107,11 +107,22 @@ public sealed partial class EditorControl
                         g.FillRectangle(b, x, op.Y, op.Width, op.Height);
                     break;
                 case PaintOpKind.DrawText:
+                    // 矩形の幅は「レイアウト上この run が占める幅」(op.Width)ではなく、右端までを
+                    // 与える。TextFormatFlags に NoClipping が無いため矩形幅はクリップ幅として
+                    // 効き、op.Width をそのまま渡すと文字の右端が削れることがある:
+                    // 選択境界で分割された本文 run の op.Width は PixelMapper.OffsetToPx の差分
+                    // (行頭からの prefix 計測の引き算)であって、その run 単独を測った幅ではない。
+                    // ICharMetrics.MeasureRun は非 ASCII を含む run を一括計測して加算的でないので、
+                    // run 単独の実描画幅が差分を上回り得る(結合文字のように advance 0 の
+                    // コードポイントだけが区間に入ると差分が 0 になり、一切描かれない)。
+                    // 縦は従来どおり op.Height(行高)でクリップする=背の高いグリフが行間へ
+                    // にじむ従来の挙動を変えないため。Left 揃えなので開始位置は x のまま。
+                    int textClipWidth = Math.Max(op.Width, frame.ClientWidth - x);
                     TextRenderer.DrawText(
                         g,
                         op.Text ?? string.Empty,
                         _font,
-                        new Rectangle(x, op.Y, op.Width, op.Height),
+                        new Rectangle(x, op.Y, textClipWidth, op.Height),
                         ToColor(op.Fore),
                         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left
                     );
@@ -134,12 +145,24 @@ public sealed partial class EditorControl
     private static Color ToColor(PaintColor c) =>
         Color.FromArgb(c.Alpha, (c.Rgb >> 16) & 0xFF, (c.Rgb >> 8) & 0xFF, c.Rgb & 0xFF);
 
+    /// <summary>
+    /// <c>_style</c> を直接読む唯一の窓口 (TestHook_* 規約)。
+    /// <see cref="IImeOverlayHost"/> 経由では <see cref="ViewportStyle.SelectionFore"/> の
+    /// <b>null 性が <c>?? Foreground</c> で潰れて観測できない</b>
+    /// (標準テーマは SelectionFore も Foreground も黒なので seam の値が同じになる)。
+    /// 「標準テーマは選択文字色を持たない = 本文 op を分割しない = 描画完全不変」という
+    /// 2026-09-14 設計書 §5.2 の不変条件は Editor 層でここからしか固定できない。
+    /// </summary>
+    internal static ViewportStyle TestHook_ViewportStyle(EditorControl c) => c._style;
+
     private static ViewportStyle DefaultStyle() =>
         new(
             Foreground: new PaintColor(0x000000),
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0xF0F0F0),
+            // 標準テーマ(AppearanceThemes の "default" 行)と同値。ApplyAppearance 前の暫定値。
             SelectionBack: new PaintColor(0xADD8E6),
+            SelectionFore: null,
             LineNumberFore: new PaintColor(0x777777),
             HighlightOutline: new PaintColor(0xD77800),
             WhitespaceGlyph: new PaintColor(0xCCCCCC)
@@ -153,7 +176,8 @@ public sealed partial class EditorControl
     /// - LineNumberFore (ratio=0.5) / WhitespaceGlyph (ratio=0.3): 自作コントロール独自の派生
     ///   (App 層は Scintilla の既定色を使うため直接の対応値なし)
     /// 強調 OFF 時の CurrentLineBack は Alpha=0 で「未使用」を明示。
-    /// 選択背景と枠色は現行 App 層と同じ固定値(P6 でテーマ拡張が入るなら再検討=Task 15 の申し送り参照)。
+    /// 選択色(背景・文字色)は <see cref="AppearanceTheme"/> の表から取る(2026-09-14 設計書 §5.1)。
+    /// 枠色は現行 App 層と同じ固定値。
     /// </summary>
     private static ViewportStyle BuildStyle(AppearanceTheme theme, bool highlightCurrentLine)
     {
@@ -164,7 +188,8 @@ public sealed partial class EditorControl
             Foreground: new PaintColor(theme.ForeRgb),
             Background: new PaintColor(theme.BackRgb),
             CurrentLineBack: currentLineBack,
-            SelectionBack: new PaintColor(0xADD8E6),
+            SelectionBack: new PaintColor(theme.SelectionBackRgb),
+            SelectionFore: theme.SelectionForeRgb is int selFore ? new PaintColor(selFore) : null,
             LineNumberFore: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.5)),
             HighlightOutline: new PaintColor(0xD77800),
             WhitespaceGlyph: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.3))
