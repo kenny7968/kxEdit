@@ -107,11 +107,22 @@ public sealed partial class EditorControl
                         g.FillRectangle(b, x, op.Y, op.Width, op.Height);
                     break;
                 case PaintOpKind.DrawText:
+                    // 矩形の幅は「レイアウト上この run が占める幅」(op.Width)ではなく、右端までを
+                    // 与える。TextFormatFlags に NoClipping が無いため矩形幅は<b>クリップ幅</b>として
+                    // 効き、op.Width をそのまま渡すと文字の右端が削れることがある:
+                    // 選択境界で分割された本文 run の op.Width は PixelMapper.OffsetToPx の差分
+                    // (行頭からの prefix 計測の引き算)であって、その run 単独を測った幅ではない。
+                    // ICharMetrics.MeasureRun は非 ASCII を含む run を一括計測して加算的でないので、
+                    // run 単独の実描画幅が差分を上回り得る(結合文字のように advance 0 の
+                    // コードポイントだけが区間に入ると差分が 0 になり、一切描かれない)。
+                    // 縦は従来どおり op.Height(行高)でクリップする=背の高いグリフが行間へ
+                    // にじむ従来の挙動を変えないため。Left 揃えなので開始位置は x のまま。
+                    int textClipWidth = Math.Max(op.Width, frame.ClientWidth - x);
                     TextRenderer.DrawText(
                         g,
                         op.Text ?? string.Empty,
                         _font,
-                        new Rectangle(x, op.Y, op.Width, op.Height),
+                        new Rectangle(x, op.Y, textClipWidth, op.Height),
                         ToColor(op.Fore),
                         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left
                     );
