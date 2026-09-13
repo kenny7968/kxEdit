@@ -1,7 +1,8 @@
 // FakeImeOverlayHost.cs
 // Phase 3 (Task 3a) で ImeController の pure テスト用に IImeOverlayHost を差し替える fake。
 // state 系 (CanImeCompose/HasBuffer/HasFocus) は set 可能・副作用系は呼び出し回数を記録。
-// Draw に必要な Font/Color も個別に差し替え可能 (Draw テストは Graphics 依存のため本 fake では扱わない)。
+// Draw に必要な Font/Color も個別に差し替え可能 (ImeOverlayColorTests は本 fake に識別しやすい色を
+// 差し込み、実 GDI で Bitmap に描いて画素からどちらの色 seam が使われたかを検証する)。
 using System.Drawing;
 
 namespace kxEdit.Editor.Tests.Fakes;
@@ -22,7 +23,8 @@ internal sealed class FakeImeOverlayHost : IImeOverlayHost
     public Font Font { get; set; } = SystemFonts.DefaultFont;
     public Font UnderlineFont { get; set; } = SystemFonts.DefaultFont;
     public Font TargetFont { get; set; } = SystemFonts.DefaultFont;
-    public Color ForeColor { get; set; } = Color.Black;
+    public Color OverlayForeColor { get; set; } = Color.Black;
+    public Color OverlayTargetForeColor { get; set; } = Color.Black;
     public Color SelectionBackColor { get; set; } = Color.LightBlue;
 
     public void DeleteSelectionForImeStart() => DeleteSelectionCallCount++;

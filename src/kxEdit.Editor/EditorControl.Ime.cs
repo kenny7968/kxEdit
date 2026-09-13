@@ -61,7 +61,15 @@ public sealed partial class EditorControl : IImeOverlayHost
     Font IImeOverlayHost.Font => _font;
     Font IImeOverlayHost.UnderlineFont => _underlineFontCache;
     Font IImeOverlayHost.TargetFont => _targetFontCache;
-    Color IImeOverlayHost.ForeColor => ForeColor;
+
+    // Issue #72: 旧実装は Control.ForeColor (ctor で黒固定・ApplyAppearance も更新しない) を返しており、
+    // 黒地テーマで通常節が背景に溶けていた。本文と同じ _style.Foreground に揃える (意図的挙動変更)。
+    Color IImeOverlayHost.OverlayForeColor => ToColor(_style.Foreground);
+
+    // 対象節は _style.SelectionBack (テーマ非連動の固定水色 0xADD8E6) の上に描くため、テーマ前景に
+    // 連動させると黒地テーマで水色地に白/黄/緑となり読めなくなる。全テーマで黒を維持する (挙動不変)。
+    // SelectionBack をテーマ連動にするとき (設計書 §7 の申し送り) はこの色も合わせて見直すこと。
+    Color IImeOverlayHost.OverlayTargetForeColor => Color.Black;
 
     // 旧 DrawImeOverlay で使う target 節背景色。EditorControl.Paint.cs の ToColor(_style.SelectionBack) と等価。
     Color IImeOverlayHost.SelectionBackColor => ToColor(_style.SelectionBack);

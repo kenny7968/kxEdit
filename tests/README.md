@@ -90,6 +90,12 @@ private sealed class Host : IDisposable
   `%APPDATA%\kxEdit\session-state.json` を削除してしまう。MainForm を直生成するテストは
   必ず `ShowMainForm` ヘルパ経由で構築すること。
 
+### 描画色の検証 = 「識別色を差した Fake + ビットマップ判定」
+
+`tests/kxEdit.Editor.Tests/ImeOverlayColorTests.cs` が唯一の前例(全テストプロジェクトで `Graphics.FromImage` / `new Bitmap(` を使うのはここだけ)。**どの色 seam が使われたか**を検証したいときは、Fake host に実運用と違う識別しやすい色(緑・マゼンタ等)を差し込み、`Graphics.FromImage(bitmap)` へ実 GDI 描画してから画素を走査する。アンチエイリアスで厳密一致は揺れるため、期待色との**ユークリッド色距離のしきい値**で「十分近い画素があるか」を判定する。
+
+注意 2 点: 描画テキストは ASCII にする(和文グリフを持つフォントが無い CI ランナーで落ちるため。検証対象は字形ではなく色)。識別色は互いに、かつ背景色・選択背景色とも距離が十分離れた値を選ぶ。
+
 ### ミューテーション検証(執筆時セルフチェック・必須)
 
 新しいテスト 1 件ごとに、書いた本人が実施する:

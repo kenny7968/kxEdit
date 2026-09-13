@@ -183,8 +183,9 @@ internal sealed class ImeController
     /// <summary>
     /// 未確定文字列 overlay 描画。旧 <c>EditorControl.DrawImeOverlay</c> bit-perfect 移設。
     /// 節 (<c>_ime.Clauses[i]..[i+1]</c>) ごとに Attrs を見て target 節 (TargetConverted) を
-    /// SelectionBack + Underline|Bold で強調、それ以外は Underline のみで通常前景色。
-    /// Clauses が空 or 節境界が 2 未満なら全体を通常下線 1 度描画。
+    /// SelectionBack + Underline|Bold + <see cref="IImeOverlayHost.OverlayTargetForeColor"/> で強調、
+    /// それ以外は Underline のみで <see cref="IImeOverlayHost.OverlayForeColor"/> (本文と同じテーマ前景)。
+    /// Clauses が空 or 節境界が 2 未満なら全体を通常下線 1 度描画 (色も通常節と同じ)。
     /// </summary>
     /// <remarks>
     /// <see cref="TextRenderer"/> を使う理由と Attrs 長不整合防御は旧 DrawImeOverlay と同じ (§3-3 / Task 2 M-5)。
@@ -207,7 +208,7 @@ internal sealed class ImeController
                 _ime.Text,
                 _host.UnderlineFont,
                 new Point(curX, y),
-                _host.ForeColor,
+                _host.OverlayForeColor,
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
             );
             return;
@@ -248,7 +249,7 @@ internal sealed class ImeController
                     clause,
                     drawFont,
                     new Point(curX, y),
-                    _host.ForeColor,
+                    _host.OverlayTargetForeColor,
                     TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
                 );
             }
@@ -259,7 +260,7 @@ internal sealed class ImeController
                     clause,
                     drawFont,
                     new Point(curX, y),
-                    _host.ForeColor,
+                    _host.OverlayForeColor,
                     TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
                 );
             }
