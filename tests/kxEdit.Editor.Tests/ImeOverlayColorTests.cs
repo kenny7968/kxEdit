@@ -45,8 +45,10 @@ public class ImeOverlayColorTests
             Assert.Equal(expected.ToArgb(), ((IImeOverlayHost)c).OverlayForeColor.ToArgb());
         });
 
-    // 対象節は固定水色 (0xADD8E6) の選択背景の上に描くため、テーマ色に連動させると
-    // 黒地テーマで低コントラストになる(設計書 §3)。全テーマで黒のままであることを固定する。
+    // 対象節は選択背景 (_style.SelectionBack) の上に描くため、文字色は選択中テキストと
+    // 同じ色 (_style.SelectionFore ?? _style.Foreground) を使う。2026-09-14 時点のテーマ表では
+    // 4 テーマとも結果が黒になり、#74 の固定黒から挙動は変わらない(設計書 §5.3)。
+    // 全テーマで黒のままであることを固定する。
     //
     // no-change テストなので「テーマが確かに効いている」アンカーを同居させる (CLAUDE.md §4-B)。
     // 実装が Color.Black リテラルである以上、アンカーが無いと ApplyAppearance の行を丸ごと

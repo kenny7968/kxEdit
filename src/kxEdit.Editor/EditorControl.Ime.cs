@@ -66,10 +66,11 @@ public sealed partial class EditorControl : IImeOverlayHost
     // 黒地テーマで通常節が背景に溶けていた。本文と同じ _style.Foreground に揃える (意図的挙動変更)。
     Color IImeOverlayHost.OverlayForeColor => ToColor(_style.Foreground);
 
-    // 対象節は _style.SelectionBack (テーマ非連動の固定水色 0xADD8E6) の上に描くため、テーマ前景に
-    // 連動させると黒地テーマで水色地に白/黄/緑となり読めなくなる。全テーマで黒を維持する (挙動不変)。
-    // SelectionBack をテーマ連動にするとき (設計書 §7 の申し送り) はこの色も合わせて見直すこと。
-    Color IImeOverlayHost.OverlayTargetForeColor => Color.Black;
+    // 対象節は選択背景 (_style.SelectionBack) の上に描くので、選択中テキストの文字色に揃える。
+    // SelectionFore 未指定 (標準テーマ) では本文色にフォールバックする。2026-09-14 時点の
+    // テーマ表では 4 テーマとも結果が黒で、#74 の固定黒から挙動は変わらない (設計書 §5.3)。
+    Color IImeOverlayHost.OverlayTargetForeColor =>
+        ToColor(_style.SelectionFore ?? _style.Foreground);
 
     // 旧 DrawImeOverlay で使う target 節背景色。EditorControl.Paint.cs の ToColor(_style.SelectionBack) と等価。
     Color IImeOverlayHost.SelectionBackColor => ToColor(_style.SelectionBack);

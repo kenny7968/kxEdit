@@ -150,6 +150,7 @@ public sealed partial class EditorControl
             Foreground: new PaintColor(0x000000),
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0xF0F0F0),
+            // 標準テーマ(AppearanceThemes の "default" 行)と同値。ApplyAppearance 前の暫定値。
             SelectionBack: new PaintColor(0xADD8E6),
             SelectionFore: null,
             LineNumberFore: new PaintColor(0x777777),
@@ -165,7 +166,8 @@ public sealed partial class EditorControl
     /// - LineNumberFore (ratio=0.5) / WhitespaceGlyph (ratio=0.3): 自作コントロール独自の派生
     ///   (App 層は Scintilla の既定色を使うため直接の対応値なし)
     /// 強調 OFF 時の CurrentLineBack は Alpha=0 で「未使用」を明示。
-    /// 選択背景と枠色は現行 App 層と同じ固定値(P6 でテーマ拡張が入るなら再検討=Task 15 の申し送り参照)。
+    /// 選択色(背景・文字色)は <see cref="AppearanceTheme"/> の表から取る(2026-09-14 設計書 §5.1)。
+    /// 枠色は現行 App 層と同じ固定値。
     /// </summary>
     private static ViewportStyle BuildStyle(AppearanceTheme theme, bool highlightCurrentLine)
     {
@@ -176,8 +178,8 @@ public sealed partial class EditorControl
             Foreground: new PaintColor(theme.ForeRgb),
             Background: new PaintColor(theme.BackRgb),
             CurrentLineBack: currentLineBack,
-            SelectionBack: new PaintColor(0xADD8E6),
-            SelectionFore: null,
+            SelectionBack: new PaintColor(theme.SelectionBackRgb),
+            SelectionFore: theme.SelectionForeRgb is int selFore ? new PaintColor(selFore) : null,
             LineNumberFore: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.5)),
             HighlightOutline: new PaintColor(0xD77800),
             WhitespaceGlyph: new PaintColor(BlendRgb(theme.BackRgb, theme.ForeRgb, 0.3))
