@@ -56,8 +56,18 @@ internal interface IImeOverlayHost
     /// <summary>Underline|Bold の overlay フォント (target 節)。</summary>
     Font TargetFont { get; }
 
-    /// <summary>overlay 文字色 (通常は <c>Control.ForeColor</c>)。</summary>
-    Color ForeColor { get; }
+    /// <summary>
+    /// 通常節 (下線のみ) / 1 節扱い経路の文字色。本文と同じテーマ前景 (<c>_style.Foreground</c>)。
+    /// Issue #72: ここが <c>Control.ForeColor</c> (ctor で黒固定) だったため、黒地テーマで
+    /// 通常節が黒地に黒になって見えなかった。
+    /// </summary>
+    Color OverlayForeColor { get; }
+
+    /// <summary>
+    /// 変換対象節の文字色。<see cref="SelectionBackColor"/> の上に描くので、テーマ前景ではなく
+    /// その背景に対してコントラストが取れる色を返す (設計書 §3 の退行回避)。
+    /// </summary>
+    Color OverlayTargetForeColor { get; }
 
     /// <summary>target 節背景色 (通常は <c>_style.SelectionBack</c> を Color 化したもの)。</summary>
     Color SelectionBackColor { get; }
