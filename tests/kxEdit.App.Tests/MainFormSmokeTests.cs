@@ -1470,6 +1470,116 @@ public class MainFormSmokeTests
         );
     }
 
+    /// <summary>
+    /// IME モード推測の無効化(設計 2026-09-05)を <b>最初のウィンドウを作る前</b>に呼んでいること。
+    /// <para>
+    /// <b>設計書 §7 の「カバレッジの穴(受容)」は前提が誤っていた</b>。<c>Main</c> を<b>実行</b>して
+    /// 観測できないのは事実だが、<see cref="IlCallees"/> という既存の道具と、すぐ上の
+    /// <see cref="ProgramMain_builds_the_form_through_the_tested_composition_point"/> という
+    /// 稼働中の前例がある。「網が無い」という主張も検証対象(CLAUDE.md §4)。
+    /// </para>
+    /// <para>
+    /// <b>この修正の核心は「呼ぶこと」ではなく「ウィンドウ生成より前に呼ぶこと」</b>である
+    /// (設計 §5.2: <c>Form.Shown</c> の時点で当てると、起動時に既に武装済みの分が
+    /// 1 回だけ鳴った ——<c>[2,0,0,0,0]</c>)。だから<b>呼出の有無ではなく順序</b>を固定する。
+    /// <see cref="IlCallees"/> の走査は IL を先頭から 1 バイトずつ進めて追加するので、
+    /// 返却リストは IL オフセットの昇順、すなわち <b>IL 上の出現順</b>である
+    /// (<b>実行順ではない</b>。下の「守らないもの」を見よ)。
+    /// </para>
+    /// <para>
+    /// <b>アンカーの選び方</b>: 「<c>Main</c> の最初の <c>call</c> であること」は厳しすぎて、
+    /// 無害な追加(ログ 1 行)でも赤くなる。実際に発声が戻るのは<b>最初のウィンドウが
+    /// 作られた後</b>なので、その合成点である <see cref="Program.CreateMainForm"/> を
+    /// 主アンカーにする。<c>ApplicationConfiguration.Initialize</c> は<b>アンカーにしない</b>
+    /// ——ウィンドウを作らない(<c>EnableVisualStyles</c> 等の静的設定)ので、実測の根拠が
+    /// 無いまま順序を縛ると「動く形」を赤にするだけになる。
+    /// </para>
+    /// <para>
+    /// <b>主アンカーだけでは足りないので一般化ガードを併せて置く</b>: <c>CreateMainForm</c> は
+    /// <c>MainForm</c> の合成点でしかなく、<c>Main</c> が<b>それ以外の <see cref="Form"/></b>を
+    /// 先に作る形になっても主アンカーは何も言わない(実測: ime 呼び出しの直前に
+    /// <c>new Form().Dispose();</c> を挿しても主アンカーだけでは<b>緑のまま</b>だった)。
+    /// そこで <c>newobj</c> まで拾い、<see cref="Form"/> 派生の ctor より前であることも見る。
+    /// <b>このガードは今日は空虚である</b>——<c>Main</c> の IL に <see cref="Form"/> の ctor は
+    /// 1 つも現れず(<c>MainForm</c> の生成は <c>CreateMainForm</c> の中)、
+    /// <c>firstForm &lt; 0</c> で素通りする。ただし<b>上記の <c>new Form()</c> 変異を実際に
+    /// 当てるとこのガードが武装して赤くなることを実測で確認してある</b>——
+    /// 空虚な assertion を「効いている」と書かないための実測である。
+    /// </para>
+    /// <para>
+    /// <b>守るもの / 守らないもの</b>の境界:
+    /// <list type="bullet">
+    /// <item><b>守る</b>: 呼び出しの有無、主アンカー / <see cref="Form"/> ctor に対する
+    /// IL 上の前後関係、そして<b>どのオーバーロードを呼んだか</b>。名前だけで照合すると
+    /// テスト seam の <c>SuppressWinFormsImeModeInference(Type?)</c> へ差し替える変異が
+    /// <b>緑のまま生存する</b>(実測)。それは <c>null</c> を渡して常に失敗する形=
+    /// 抑止が丸ごと無効になる形なので、引数の個数まで見て入口を固定する。</item>
+    /// <item><b>守らない</b>: 渡した引数の<b>値</b>(呼出集合では観測できない。
+    /// すぐ上のテストの xmldoc と同じ話)。</item>
+    /// <item><b>守らない</b>: <b>実行順</b>。固定できるのは IL 上の出現順までで、
+    /// 呼び出しを条件分岐に入れる変異(<c>Environment.TickCount &lt; 0 ? … : default</c>)は
+    /// IL 上には現れるので<b>生存する</b>(実測)。</item>
+    /// <item><b>守らない</b>: <b>実際に IME 推測が抑止されたかどうか</b>。
+    /// <c>ImeStartupTests</c>(テーブルが塗られたことの観測)と L5(実発声)の担当。</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// 向きに注意: 走査の偽陽性は「呼んでいないものが混ざる」向きにしか働かないので
+    /// <c>DoesNotContain</c> は健全だが、<c>Contains</c> / 位置比較は偽陽性で緑になりうる。
+    /// そのため本テストは変異を 4 つ当てて赤くなることを確認してある ——
+    /// (1) 呼び出しを <c>CreateMainForm</c> の後ろへ移す、(2) 呼び出しを丸ごと削除する、
+    /// (3) テスト seam の <c>(Type?)</c> 版へ差し替える、
+    /// (4) 呼び出しの直前に <c>new Form().Dispose();</c> を挿す。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProgramMain_suppresses_ime_mode_inference_before_creating_any_window()
+    {
+        var main = typeof(Program).GetMethod(
+            "Main",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(main);
+        // newobj まで拾う入口を使う: 下の一般化ガード(Form 派生の ctor より前)は ctor を見る
+        // 主張なので、集合を 1 本に揃えないと 2 つの述語が別リストへ分かれて食い違う。
+        // 余分な要素が増えてもアンカー 2 つの相対順序は変わらないので、位置比較は成立する。
+        var called = IlCallees.OfIncludingNewobj(main!);
+
+        int ime = called.FindIndex(m =>
+            m.DeclaringType == typeof(ImeStartup)
+            && m.Name == nameof(ImeStartup.SuppressWinFormsImeModeInference)
+            // 引数ゼロ = 本番の入口。テスト seam の (Type?) 版へ差し替える変異を殺す。
+            // (DeclaringType が ImeStartup である時点で ctor は排除済み)
+            && m.GetParameters().Length == 0
+        );
+        int compose = called.FindIndex(m =>
+            m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
+        );
+        // アンカーの一般化: Main が「MainForm 以外の Form」を先に作る形になっても捕まえる。
+        int firstForm = called.FindIndex(m =>
+            m is ConstructorInfo && typeof(Form).IsAssignableFrom(m.DeclaringType)
+        );
+
+        Assert.True(
+            ime >= 0,
+            "Program.Main が ImeStartup.SuppressWinFormsImeModeInference() (引数なしの本番入口) を呼んでいない(設計 2026-09-05 §5.2)"
+        );
+        Assert.True(
+            compose >= 0,
+            "Program.Main が Program.CreateMainForm を呼んでいない(アンカーが消えた=このテストの前提が壊れている)"
+        );
+        Assert.True(
+            ime < compose,
+            "IME 推測の無効化は最初のウィンドウを作る合成点より前でなければならない(設計 §5.2)。"
+                + $"実際の IL 上の出現順: ImeStartup={ime}, CreateMainForm={compose}"
+        );
+        Assert.True(
+            firstForm < 0 || ime < firstForm,
+            "IME 推測の無効化は Main が最初に Form を組み立てるより前でなければならない(設計 §5.2)。"
+                + $"実際の IL 上の出現順: ImeStartup={ime}, 最初の Form ctor={firstForm}"
+        );
+    }
+
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
 
     // ON×BackupON+dirty → 確認なし(silent close)+FinalFlush が本文バックアップとレイアウトを

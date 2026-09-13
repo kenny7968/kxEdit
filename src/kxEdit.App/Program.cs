@@ -9,6 +9,41 @@ static class Program
     [STAThread]
     static void Main()
     {
+        // 設計 2026-09-05: WinForms の ImeMode 推測機構を無効化する。放置すると、タブを閉じた
+        // ときとモーダルダイアログを閉じたときに WinForms が IME を「開いてから閉じる」ため、
+        // 日本語 SR が毎回「文字変換」「変換停止」と読み上げる(kxEdit 自身は IME の
+        // ON/OFF を変える API を一切呼んでいない —— ただし ImeMode.Disable を設定した
+        // 2 ダイアログの入力欄は例外で、そこへ入ると IME は閉じる。設計 §6.2)。
+        //
+        // 位置の制約は「最初のウィンドウが作られる前」であること。実測で、フォーム表示後に
+        // 当てると起動時に既に武装済みの分が 1 回だけ鳴った(設計 §5.2)。下の
+        // Application.SetUnhandledExceptionMode(Application.Run より前・かつウィンドウ生成前)と
+        // 同種の制約である。間に何かを挟むたび「それはウィンドウを作らないか」を確かめる
+        // 必要が出るので、確実な最初の文に置く。
+        // 前後関係は MainFormSmokeTests の
+        // ProgramMain_suppresses_ime_mode_inference_before_creating_any_window が IL で固定する。
+        //
+        // 失敗しても起動は止めない(現状動作＝発声が出る、に落ちるだけ)。.NET 更新で内部構造が
+        // 変わったことに後から気づけるよう Trace に残す。ImeStartupTests が CI で先に気づく。
+        var imeSuppression = ImeStartup.SuppressWinFormsImeModeInference();
+        if (imeSuppression.Succeeded)
+        {
+            Trace.TraceInformation(
+                $"kxEdit ime: WinForms ImeMode inference disabled ({string.Join(", ", imeSuppression.PatchedTables)})"
+            );
+        }
+        else
+        {
+            // 劣化経路なので Warning(設計 §5.3。本リポジトリでも失敗・劣化は TraceWarning で統一)。
+            // 失敗枝でも PatchedTables を出す。ImeStartup は途中まで塗れていた分を残して
+            // 失敗を返す(catch 経路)ので、ここで捨てると「1 つも無効化できていない」と
+            // 「一部は無効化済み」がログ上で区別できなくなる。
+            Trace.TraceWarning(
+                $"kxEdit ime: WinForms ImeMode inference NOT disabled: {imeSuppression.FailureReason}"
+                    + $" (patched so far: {string.Join(", ", imeSuppression.PatchedTables)})"
+            );
+        }
+
         // Shift_JIS/EUC-JP を使うため CodePagesEncodingProvider を登録（Core も内部登録するが明示）。
         EncodingCatalog.EnsureRegistered();
         // MD-L-2: 依存 (Markdig) のバージョンを Trace ログへ (post-mortem/依存更新時の追跡用)。
