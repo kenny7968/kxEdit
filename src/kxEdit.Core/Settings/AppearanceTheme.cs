@@ -1,7 +1,8 @@
 namespace kxEdit.Core.Settings;
 
 /// <summary>
-/// 配色テーマ（前景/背景/選択は 0xRRGGBB の RGB 値）。UI 非依存のため System.Drawing に依存しない。
+/// 配色テーマ（前景/背景/選択背景は 0xRRGGBB の RGB 値。選択文字色だけは RGB 値または
+/// <c>null</c>=指定しない）。UI 非依存のため System.Drawing に依存しない。
 /// </summary>
 /// <param name="SelectionBackRgb">選択範囲の背景色。</param>
 /// <param name="SelectionForeRgb">
@@ -24,8 +25,8 @@ public sealed record AppearanceTheme(
 /// 選択色の方針(2026-09-14 設計書 §4): 標準テーマは選択文字色を<b>指定しない</b>(従来どおり
 /// 薄水色の上に本文色)。黒地 3 テーマはハイコントラスト扱いで<b>反転</b>させる
 /// (選択背景 = そのテーマの前景色 / 選択文字 = 黒)。
-/// 選択文字色は結果として <c>BackRgb</c> と同値だが、純黒でない背景のテーマが将来入っても
-/// 壊れないよう<b>独立したデータとして</b>書く。
+/// 黒地 3 テーマの選択文字色は結果として <c>BackRgb</c> と同値になるが、純黒でない背景のテーマが
+/// 将来入っても壊れないよう<b>独立したデータとして</b>書く。
 /// </remarks>
 public static class AppearanceThemes
 {

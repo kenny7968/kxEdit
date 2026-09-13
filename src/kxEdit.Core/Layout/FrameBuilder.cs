@@ -162,6 +162,17 @@ internal static class FrameBuilder
         // SelectionFore が指定されているテーマ(ハイコントラスト)では、選択境界でテキスト op を
         // 分割して選択範囲だけ別色で描く。未指定(null)または選択と交差しない行では
         // 従来どおり 1 op を出す = 標準テーマの PaintOp 列は一切変わらない(設計書 §5.2)。
+        //
+        // 「分割するテーマか」「有効な選択があるか」はループ不変なので手前で 1 度だけ決める
+        // (行ごとに見るのは交差だけ)。空選択の除外は交差計算でも吸収されるが、工程 3 と
+        // 同じ読み口を残すためここでも明示する。
+        (SelectionRange Range, PaintColor Fore)? split =
+            style.SelectionFore is PaintColor styleSelFore
+            && selection is SelectionRange selRange
+            && selRange.Start < selRange.End
+                ? (selRange, styleSelFore)
+                : null;
+
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
@@ -171,21 +182,19 @@ internal static class FrameBuilder
                     : snapshot.GetText(row.SegmentStartChar, row.SegmentLength);
 
             if (
-                style.SelectionFore is PaintColor selFore
-                && selection is SelectionRange sel2
-                && sel2.Start < sel2.End
-                && TryComputeRowIntersection(row, sel2, out int interStart, out int interEnd)
+                split is { } sp
+                && TryComputeRowIntersection(row, sp.Range, out int startInRow, out int endInRow)
             )
             {
-                EmitSplitBodyText(
+                EmitBodyTextWithSelection(
                     text,
                     bodyX,
                     row.YPx,
                     lineHeight,
-                    interStart - row.SegmentStartChar,
-                    interEnd - row.SegmentStartChar,
+                    startInRow,
+                    endInRow,
                     style.Foreground,
-                    selFore,
+                    sp.Fore,
                     metrics,
                     ops
                 );
@@ -302,21 +311,27 @@ internal static class FrameBuilder
     }
 
     /// <summary>
-    /// 視覚行と char 範囲の交差を求める。交差が空なら false。
+    /// 視覚行と char 範囲の交差を<b>行内オフセット</b>(視覚行の先頭を 0 とする)で求める。
+    /// 交差が空なら false。
     /// 選択矩形(工程 3)と本文の分割(工程 5)が必ず同じ境界を使うよう、計算はここ 1 箇所に置く。
+    /// <b>行内オフセットへの変換までをここで済ませる</b>のは、呼び出し側で
+    /// <c>- row.SegmentStartChar</c> を書かせると境界の定義が再び 2 箇所へ散るため。
     /// </summary>
+    /// <remarks>
+    /// true を返すとき <c>0 &lt;= startInRow &lt; endInRow &lt;= row.SegmentLength</c> が成り立つ
+    /// (呼び出し側はこの区間をそのまま行テキストの添字に使える)。
+    /// </remarks>
     private static bool TryComputeRowIntersection(
         VisualRow row,
         SelectionRange range,
-        out int interStart,
-        out int interEnd
+        out int startInRow,
+        out int endInRow
     )
     {
         int rowStart = row.SegmentStartChar;
-        int rowEnd = rowStart + row.SegmentLength;
-        interStart = Math.Max(range.Start, rowStart);
-        interEnd = Math.Min(range.End, rowEnd);
-        return interStart < interEnd;
+        startInRow = Math.Max(range.Start, rowStart) - rowStart;
+        endInRow = Math.Min(range.End, rowStart + row.SegmentLength) - rowStart;
+        return startInRow < endInRow;
     }
 
     /// <summary>
@@ -336,7 +351,7 @@ internal static class FrameBuilder
         out int h
     )
     {
-        if (!TryComputeRowIntersection(row, range, out int interStart, out int interEnd))
+        if (!TryComputeRowIntersection(row, range, out int startInRow, out int endInRow))
         {
             x = 0;
             y = 0;
@@ -345,11 +360,10 @@ internal static class FrameBuilder
             return false;
         }
 
-        int rowStart = row.SegmentStartChar;
-        string text = snapshot.GetText(rowStart, row.SegmentLength);
+        string text = snapshot.GetText(row.SegmentStartChar, row.SegmentLength);
         var span = text.AsSpan();
-        int xStart = PixelMapper.OffsetToPx(span, interStart - rowStart, metrics);
-        int xEnd = PixelMapper.OffsetToPx(span, interEnd - rowStart, metrics);
+        int xStart = PixelMapper.OffsetToPx(span, startInRow, metrics);
+        int xEnd = PixelMapper.OffsetToPx(span, endInRow, metrics);
         x = bodyX + xStart;
         y = row.YPx;
         w = xEnd - xStart;
@@ -400,18 +414,28 @@ internal static class FrameBuilder
     }
 
     /// <summary>
-    /// 1 視覚行の本文を選択境界で最大 3 つの DrawText に分割して発行する
-    /// (prefix=Foreground / 選択内=selectionFore / suffix=Foreground)。空の区間は発行しない。
+    /// 1 視覚行の本文を、選択範囲だけ <paramref name="selectionFore"/> で描くように
+    /// 最大 3 つの DrawText へ分けて発行する
+    /// (prefix=<paramref name="fore"/> / 選択内=<paramref name="selectionFore"/> /
+    /// suffix=<paramref name="fore"/>)。空の区間は発行しないので、行まるごとの選択なら 1 op になる。
     /// </summary>
+    /// <param name="selStartInRow">
+    /// 選択開始の<b>行内</b>オフセット。<see cref="TryComputeRowIntersection"/> の契約により
+    /// <c>[0, text.Length]</c> に収まっている前提で、ここでは再クランプしない
+    /// (<see cref="TextBoundary"/> の「クランプで隠さず throw させる」方針に合わせ、
+    /// 契約違反は添字の例外として露出させる)。
+    /// </param>
+    /// <param name="selEndInRow">選択終了の行内オフセット。同上。</param>
     /// <remarks>
     /// X と幅は必ず <see cref="PixelMapper.OffsetToPx"/>(行頭からの prefix 計測)の差分で出す。
     /// <c>ICharMetrics.MeasureRun</c> は非 ASCII を含む run を一括計測するため加算的ではなく、
     /// 部分文字列を個別に測ると選択矩形(工程 3)と文字がずれる。
     /// オフセットは <see cref="TextBoundary.SnapToCodePointStart"/> で前方スナップする。
-    /// OffsetToPx も同じスナップを行うため、ここで揃えないと x と文字がずれ、
-    /// サロゲートペアが割れた文字列を描くことになる。
+    /// <b>OffsetToPx も同じスナップを行うことに依存している</b>ため、ここで揃えないと x と文字が
+    /// ずれ、サロゲートペアが割れた文字列を描くことになる(<see cref="PixelMapper.OffsetToPx"/>
+    /// のスナップ方針を変えるときは、必ずここも一緒に直すこと)。
     /// </remarks>
-    private static void EmitSplitBodyText(
+    private static void EmitBodyTextWithSelection(
         string text,
         int bodyX,
         int yPx,
@@ -425,26 +449,26 @@ internal static class FrameBuilder
     )
     {
         var span = text.AsSpan();
-        int selStart = TextBoundary.SnapToCodePointStart(
-            span,
-            Math.Clamp(selStartInRow, 0, text.Length)
-        );
-        int selEnd = TextBoundary.SnapToCodePointStart(
-            span,
-            Math.Clamp(selEndInRow, 0, text.Length)
-        );
+        int selStart = TextBoundary.SnapToCodePointStart(span, selStartInRow);
+        int selEnd = TextBoundary.SnapToCodePointStart(span, selEndInRow);
 
         int pxSelStart = PixelMapper.OffsetToPx(span, selStart, metrics);
         int pxSelEnd = PixelMapper.OffsetToPx(span, selEnd, metrics);
         int pxEnd = PixelMapper.OffsetToPx(span, text.Length, metrics);
 
-        Emit(0, selStart, 0, pxSelStart, fore);
-        Emit(selStart, selEnd, pxSelStart, pxSelEnd, selectionFore);
-        Emit(selEnd, text.Length, pxSelEnd, pxEnd, fore);
+        EmitRun(charFrom: 0, charTo: selStart, pxFrom: 0, pxTo: pxSelStart, color: fore);
+        EmitRun(
+            charFrom: selStart,
+            charTo: selEnd,
+            pxFrom: pxSelStart,
+            pxTo: pxSelEnd,
+            color: selectionFore
+        );
+        EmitRun(charFrom: selEnd, charTo: text.Length, pxFrom: pxSelEnd, pxTo: pxEnd, color: fore);
 
-        void Emit(int from, int to, int pxFrom, int pxTo, PaintColor color)
+        void EmitRun(int charFrom, int charTo, int pxFrom, int pxTo, PaintColor color)
         {
-            if (from >= to)
+            if (charFrom >= charTo)
                 return;
             ops.Add(
                 new PaintOp(
@@ -453,7 +477,7 @@ internal static class FrameBuilder
                     yPx,
                     pxTo - pxFrom,
                     lineHeight,
-                    Text: text[from..to],
+                    Text: text[charFrom..charTo],
                     Fore: color
                 )
             );

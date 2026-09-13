@@ -55,17 +55,61 @@ public class AppearanceThemeTests
         Assert.Equal(expectedSelFore, t.SelectionForeRgb);
     }
 
-    // ハイコントラスト(黒地)テーマだけが選択文字色を持つ、という方針そのものの網。
-    // 標準テーマに文字色が入ると「標準テーマは描画不変」という不変条件(設計書 §5.2)が崩れる。
+    // 本件の不具合(黒地テーマで選択中テキストが読めない)そのものの網。
+    // 「選択中に実際に使われる文字色」と選択背景のコントラストだけを見るので、テーマを Id や
+    // 地の色でカテゴリ分けせずに済む = 設計書 §5.1 が想定する将来テーマ(「濃紺地に白」のような
+    // 中間的な地の色)が増えても、正しい値を入れた瞬間に落ちる、ということが起きない。
+    //
+    // 旧版はこれを「default 以外は SelectionForeRgb が非 null」で表現していたが、それは
+    // 「Id != default ⇒ ハイコントラスト」という暗黙の概念をテストへ焼き込むもので、
+    // 暗黙の概念を作らずに済むことを採用理由に挙げた設計書 §5.1 と矛盾していた(レビュー指摘)。
+    //
+    // しきい値は WCAG 2.x の本文テキスト基準 4.5:1。
     [Fact]
-    public void Only_non_default_themes_specify_selection_foreground()
+    public void Selected_text_is_readable_on_its_selection_background()
     {
         foreach (var t in AppearanceThemes.All)
         {
-            if (t.Id == "default")
-                Assert.Null(t.SelectionForeRgb);
-            else
-                Assert.NotNull(t.SelectionForeRgb);
+            // SelectionForeRgb が null なら選択範囲も本文色のまま描かれる(設計書 §5.1 の null 意味論)。
+            int selectedTextRgb = t.SelectionForeRgb ?? t.ForeRgb;
+            double ratio = ContrastRatio(selectedTextRgb, t.SelectionBackRgb);
+
+            Assert.True(
+                ratio >= 4.5,
+                $"{t.Id}: 選択中テキストのコントラスト比が {ratio:F2}:1 で 4.5:1 未満"
+            );
         }
+    }
+
+    // 選択していない本文が読めることの対。選択色を入れ替えたときに本文側を巻き込んでいないか。
+    [Fact]
+    public void Body_text_is_readable_on_its_background()
+    {
+        foreach (var t in AppearanceThemes.All)
+        {
+            double ratio = ContrastRatio(t.ForeRgb, t.BackRgb);
+
+            Assert.True(ratio >= 4.5, $"{t.Id}: 本文のコントラスト比が {ratio:F2}:1 で 4.5:1 未満");
+        }
+    }
+
+    /// <summary>WCAG 2.x のコントラスト比 (L1+0.05)/(L2+0.05)。1.0〜21.0。</summary>
+    private static double ContrastRatio(int rgbA, int rgbB)
+    {
+        double la = RelativeLuminance(rgbA);
+        double lb = RelativeLuminance(rgbB);
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    /// <summary>WCAG 2.x の相対輝度(sRGB のガンマを戻してから係数を掛ける)。</summary>
+    private static double RelativeLuminance(int rgb) =>
+        0.2126 * Linearize((rgb >> 16) & 0xFF)
+        + 0.7152 * Linearize((rgb >> 8) & 0xFF)
+        + 0.0722 * Linearize(rgb & 0xFF);
+
+    private static double Linearize(int channel)
+    {
+        double c = channel / 255.0;
+        return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
     }
 }

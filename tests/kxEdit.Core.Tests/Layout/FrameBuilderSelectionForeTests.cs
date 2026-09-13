@@ -9,38 +9,43 @@ namespace kxEdit.Core.Tests.Layout;
 
 public class FrameBuilderSelectionForeTests
 {
-    private static MonoCharMetrics M => new(halfWidthPx: 1, lineHeightPx: 10);
+    // MonoCharMetrics(halfWidthPx:1, lineHeightPx:10) を共有=決定的な座標。
+    // ASCII=1px・サロゲートペア=2px・行高 10px。
+    private static readonly MonoCharMetrics M = new(halfWidthPx: 1, lineHeightPx: 10);
 
     private static readonly PaintColor Fore = new(0x000000);
     private static readonly PaintColor SelFore = new(0xFF00FF);
+    private static readonly PaintColor SelBack = new(0xADD8E6);
 
     private static ViewportStyle Style(PaintColor? selectionFore) =>
         new(
             Foreground: Fore,
             Background: new PaintColor(0xFFFFFF),
             CurrentLineBack: new PaintColor(0x88FF88),
-            SelectionBack: new PaintColor(0xADD8E6),
+            SelectionBack: SelBack,
             SelectionFore: selectionFore,
             LineNumberFore: new PaintColor(0x777777),
             HighlightOutline: new PaintColor(0xFF8800),
             WhitespaceGlyph: new PaintColor(0xCCCCCC)
         );
 
-    /// <summary>本文 DrawText だけを抽出する(行番号・空白グリフを除くため色と Text で絞る)。</summary>
+    /// <summary>
+    /// 本文 DrawText を抽出する。<see cref="Build"/> は行番号マージン 0・空白可視化 OFF で組むので、
+    /// フレーム中の DrawText は本文だけ。<b>色で絞らない</b>のは、想定外の色で増えた余計な op を
+    /// フィルタで消さないため(色で絞ると「op が 1 本足りない」という遠い形でしか落ちない)。
+    /// </summary>
     private static List<PaintOp> BodyText(Frame frame) =>
-        frame
-            .Ops.Where(op =>
-                op.Kind == PaintOpKind.DrawText && (op.Fore == Fore || op.Fore == SelFore)
-            )
-            .ToList();
+        frame.Ops.Where(op => op.Kind == PaintOpKind.DrawText).ToList();
 
     private static Frame Build(
         string text,
         SelectionRange? selection,
         PaintColor? selectionFore,
-        int wrapCols = 0
+        int wrapCols = 0,
+        ICharMetrics? metrics = null
     )
     {
+        var m = metrics ?? M;
         var buf = TextBuffer.FromString(text);
         var rows = ViewportLayout.Build(
             buf.Current,
@@ -48,7 +53,7 @@ public class FrameBuilderSelectionForeTests
             topSegment: 0,
             heightPx: 1000,
             wrapColumns: wrapCols,
-            M
+            m
         );
         return FrameBuilder.Build(
             buf.Current,
@@ -61,7 +66,7 @@ public class FrameBuilderSelectionForeTests
             cellHighlight: null,
             showWhitespace: false,
             Style(selectionFore),
-            M
+            m
         );
     }
 
@@ -166,7 +171,25 @@ public class FrameBuilderSelectionForeTests
         );
     }
 
-    // 空選択(Start == End)は分割しない。既存の選択矩形のガード(sel.Start < sel.End)と揃える。
+    // 選択の<b>内側</b>にある空行(SegmentLength == 0)も分割経路に入らず、
+    // 従来どおり空 Text の op が 1 本出る(不変条件のもう一方の端点)。
+    [Fact]
+    public void Empty_row_inside_selection_keeps_single_empty_run()
+    {
+        var frame = Build("ab\n\ncd", new SelectionRange(0, 6), SelFore);
+
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "ab", x: 0, w: 2, SelFore, y: 0),
+            op => AssertRun(op, "", x: 0, w: 0, Fore, y: 10),
+            op => AssertRun(op, "cd", x: 0, w: 2, SelFore, y: 20)
+        );
+    }
+
+    // 空選択(Start == End)は分割しない。
+    // 交差計算が空選択を吸収するので、FrameBuilder 側の Start < End ガードを外してもこれは緑のまま
+    // (ガードは工程 3 と読み口を揃えるための冗長な明示)。ここが固定しているのは
+    // 「キャレットがあるだけの状態で本文の色が変わらない」ことそのもの。
     [Fact]
     public void Empty_selection_does_not_split()
     {
@@ -175,20 +198,106 @@ public class FrameBuilderSelectionForeTests
         Assert.Collection(BodyText(frame), op => AssertRun(op, "abcdef", x: 0, w: 6, Fore));
     }
 
-    // サロゲートペアの途中に落ちた選択でも、文字が欠落も重複もしないこと。
-    // OffsetToPx は pair 先頭へ前方スナップするので、文字の切り出しも同じ位置で
-    // スナップしないと x と文字がずれるか pair が割れる。
-    [Theory]
-    [InlineData(1, 2)] // pair の途中で始まり途中で終わる
-    [InlineData(0, 2)] // pair の途中で終わる
-    [InlineData(2, 4)] // pair の途中で始まる
-    public void Selection_inside_surrogate_pair_preserves_all_text(int start, int end)
-    {
-        // "a" + U+1F600 (サロゲートペア=2 code unit) + "b" = 4 code unit
-        var frame = Build("a😀b", new SelectionRange(start, end), SelFore);
+    // --- サロゲートペア ---
+    // "a" + U+1F600(サロゲートペア=2 code unit・幅 2)+ "b" = 4 code unit・全幅 4。
+    // OffsetToPx は pair 先頭へ前方スナップするので、文字の切り出しも同じ位置でスナップしないと
+    // x と文字がずれるか pair が割れる。
+    // <b>連結文字列の一致では検証にならない</b>: スナップを外しても "a" / "\uD83D" / "\uDE00b" を
+    // 連結すれば元の文字列に等しくなり、pair が割れた状態を素通りさせてしまう(レビュー指摘)。
+    // そのため op ごとに Text / X / Width / 色を固定する。
+    private const string SurrogateLine = "a😀b";
 
-        string joined = string.Concat(BodyText(frame).Select(op => op.Text));
-        Assert.Equal("a😀b", joined);
+    // pair の high 側(offset 1)から low 側(offset 2)までの選択は、両端とも pair 先頭へ寄って
+    // 空区間になり、選択色の op が 1 本も出ない(選択矩形も幅 0)。pair が割れないのが要点。
+    [Fact]
+    public void Selection_within_surrogate_pair_emits_no_selection_run()
+    {
+        var frame = Build(SurrogateLine, new SelectionRange(1, 2), SelFore);
+
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "a", x: 0, w: 1, Fore),
+            op => AssertRun(op, "😀b", x: 1, w: 3, Fore)
+        );
+    }
+
+    // pair の途中で終わる選択は pair 先頭まで縮む(pair は選択外=本文色でまとめて描かれる)。
+    [Fact]
+    public void Selection_ending_inside_surrogate_pair_snaps_to_pair_start()
+    {
+        var frame = Build(SurrogateLine, new SelectionRange(0, 2), SelFore);
+
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "a", x: 0, w: 1, SelFore),
+            op => AssertRun(op, "😀b", x: 1, w: 3, Fore)
+        );
+    }
+
+    // pair の途中で始まる選択は pair 先頭まで広がる(pair 全体が選択色になる)。
+    [Fact]
+    public void Selection_starting_inside_surrogate_pair_snaps_to_pair_start()
+    {
+        var frame = Build(SurrogateLine, new SelectionRange(2, 4), SelFore);
+
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "a", x: 0, w: 1, Fore),
+            op => AssertRun(op, "😀b", x: 1, w: 3, SelFore)
+        );
+    }
+
+    // --- 非加算メトリクス(設計書 §5.2 の最重要制約)---
+
+    // 設計書 §5.2: X と幅は必ず OffsetToPx(行頭からの prefix 計測)の差分で出す。
+    // MonoCharMetrics は加算的なので、部分文字列を個別に MeasureRun する実装でも上の全テストが
+    // 緑のまま通ってしまう = この制約は加算的メトリクスでは固定できない(レビュー指摘)。
+    // 非加算のメトリクスで撃って初めて差が出る。
+    [Fact]
+    public void Run_x_and_width_come_from_prefix_measurement_not_substring_measurement()
+    {
+        var frame = Build("abcdef", new SelectionRange(2, 4), SelFore, metrics: new NonAdditive());
+
+        // prefix 計測: "ab"=19 / "abcd"=37 / "abcdef"=55。差分は 19 / 18 / 18 で合計 55。
+        // 部分文字列を個別に測ると "ab"="cd"="ef"=19 となり、幅も X も合わなくなる。
+        Assert.Collection(
+            BodyText(frame),
+            op => AssertRun(op, "ab", x: 0, w: 19, Fore),
+            op => AssertRun(op, "cd", x: 19, w: 18, SelFore),
+            op => AssertRun(op, "ef", x: 37, w: 18, Fore)
+        );
+    }
+
+    // 設計書 §5.2「矩形と文字が必ず一致する」の実証。交差計算(char 境界)は共有しているが、
+    // px への変換は 2 経路(矩形側は OffsetToPx の内部スナップ任せ・分割側は明示スナップ)あり、
+    // 一致は構造ではなく両者の等価性に依存している。非加算メトリクスで値ごと突き合わせる。
+    [Fact]
+    public void Selection_run_matches_selection_rect_exactly()
+    {
+        var frame = Build("abcdef", new SelectionRange(2, 4), SelFore, metrics: new NonAdditive());
+
+        var selRun = Assert.Single(BodyText(frame), op => op.Fore == SelFore);
+        var selRect = Assert.Single(
+            frame.Ops,
+            op => op.Kind == PaintOpKind.FillRect && op.Back == SelBack
+        );
+
+        Assert.Equal(selRect.X, selRun.X);
+        Assert.Equal(selRect.Width, selRun.Width);
+    }
+
+    /// <summary>
+    /// 加算的でない <see cref="ICharMetrics"/>。1 文字 10px だが、run の文字数 n に対して
+    /// <c>10n - (n - 1)</c> を返す = 部分文字列を個別に測って足すと行全体より広くなる。
+    /// <c>GdiCharMetrics</c> が非 ASCII を含む run を一括計測することで生じる非加算性を、
+    /// GDI 抜きで決定的に再現するための道具。
+    /// </summary>
+    private sealed class NonAdditive : ICharMetrics
+    {
+        public int LineHeightPx => 10;
+
+        public int MeasureRun(ReadOnlySpan<char> text) =>
+            text.Length == 0 ? 0 : (text.Length * 10) - (text.Length - 1);
     }
 
     // --- 分割しない側(標準テーマ相当)---
@@ -204,10 +313,7 @@ public class FrameBuilderSelectionForeTests
 
         // アンカー: 選択自体は確かに有効(矩形は塗られている)。これが無いと選択が
         // 効いていない状態でも緑になり、このテストは何も主張しなくなる。
-        Assert.Contains(
-            frame.Ops,
-            op => op.Kind == PaintOpKind.FillRect && op.Back == new PaintColor(0xADD8E6)
-        );
+        Assert.Contains(frame.Ops, op => op.Kind == PaintOpKind.FillRect && op.Back == SelBack);
     }
 
     private static void AssertRun(PaintOp op, string text, int x, int w, PaintColor fore, int y = 0)

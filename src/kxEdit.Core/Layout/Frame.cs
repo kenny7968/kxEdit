@@ -17,6 +17,12 @@ public enum PaintOpKind
 /// 描画色(RGB + アルファ)。<see cref="Rgb"/> は 0xRRGGBB。
 /// <see cref="Alpha"/> == 0 は「無効/未使用」を意味する運用色として使う(例: CurrentLineBack)。
 /// </summary>
+/// <remarks>
+/// <b><see cref="Alpha"/> == 0 の運用は先行実装の名残</b>(型で強制されない規約なので、
+/// 消し忘れると黙って透明で塗る)。<b>新しく「色の不在」を表す必要が出たら
+/// <c>PaintColor?</c> の null を使うこと</b>(<see cref="ViewportStyle.SelectionFore"/> が先例)。
+/// null なら全消費側が <c>?? 既定色</c> / <c>is PaintColor</c> を書かされるため、規約が漏れない。
+/// </remarks>
 public readonly record struct PaintColor(int Rgb, byte Alpha = 255);
 
 /// <summary>
@@ -44,6 +50,10 @@ public sealed record Frame(IReadOnlyList<PaintOp> Ops, int ClientWidth, int Clie
 /// <summary>
 /// ビューポート描画のパレット(前景/背景/現在行/選択/行番号/ハイライト枠/空白グリフ)。
 /// すべての色を明示的に指定する(既定=default(PaintColor) は使わない=RGB 0 と混同されないように)。
+/// <b>「指定しない」が正当な色は <c>PaintColor?</c> の null で表す</b>
+/// (<see cref="SelectionFore"/> が唯一の例)。<see cref="PaintColor.Alpha"/> == 0 を
+/// 「未使用」の印にする流儀は <see cref="CurrentLineBack"/> に残る先行実装の名残で、
+/// 新しい色はこれに倣わないこと(<see cref="PaintColor"/> の remarks 参照)。
 /// </summary>
 /// <param name="SelectionFore">
 /// 選択範囲の文字色。<c>null</c> は「指定しない」= 選択範囲も <see cref="Foreground"/> で描く
