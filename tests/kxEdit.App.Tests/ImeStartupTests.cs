@@ -18,8 +18,12 @@ namespace kxEdit.App.Tests;
 /// ここではフィールド<b>名</b>で引く。同じ経路で引くと「本番が探せていない」ことをテストも
 /// 同時に見失う(循環)。.NET 更新で名前が変わればこのテストが赤くなり、CI が気づく。</para>
 ///
-/// <para><b>本テストはプロセス全体の static 状態を変える</b>(製品と同じ状態にする)。
-/// 順序依存の偽陽性を避けるため、各テストは<b>非 NoControl の番兵値を書いてから</b>呼ぶ。</para>
+/// <para><b>本テストはプロセス全体の static 状態を変える</b>。順序依存の偽陽性を避けるため、
+/// テーブルを見る各テストは<b>非 NoControl の番兵値を書いてから</b>呼び、<see cref="TableGuard"/> で
+/// <b>呼び出し前の内容へ復元する</b>。したがって<b>プロセスの最終状態は実行順に依存する</b>
+/// (復元しない <see cref="Suppress_PatchesAllThreeCjkTables_ExcludesUnsupportedTable"/> が
+/// 最後に走ったかどうかで変わる)。他クラスのテストは推測テーブルの内容に依存しないため
+/// 受容する —— 「テスト後は製品と同じ状態になる」とは書けない(設計 §7 の同旨の記述も不正確)。</para>
 ///
 /// 実際の発声が消えたかは自動テストでは確認できない(CLAUDE.md §2 a11y 鉄則)。L5 で見る。
 /// </summary>
@@ -68,7 +72,7 @@ public class ImeStartupTests
     }
 
     [Fact]
-    public void 推測セルだけが_NoControl_に塗られる()
+    public void Suppress_PatchesOnlyInferredCells_LeavesStructuralCellsIntact()
     {
         var table = JapaneseTable;
         using var guard = new TableGuard(table);
@@ -92,7 +96,7 @@ public class ImeStartupTests
     /// 総数の固定は .NET 側でテーブルが増えたときの検知も兼ねる(設計 §6.3)。
     /// </summary>
     [Fact]
-    public void CJK_3テーブルが対象になり_UnsupportedTable_は含まれない()
+    public void Suppress_PatchesAllThreeCjkTables_ExcludesUnsupportedTable()
     {
         var result = ImeStartup.SuppressWinFormsImeModeInference();
 
@@ -101,6 +105,9 @@ public class ImeStartupTests
         Assert.Contains("s_koreanTable", result.PatchedTables);
         Assert.Contains("s_chineseTable", result.PatchedTables);
         Assert.Equal(3, result.PatchedTables.Count);
+        // 上の 4 行から論理的には導出できるが、意図を名指しで残すために置く:
+        // s_unsupportedTable は今日は空配列なので長さガードで自然に落ちる。将来これが
+        // 非空になったときに「除外しそこねた」ことを、件数だけでなく名前でも赤くする。
         Assert.DoesNotContain(
             result.PatchedTables,
             n => n.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
@@ -114,7 +121,7 @@ public class ImeStartupTests
     /// 添字の出典はフレームワーク側の定数に取る(手書きの 2 / 3 を信じない)。
     /// </summary>
     [Fact]
-    public void フレームワークが実際に読むセルが中和される()
+    public void Suppress_NeutralisesCellsTheFrameworkActuallyReads()
     {
         int imeClosed = (int)ConversionType.GetField("ImeClosed", Any)!.GetValue(null)!;
         int imeDirectInput = (int)ConversionType.GetField("ImeDirectInput", Any)!.GetValue(null)!;
@@ -134,7 +141,7 @@ public class ImeStartupTests
     }
 
     [Fact]
-    public void 二回呼んでも成功する()
+    public void Suppress_CalledTwice_StillSucceeds()
     {
         var table = JapaneseTable;
         using var guard = new TableGuard(table);
@@ -149,7 +156,7 @@ public class ImeStartupTests
     }
 
     [Fact]
-    public void 型を解決できなくても例外を投げず失敗を返す()
+    public void Suppress_UnresolvableType_ReturnsFailure_WithoutThrowing()
     {
         var result = ImeStartup.SuppressWinFormsImeModeInference(null);
 
@@ -159,12 +166,57 @@ public class ImeStartupTests
     }
 
     [Fact]
-    public void 変換テーブルを持たない型を渡しても失敗を返すだけで落ちない()
+    public void Suppress_TypeWithoutConversionTables_ReturnsFailure_WithoutThrowing()
     {
         var result = ImeStartup.SuppressWinFormsImeModeInference(typeof(string));
 
         Assert.False(result.Succeeded);
         Assert.NotNull(result.FailureReason);
         Assert.Empty(result.PatchedTables);
+    }
+
+    /// <summary>
+    /// 設計 §6.1 の固定。本対策の唯一の挙動変更は<b>「明示的な<i>能動</i> <c>ImeMode</c>
+    /// (<c>Hiragana</c> / <c>Katakana</c> / <c>Alpha</c> / <c>On</c> / <c>Off</c> 等)を設定した
+    /// コントロールは、フォーカス後に <c>ImeMode</c> の<i>読み値</i>が <c>NoControl</c> へ退化する」</b>
+    /// ことである。今日 kxEdit に該当コントロールは<b>ゼロ</b>なので実害は無い —— この
+    /// 「ゼロである」という前提そのものを固定し、将来足したときに気づけるようにする。
+    ///
+    /// <para><b>退化しない 3 値</b>: <c>Inherit</c>(既定・何も主張しない)/ <c>NoControl</c>
+    /// (明示的に WinForms に触らせない)/ <c>Disable</c>(一次資料で確認: 読み側
+    /// <c>ImeContext.GetImeMode</c> は <c>ImmGetContext == 0</c> のときテーブルを引かず
+    /// リテラルの <c>Disable</c> を返し、設定側 <c>SetImeStatus</c> も <c>ImmAssociateContext</c>
+    /// へ回してテーブルを読まない)。この 3 値だけが本対策と無関係でいられる。</para>
+    ///
+    /// <para><b>このテストが見ないもの</b>: <c>ImeMode.Disable</c> が<b>実際に</b> IME を
+    /// 切り離すかどうか(実 IME が要る)。設計 §7 はこれも L3 の項目として挙げていたが、
+    /// en-US の CI では <c>InputLanguageTable</c> が <c>s_unsupportedTable</c> になり
+    /// <c>SetImeStatus</c> が即 return するため、自動化しても空虚になる。
+    /// <b>L5 チェックリストへ移送した</b>(本 fixup で同書の網の表も訂正済み)。
+    /// 対象も 2 ダイアログに限る —— <c>MainForm</c> 全体の走査はフィクスチャが重く、
+    /// 明示的な <c>ImeMode</c> を書く場所は今日この 2 つと <c>CsvCellEditor</c> だけである。</para>
+    /// </summary>
+    [Fact]
+    public void AppDialogs_DeclareNoActiveImeMode() =>
+        Sta.Run(() =>
+        {
+            using var goToLine = new GoToLineDialog(current: 1, maxLine: 100);
+            using var goToCell = new CsvGoToCellDialog(currentRow: 1, currentCol: 1);
+
+            AssertNoActiveImeMode(goToLine);
+            AssertNoActiveImeMode(goToCell);
+        });
+
+    /// <summary>コントロール木を再帰的に歩き、退化しうる能動 <c>ImeMode</c> が無いことを見る。</summary>
+    private static void AssertNoActiveImeMode(Control root)
+    {
+        Assert.True(
+            root.ImeMode is ImeMode.Inherit or ImeMode.NoControl or ImeMode.Disable,
+            $"{root.GetType().Name}('{root.Name}') が能動的な ImeMode.{root.ImeMode} を設定している。"
+                + "本対策(WinForms の ImeMode 推測の無効化)により読み値が NoControl へ退化する。"
+                + "設計 2026-09-05 §6.1 を読み、意図した設定なら受容事項として記録すること。"
+        );
+        foreach (Control child in root.Controls)
+            AssertNoActiveImeMode(child);
     }
 }

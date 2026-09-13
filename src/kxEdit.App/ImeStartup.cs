@@ -12,6 +12,15 @@ namespace kxEdit.App;
 /// <c>EqualityComparer&lt;IReadOnlyList&lt;string&gt;&gt;.Default</c> —— つまり参照等値 ——
 /// で比べるため、中身が同じでも別インスタンスなら不等になる。比較したいときは
 /// <see cref="PatchedTables"/> など個々のメンバを比べる。</para>
+///
+/// <para><b><c>default</c> を作らないこと</b>: record struct なので <c>default</c> が
+/// 構築でき、そのときだけ <see cref="PatchedTables"/> が <c>null</c> になる。
+/// 呼び出し側(<c>Program.Main</c> 冒頭)は <c>SetUnhandledExceptionMode</c> も
+/// <c>CrashHandler</c> も未装着の区間で <c>string.Join</c> に渡すため、そこへ
+/// <c>null</c> が届くと起動不能かつ post-mortem 無しになる。生成は必ず
+/// <see cref="Failed(string)"/> / <see cref="Failed(string, IReadOnlyList{string})"/> か
+/// 全引数コンストラクタを通し、<b><see cref="PatchedTables"/> は非 null 前提</b>で読む
+/// (今日 <c>default</c> を返す経路は 1 つも無い。増やさないこと)。</para>
 /// </summary>
 internal readonly record struct ImeSuppressionResult(
     bool Succeeded,
@@ -88,7 +97,7 @@ internal static class ImeStartup
     /// <para><b>ここを 4 以上へ狭めてはいけない</b>: 読まれる最初のセルは <c>ImeClosed</c>(3)で、
     /// 3 を塗り残すと IME が閉じているときの推測が生き返り、<c>PropagatingImeMode</c> が
     /// 再び記録されて発声が戻る(変異 4 は実測で KILLED)。
-    /// 3 は機能的には 2 と等価だが、<c>ImeStartupTests.フレームワークが実際に読むセルが中和される</c> が
+    /// 3 は機能的には 2 と等価だが、<c>ImeStartupTests.Suppress_NeutralisesCellsTheFrameworkActuallyReads</c> が
     /// <c>ImeDirectInput</c>(2)まで塗ることを固定しているため、そこでも赤くなる。</para>
     /// </summary>
     private const int FirstInferredCell = 2;
@@ -108,8 +117,9 @@ internal static class ImeStartup
         }
         catch (Exception ex)
         {
-            // Assembly.GetType は ArgumentException / FileLoadException /
-            // BadImageFormatException を投げうる。呼び出し位置は Program.Main の最初 =
+            // Assembly.GetType は ArgumentException / FileNotFoundException /
+            // FileLoadException / BadImageFormatException 等を投げうる(列挙は例示で、
+            // いずれにせよ Exception で受ける)。呼び出し位置は Program.Main の最初 =
             // Application.SetUnhandledExceptionMode も CrashHandler もまだ未装着の区間で、
             // ここから漏らすと起動不能かつ post-mortem も残らない。絶対に投げ返さない。
             return ImeSuppressionResult.Failed($"型解決に失敗: {ex.GetType().Name}: {ex.Message}");
@@ -157,6 +167,19 @@ internal static class ImeStartup
                 // 塗ったうえで PatchedTables に載り、テストが赤くなって気づける(設計 §6.3)。
                 if (table.Length <= FirstInferredCell)
                     continue;
+                // 変換テーブルの構造署名。今日の 3 テーブルはいずれも [Inherit, Disable, ...] で
+                // 始まる(一次資料 ImeModeConversion で確認)。将来 ImeModeConversion に
+                // 「変換テーブルではない ImeMode[] static」(既定モードの一覧など)が増えたとき、
+                // 型と長さだけでは素通りして全セルを塗り潰してしまう —— そうなると WinForms が
+                // その配列に置いた前提が例外も Trace も無しに静かに壊れる。フィールド名依存へ
+                // 戻らずに誤爆面だけを狭めるための、形による第 2 の絞り込みである。
+                // 逆に .NET 側で署名が変わって 1 つも塗れなくなった場合は Failed に落ちるだけで
+                // (症状が戻る)、ImeStartupTests の件数固定(3 テーブル)が CI で先に赤くなる。
+                // 上の 2 つの continue と同じく、今日この行を消す変異は生き残る(現存する
+                // ImeMode[] static はすべて署名を満たすため)。将来の誤爆に対する防御であって、
+                // 今日の網ではない。
+                if (table[0] != ImeMode.Inherit || table[1] != ImeMode.Disable)
+                    continue;
 
                 for (int i = FirstInferredCell; i < table.Length; i++)
                     table[i] = ImeMode.NoControl;
@@ -172,6 +195,13 @@ internal static class ImeStartup
             // 起動処理なのでここで投げ返さない。握り潰した事実は呼び出し側が Trace へ落とす。
             // ループ途中で落ちても塗り済みの分は渡す —— 「1 つも無効化できていない」と
             // 「一部は無効化済み」を Trace が取り違えないため。
+            //
+            // ex.Message の評価を try で包まないのは意図的(Program.cs の CrashHandler 側は
+            // ExceptionObject.ToString() を包んでいるので、防御水準が非対称に見える)。
+            // あちらは任意の例外オブジェクトを受けるが、ここへ到達しうるのは Assembly /
+            // Type / FieldInfo が投げる BCL の例外型に限られ、その Message は投げない。
+            // 塗るのはテーブル単位で原子的(内側のループは境界内の値型代入のみで throw
+            // しえない)なので、ここに来ても半端に塗られたテーブルは残らない。
             return ImeSuppressionResult.Failed($"{ex.GetType().Name}: {ex.Message}", patched);
         }
     }

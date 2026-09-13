@@ -26,15 +26,23 @@ static class Program
         // 失敗しても起動は止めない(現状動作＝発声が出る、に落ちるだけ)。.NET 更新で内部構造が
         // 変わったことに後から気づけるよう Trace に残す。ImeStartupTests が CI で先に気づく。
         var imeSuppression = ImeStartup.SuppressWinFormsImeModeInference();
-        Trace.TraceInformation(
-            imeSuppression.Succeeded
-                ? $"kxEdit ime: WinForms ImeMode inference disabled ({string.Join(", ", imeSuppression.PatchedTables)})"
-                // 失敗枝でも PatchedTables を出す。ImeStartup は途中まで塗れていた分を残して
-                // 失敗を返す(catch 経路)ので、ここで捨てると「1 つも無効化できていない」と
-                // 「一部は無効化済み」がログ上で区別できなくなる。
-                : $"kxEdit ime: WinForms ImeMode inference NOT disabled: {imeSuppression.FailureReason}"
+        if (imeSuppression.Succeeded)
+        {
+            Trace.TraceInformation(
+                $"kxEdit ime: WinForms ImeMode inference disabled ({string.Join(", ", imeSuppression.PatchedTables)})"
+            );
+        }
+        else
+        {
+            // 劣化経路なので Warning(設計 §5.3。本リポジトリでも失敗・劣化は TraceWarning で統一)。
+            // 失敗枝でも PatchedTables を出す。ImeStartup は途中まで塗れていた分を残して
+            // 失敗を返す(catch 経路)ので、ここで捨てると「1 つも無効化できていない」と
+            // 「一部は無効化済み」がログ上で区別できなくなる。
+            Trace.TraceWarning(
+                $"kxEdit ime: WinForms ImeMode inference NOT disabled: {imeSuppression.FailureReason}"
                     + $" (patched so far: {string.Join(", ", imeSuppression.PatchedTables)})"
-        );
+            );
+        }
 
         // Shift_JIS/EUC-JP を使うため CodePagesEncodingProvider を登録（Core も内部登録するが明示）。
         EncodingCatalog.EnsureRegistered();

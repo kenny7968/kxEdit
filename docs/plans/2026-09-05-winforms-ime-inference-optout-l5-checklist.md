@@ -39,7 +39,7 @@
 | `SuppressWinFormsImeModeInference()` が成功を返し、対象テーブルを 1 つ以上挙げること | L3 `ImeStartupTests` |
 | 推測セル(index 2 以降)がすべて `NoControl` に塗られ、index 0 / 1 が不変であること | 同上(ループ開始位置・範囲を変える変異がここで死ぬ) |
 | 冪等であること・型解決に失敗しても例外を投げず失敗を返すこと | 同上 |
-| `ImeMode.Disable` を設定したコントロールが**依然として IME を切り離す**こと | 同上(設計 §6.1 の固定) |
+| アプリのダイアログに**能動的な `ImeMode`**(`Hiragana` / `Alpha` / `On` / `Off` 等)を設定したコントロールが**存在しない**こと(= 設計 §6.1 の唯一の挙動変更に該当するものが無い) | L3 `ImeStartupTests` の `AppDialogs_DeclareNoActiveImeMode` |
 | `Program.Main` が `ImeStartup.SuppressWinFormsImeModeInference` を **`CreateMainForm`(最初のウィンドウ)より前**に呼ぶこと(IL 上の出現順) | L3 `MainFormSmokeTests` の `ProgramMain_suppresses_ime_mode_inference_before_creating_any_window` |
 
 > **本数は網の増減で変わる。引用するときは数え直すこと。**
@@ -53,6 +53,7 @@
 | **半角/全角キー自体のフィードバックが残っているか** | 同上(実発声) |
 | **日本語入力中の未確定文字列・候補・確定の読み上げが従来どおりか** | 同上 |
 | **`ImeMode.Disable` の欄から戻ったときに IME が切れたままになる**(設計 §6.2 の受容事項)ことの体感 | IME の open status は OS グローバルの状態で、L3 のハーネスからは実キー入力も IME の切替も起こせない |
+| **`ImeMode.Disable` が依然として実際に IME を切り離すか**(設計 §7 が L3 の項目 5 として挙げていたもの) | **L3 から本書へ移送**(2026-09-13 の最終ブランチレビューで訂正)。en-US の CI では `InputLanguageTable` が `s_unsupportedTable` になり `ImeContext.SetImeStatus` が即 return するため、自動テストにしても**空虚に緑になるだけ**で網にならない。§6.1 のうち自動化できる部分(能動 `ImeMode` を持つコントロールがゼロであること)は上の表の `AppDialogs_DeclareNoActiveImeMode` が受け持つ。実挙動は**本書の項目 6** で見る |
 
 > ### ★ 自動テストは「実際に効いたか」を原理的に固定できない —— 回収点は本書だけである
 >
@@ -144,6 +145,8 @@
 | 4 | 編集領域で **半角/全角** を押す(ON にする → OFF に戻す) | NVDA が**従来どおり**「日本語変換」/「変換停止」相当を読む。**ここが黙ったら FAIL**(潰しすぎ) | |
 | 5 | 編集領域で日本語を変換入力する(例: `にほんご` → Space で変換 → 候補を `↓` で送る → Enter で確定) | 未確定文字列・変換候補・確定が**従来どおり**読まれる。読み上げの内容・タイミングが変わらない。IME の変換モード(ひらがな/カタカナ/英数)の切替も従来どおり効く | |
 | 7 | `t.csv` を開いて CSV モードにし、セルへ移動して **F2** でセル編集 → 内容を打ち替えて **Enter** で確定(**F2 の直前**に半角/全角で ON→OFF しておく) | セル値・位置の発声は従来どおりで、**追加の「文字変換」「変換停止」が出ない**。CSV のセル編集欄は `ImeMode.NoControl`(`CsvCellEditor`)なので、対策前後とも IME を奪わない | |
+| 11 | `Ctrl+F` で検索ダイアログを開き、検索語に**日本語を変換入力して確定** → `Esc` で閉じて編集領域へ戻る(**開く直前**に半角/全角で ON→OFF しておく) | 入力欄で日本語が従来どおり打てて読まれる。閉じて戻るときに**追加の「文字変換」「変換停止」が出ない**。日本語を打つ主要面なので、ここの退行は実害が大きい | |
+| 12 | `Ctrl+Shift+F`(フォルダ検索(grep))で Grep ダイアログを開き、検索語に**日本語を変換入力** → フォルダ選択(`参照`)を開いて `Esc` で閉じる → Grep も `Esc` で閉じる | 項目 11 と同じ。フォルダ選択は**モーダル**なので、`WmImeKillFocus` の第 1 項が成立する経路でもある —— §1 の一般化としても見る | |
 
 > 項目 5 は**発声だけでなく実際に日本語が入力できること**も見る。テーブルを塗る対策なので
 > IME の実挙動には触れないはずだが(設計 §6.1: 読み値が `NoControl` に退化しても実挙動は正しい)、
@@ -172,7 +175,7 @@
 
 | # | 手順 | 期待 | 判定 |
 |---|---|---|---|
-| 8 | 起動時の `Trace` を観測する(下の観測手段を参照) | 成功時: `kxEdit ime: WinForms ImeMode inference disabled (s_japaneseTable, s_koreanTable, s_chineseTable)` が 1 行出る。失敗時: `kxEdit ime: WinForms ImeMode inference NOT disabled: <理由> (patched so far: ...)`。**観測できた行を逐語で記録する** | |
+| 8 | 起動時の `Trace` を観測する(下の観測手段を参照) | 成功時: `kxEdit ime: WinForms ImeMode inference disabled (...)` が 1 行出て、括弧内に `s_japaneseTable` / `s_koreanTable` / `s_chineseTable` の **3 つが並ぶ**(**順序は不定** —— `Type.GetFields` の返却順は仕様上未定義。並び順で FAIL を付けないこと)。失敗時は `kxEdit ime: WinForms ImeMode inference NOT disabled: <理由> (patched so far: ...)` が**警告**として出る。**観測できた行を逐語で記録する** | |
 | 9 | **弁別の実測**(任意だが強く推奨): 修正前のビルド(main `e740067` を別ディレクトリでビルド)で項目 1 を同じ手順で撃つ | 修正前は **1 回の `Ctrl+W` につき「文字変換」「変換停止」の 2 発声**が出る。本ブランチでは出ない = **弁別できている**。撃たない場合は「未実施(弁別は §0.2 の過去実測に依拠)」と書く | |
 
 **項目 8 の観測手段**(いずれも取れなければ **「観測せず」と正直に書く**。観測できないものを PASS にしない):
@@ -254,6 +257,8 @@ IME: ____(Microsoft IME / その他) / kxEdit ビルド: ____(commit: ____)
 | 8 | 起動時 `Trace` の観測 | | |
 | 9 | 修正前ビルドとの弁別 | | |
 | 10 | CSV セルへ移動からの復帰(残存の確認) | | |
+| 11 | 検索ダイアログでの日本語入力と復帰 | | |
+| 12 | Grep ダイアログ(+フォルダ参照)での日本語入力と復帰 | | |
 
 総合判定: ____
 
