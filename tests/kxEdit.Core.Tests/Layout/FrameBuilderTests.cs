@@ -721,4 +721,106 @@ public class FrameBuilderTests
             .ToList();
         Assert.Single(lineNumbers);
     }
+
+    // ===== F-1(2026-09-14 の L5 で検出): 長大行の本文 DrawText を長さで分割する =====
+
+    /// <summary>本文の DrawText op(Fore が Foreground のもの)だけを拾う。</summary>
+    private static List<PaintOp> BodyTextOps(Frame frame, PaintColor fore) =>
+        frame.Ops.Where(op => op.Kind == PaintOpKind.DrawText && op.Fore == fore).ToList();
+
+    private static Frame BuildForLine(string line, ViewportStyle style)
+    {
+        var buf = TextBuffer.FromString(line);
+        var rows = BuildRows(buf.Current);
+        return FrameBuilder.Build(
+            buf.Current,
+            rows,
+            clientWidth: 200,
+            clientHeight: 100,
+            lineNumberMarginPx: 0,
+            currentLineLogical: -1,
+            selection: null,
+            cellHighlight: null,
+            showWhitespace: false,
+            style,
+            M
+        );
+    }
+
+    /// <summary>
+    /// 上限ちょうどの行は分割しない = 分割導入前と同じ 1 op のまま。
+    /// (上限の比較を &lt;= から &lt; へ緩める変異はここで死ぬ)
+    /// </summary>
+    [Fact]
+    public void Body_text_op_is_not_split_at_exactly_the_limit()
+    {
+        var style = TestStyle();
+        string line = new('a', FrameBuilder.MaxCharsPerTextOp);
+
+        var body = BodyTextOps(BuildForLine(line, style), style.Foreground);
+
+        Assert.Single(body);
+        Assert.Equal(line, body[0].Text);
+    }
+
+    /// <summary>
+    /// 上限を 1 文字超えると分割され、<b>連結すると元の行と一致する</b>。
+    /// GDI は上限超過で何も描かないので、ここが F-1 の本体
+    /// (1 文字も落とさない・重複しないことを連結で固定する)。
+    /// </summary>
+    [Fact]
+    public void Body_text_op_is_split_beyond_the_limit_and_concatenates_back()
+    {
+        var style = TestStyle();
+        string line = new('a', FrameBuilder.MaxCharsPerTextOp + 1);
+
+        var body = BodyTextOps(BuildForLine(line, style), style.Foreground);
+
+        Assert.Equal(2, body.Count);
+        Assert.Equal(line, string.Concat(body.Select(op => op.Text)));
+    }
+
+    /// <summary>分割後も X は単調増加し、先頭は本文原点(行番号なしなので 0)から始まる。</summary>
+    [Fact]
+    public void Split_body_ops_advance_x_monotonically_from_body_origin()
+    {
+        var style = TestStyle();
+        string line = new('a', FrameBuilder.MaxCharsPerTextOp * 2 + 5);
+
+        var body = BodyTextOps(BuildForLine(line, style), style.Foreground);
+
+        Assert.Equal(3, body.Count);
+        Assert.Equal(0, body[0].X);
+        for (int i = 1; i < body.Count; i++)
+            Assert.True(body[i].X > body[i - 1].X, $"op[{i}].X={body[i].X} <= op[{i - 1}].X");
+        // ASCII なので MeasureRun は加算的 = 幅の合計が行全体の幅と一致する
+        Assert.Equal(M.MeasureRun(line), body.Sum(op => op.Width));
+    }
+
+    /// <summary>
+    /// 分割境界にサロゲートペアが跨っても<b>割らない</b>。
+    /// (SnapToCodePointStart を落とす変異はここで死ぬ —— 割ると片割れだけの
+    /// 不正な文字列を描くことになる)
+    /// </summary>
+    [Fact]
+    public void Split_does_not_break_a_surrogate_pair_at_the_boundary()
+    {
+        var style = TestStyle();
+        const string pair = "\uD842\uDFB7"; // U+20BB7(𠮷)
+        // 上限の 1 つ手前からペアを置く = 分割したい位置が必ずペアの内側に落ちる
+        string line =
+            new string('a', FrameBuilder.MaxCharsPerTextOp - 1) + pair + new string('b', 10);
+
+        var body = BodyTextOps(BuildForLine(line, style), style.Foreground);
+
+        Assert.Equal(2, body.Count);
+        Assert.Equal(line, string.Concat(body.Select(op => op.Text)));
+        foreach (var op in body)
+        {
+            string t = op.Text!;
+            Assert.False(char.IsHighSurrogate(t[^1]), "op が高位サロゲートで終わっている");
+            Assert.False(char.IsLowSurrogate(t[0]), "op が低位サロゲートで始まっている");
+        }
+        Assert.Contains(body, op => op.Text!.Contains(pair, StringComparison.Ordinal));
+    }
 }

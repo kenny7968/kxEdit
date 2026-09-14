@@ -395,6 +395,83 @@ public class FrameBuilderSelectionForeTests
         Assert.Contains(frame.Ops, op => op.Kind == PaintOpKind.FillRect && op.Back == SelBack);
     }
 
+    // --- F-1(2026-09-14 の L5 で検出): 長大行の分割が選択色分けと共存すること ---
+
+    /// <summary>
+    /// <b>分割しない run の幅は従来どおり OffsetToPx の差分</b>である(自前計測に置き換えない)。
+    /// これが崩れると選択矩形と文字の幅がずれる(設計 §5.2 の制約そのもの)。
+    /// <para>
+    /// 上限<b>ちょうど</b>の run で撃つ。<see cref="FrameBuilder.MaxCharsPerTextOp"/> の比較を
+    /// <c>&lt;=</c> から <c>&lt;</c> へ緩める変異は、ここでだけ死ぬ ——
+    /// 分割経路へ落ちると widthOverride が使われず <c>MeasureRun</c> の値になるため。
+    /// 加算的な <see cref="MonoCharMetrics"/> では両者が一致してしまい、固定できない。
+    /// </para>
+    /// <para>
+    /// 選択を<b>オフセット 0 から始めない</b>のが要点。<c>OffsetToPx(0)</c> は早期 return で
+    /// 0 を返すので、0 起点だと差分 <c>= MeasureRun(run)</c> になってしまい、
+    /// 「差分か自前計測か」を区別できない(CLAUDE.md §4-B の partial-selection の教訓)。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Run_at_exactly_the_limit_keeps_the_prefix_difference_width()
+    {
+        const int limit = FrameBuilder.MaxCharsPerTextOp;
+        const int prefixLen = 5;
+        string text = new string('x', prefixLen) + new string('a', limit) + "bcde";
+
+        var frame = Build(
+            text,
+            new SelectionRange(prefixLen, prefixLen + limit),
+            SelFore,
+            metrics: new NonAdditive()
+        );
+
+        var body = BodyText(frame);
+        // prefix(Fore) / 選択(SelFore) / suffix(Fore) の 3 本。分割は起きない。
+        Assert.Equal(3, body.Count);
+        var sel = body[1];
+        Assert.Equal(SelFore, sel.Fore);
+        Assert.Equal(limit, sel.Text!.Length);
+        // x = OffsetToPx(prefixLen) = 9*prefixLen + 1
+        Assert.Equal((9 * prefixLen) + 1, sel.X);
+        // 幅 = OffsetToPx(prefixLen+limit) - OffsetToPx(prefixLen)
+        //    = (9*(prefixLen+limit) + 1) - (9*prefixLen + 1) = 9*limit。
+        // 分割経路へ落ちて自前計測になると MeasureRun(run) = 9*limit + 1 になり、ここで死ぬ。
+        Assert.Equal(9 * limit, sel.Width);
+    }
+
+    /// <summary>
+    /// 上限を超える選択 run は<b>その内側で</b>分割される。色の並びと連結が保たれ、
+    /// prefix / 選択 / suffix の 3 色構成そのものは変わらない。
+    /// </summary>
+    [Fact]
+    public void Oversized_runs_are_split_inside_each_selection_run()
+    {
+        const int limit = FrameBuilder.MaxCharsPerTextOp;
+        // prefix / 選択 / suffix をすべて上限超えにする
+        string text =
+            new string('a', limit + 1) + new string('b', limit + 1) + new string('c', limit + 1);
+
+        var frame = Build(
+            text,
+            new SelectionRange(limit + 1, (limit + 1) * 2),
+            SelFore,
+            metrics: new NonAdditive()
+        );
+
+        var body = BodyText(frame);
+        // 3 run × 各 2 チャンク
+        Assert.Equal(6, body.Count);
+        Assert.Equal(text, string.Concat(body.Select(op => op.Text)));
+        // 色の並びは prefix(Fore) 2 本 → 選択(SelFore) 2 本 → suffix(Fore) 2 本
+        Assert.Equal(
+            new[] { Fore, Fore, SelFore, SelFore, Fore, Fore },
+            body.Select(op => op.Fore).ToArray()
+        );
+        for (int i = 1; i < body.Count; i++)
+            Assert.True(body[i].X > body[i - 1].X, $"op[{i}].X={body[i].X} <= op[{i - 1}].X");
+    }
+
     private static void AssertRun(PaintOp op, string text, int x, int w, PaintColor fore, int y = 0)
     {
         Assert.Equal(PaintOpKind.DrawText, op.Kind);
