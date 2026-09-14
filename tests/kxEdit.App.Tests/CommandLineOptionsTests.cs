@@ -52,4 +52,13 @@ public class CommandLineOptionsTests
         var options = CommandLineOptions.Parse([@"C:\work\memo.txt", "--new-instance"]);
         Assert.True(options.NewInstance);
     }
+
+    [Fact]
+    public void Parse_KeepsNewInstanceWhenUnknownArgumentFollows()
+    {
+        // 非既定状態(スイッチ検出済み)から始める。後続の未知引数がフラグを落とさないこと。
+        // 将来 `kxEdit.exe --new-instance C:\work\memo.txt` が実際の起動形になる(設計 §6)。
+        var options = CommandLineOptions.Parse(["--new-instance", @"C:\work\memo.txt"]);
+        Assert.True(options.NewInstance);
+    }
 }
