@@ -1818,6 +1818,40 @@ internal sealed class PendingActivation
 Markdig ログのブロックの**直後**、`PreviewUserDataSweeper.SweepIfSoleInstance()` の**直前**に
 ゲートを挿す。既存のコメントと順序は一切動かさないこと。
 
+> 【Task 6 仕様レビューによる訂正 2026-09-15・T-1】**`ApplicationConfiguration.Initialize()` は
+> ゲートより前へ移す**(下のコード片は策定時のままなので、実装時に反映すること)。
+>
+> 策定時の配置では `ShowStartupError`(D4 のエラーダイアログ)が `Initialize()` **より前**に
+> 呼ばれる。`kxEdit.App` に app.manifest は無く、**DPI 認識は `Initialize()` の
+> `SetHighDpiMode` に依存している**ため、高 DPI 環境ではこのダイアログだけ
+> ビットマップ拡大(ぼやけ)になる。CLAUDE.md §2「**弱視ユーザーも第一級**」に触れる。
+>
+> 移動が安全な理由: `Initialize()` は `EnableVisualStyles` /
+> `SetCompatibleTextRenderingDefault` / `SetHighDpiMode` を呼ぶだけで、
+> **共有状態に触れずウィンドウも作らない**。既存の IME IL テストの xmldoc 自身が
+> 「`ApplicationConfiguration.Initialize` はアンカーにしない —— ウィンドウを作らない
+> (`EnableVisualStyles` 等の静的設定)ので」と明記しており、この移動と矛盾しない。
+> ゲートを `PreviewUserDataSweeper` / `SettingsStartup.Prepare` より前に置く理由
+> (共有状態を書き換える前に弾く)も保たれる。
+>
+> 結果の順序:
+> ```
+> 1. ImeStartup.SuppressWinFormsImeModeInference()   ← 不変条件・最初の文
+> 2. EncodingCatalog / Trace ログ
+> 3. ApplicationConfiguration.Initialize()            ← ここへ移す
+> 4. SingleInstanceGate.Acquire(args)                 ← ここで 2 つ目は終了する
+> 5. PreviewUserDataSweeper.SweepIfSoleInstance()
+> 6. SetUnhandledExceptionMode / CrashHandler 配線 / CreateMainForm / Application.Run
+> ```
+
+> 【Task 6 仕様レビューによる追加 2026-09-15・T-2】**SID 取得失敗を握ること。**
+> `SingleInstanceNames.CurrentMutexName()` / `CurrentPipeName()` は SID を取れないと
+> `InvalidOperationException` を投げる。ゲートの外なので `Acquire` の catch では拾えない。
+> **名前の組み立てを `try`/`catch (InvalidOperationException)` で囲み、失敗したら
+> Trace に残して `--new-instance` と同じ経路(排他も待受もせず通常起動)へ落とすこと。**
+> 単一インスタンス化は諦めるが**エディタは使える**方に倒す —— 設計全体が
+> 「待受の開始に失敗しても起動を止めない」で一貫しており、ここだけ起動不能にする理由がない。
+
 ```csharp
     [STAThread]
     static void Main(string[] args)
@@ -1854,9 +1888,15 @@ Markdig ログのブロックの**直後**、`PreviewUserDataSweeper.SweepIfSole
                     );
                     return;
                 case SingleInstanceOutcome.ForeignPeer:
+                    // 「別の場所」と断定しないこと(設計 §4 の訂正 2026-09-15)。
+                    // この結果には 2 経路ある: ①実行ファイルパスの不一致(本当に別フォルダ)
+                    // ②高 IL の kxEdit が先に起動していて Connect が拒否された(同じ場所・
+                    // 同じビルドで権限だけ違う)。②で「別の場所」と言うと、ユーザーは
+                    // 存在しないフォルダを探すことになる。取るべき行動は両方同じなので
+                    // 場所にも権限にも触れない文言にする。
                     ShowStartupError(
-                        "別の場所にある kxEdit が既に起動しています。\n"
-                            + "先にそちらを終了してから、もう一度実行してください。"
+                        "別の kxEdit が既に起動していますが、この kxEdit からは操作できません。\n"
+                            + "先に起動している kxEdit を終了してから、もう一度実行してください。"
                     );
                     return;
             }
