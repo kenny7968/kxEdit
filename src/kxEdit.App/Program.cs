@@ -93,6 +93,11 @@ static class Program
         // 単一インスタンス化は諦めるがエディタは使える方へ倒す。設計全体が
         // 「待受の開始に失敗しても起動を止めない」で一貫しており、ここだけ起動不能にする
         // 理由がない。
+        // Parse は try / if の【外】に置く。中へ入れると、SID 取得に失敗した劣化経路で
+        // 「未知の引数を無視した」Trace が出なくなる —— 劣化経路こそ post-mortem の
+        // 手掛かりが要る(レビュー指摘 M-2)。
+        var options = CommandLineOptions.Parse(args);
+
         string? mutexName = null;
         string? pipeName = null;
         try
@@ -111,7 +116,7 @@ static class Program
         if (mutexName is not null && pipeName is not null)
         {
             (outcome, gate) = SingleInstanceGate.Acquire(
-                CommandLineOptions.Parse(args),
+                options,
                 mutexName,
                 pipeName,
                 pending.Request,
@@ -129,12 +134,20 @@ static class Program
             {
                 case SingleInstanceOutcome.HandedOff:
                     // 既存ウィンドウが前面に出た。無言で終わる(設計 D1)。
+                    // 【終了コードは 0】引き渡しは成功しているため。下の 2 つと区別が付く
+                    // ことに意味がある —— 将来 kxEdit.exe foo.txt でファイルを開けるように
+                    // なると(設計 §6)、スクリプトはこの終了コードで成否を判定できる。
                     return;
                 case SingleInstanceOutcome.NoResponse:
                     ShowStartupError(
                         "kxEdit は既に起動していますが応答しません。\n"
                             + "タスク マネージャーで kxEdit を終了してから、もう一度実行してください。"
                     );
+                    // 【設計 §3「ゲートの 3 状態」: 失敗は終了コード非 0】
+                    // §4 の「失敗理由を 2 つに分ける」精密化はこの定めを撤回していない。
+                    // Environment.Exit(1) は使わないこと —— using (gate) の Dispose を飛ばす。
+                    // ExitCode なら Main から普通に抜けて finally が走る。
+                    Environment.ExitCode = 1;
                     return;
                 case SingleInstanceOutcome.ForeignPeer:
                     // 「別の場所」と断定しないこと(設計 §4 の訂正 2026-09-15)。
@@ -147,6 +160,7 @@ static class Program
                         "別の kxEdit が既に起動していますが、この kxEdit からは操作できません。\n"
                             + "先に起動している kxEdit を終了してから、もう一度実行してください。"
                     );
+                    Environment.ExitCode = 1; // 上と同じ理由(設計 §3)
                     return;
                 case SingleInstanceOutcome.FirstInstance:
                 default:

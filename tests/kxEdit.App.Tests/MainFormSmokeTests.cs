@@ -1596,6 +1596,20 @@ public class MainFormSmokeTests
     /// <c>SweepIfSoleInstance</c> は <c>Main</c> に直接現れるので、そちらは実名で見る。
     /// </para>
     /// <para>
+    /// <b>T-1: <c>ApplicationConfiguration.Initialize</c> がゲートより前であることも固定する</b>
+    /// (設計 2026-09-14・Task 6 仕様レビュー)。<c>kxEdit.App</c> に app.manifest は無く DPI 認識は
+    /// <c>Initialize()</c> の <c>SetHighDpiMode</c> に依存しているので、ゲートを先に置くと
+    /// 高 DPI 環境で D4 のエラーダイアログ<b>だけ</b>がビットマップ拡大(ぼやけ)になる ——
+    /// CLAUDE.md §2「<b>弱視ユーザーも第一級</b>」に触れる。通常の起動経路では観測できず、
+    /// 退行しても L5 を実施するまで誰も気づかないため、ここで構造として縛る。
+    /// </para>
+    /// <para>
+    /// <b>すぐ上の IME テストの「<c>ApplicationConfiguration.Initialize</c> はアンカーにしない」と
+    /// 矛盾しない</b>: あちらは<b>ウィンドウ生成の代理アンカー</b>として不適(<c>Initialize</c> は
+    /// ウィンドウを作らない)という話で、こちらは<b>ゲートより前</b>という別の不変条件を見ている。
+    /// 片方を「重複」と見て消さないこと。
+    /// </para>
+    /// <para>
     /// <b>守るもの / 守らないもの</b>(すぐ上の IME テストと同じ境界):
     /// <list type="bullet">
     /// <item><b>守る</b>: <see cref="SingleInstanceGate.Acquire"/> の呼び出しの有無と、
@@ -1633,6 +1647,11 @@ public class MainFormSmokeTests
         int compose = called.FindIndex(m =>
             m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
         );
+        // ApplicationConfiguration は WinForms のソースジェネレータが kxEdit.App 名前空間へ
+        // 生成する通常の静的クラス(型参照が無いので名前で照合する)。
+        int init = called.FindIndex(m =>
+            m.Name == "Initialize" && m.DeclaringType?.Name == "ApplicationConfiguration"
+        );
 
         Assert.True(
             gate >= 0,
@@ -1655,6 +1674,12 @@ public class MainFormSmokeTests
             gate < compose,
             "単一インスタンス判定は設定読込(CreateMainForm 内の SettingsStartup.Prepare)より"
                 + $"前でなければならない(設計 §3)。実際の IL 上の出現順: gate={gate}, compose={compose}"
+        );
+        Assert.True(
+            init >= 0 && init < gate,
+            "ApplicationConfiguration.Initialize は単一インスタンス判定より前でなければならない。"
+                + "D4 のエラーダイアログを DPI 認識済みで出すため(T-1・CLAUDE.md §2 弱視ユーザーも第一級)。"
+                + $"実際の IL 上の出現順: Initialize={init}, gate={gate}"
         );
     }
 

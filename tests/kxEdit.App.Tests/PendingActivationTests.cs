@@ -111,7 +111,19 @@ public class PendingActivationTests
     /// </para>
     /// <para>
     /// 「前面化が<b>完了してから</b> <c>true</c> を返す」ことも同時に固定する(設計 §4 ★1)。
-    /// 投げっぱなしで即 <c>true</c> にすると、2 つ目が譲渡したフォアグラウンド権ごと消える。
+    /// 投げっぱなしで即 <c>true</c> にすると、2 つ目は ACK を受けて即終了し、譲渡した
+    /// フォアグラウンド権ごと消える —— A の <c>SetForegroundWindow</c> は拒否され、
+    /// タスクバーが点滅するだけになる。実装計画が「Task 4 のテストはこの破壊を一切検出
+    /// できない」と明記したとおり、<b>ここが唯一の網</b>である。
+    /// </para>
+    /// <para>
+    /// <b>観測点は「<c>Request</c> が返った瞬間の発火数」でなければならない</b>(レビュー指摘 I-1)。
+    /// <c>PumpUntilCompleted</c> の<b>後</b>で <c>activated</c> を見ると、ポンプ自身が
+    /// デリゲートを走らせてしまうので、投げっぱなし変異でも Task の完了が少し遅れれば
+    /// <c>1</c> になって<b>緑で生存する</b>(タイミング依存)。Task の中で戻り時点の値を
+    /// 捕まえれば決定論的になる —— 正しい実装では <c>WaitAny</c> が 0 を返すのは
+    /// <c>ThreadMethodEntry.Complete()</c>(<c>finally</c> でコールバックの<b>後</b>に呼ばれる)
+    /// の後なので必ず <c>1</c>、投げっぱなし変異では必ず <c>0</c> になる。
     /// </para>
     /// </summary>
     [Fact]
@@ -131,11 +143,19 @@ public class PendingActivationTests
             pending.Attach(form);
 
             // 要求はパイプスレッド(=UI スレッド以外)から来る。
-            var request = Task.Run(() => pending.Request(CancellationToken.None));
+            // 戻り時点の発火数を Task の中で捕まえる(下の assertion の決定論はこれに依る)。
+            int activatedAtReturn = -1;
+            var request = Task.Run(() =>
+            {
+                bool accepted = pending.Request(CancellationToken.None);
+                activatedAtReturn = Volatile.Read(ref activated);
+                return accepted;
+            });
 
             PumpUntilCompleted(request);
 
             Assert.True(request.Result);
+            Assert.Equal(1, activatedAtReturn); // ★1: 前面化を終えてから受理している
             Assert.Equal(1, activated);
             Assert.Equal(uiThread, activatedOn);
         });
