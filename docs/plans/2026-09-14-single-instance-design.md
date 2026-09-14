@@ -69,8 +69,36 @@ Mutex + 名前付きパイプは、将来のファイル引数受け渡し(§6)�
 2. EncodingCatalog / Trace ログ                     ← 現状のまま
 3. ★ SingleInstanceGate.Acquire(args)              ← 新規。ここで 2 つ目は終了する
 4. PreviewUserDataSweeper.SweepIfSoleInstance()
-5. ApplicationConfiguration.Initialize() 以降        ← 現状のまま
+5. ApplicationConfiguration.Initialize() 以降        ← 【下記 T-1 で訂正】ゲートより前へ移した
 ```
+
+#### 【Task 6 仕様レビューによる訂正 2026-09-15・T-1】`ApplicationConfiguration.Initialize()` はゲートより前
+
+上の表の 5 行目は誤り。**`Initialize()` はゲートより前**に置く。訂正後の順序:
+
+```
+1. ImeStartup.SuppressWinFormsImeModeInference()   ← 不変条件・最初の文
+2. EncodingCatalog / Trace ログ
+3. ApplicationConfiguration.Initialize()            ← ここへ移す
+4. SingleInstanceGate.Acquire(args)                 ← ここで 2 つ目は終了する
+5. PreviewUserDataSweeper.SweepIfSoleInstance()
+6. SetUnhandledExceptionMode / CrashHandler 配線 / CreateMainForm / Application.Run
+```
+
+**理由**: 策定時の配置では D4 のエラーダイアログ(`ShowStartupError`)が `Initialize()` **より前**に
+出る。`kxEdit.App` に app.manifest は無く、**DPI 認識は `Initialize()` の `SetHighDpiMode` に
+依存している**ため、高 DPI 環境では**このダイアログだけビットマップ拡大(ぼやけ)**になる。
+CLAUDE.md §2「**晴眼・弱視ユーザーも第一級**」に触れる。
+
+**移動が安全な理由**: `Initialize()` は `EnableVisualStyles` /
+`SetCompatibleTextRenderingDefault` / `SetHighDpiMode` を呼ぶだけで、**共有状態に触れず
+ウィンドウも作らない**。既存の IME IL テストの xmldoc 自身が「`ApplicationConfiguration.Initialize`
+はアンカーにしない —— ウィンドウを作らない(静的設定)ので」と明記しており矛盾しない。
+ゲートを `PreviewUserDataSweeper` / `SettingsStartup.Prepare` より前に置く理由
+(共有状態を書き換える前に弾く)も保たれる。
+
+この順序は `ProgramMain_gates_single_instance_before_touching_shared_state` が IL で固定する
+(`init < gate` を assert)。**退行させるとテストが赤くなる。**
 
 ### なぜ ImeStartup より後なのか
 
@@ -329,6 +357,45 @@ CLAUDE.md §3 の前倒しレビュー条件(外部入力のパース・プロ�
 |---|---|
 | 同一ユーザーが複数セッション(コンソール + RDP)にログオンすると 2 つ起動でき、`%APPDATA%` を共有して競合する | D2 の帰結として受容。別セッションのウィンドウは前面化が物理的に不可能で、防ぐと「何も起きない」死角になる |
 | 同一セッションの悪意あるコードが Mutex 名を先取りして kxEdit の起動を妨害できる | 同一ユーザー権限のコードは既に任意の操作が可能なため、新たな攻撃面ではない |
+| **【最終脆弱性レビューで判明 2026-09-15・V-1】別ユーザーがパイプ名を先取りすると、引き渡し機能が恒久的に使えなくなる。** 上の行の「同一ユーザー権限なら既に何でもできる」という論法は、**この別ユーザー経路を覆っていなかった** | **受容**(下記) |
+
+#### 【V-1 の詳細】Mutex とパイプで「先取りできる相手」が違う
+
+カーネルオブジェクトディレクトリの DACL を実測(`NtOpenDirectoryObject` + `GetKernelObjectSecurity`):
+
+```
+\Sessions\1\BaseNamedObjects の DACL:
+  (A;CI;CCDC;;;WD)                     ← Everyone = QUERY|TRAVERSE のみ。CREATE_OBJECT(0x4) なし
+  (A;;CCDCLCSWSDRCWDWO;;;<user SID>)   ← セッションの所有ユーザー
+  (A;;CCDCLCSWRC;;;<logon SID>)
+  (A;;CCDCLCSWRC;;;BA)                 ← Administrators
+```
+
+つまり **`Local\` の Mutex は別ユーザーの非管理者には作れない**(親ディレクトリに作成権が無い)。
+一方**名前付きパイプの名前空間は OS 全体で、誰でも作れる**。ユーザー SID は
+`HKLM\...\ProfileList` から誰でも読め、セッション ID は小さい整数なので総当たりできる。
+この非対称が V-1 の正体である。
+
+**起きること**:
+
+- 1 つ目の kxEdit: `Start()` が失敗し**待受なしで通常起動**する(エディタは使える)。Trace 警告のみ。
+- 2 つ目以降: `Connect` は通るが `CurrentUserOnly` のオーナー SID 不一致で
+  `UnauthorizedAccessException` → **`ForeignPeer`**。**ペイロードは渡らない(fail-closed・正しい)**。
+- ユーザーに出るのは「別の kxEdit が既に起動していますが…先に起動している kxEdit を
+  終了してから」。**この指示に従っても直らない**(squatter が居る限り再現する)。
+
+**なぜ受容するか**:
+
+1. **fail-closed は成立している** —— 攻撃者へデータは 1 バイトも渡らない。
+2. **1 つ目の起動は妨げられない** —— エディタは普通に使える。壊れるのは「2 つ目を起動したときに
+   既存へフォーカスを移す」機能の可用性だけで、**詰みではない**。
+3. 別ユーザーがマシンに居て、かつ SID とセッション ID を調べて先回りする、という前提が要る。
+
+**文言に `--new-instance` の案内を足さない理由**: このダイアログは
+「別フォルダの別ビルドが起動している」という**良性のケースでも出る**。そこへ抜け道を書くと、
+D3 が「説明書には載せない」と決めた開発用スイッチを日常的に使うよう促すことになり、
+それは複数インスタンス競合(バックアップの取り合い・`session-state.json` の last-writer-wins)を
+復活させる。攻撃を受けている稀なケースのために、全ユーザーへ競合の扉を開くのは割に合わない。
 | `--new-instance` を使うと上記の競合問題が復活する | 開発・検証用の明示的な抜け道。説明書には載せない |
 | **【Task 7 仕様レビューで判明 2026-09-15】A の終了処理中に来た引き渡しは成功して両方消える。** `Application.Run` が返るまでゲートは生きているので、A がクローズ処理中(未保存ファイルの最終フラッシュ・バックアップ書き出し)でも待受は応答する。B は ACK を受けて無言終了し、その直後に A も終了する —— **ユーザーから見ると「起動したのに何も起きない」** | **受容**。窓は短く、再度起動すれば正常に立ち上がる。これを塞ぐには「終了処理に入ったら待受を止める」配線が要るが、そうすると今度は「終了をやめた(保存ダイアログでキャンセルした)場合に待受が戻らない」という別の壊れ方を作る。`SingleInstanceGate.Dispose` が `_server` → `_mutex` の順である理由(逆にすると「Mutex を手放したのに待受が生きている」窓が開く)と同じ系統のトレードオフ。L5 で実挙動を一度見ておく |
 | **昇格の順序**: 同一ユーザーが管理者として先に起動し、その後に通常権限で起動すると、SID もセッションも同じなので**名前が完全に一致する**。高 IL プロセスが作ったオブジェクトには既定で High / NO_WRITE_UP の必須整合性ラベルが付き、`MUTEX_MODIFY_STATE` を含む `MUTEX_ALL_ACCESS` 要求は中 IL から拒否される(Windows Integrity Mechanism の既定ポリシー) | **受容**。ただし**起動時例外にしてはならない** —— ゲートは `UnauthorizedAccessException` を捕捉し、D4 の `NoResponse` エラーに落とす(§5 の実装要件)。kxEdit を管理者権限で常用する構成は想定外だが、一度でも昇格起動すると通常起動が詰む形は避ける |
