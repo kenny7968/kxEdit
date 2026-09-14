@@ -1182,6 +1182,40 @@ feat(app): 既存ウィンドウの前面化(最小化復帰・モーダル考�
 - Create: `src/kxEdit.App/SingleInstanceGate.cs`
 - Test: `tests/kxEdit.App.Tests/SingleInstanceGateTests.cs`
 
+> 【Task 4 コード品質レビューによる計画の訂正 2026-09-15】**引き渡しを注入可能にする。
+> 可変 static フック `OnHandoffFailedForTest` は廃止する。**
+>
+> 策定時の計画は `SingleInstanceClient.TryHandOff` を直接呼ぶ前提だったため、
+> 「終了中レース」を再現するのに可変 static のテストフックを導入していた。これは
+> このリポジトリの慣例から外れている —— 既存の seam
+> (`MainForm.SetSuppressRestoreDialogsForTest` / `BackupCoordinator.InjectWriteFailureForTest`)は
+> **インスタンスのメソッド/プロパティ**が主流で、可変 static はテストごとの後片付けが要り、
+> 並列実行が戻ると壊れる。
+>
+> `Acquire` に引き渡しデリゲート(既定 `SingleInstanceClient.TryHandOff`)を注入できる形にすると、
+> 次の 3 つが同時に片付く:
+>
+> 1. 4 状態(`FirstInstance` / `HandedOff` / `NoResponse` / `ForeignPeer`)の写像を**決定論的に**検証できる
+> 2. **`ForeignPeer` → `SingleInstanceOutcome.ForeignPeer` の写像が初めてテストされる**
+>    (Task 4 の powershell 版テストは `TryVerifyPeer` の検証ロジックそのものを見るもので、
+>    ゲートの写像は別物。両方要る)
+> 3. 「終了中レース」を実パイプのタイミングに頼らず再現でき、可変 static が不要になる
+>
+> シグネチャの目安(Task 4 fixup で `TryHandOff` の引数が 2 つの期限に分かれる点も反映すること):
+>
+> ```csharp
+> internal static (SingleInstanceOutcome Outcome, SingleInstanceGate? Gate) Acquire(
+>     CommandLineOptions options,
+>     string mutexName,
+>     string pipeName,
+>     Func<CancellationToken, bool> onActivate,
+>     Func<string, HandoffResult>? handOff = null   // 既定は SingleInstanceClient.TryHandOff への束縛
+> );
+> ```
+>
+> 期限の配分は Task 4 fixup の remarks に従い、**`ActivateTimeout < ackTimeout`** を満たすこと
+> (等しいと「前面化は成功したのにエラーダイアログが出る」窓が開く。2 レビューが独立に指摘)。
+
 ### Step 1: 失敗するテストを書く
 
 ```csharp
@@ -1577,7 +1611,23 @@ public class PendingActivationTests
         // ウィンドウがまだ無い時点の要求は「失敗」ではない。
         // false を返す変異は、起動直後の 2 つ目起動を誤ってエラーにする。
         var pending = new PendingActivation();
-        Assert.True(pending.Request());
+        Assert.True(pending.Request(CancellationToken.None));
+    }
+
+    [Fact]
+    public void Request_WhenConnectionDeadlineAlreadyExpired_DoesNotAccept()
+    {
+        // 接続の期限が切れているのに true を返すと、サーバは ACK を書きに行き、
+        // 既に切れた相手への書き込みで Task 4 の C-1 と同じ経路へ入る。
+        // ct を無視する変異(WaitOne(ActivateTimeout) のみ)を殺す。
+        var pending = new PendingActivation(_ => { });
+        using var form = new Form();
+        form.Show();
+        pending.Attach(form);
+
+        using var expired = new CancellationTokenSource();
+        expired.Cancel();
+        Assert.False(pending.Request(expired.Token));
     }
 
     [Fact]
@@ -1620,6 +1670,32 @@ public class PendingActivationTests
 (既定は `WindowActivator.Activate`)。こうしないと `Attach` の分岐がテストできない。
 テストは `form: null!` を渡すが、注入した fake は `Form` を使わないので安全。
 
+**注(実 `Form` を使うテストについて)**: `Request_WhenConnectionDeadlineAlreadyExpired_...` だけは
+実 `Form` が要る(`BeginInvoke` にハンドルが必要なため)。このテストプロジェクトには
+既に `tests/kxEdit.App.Tests/Sta.cs` / `TestHost.cs` があるので、**既存の STA ヘルパに倣うこと**。
+キャンセル済みトークンなら `WaitAny` は即座に返るのでメッセージポンプを回す必要はない。
+実 `Form` 方式が不安定なら形は変えてよいが、**「`ct` を無視する変異
+(`WaitOne(ActivateTimeout)` だけにする)を殺せること」は必ず満たすこと** ——
+ここが Task 4 の C-1 と同じ壊れ方への唯一の防波堤である。
+
+> 【Task 5 からの申し送り 2026-09-15・**Task 7 の必須確認項目**】
+> **`WindowActivator.Activate` は必ず UI スレッドから呼ぶこと。**
+> 危険なのはハンドル未生成そのものではなく**スレッド**である ——
+> `Control.Handle` を UI スレッド以外から**初回に**触ると、そのスレッドでハンドルが生成され、
+> ウィンドウのメッセージポンプの所属を誤る。パイプの待受は別スレッドなので、
+> `form.Invoke` / `BeginInvoke` でマーシャルしてから呼ぶ配線が必須。
+> なお `WindowActivator` 側にハンドル未生成のガードは**意図的に置いていない**
+> (自動テストの網の外にある型に検証不能な分岐を増やさないため。設計 §5)。
+
+> 【Task 4 仕様レビューからの申し送り 2026-09-14・**Task 7 の必須確認項目**】
+> **`Request()` は「前面化が完了してから」`true` を返さなければならない。**
+> ここを `BeginInvoke` の投げっぱなし(即 `true`)に変えると、設計 §4 ★1 が無音で壊れる ——
+> B は ACK を受けて即終了し、**譲渡したフォアグラウンド権ごと消える**ので、
+> A の `SetForegroundWindow` が拒否されてタスクバーが点滅するだけになる。
+> **Task 4 のテストはこの破壊を一切検出できない**(`onActivate` の中身を知らないため)。
+> 計画の `BeginInvoke` + `AsyncWaitHandle.WaitOne(ActivateTimeout)` はこの要件を満たす形である。
+> 変えるときは、なぜ ★1 が保たれるかを説明できること。
+
 ### Step 2: `PendingActivation` を実装
 
 `src/kxEdit.App/PendingActivation.cs`:
@@ -1654,10 +1730,20 @@ internal sealed class PendingActivation
 
     /// <summary>
     /// <b>パイプスレッドから呼ばれる。</b>UI スレッドへマーシャルして前面化する。
-    /// 戻り値は「引き渡しが成立したか」——<c>false</c> なら 2 つ目は
-    /// 「応答しません」エラーになる(設計 D4)。
+    /// 戻り値は「<b>要求を引き受けたか(ACK を返してよいか)</b>」——<c>false</c> なら
+    /// 2 つ目は「応答しません」エラーになる(設計 D4)。
+    /// <para>
+    /// 「前面化できたか」ではない点に注意。ウィンドウ未生成のときは保留に積んで
+    /// <c>true</c> を返す —— どのみちこれから前面に出るので、引き渡しは成立している。
+    /// </para>
     /// </summary>
-    internal bool Request()
+    /// <param name="ct">
+    /// この接続の期限(<see cref="SingleInstanceServer"/> の <c>PerConnectionTimeout</c>)。
+    /// <b>マーシャル待ちは必ずこれで打ち切ること。</b>無視してブロックすると、UI が一度
+    /// 詰まっただけで<b>待受ループごと止まり</b>、以後その kxEdit は引き渡し不能になる
+    /// (Task 4 の C-1 と同じ壊れ方。脆弱性レビューの必須確認項目)。
+    /// </param>
+    internal bool Request(CancellationToken ct)
     {
         Form? form;
         lock (_sync)
@@ -1674,8 +1760,15 @@ internal sealed class PendingActivation
         {
             // Invoke ではなく BeginInvoke + 期限付き待機。UI スレッドが固まっていても
             // パイプの待受スレッドを道連れにしない。
+            // マーシャル先で WindowActivator.Activate が走る = UI スレッドで実行される
+            // ことがここで担保される(Task 5 の申し送り: Control.Handle を別スレッドから
+            // 初回に触るとそのスレッドでハンドルが生成されメッセージポンプの所属を誤る)。
             var async = form.BeginInvoke(() => _activate(form));
-            return async.AsyncWaitHandle.WaitOne(ActivateTimeout);
+            int signaled = WaitHandle.WaitAny(
+                [async.AsyncWaitHandle, ct.WaitHandle],
+                ActivateTimeout
+            );
+            return signaled == 0; // 1 = 接続の期限切れ / WaitTimeout = 活性化の期限切れ
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
         {
