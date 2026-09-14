@@ -4621,6 +4621,48 @@ public class FileControllerTests
             Assert.Equal(LineEnding.Lf, doc.State.LineEnding);
         });
 
+    /// <summary>
+    /// F-4(2026-09-14 の L5 で検出): 空枠で復元した無題タブに<b>実際に書き込めること</b>。
+    /// <para>
+    /// 直前の <c>RestoreSession_UntitledEmptyFrame_RestoresLineEnding_ModifiedFalse</c> は
+    /// <c>SnapshotText == ""</c> と <c>Modified == false</c> しか見ておらず、
+    /// <b>バッファが 1 つも無い状態でも通ってしまう</b>(実際 F-4 はそれで素通りした)。
+    /// <c>EditorControl</c> の書込系は全て <c>if (_buffer is null || ReadOnly) return;</c> で
+    /// 始まるため、ソース未投入のタブは例外も発声も出さずに編集を落とす。
+    /// </para>
+    /// したがってここは「バッファが null でない」ではなく
+    /// <b>「1 文字入れたら本文が変わる」</b>で固定する —— 将来 <c>_buffer</c> の持ち方が
+    /// 変わっても空虚に緑にならない形にしておく。
+    /// </summary>
+    [Fact]
+    public void RestoreSession_UntitledEmptyFrame_IsActuallyEditable() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.Settings.DefaultLineEnding = (int)LineEnding.Crlf;
+            var initialEmpty = host.Docs.CreateNew();
+            var layout = Layout(
+                LayoutRec(untitledNumber: 3, isActive: true, lineEnding: (int)LineEnding.Lf)
+            );
+
+            host.File.RestoreSession(
+                layout,
+                Array.Empty<BackupRecord>(),
+                initialEmpty,
+                adoptRestored: null
+            );
+
+            var doc = host.Docs.Active!;
+            Assert.Equal("", doc.Editor.SnapshotText);
+
+            // ユーザーの打鍵と同じ書込 API。`_buffer is null` ガードの手前で落ちれば何も起きない。
+            doc.Editor.ReplaceCharRange(0, 0, "abc");
+
+            Assert.Equal("abc", doc.Editor.SnapshotText); // 書けている = _buffer がある
+            Assert.True(doc.Editor.Modified); // 書いたら dirty になる
+            Assert.Equal(LineEnding.Lf, doc.Editor.EolMode); // ApplyEol が効いている
+        });
+
     [Fact]
     public void RestoreSession_DirtyPathRecord_BackupMissing_DemotesToDiskReopen() =>
         Sta.Run(() =>
