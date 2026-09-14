@@ -346,6 +346,27 @@ public class SingleInstanceGateTests
     }
 
     [Fact]
+    public void Acquire_WhenListenerCannotStart_StillBecomesFirstInstance_AndKeepsMutex()
+    {
+        // パイプ名を先回りされた場合(設計 §4 ★3 の逆向き)。待受なしの 1 つ目に
+        // 劣化するだけで、起動は止めない。<b>Mutex は握ったままにする</b>のが要点 ——
+        // 手放すと 2 つ目が黙って並走し、本機能が塞ごうとしている競合が復活する。
+        using var squatter = new SingleInstanceServer(_pipeName, _ => true);
+        Assert.True(squatter.Start());
+
+        var (outcome, gate) = Acquire(onActivate: MustNotActivate);
+        using (gate)
+        {
+            Assert.Equal(SingleInstanceOutcome.FirstInstance, outcome);
+            Assert.NotNull(gate);
+
+            // 排他が効いていること(取り直せない = ゲートが握っている)。
+            using var probe = new Mutex(initiallyOwned: true, _mutexName, out bool createdNew);
+            Assert.False(createdNew);
+        }
+    }
+
+    [Fact]
     public void Dispose_ReleasesMutex_SoNextLaunchBecomesFirstInstance()
     {
         var (_, gate) = Acquire();
