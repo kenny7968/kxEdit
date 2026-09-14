@@ -13,6 +13,10 @@
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.5.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <!-- MutexAcl / MutexSecurity（SingleInstanceGateTests の「昇格の順序」代理再現）。
+         NamedPipeServerStreamAcl と違い、Mutex 側の ACL API はこのパッケージが要る。
+         製品コードは ACL を読まないので kxEdit.App へは足さない -->
+    <PackageReference Include="System.Threading.AccessControl" Version="9.0.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
