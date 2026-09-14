@@ -25,6 +25,15 @@ public class SingleInstanceRequestTests
         );
     }
 
+    [Fact]
+    public void Serialize_ProducesExactWireFormat()
+    {
+        // wire 形式は他プロセスとの契約。変更が diff に現れるよう文字列を固定する。
+        // 定数から導出すると自己無矛盾になり、3 定数を同時に変えた変異が生存する(実測)。
+        Assert.Equal("KXEDIT1 ACTIVATE", SingleInstanceRequest.Activate.Serialize());
+        Assert.Equal("KXEDIT1 OK", SingleInstanceRequest.Ack);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -37,6 +46,8 @@ public class SingleInstanceRequestTests
     [InlineData("KXEDIT1 QUIT")] // 未定義の動詞
     [InlineData("KXEDIT1 ACTIVATE EXTRA")] // 余分なトークン
     [InlineData("KXEDIT1  ACTIVATE")] // 空白 2 つ
+    [InlineData("KXEDIT1 ACTIVATE\n")] // 行区切りの除去は受信側の責務(ここでは拒否)
+    [InlineData("KXEDIT1 ACTIVATE\r")] // CR の取り残しも拒否する(Task 4 の \r\n 事故を検出する)
     public void TryParse_RejectsMalformedInput(string? wire)
     {
         Assert.Null(SingleInstanceRequest.TryParse(wire));

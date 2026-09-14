@@ -29,11 +29,20 @@ internal sealed record SingleInstanceRequest
 
     // 将来ファイルパスが乗る器としてインスタンスメソッドで置く(設計 §6)。今日のペイロードは
     // 空なのでインスタンス状態を読まず、CA1822 / S2325(static にできる)が立つ。
+    // 【削除トリガー】設計 §6 のファイル引数対応でペイロードを持たせると Serialize() は
+    // インスタンス状態を読むようになり、この抑止は不要になる。そのとき必ず削除すること
+    // (不要な #pragma warning disable は警告が出ないため、書いた側が回収しないと誰も気付かない)。
 #pragma warning disable CA1822, S2325 // reason: 上記。static 化すると将来ペイロードを足すときに呼び出し側を全面改修することになる
     internal string Serialize() => $"{ProtocolTag} {ActivateVerb}";
 #pragma warning restore CA1822, S2325
 
-    /// <summary>解釈できないものは <c>null</c>。呼び出し側は ACK を返さず切る。</summary>
+    /// <summary>
+    /// 解釈できないものは <c>null</c>。呼び出し側は ACK を返さず切る。
+    /// <para>
+    /// 行区切り(<c>\n</c> / <c>\r</c>)を含む文字列は受け付けない —— 除去は受信側の責務である。
+    /// 長さの上限もここでは見ない。入力長の上限は受信側(SingleInstanceServer 側)の責務。
+    /// </para>
+    /// </summary>
     internal static SingleInstanceRequest? TryParse(string? wire)
     {
         if (string.IsNullOrWhiteSpace(wire))
