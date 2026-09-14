@@ -1325,6 +1325,39 @@ public class SingleInstanceGateTests : IDisposable
     }
 
     [Fact]
+    public void Acquire_WhenMutexAccessIsDenied_ReportsNoResponse_WithoutThrowing()
+    {
+        // 昇格の順序(設計 §7 受容リスク)の代理再現。実際は高 IL プロセスが作った
+        // Mutex を中 IL から開けない形だが、IL を跨がなくても「自分に権利を与えない
+        // DACL の Mutex」で同じ UnauthorizedAccessException を起こせる。
+        // ここで例外が漏れると、ゲートが D4 のエラーを出す前に起動時クラッシュする。
+        var deny = new MutexSecurity();
+        deny.AddAccessRule(
+            new MutexAccessRule(
+                WindowsIdentity.GetCurrent().User!,
+                MutexRights.FullControl,
+                AccessControlType.Deny
+            )
+        );
+        using var blocker = MutexAcl.Create(
+            initiallyOwned: false,
+            _mutex,
+            out _,
+            mutexSecurity: deny
+        );
+
+        var (outcome, gate) = SingleInstanceGate.Acquire(
+            new CommandLineOptions(NewInstance: false),
+            _mutex,
+            _pipe,
+            () => true,
+            ShortTimeout
+        );
+        Assert.Equal(SingleInstanceOutcome.NoResponse, outcome);
+        Assert.Null(gate);
+    }
+
+    [Fact]
     public void Dispose_ReleasesMutex_SoNextLaunchBecomesFirstInstance()
     {
         var (_, gate) = SingleInstanceGate.Acquire(
@@ -1447,7 +1480,21 @@ internal sealed class SingleInstanceGate : IDisposable
         Func<bool> onActivate
     )
     {
-        var mutex = new Mutex(initiallyOwned: true, mutexName, out bool createdNew);
+        Mutex mutex;
+        bool createdNew;
+        try
+        {
+            mutex = new Mutex(initiallyOwned: true, mutexName, out createdNew);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            // 昇格の順序(設計 §7 受容リスク): 同一ユーザーが管理者として先に起動していると、
+            // 名前は一致するが高 IL オブジェクトへの MUTEX_ALL_ACCESS が中 IL から拒否される。
+            // ここを捕捉しないと D4 のエラーダイアログを出す前に起動時例外で落ち、
+            // ゲート自身が「必ずエラーを出して終了する」という不変条件を破る。
+            Trace.TraceWarning($"single-instance: mutex access denied: {ex.Message}");
+            return null; // 呼び出し側は引き渡しを試み、失敗すれば NoResponse になる
+        }
         if (!createdNew)
         {
             mutex.Dispose();
@@ -1478,7 +1525,24 @@ internal sealed class SingleInstanceGate : IDisposable
 ### Step 4: テスト通過を確認
 
 Run: `dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~SingleInstanceGateTests"`
-Expected: PASS (6 件)
+Expected: PASS (7 件)
+
+> 【Task 3 レビューによる追加 2026-09-14】`Acquire_WhenMutexAccessIsDenied_...` は
+> 設計 §7 の「昇格の順序」リスクを回収するテスト。
+>
+> **実機で確認済み(2026-09-14)**: `MutexAcl` / `MutexSecurity` / `MutexAccessRule` は
+> `NamedPipeServerStreamAcl`(追加参照不要)とは異なり、**PackageReference が必要**。
+> `tests/kxEdit.App.Tests/kxEdit.App.Tests.csproj` にのみ次を足すこと
+> (製品コードは ACL を読まないので `kxEdit.App` へは足さない):
+>
+> ```xml
+> <PackageReference Include="System.Threading.AccessControl" Version="9.0.0" />
+> ```
+>
+> 「自分に Deny を与える DACL の Mutex」を先に作ってから `new Mutex(true, name, out _)` すると、
+> 実測で `UnauthorizedAccessException: Access to the path '...' is denied.` が出る
+> ——昇格順序のケースと同じ例外型なので、IL を跨がずに代理再現できる。
+> テスト側の using は `System.Security.AccessControl` と `System.Security.Principal`。
 
 ### Step 5: Commit
 
@@ -1659,7 +1723,7 @@ Markdig ログのブロックの**直後**、`PreviewUserDataSweeper.SweepIfSole
         var pending = new PendingActivation();
         var (outcome, gate) = SingleInstanceGate.Acquire(
             CommandLineOptions.Parse(args),
-            SingleInstanceNames.MutexName,
+            SingleInstanceNames.CurrentMutexName(),
             SingleInstanceNames.CurrentPipeName(),
             pending.Request,
             HandoffTimeout
