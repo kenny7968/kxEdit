@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Buffers;
 using kxEdit.Core.IO;

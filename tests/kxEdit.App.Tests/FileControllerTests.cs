@@ -4654,8 +4654,13 @@ public class FileControllerTests
 
             var doc = host.Docs.Active!;
             Assert.Equal("", doc.Editor.SnapshotText);
+            // 書込前は clean。これが無いと後段の Modified == true が
+            // 「復元直後から dirty だっただけ」でも通ってしまう。
+            Assert.False(doc.Editor.Modified);
 
-            // ユーザーの打鍵と同じ書込 API。`_buffer is null` ガードの手前で落ちれば何も起きない。
+            // 打鍵経路(OnKeyPress → InsertConfirmedText)そのものではないが、
+            // F-4 の原因である `if (_buffer is null || ReadOnly) return;` ガードを
+            // 共有する書込 API。ガードで落ちれば例外も出さずに何も起きない。
             doc.Editor.ReplaceCharRange(0, 0, "abc");
 
             Assert.Equal("abc", doc.Editor.SnapshotText); // 書けている = _buffer がある
