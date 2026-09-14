@@ -25,31 +25,92 @@ namespace kxEdit.App;
 /// 引き渡しは一瞬で終わるので直列化のコストは問題にならない。
 /// </para>
 /// <para>
-/// <c>onActivate</c> は<b>パイプスレッドから呼ばれる</b>。UI スレッドへの
-/// マーシャルは呼び出し側(Task 7 の <c>PendingActivation</c>)の責務。戻り値 <c>false</c> は
-/// 「前面化できなかった」を意味し、その場合 ACK を返さない —— 2 つ目はそれを見て
-/// 「応答しません」と判断する(設計 D4)。
+/// <b>時間予算の入れ子(ここが唯一の正)</b> —— 4 つの期限は次の順序を保つこと。
+/// 1 つでも逆転すると「前面化は成功しているのにエラーダイアログが出る」等の誤診になる。
+/// <code>
+///   ActivateTimeout  &lt;  ackTimeout  &lt;  PerConnectionTimeout  &lt;  Dispose の待ち
+///   (Task 7 の       ) (クライアント) (本クラス・既定 5 秒 ) (PerConnection + 余裕)
+///   (前面化待ち      ) (ACK 待ち    )
+/// </code>
+/// <list type="bullet">
+/// <item><c>ActivateTimeout &lt; ackTimeout</c>: 逆だと、前面化が成功しているのに
+/// クライアントが待ちきれず <c>NoResponse</c> を返す。</item>
+/// <item><c>ackTimeout &lt; PerConnectionTimeout</c>: 逆だと、サーバが先に接続を畳んで
+/// クライアントが正常な ACK を取り逃す。</item>
+/// <item><c>PerConnectionTimeout &lt; Dispose の待ち</c>: 逆だと、終了時に処理中の接続を
+/// 待ちきれず <c>_loop</c> を取り残す。本クラスはこれを自動で満たす
+/// (<see cref="Dispose"/> は <c>PerConnectionTimeout + 2 秒</c> 待つ)。</item>
+/// </list>
+/// 具体値は Task 6 / 7 が決める。本クラスは既定値と上の関係だけを定める。
 /// </para>
 /// </remarks>
 internal sealed class SingleInstanceServer : IDisposable
 {
-    /// <summary>1 要求の上限。改行が来ないまま超えたら不正として切る。</summary>
+    /// <summary>
+    /// 1 要求の上限。改行が来ないまま超えたら不正として切る。
+    /// </summary>
+    /// <remarks>
+    /// 【設計 §6 でファイルパスを載せる際は必ず見直すこと】Windows のパスは長く、
+    /// 複数選択なら 4096 バイトは容易に超える。超えた要求は<b>黙って ACK 無し</b>になり、
+    /// ユーザーには「応答しません」としか見えない —— 原因が極めて追いにくい失敗の仕方をする。
+    /// </remarks>
     private const int MaxRequestBytes = 4096;
 
-    /// <summary>1 接続あたりの上限時間。悪意ある / 壊れた相手で待受を詰まらせない。</summary>
-    private static readonly TimeSpan PerConnectionTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>既定の 1 接続あたり上限。</summary>
+    internal static readonly TimeSpan DefaultPerConnectionTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// accept が連続して失敗したときに、パイプを作り直す回数の上限。
+    /// </summary>
+    /// <remarks>
+    /// 作り直しが毎回失敗する状況(名前を奪われた等)で無限ループにしないための歯止め。
+    /// accept が 1 回でも成功したらカウンタは 0 に戻る。
+    /// </remarks>
+    private const int MaxConsecutiveAcceptFailures = 3;
 
     private readonly string _pipeName;
-    private readonly Func<bool> _onActivate;
+    private readonly Func<CancellationToken, bool> _onActivate;
+    private readonly TimeSpan _perConnectionTimeout;
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary><see cref="_pipe"/> の差し替えと破棄を直列化する。</summary>
+    private readonly object _gate = new();
+
     private NamedPipeServerStream? _pipe;
     private Task? _loop;
     private bool _disposed;
 
-    internal SingleInstanceServer(string pipeName, Func<bool> onActivate)
+    /// <param name="pipeName">待ち受けるパイプ名。</param>
+    /// <param name="onActivate">
+    /// 前面化要求の受理ハンドラ。<b>パイプスレッドから呼ばれる</b> —— UI スレッドへの
+    /// マーシャルは呼び出し側(Task 7 の <c>PendingActivation</c>)の責務。
+    /// <para>
+    /// <b>戻り値は「要求を引き受けたか(= ACK を返してよいか)」</b>であって
+    /// 「前面化が完了したか」ではない。Task 7 の <c>PendingActivation.Request()</c> は
+    /// ウィンドウ未生成時に保留へ積んで <c>true</c> を返すが、その時点で前面化は
+    /// 起きていない —— それでも引き渡しは成立しているので ACK を返すのが正しい。
+    /// <c>false</c> は「引き受けられなかった」を意味し、ACK を返さない。2 つ目はそれを見て
+    /// 「応答しません」と判断する(設計 D4)。
+    /// </para>
+    /// <para>
+    /// 渡される <see cref="CancellationToken"/> は<b>この接続の期限</b>。UI スレッドへの
+    /// マーシャル待ちは必ずこれで打ち切ること。打ち切らないと、UI がハングした瞬間に
+    /// 待受ループごと無期限停止する。
+    /// </para>
+    /// </param>
+    /// <param name="perConnectionTimeout">
+    /// 1 接続あたりの上限時間。悪意ある / 壊れた相手で待受を詰まらせない。
+    /// 省略時は <see cref="DefaultPerConnectionTimeout"/>(テストから短縮するための引数)。
+    /// </param>
+    internal SingleInstanceServer(
+        string pipeName,
+        Func<CancellationToken, bool> onActivate,
+        TimeSpan? perConnectionTimeout = null
+    )
     {
         _pipeName = pipeName;
         _onActivate = onActivate;
+        _perConnectionTimeout = perConnectionTimeout ?? DefaultPerConnectionTimeout;
     }
 
     /// <summary>
@@ -58,18 +119,34 @@ internal sealed class SingleInstanceServer : IDisposable
     /// </summary>
     internal bool Start()
     {
+        NamedPipeServerStream pipe;
         try
         {
-            _pipe = CreatePipe(_pipeName);
+            pipe = CreatePipe(_pipeName);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        // 【意図的に全例外を捕まえる】設計 §7 の不変条件「単一インスタンス機構は
+        // 起動時例外にしてはならない」を守るため。IOException / UnauthorizedAccessException
+        // (名前を先回りされた)以外にも、SID を取れなければ InvalidOperationException、
+        // 名前が不正なら ArgumentException 系が飛ぶ。どれも「待受なしで通常起動」が正解で、
+        // ここで投げると kxEdit がまったく起動しなくなる。型名は Trace に残す。
+        catch (Exception ex)
         {
-            // 名前を他プロセスに専有されている。攻撃者へデータを渡さない方向へ倒れる
-            // (こちらからは一切接続しない)。以後の 2 つ目起動はエラーになる。
-            Trace.TraceWarning($"single-instance: listen failed: {ex.Message}");
+            Trace.TraceWarning(
+                $"single-instance: listen failed: {ex.GetType().Name}: {ex.Message}"
+            );
             return false;
         }
-        _loop = Task.Run(() => RunAsync(_pipe));
+
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                pipe.Dispose();
+                return false;
+            }
+            _pipe = pipe;
+        }
+        _loop = Task.Run(() => RunAsync(pipe));
         return true;
     }
 
@@ -84,6 +161,16 @@ internal sealed class SingleInstanceServer : IDisposable
         security.AddAccessRule(
             new PipeAccessRule(user, PipeAccessRights.FullControl, AccessControlType.Allow)
         );
+
+        // 【重要・バッファサイズ 0 は性能設定ではなく正しさの前提】
+        // out バッファのクォータを 0 にすると、書き込みは「相手が読むまで完了しない」
+        // 同期的な受け渡しになる。ACK は書いた直後に Disconnect するので、
+        // クォータを持たせると未読の ACK がカーネルに溜まったまま破棄され、
+        // 引き渡しが確率的に失敗する。実測:
+        //   outBuf=   0, 相手の読み出しを 300ms 遅延 => 11 バイト 'KXEDIT1 OK\n' が届く
+        //   outBuf=4096, 同上                        =>  0 バイト(ACK が捨てられた)
+        // ユーザーから見ると「ウィンドウは前面に出たのにエラーダイアログも出る」になる。
+        // in バッファ側も同じ理由で 0 のまま揃える。変更してはならない。
         return NamedPipeServerStreamAcl.Create(
             pipeName,
             PipeDirection.InOut,
@@ -98,14 +185,14 @@ internal sealed class SingleInstanceServer : IDisposable
 
     private async Task RunAsync(NamedPipeServerStream pipe)
     {
+        int consecutiveAcceptFailures = 0;
+
         while (!_cts.IsCancellationRequested)
         {
-            // Disconnect が失敗したらパイプはもう使えないので待受を終える。
-            // finally 句からは return できない(CS0157)ため、フラグで外へ伝える。
-            bool pipeBroken = false;
             try
             {
                 await pipe.WaitForConnectionAsync(_cts.Token).ConfigureAwait(false);
+                consecutiveAcceptFailures = 0;
             }
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
             {
@@ -113,14 +200,28 @@ internal sealed class SingleInstanceServer : IDisposable
             }
             catch (IOException ex)
             {
+                // 【一発退場にしない】待受を諦めると、このプロセスは以後ずっと引き渡し
+                // 不能になる。設計 D4 はフォールバック起動をしないので、それは
+                // 「2 つ目を二度と起動できない」を意味する —— C-1 で実際に起きた壊れ方。
+                // パイプインスタンスを作り直して自己修復を試みる(回数上限つき)。
                 Trace.TraceWarning($"single-instance: accept failed: {ex.Message}");
-                return;
+                if (++consecutiveAcceptFailures > MaxConsecutiveAcceptFailures)
+                {
+                    Trace.TraceWarning(
+                        "single-instance: giving up listening after repeated accept failures"
+                    );
+                    return;
+                }
+                if (!TryRecreatePipe(out var fresh))
+                    return;
+                pipe = fresh;
+                continue;
             }
 
             try
             {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                deadline.CancelAfter(PerConnectionTimeout);
+                deadline.CancelAfter(_perConnectionTimeout);
                 await HandleAsync(pipe, deadline.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -130,20 +231,63 @@ internal sealed class SingleInstanceServer : IDisposable
             }
             finally
             {
+                // 【C-1: IsConnected で条件を付けてはならない】ACK 書き込みが
+                // IOException(Pipe is broken)で落ちると .NET は State=Broken にするので
+                // IsConnected は false になる。しかしカーネル側のパイプインスタンスは
+                // 接続済みのままなので、Disconnect を飛ばすと次の accept が必ず失敗し、
+                // 待受が恒久停止する。無条件に呼ぶこと。
+                // Disconnect は未接続 / 二重呼び出しで InvalidOperationException を投げる
+                // (実測)ので、それも捕まえる。ここから例外を出すとループ Task が
+                // 無言で faulted になり、やはり待受が死ぬ。
                 try
                 {
-                    if (pipe.IsConnected)
-                        pipe.Disconnect();
+                    pipe.Disconnect();
                 }
-                catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+                catch (Exception ex)
+                    when (ex is IOException or ObjectDisposedException or InvalidOperationException)
                 {
                     Trace.TraceWarning($"single-instance: disconnect failed: {ex.Message}");
-                    pipeBroken = true;
                 }
             }
+        }
+    }
 
-            if (pipeBroken)
-                return;
+    /// <summary>
+    /// パイプインスタンスを作り直す。<see cref="Dispose"/> と競合しないよう
+    /// <see cref="_gate"/> の下で行う。作り直せなければ <c>false</c>(呼び出し側は待受終了)。
+    /// </summary>
+    private bool TryRecreatePipe(out NamedPipeServerStream fresh)
+    {
+        fresh = null!;
+        lock (_gate)
+        {
+            if (_disposed || _cts.IsCancellationRequested)
+                return false;
+
+            try
+            {
+                _pipe?.Dispose();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                Trace.TraceWarning($"single-instance: stale pipe dispose failed: {ex.Message}");
+            }
+            _pipe = null;
+
+            try
+            {
+                fresh = CreatePipe(_pipeName);
+            }
+            catch (Exception ex)
+            {
+                // 名前を奪われた等。待受は諦めるが起動は止めない(設計 §7)。
+                Trace.TraceWarning(
+                    $"single-instance: pipe recreate failed: {ex.GetType().Name}: {ex.Message}"
+                );
+                return false;
+            }
+            _pipe = fresh;
+            return true;
         }
     }
 
@@ -159,21 +303,32 @@ internal sealed class SingleInstanceServer : IDisposable
 
         // ACK より前に前面化する。2 つ目は ACK を待ってから終了するので、
         // ここで前面化を終えておかないと譲渡されたフォアグラウンド権が消える(設計 §4 ★1)。
-        if (!_onActivate())
+        // ct を渡すのが要点 —— UI スレッドへのマーシャル待ちが無期限になると、
+        // 待受ループごと止まる(この呼び出しは PerConnectionTimeout の内側にある)。
+        if (!_onActivate(ct))
         {
-            Trace.TraceWarning("single-instance: activation reported failure; no ack");
+            Trace.TraceWarning("single-instance: activation not accepted; no ack");
             return;
         }
 
+        // FlushAsync は呼ばない。PipeStream は FlushAsync を override しないため
+        // Stream 既定実装(ブロッキング Flush をスレッドプールで実行)になり、
+        // 開始後は ct を尊重しない = 5 秒期限の外に出る唯一の I/O になってしまう。
+        // out バッファのクォータが 0 なので、WriteAsync が完了した時点で
+        // 相手は既に読んでおり、そもそも Flush の必要が無い(CreatePipe のコメント参照)。
         byte[] ack = Encoding.UTF8.GetBytes(SingleInstanceRequest.Ack + "\n");
         await pipe.WriteAsync(ack, ct).ConfigureAwait(false);
-        await pipe.FlushAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>
     /// 改行までを読む。<see cref="MaxRequestBytes"/> を超えたら <c>null</c>(=不正)。
     /// <c>StreamReader</c> を使わないのは、上限を自分で決めるため。
     /// </summary>
+    /// <remarks>
+    /// <b><c>ConfigureAwait(false)</c> を外してはならない</b>。本クラスの待受ループは
+    /// UI スレッドから <c>GetAwaiter().GetResult()</c> で待ち合わせられうる経路に繋がる。
+    /// 1 か所でも同期コンテキストへ戻すと、そこでデッドロックする(実測で追認済み)。
+    /// </remarks>
     private static async Task<string?> ReadLineAsync(Stream stream, CancellationToken ct)
     {
         byte[] buffer = new byte[MaxRequestBytes];
@@ -201,26 +356,42 @@ internal sealed class SingleInstanceServer : IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
+        lock (_gate)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+        }
 
         _cts.Cancel();
+
+        lock (_gate)
+        {
+            try
+            {
+                _pipe?.Dispose();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                Trace.TraceWarning($"single-instance: pipe dispose failed: {ex.Message}");
+            }
+            _pipe = null;
+        }
+
         try
         {
-            _pipe?.Dispose();
+            // 【予算の入れ子】処理中の 1 接続は最長 _perConnectionTimeout かかるので、
+            // それより長く待つ(クラス remarks の入れ子関係の最外周)。
+            // 待ちきれなかったことは握り潰さず Trace に残す —— 取り残した _loop は
+            // 破棄済みパイプに触れて faulted になるため、原因追跡の手掛かりが要る。
+            if (_loop is not null && !_loop.Wait(_perConnectionTimeout + TimeSpan.FromSeconds(2)))
+                Trace.TraceWarning("single-instance: listen loop did not finish within timeout");
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
-        {
-            Trace.TraceWarning($"single-instance: pipe dispose failed: {ex.Message}");
-        }
-        try
-        {
-            _loop?.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (AggregateException)
+        catch (AggregateException ex)
         { /* 待受ループの終了例外は握る(終了処理を止めない) */
+            Trace.TraceWarning($"single-instance: listen loop faulted: {ex.InnerException?.Message}");
         }
+
         _cts.Dispose();
     }
 }
