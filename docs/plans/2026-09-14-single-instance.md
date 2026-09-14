@@ -177,7 +177,34 @@ internal sealed record CommandLineOptions(bool NewInstance)
 ### Step 4: テストが通ることを確認
 
 Run: `dotnet test tests/kxEdit.App.Tests -c Release --filter "FullyQualifiedName~CommandLineOptionsTests"`
-Expected: PASS (7 件)
+Expected: PASS (10 件 = Fact 6 件 + Theory 4 ケース)
+
+> 【実施時の訂正 2026-09-14】策定時は「7 件」と書いていたが、策定時のテストコードの実際の
+> 内訳は Fact 5 件 + Theory 4 ケース = 9 件だった(Task 1 実装時に判明)。
+> さらに仕様レビュー指摘で `Parse_KeepsNewInstanceWhenUnknownArgumentFollows` を
+> 1 本追加したため、最終は 10 件。追加の経緯は下記。
+
+> 【仕様レビュー指摘の回収 2026-09-14・fixup d7d03e1】
+> 策定時のテストは `--new-instance` が**最後**に来るケースしか無く、
+> `newInstance = string.Equals(...)`(後勝ち = 最後の引数だけが効く)への変異が
+> 9 ケースすべてを緑で通過した(実測)。設計 §6 が想定する将来の実起動形は
+> `kxEdit.exe --new-instance C:\work\memo.txt` = **スイッチが先**であり、
+> その順序が一度もテストされていなかった。CLAUDE.md §4B の
+> 「no-change のテストは非既定状態から始める」にも当たるため、次を追加した:
+>
+> ```csharp
+> [Fact]
+> public void Parse_KeepsNewInstanceWhenUnknownArgumentFollows()
+> {
+>     var options = CommandLineOptions.Parse(["--new-instance", @"C:\work\memo.txt"]);
+>     Assert.True(options.NewInstance);
+> }
+> ```
+>
+> 却下した指摘: `NewInstanceSwitch` の `private` 化(CLI 契約の自己文書化として
+> `internal` が妥当)。ただし「テスト側はリテラル直書きを維持する」方針は採用した
+> —— 定数を参照すると `Parse_RecognizesNewInstanceSwitch` が同語反復になり、
+> near-miss テスト群の価値も同時に落ちるため。**後続タスクでもこの方針を維持すること。**
 
 ### Step 5: Commit
 
