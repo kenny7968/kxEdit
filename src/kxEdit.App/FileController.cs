@@ -1599,8 +1599,20 @@ public sealed class FileController
         doc.State.Encoding = EncodingCatalog.Get(s.DefaultCodePage);
         doc.State.HasBom = false;
         doc.State.LineEnding = SafeLineEndingOrFallback(rec.LineEnding);
+        // F-4(2026-09-14 の L5 で検出): ここでソースを与えないと EditorControl の _buffer が
+        // null のままになり、書込系がすべて `if (_buffer is null || ReadOnly) return;` で
+        // 黙って落ちる = 復元された空の無題タブに 1 文字も入力できない。
+        // UIA / 発声の経路は生きているので **NVDA は打鍵を読み上げ**、ユーザーは入力できたと誤認する。
+        // 他の復元経路(RestoreDirtyFromBackup / RestoreUntitledFromBackup)と NewFile() は
+        // いずれもソースを与えており、この経路だけが抜けていた。
+        doc.Editor.Text = string.Empty;
+        ApplyEol(doc);
+        doc.Editor.EmptyUndoBuffer();
+        // 「終了時に空だったタブ」の枠を戻すだけなので clean にする(ClearSavePoint ではない)。
+        // `*` を付けると「保存すべき中身がある」と嘘をつくことになる。
+        doc.Editor.SetSavePoint();
         DocumentManager.UpdateLabel(doc);
-        return doc; // fresh バッファ=Modified=false・本文なし
+        return doc; // 空バッファ=Modified=false・本文なし
     }
 
     /// <summary>extras(レイアウト外バックアップ)の復元。Content=null(path-only)は

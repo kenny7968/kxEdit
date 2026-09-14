@@ -29,6 +29,29 @@ internal static class FrameBuilder
     /// <summary>セルハイライト背景のアルファ(半透明)。</summary>
     private const byte HighlightBackAlpha = 60;
 
+    /// <summary>
+    /// 1 つの <see cref="PaintOpKind.DrawText"/> に載せる最大文字数(F-1・2026-09-14 の L5 で検出)。
+    /// </summary>
+    /// <remarks>
+    /// GDI / Uniscribe は 1 回の描画で扱えるグリフ数が 16 bit に収まる必要があり、
+    /// グリフ数の見積もり <c>1.5 × 文字数 + 16</c> が 65535 を超えると
+    /// <b>エラーを返さずに何も描かない</b>。式を解くと上限は 43,679 文字で、
+    /// 実測(2026-09-14)の境界と一致する —— <b>43,671 文字は描かれ、43,681 文字は描かれない</b>。
+    /// <para>
+    /// <b>効くのは文字数だけで、ピクセル幅は関係しない</b>のも実測済み:
+    /// 全角 24,000 文字(約 384,000 px)は描かれ、半角 44,000 文字(約 352,000 px)は描かれない。
+    /// </para>
+    /// 実装詳細に依存する値なので 1/2.6 の余裕を取る(結合文字が多い文字列では
+    /// グリフ数が文字数を上回りうることも織り込む)。一方で小さくしすぎない ——
+    /// 分割は継ぎ目のたびに計測を 1 回増やすので、<b>通常の行(数百文字)では
+    /// 絶対に分割されない</b>大きさにしてある。
+    /// <para>
+    /// テストが境界(ちょうど上限 / 上限 +1)を<b>定数から導く</b>ために internal。
+    /// 値をテスト側へ写すと、定数を動かしたときに網だけが古い境界を見て空虚に緑になる。
+    /// </para>
+    /// </remarks>
+    internal const int MaxCharsPerTextOp = 16384;
+
     /// <summary>スペースの可視化グリフ(中点)。</summary>
     private const string SpaceGlyph = "·";
 
@@ -201,18 +224,7 @@ internal static class FrameBuilder
                 continue;
             }
 
-            int width = text.Length == 0 ? 0 : metrics.MeasureRun(text);
-            ops.Add(
-                new PaintOp(
-                    PaintOpKind.DrawText,
-                    bodyX,
-                    row.YPx,
-                    width,
-                    lineHeight,
-                    Text: text,
-                    Fore: style.Foreground
-                )
-            );
+            EmitBodyRun(text.AsSpan(), bodyX, row.YPx, lineHeight, style.Foreground, metrics, ops);
         }
 
         // 6) 空白可視化(スペース/タブごとに個別 DrawText=検証しやすい)
@@ -414,6 +426,91 @@ internal static class FrameBuilder
     }
 
     /// <summary>
+    /// 本文 1 run を <see cref="PaintOpKind.DrawText"/> として発行する。
+    /// <see cref="MaxCharsPerTextOp"/> を超える run だけを複数 op へ割る(F-1)。
+    /// 超えない run は今までどおり <b>ちょうど 1 op</b> = 既存の PaintOp 列は変わらない
+    /// (空 run も 1 op を出す —— 分割導入前と同じ)。
+    /// </summary>
+    /// <param name="widthOverride">
+    /// 分割しない場合に使う幅。選択色分け経路は幅を
+    /// <see cref="PixelMapper.OffsetToPx"/> の差分で出す(選択矩形と同じ出し方)ので、
+    /// そこから呼ぶときだけ渡す。null なら <see cref="ICharMetrics.MeasureRun"/> で測る。
+    /// <b>分割する場合は使わない</b>(チャンクごとの幅が要るため)。
+    /// </param>
+    /// <remarks>
+    /// <b>分割時の X は「チャンクを 1 つずつ測った幅の累積」で出す。</b>
+    /// <see cref="PixelMapper.OffsetToPx"/>(行頭からの prefix 計測)をチャンクごとに呼ぶと
+    /// O(行長 × チャンク数)になり、長大行では毎フレーム数百万文字を測ることになる
+    /// (`2026-08-02-large-line-resilience-design.md` が潰した経路の再導入)。
+    /// 累積なら合計は「行あたり 1 回ぶん」= 分割導入前と同じコストに収まる。
+    /// <para>
+    /// <see cref="ICharMetrics.MeasureRun"/> は非 ASCII を含む run の一括計測が<b>加算的でない</b>ため、
+    /// 継ぎ目で数 px ずれうる。<b>16,384 文字を超える run でしか起きない</b>ので受容する
+    /// (設計 2026-09-14 §2.4)。「数 px ずれる」と「1 文字も描かれない」なら後者の方が重い。
+    /// </para>
+    /// 分割位置は <see cref="TextBoundary.SnapToCodePointStart"/> で前方スナップし、
+    /// <b>サロゲートペアを割らない</b>(既存の選択分割と同じ規約)。
+    /// </remarks>
+    private static void EmitBodyRun(
+        ReadOnlySpan<char> text,
+        int xPx,
+        int yPx,
+        int lineHeight,
+        PaintColor fore,
+        ICharMetrics metrics,
+        List<PaintOp> ops,
+        int? widthOverride = null
+    )
+    {
+        if (text.Length <= MaxCharsPerTextOp)
+        {
+            int width = widthOverride ?? (text.Length == 0 ? 0 : metrics.MeasureRun(text));
+            ops.Add(
+                new PaintOp(
+                    PaintOpKind.DrawText,
+                    xPx,
+                    yPx,
+                    width,
+                    lineHeight,
+                    Text: text.ToString(),
+                    Fore: fore
+                )
+            );
+            return;
+        }
+
+        int from = 0;
+        int x = xPx;
+        while (from < text.Length)
+        {
+            int want = Math.Min(from + MaxCharsPerTextOp, text.Length);
+            // 末尾チャンク以外は、コードポイント境界へ前方スナップしてペアを割らない。
+            int to =
+                want >= text.Length ? text.Length : TextBoundary.SnapToCodePointStart(text, want);
+            // スナップが from まで戻ることは無い(MaxCharsPerTextOp >= 2 かつコードポイント長は
+            // 最大 2)。万一戻っても前進を保証して無限ループを作らない。
+            if (to <= from)
+                to = Math.Min(from + 2, text.Length);
+
+            var chunk = text[from..to];
+            int w = metrics.MeasureRun(chunk);
+            ops.Add(
+                new PaintOp(
+                    PaintOpKind.DrawText,
+                    x,
+                    yPx,
+                    w,
+                    lineHeight,
+                    Text: chunk.ToString(),
+                    Fore: fore
+                )
+            );
+            x += w;
+            from = to;
+        }
+    }
+
+    /// <summary>
     /// 1 視覚行の本文を、選択範囲だけ <paramref name="selectionFore"/> で描くように
     /// 最大 3 つの DrawText へ分けて発行する
     /// (prefix=<paramref name="fore"/> / 選択内=<paramref name="selectionFore"/> /
@@ -470,17 +567,9 @@ internal static class FrameBuilder
         if (pxSelStart == pxSelEnd)
         {
             int fullWidth = PixelMapper.OffsetToPx(span, text.Length, metrics);
-            ops.Add(
-                new PaintOp(
-                    PaintOpKind.DrawText,
-                    bodyX,
-                    yPx,
-                    fullWidth,
-                    lineHeight,
-                    Text: text,
-                    Fore: fore
-                )
-            );
+            // F-1: 長大行はここでも分割する。分割しないときの幅は従来どおり
+            // OffsetToPx の結果を渡す(選択矩形と同じ出し方を変えない)。
+            EmitBodyRun(span, bodyX, yPx, lineHeight, fore, metrics, ops, widthOverride: fullWidth);
             return;
         }
 
@@ -505,16 +594,18 @@ internal static class FrameBuilder
         {
             if (charFrom >= charTo)
                 return;
-            ops.Add(
-                new PaintOp(
-                    PaintOpKind.DrawText,
-                    bodyX + pxFrom,
-                    yPx,
-                    pxTo - pxFrom,
-                    lineHeight,
-                    Text: text[charFrom..charTo],
-                    Fore: color
-                )
+            // F-1: run の内側を長さで割る。**run の開始 X と幅は従来どおり OffsetToPx の差分**で、
+            // 分割が起きない限り PaintOp は 1 つも変わらない(選択矩形との整合を崩さない)。
+            // span(ref ローカル)はローカル関数から参照できないので text から作り直す。
+            EmitBodyRun(
+                text.AsSpan(charFrom, charTo - charFrom),
+                bodyX + pxFrom,
+                yPx,
+                lineHeight,
+                color,
+                metrics,
+                ops,
+                widthOverride: pxTo - pxFrom
             );
         }
     }
