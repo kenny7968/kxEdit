@@ -749,7 +749,16 @@ public class FrameBuilderTests
 
     /// <summary>
     /// 上限ちょうどの行は分割しない = 分割導入前と同じ 1 op のまま。
-    /// (上限の比較を &lt;= から &lt; へ緩める変異はここで死ぬ)
+    /// <para>
+    /// <b>この網は「&lt;= を &lt; へ緩める」変異を殺さない。</b>選択が無い本文 run は
+    /// widthOverride を渡さないので、分割枝へ落ちても
+    /// <c>want = min(0+上限, 上限) &gt;= text.Length</c> → チャンクは全文 1 本・
+    /// 幅も <c>MeasureRun(text)</c> となり、<b>PaintOp が完全に同一</b>になるため。
+    /// この変異を殺すのは
+    /// <c>FrameBuilderSelectionForeTests.Run_at_exactly_the_limit_keeps_the_prefix_difference_width</c>
+    /// (widthOverride を迂回すると幅が OffsetToPx 差分から MeasureRun へ変わる)だけ。
+    /// ここが固定するのは「上限ちょうどでは op 本数が増えない」ことに限られる。
+    /// </para>
     /// </summary>
     [Fact]
     public void Body_text_op_is_not_split_at_exactly_the_limit()
@@ -780,19 +789,29 @@ public class FrameBuilderTests
         Assert.Equal(line, string.Concat(body.Select(op => op.Text)));
     }
 
-    /// <summary>分割後も X は単調増加し、先頭は本文原点(行番号なしなので 0)から始まる。</summary>
+    /// <summary>
+    /// 分割後の X は<b>直前チャンクの右端そのもの</b>で、先頭は本文原点
+    /// (行番号なしなので 0)から始まる。
+    /// <para>
+    /// 単調増加ではなく<b>等式</b>で固定するのが要点。設計 §2.4 の「芯」は
+    /// <c>x += w</c> の累積であって、単調性だけだと <c>x += w - 1</c> や
+    /// <c>x += w / 2</c> の変異が幅の合計 assert をすり抜けて生き残る
+    /// (幅は各 op に正しく入ったまま、置き場所だけがずれる = 文字が重なる)。
+    /// <see cref="MonoCharMetrics"/> は加算的なので等式で書ける。
+    /// </para>
+    /// </summary>
     [Fact]
-    public void Split_body_ops_advance_x_monotonically_from_body_origin()
+    public void Split_body_ops_advance_x_by_the_previous_chunk_width()
     {
         var style = TestStyle();
-        string line = new('a', FrameBuilder.MaxCharsPerTextOp * 2 + 5);
+        string line = new('a', (FrameBuilder.MaxCharsPerTextOp * 2) + 5);
 
         var body = BodyTextOps(BuildForLine(line, style), style.Foreground);
 
         Assert.Equal(3, body.Count);
         Assert.Equal(0, body[0].X);
         for (int i = 1; i < body.Count; i++)
-            Assert.True(body[i].X > body[i - 1].X, $"op[{i}].X={body[i].X} <= op[{i - 1}].X");
+            Assert.Equal(body[i - 1].X + body[i - 1].Width, body[i].X);
         // ASCII なので MeasureRun は加算的 = 幅の合計が行全体の幅と一致する
         Assert.Equal(M.MeasureRun(line), body.Sum(op => op.Width));
     }
