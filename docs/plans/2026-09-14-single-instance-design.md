@@ -315,6 +315,25 @@ CLAUDE.md §3 の前倒しレビュー条件(外部入力のパース・プロ�
   その旨を伝えるダイアログを出す形になる。
 - ファイル関連付け + コマンドライン引数でのファイルオープン(§6)。
 
+### 【Task 5 仕様レビューで判明 2026-09-15】`UiCrashSink` の owner なし MessageBox
+
+★2(モーダルの吸い込み回避)は `GetLastActivePopup` がオーナーの所有ポップアップを
+返すことに依存する。kxEdit のモーダル `ShowDialog` は**すべて owner 付き**で、
+owner を省略した `MessageBox.Show` も WinForms が `GetActiveWindow()` をオーナーに
+代入するため、通常は問題にならない。
+
+**例外が 1 つある**: メインフォームが**最小化されているとき** `GetActiveWindow()` は 0 を返し、
+owner なしの `MessageBox` は真に所有者なしで作られる。このときオーナー側からは
+どうやっても辿れない(実測: `GetLastActivePopup` も `GW_ENABLEDPOPUP` も救えない)。
+
+該当するのは `src/kxEdit.App/UiCrashSink.cs` の `MainFormCrashHost.ShowMessage` のみ。
+クラッシュ通知は `Application.ThreadException` や背景スレッド例外から発火するため、
+**最小化中にも出うる**。`MainFormCrashHost` は `MainForm` を保持しているので、
+`MessageBox.Show(form, ...)` にするだけで解消する。
+
+**今回は受容**(クラッシュ通知経路のみ・単一インスタンス化のスコープ外)。
+将来タスクで回収すること。
+
 ### 【Task 2 仕様レビューで判明・受容 2026-09-14】ワイヤ形式は空白区切りのままではパスを運べない
 
 `SingleInstanceRequest` の今日のワイヤ形式は `KXEDIT1 ACTIVATE` ——**半角空白区切りで
