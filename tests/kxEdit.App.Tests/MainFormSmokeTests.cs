@@ -1580,6 +1580,84 @@ public class MainFormSmokeTests
         );
     }
 
+    /// <summary>
+    /// 単一インスタンスのゲートが<b>共有状態を書き換える処理より前</b>にあることを固定する
+    /// (設計 2026-09-14 §3)。
+    /// <para>
+    /// <b>この順序には実害の裏付けがある</b>: <c>SettingsStartup.Prepare</c> は壊れた
+    /// <c>settings.json</c> を<b>退避(quarantine)</b>する。2 つ目のプロセスをそこまで
+    /// 到達させると、ゲートで弾く前にユーザーの設定ファイルを動かしてしまう。
+    /// <c>PreviewUserDataSweeper.SweepIfSoleInstance</c> も同じく共有状態
+    /// (WebView2 のプロファイル)を掃除する。
+    /// </para>
+    /// <para>
+    /// <b>アンカーの選び方</b>: <c>Prepare</c> は <see cref="Program.CreateMainForm"/> の中なので
+    /// <c>Main</c> の IL には現れない。そこで合成点である <c>CreateMainForm</c> をアンカーにする。
+    /// <c>SweepIfSoleInstance</c> は <c>Main</c> に直接現れるので、そちらは実名で見る。
+    /// </para>
+    /// <para>
+    /// <b>守るもの / 守らないもの</b>(すぐ上の IME テストと同じ境界):
+    /// <list type="bullet">
+    /// <item><b>守る</b>: <see cref="SingleInstanceGate.Acquire"/> の呼び出しの有無と、
+    /// 2 つのアンカーに対する IL 上の前後関係。</item>
+    /// <item><b>守らない</b>: <b>実行順</b>。固定できるのは IL 上の出現順までで、
+    /// 呼び出しを条件分岐に入れる変異は IL 上には現れるので生存する。</item>
+    /// <item><b>守らない</b>: 渡した引数の<b>値</b>(期限・名前・<c>onActivate</c> の中身)。
+    /// 期限の入れ子は <see cref="SingleInstanceServer"/> の remarks が、判定の写像は
+    /// <c>SingleInstanceGateTests</c> が担当する。</item>
+    /// <item><b>守らない</b>: 2 つ目が実際に終了すること(<c>Main</c> は実行できない)。
+    /// L5(実機・手動)の担当。</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProgramMain_gates_single_instance_before_touching_shared_state()
+    {
+        var main = typeof(Program).GetMethod(
+            "Main",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
+        );
+        Assert.NotNull(main);
+        // 上の IME テストと同じ入口(newobj 込み)で集合を 1 本に揃える。余分な要素が増えても
+        // アンカー間の相対順序は変わらないので、位置比較は成立する。
+        var called = IlCallees.OfIncludingNewobj(main!);
+
+        int gate = called.FindIndex(m =>
+            m.DeclaringType == typeof(SingleInstanceGate)
+            && m.Name == nameof(SingleInstanceGate.Acquire)
+        );
+        int sweep = called.FindIndex(m =>
+            m.DeclaringType == typeof(PreviewUserDataSweeper)
+            && m.Name == nameof(PreviewUserDataSweeper.SweepIfSoleInstance)
+        );
+        int compose = called.FindIndex(m =>
+            m.DeclaringType == typeof(Program) && m.Name == nameof(Program.CreateMainForm)
+        );
+
+        Assert.True(
+            gate >= 0,
+            "Program.Main が SingleInstanceGate.Acquire を呼んでいない(設計 2026-09-14 §3)"
+        );
+        Assert.True(
+            sweep >= 0,
+            "アンカーが消えた: PreviewUserDataSweeper.SweepIfSoleInstance(このテストの前提が壊れている)"
+        );
+        Assert.True(
+            compose >= 0,
+            "アンカーが消えた: Program.CreateMainForm(このテストの前提が壊れている)"
+        );
+        Assert.True(
+            gate < sweep,
+            "単一インスタンス判定は共有状態の掃除より前でなければならない(設計 §3)。"
+                + $"実際の IL 上の出現順: gate={gate}, sweep={sweep}"
+        );
+        Assert.True(
+            gate < compose,
+            "単一インスタンス判定は設定読込(CreateMainForm 内の SettingsStartup.Prepare)より"
+                + $"前でなければならない(設計 §3)。実際の IL 上の出現順: gate={gate}, compose={compose}"
+        );
+    }
+
     // ===== hot exit 統合: OnFormClosing / OnFormClosed(設計 §3.2/§5.2/§10) =====
 
     // ON×BackupON+dirty → 確認なし(silent close)+FinalFlush が本文バックアップとレイアウトを
