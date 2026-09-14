@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -15,6 +13,12 @@ namespace kxEdit.App.Tests;
 /// パイプ名は <see cref="UniqueName"/> で毎回変える —— 実運用の kxEdit が同じ PC で
 /// 動いていても干渉させないため。
 /// </para>
+/// <para>
+/// <b>前面化の回数は <c>Interlocked</c> / <c>Volatile</c> で数える</b>。ハンドラは
+/// パイプの待受スレッドから呼ばれ、assertion はテストスレッドで読むので、生の
+/// <c>++</c> と生読みではスレッド間の可視性が保証されない。<c>SingleInstanceGateTests</c> も
+/// 同じ作法に揃えてある(隣接するテストで観測の書き方を変えないこと)。
+/// </para>
 /// </summary>
 public class SingleInstanceChannelTests
 {
@@ -25,20 +29,6 @@ public class SingleInstanceChannelTests
     /// <summary>接続・ACK とも <see cref="ShortTimeout"/> で引き渡す(大半のテストの既定)。</summary>
     private static HandoffResult HandOff(string pipeName) =>
         SingleInstanceClient.TryHandOff(pipeName, ShortTimeout, ShortTimeout);
-
-    /// <summary>現在のユーザーだけを許可する ACL(サーバ実装と同じ形)。</summary>
-    private static PipeSecurity CurrentUserOnlyAcl()
-    {
-        var security = new PipeSecurity();
-        security.AddAccessRule(
-            new PipeAccessRule(
-                WindowsIdentity.GetCurrent().User!,
-                PipeAccessRights.FullControl,
-                AccessControlType.Allow
-            )
-        );
-        return security;
-    }
 
     /// <summary>テスト用の生クライアント(サーバ実装の作法に合わせて開く)。</summary>
     private static NamedPipeClientStream RawClient(string pipeName) =>
@@ -53,14 +43,14 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             }
         );
         Assert.True(server.Start());
 
         Assert.Equal(HandoffResult.Success, HandOff(pipe));
-        Assert.Equal(1, activations);
+        Assert.Equal(1, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -73,7 +63,7 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             }
         );
@@ -81,7 +71,7 @@ public class SingleInstanceChannelTests
 
         Assert.Equal(HandoffResult.Success, HandOff(pipe));
         Assert.Equal(HandoffResult.Success, HandOff(pipe));
-        Assert.Equal(2, activations);
+        Assert.Equal(2, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -99,7 +89,7 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             }
         );
@@ -115,7 +105,7 @@ public class SingleInstanceChannelTests
 
         // 待受は生きていなければならない。
         Assert.Equal(HandoffResult.Success, HandOff(pipe));
-        Assert.Equal(2, activations);
+        Assert.Equal(2, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -146,7 +136,7 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             }
         );
@@ -162,10 +152,10 @@ public class SingleInstanceChannelTests
             Assert.Equal(0, client.Read(new byte[16], 0, 16));
         }
 
-        Assert.Equal(0, activations);
+        Assert.Equal(0, Volatile.Read(ref activations));
         // 不正要求のあとも待受は生きている(1 件で死ぬ変異を殺す)。
         Assert.Equal(HandoffResult.Success, HandOff(pipe));
-        Assert.Equal(1, activations);
+        Assert.Equal(1, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -185,7 +175,7 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             },
             perConnectionTimeout: TimeSpan.FromSeconds(30)
@@ -208,7 +198,7 @@ public class SingleInstanceChannelTests
             Assert.Equal(0, read);
         }
 
-        Assert.Equal(0, activations);
+        Assert.Equal(0, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -224,7 +214,7 @@ public class SingleInstanceChannelTests
             pipe,
             _ =>
             {
-                activations++;
+                Interlocked.Increment(ref activations);
                 return true;
             },
             perConnectionTimeout: TimeSpan.FromSeconds(1)
@@ -246,7 +236,7 @@ public class SingleInstanceChannelTests
             HandoffResult.Success,
             SingleInstanceClient.TryHandOff(pipe, TimeSpan.FromSeconds(10), ShortTimeout)
         );
-        Assert.Equal(1, activations);
+        Assert.Equal(1, Volatile.Read(ref activations));
     }
 
     [Fact]
@@ -264,7 +254,7 @@ public class SingleInstanceChannelTests
             PipeOptions.Asynchronous,
             0,
             0,
-            CurrentUserOnlyAcl()
+            PipeAcl.CurrentUserOnly()
         );
         // 接続だけは受け付ける(黙り込む相手の再現)。完了は待たないので破棄する。
         _ = mute.WaitForConnectionAsync();
@@ -319,7 +309,20 @@ public class SingleInstanceChannelTests
                 peer.StandardOutput,
                 TimeSpan.FromSeconds(60)
             );
-            Assert.Equal("READY", ready?.Trim());
+            if (ready?.Trim() != "READY")
+            {
+                // 【stderr を読むのは診断性のため】RedirectStandardError しておきながら
+                // 一度も読まないと、子側が失敗した場合に 60 秒待ったうえで
+                // Assert.Equal("READY", null) としか出ず、落ちた理由がどこにも残らない
+                // (スクリプトの構文エラー・実行ポリシー・powershell.exe 不在など)。
+                string error = await ReadToEndWithTimeoutAsync(
+                    peer.StandardError,
+                    TimeSpan.FromSeconds(5)
+                );
+                Assert.Fail(
+                    $"powershell 側が READY を出さなかった: stdout='{ready ?? "(なし)"}' / stderr='{error}'"
+                );
+            }
 
             // 実行ファイルが違う(testhost.exe vs powershell.exe)ので拒否されること。
             Assert.Equal(
@@ -358,6 +361,23 @@ public class SingleInstanceChannelTests
         return completed == (Task)line ? await line : null;
     }
 
+    /// <summary>
+    /// 子プロセスの出力を末尾まで、期限付きで読む(診断メッセージ用)。
+    /// </summary>
+    /// <remarks>
+    /// <c>ReadToEndAsync</c> は子がストリームを閉じるまで返らないので、期限は必須。
+    /// 失敗経路でしか呼ばないため、期限切れでもテストを落とさずその旨を文字列で返す。
+    /// </remarks>
+    private static async Task<string> ReadToEndWithTimeoutAsync(
+        StreamReader reader,
+        TimeSpan timeout
+    )
+    {
+        var all = reader.ReadToEndAsync();
+        var completed = await Task.WhenAny(all, Task.Delay(timeout));
+        return completed == (Task)all ? (await all).Trim() : "(期限内に読めなかった)";
+    }
+
     [Fact]
     public void Start_ReturnsFalse_WhenPipeNameIsAlreadyTaken()
     {
@@ -391,7 +411,7 @@ public class SingleInstanceChannelTests
             PipeOptions.Asynchronous,
             0,
             0,
-            CurrentUserOnlyAcl()
+            PipeAcl.CurrentUserOnly()
         );
 
         using var ours = new SingleInstanceServer(pipe, _ => true);

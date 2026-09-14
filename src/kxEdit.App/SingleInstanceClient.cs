@@ -28,6 +28,14 @@ internal enum HandoffResult
 /// </summary>
 internal static class SingleInstanceClient
 {
+    /// <summary>ACK 1 行の上限バイト数(= 読み出しバッファ長)。</summary>
+    /// <remarks>
+    /// 64 バイトの根拠: ACK は <c>SingleInstanceRequest.Ack</c> + <c>"\n"</c> の 11 バイト固定で、
+    /// 将来応答にフィールドが増えても同じ桁に収まる。行が 64 バイトに収まらなければ
+    /// ACK ではないので、読み捨てずに「応答なし」扱いでよい。
+    /// </remarks>
+    private const int AckBufferBytes = 64;
+
     /// <summary>
     /// 既存インスタンスへ前面化を依頼する。
     /// </summary>
@@ -37,8 +45,8 @@ internal static class SingleInstanceClient
     /// 最悪で 2 倍の時間がかかり、呼び出し側が全体の所要時間を見積もれない。
     /// </param>
     /// <param name="ackTimeout">
-    /// 要求送信 + ACK 受信の上限。<b>サーバ側の前面化待ち(Task 7 の <c>ActivateTimeout</c>)
-    /// より長くすること</b>。短いと、前面化が成功しているのに待ちきれず
+    /// 要求送信 + ACK 受信の上限。<b>サーバ側の前面化待ち(<see cref="PendingActivation"/> の
+    /// <c>ActivateTimeout</c>)より長くすること</b>。短いと、前面化が成功しているのに待ちきれず
     /// <see cref="HandoffResult.NoResponse"/> を返し、ユーザーには
     /// 「ウィンドウは前面に出たのにエラーも出る」と見える。
     /// 予算の入れ子の全体像は <see cref="SingleInstanceServer"/> の remarks を参照。
@@ -110,10 +118,12 @@ internal static class SingleInstanceClient
     /// <remarks>
     /// <para>
     /// 本メソッドは「検証して<b>別物だった</b>」と「そもそも<b>検証できなかった</b>」を
-    /// どちらも <c>false</c> に潰す。拒否側へ倒す判断としては正しいが、Task 6 が出す文言
-    /// 「別の場所にある kxEdit が既に起動しています」は後者では誤診になる。
-    /// 区別が要るときのために、Trace のメッセージを 2 系統に分けてある
-    /// (<c>peer image mismatch</c> / <c>cannot verify</c>)。文言の調整は Task 7 の担当。
+    /// どちらも <c>false</c> に潰す。拒否側へ倒す判断として正しく、<b>ユーザーへの文言も
+    /// これで壊れない</b> —— <see cref="HandoffResult.ForeignPeer"/> に対して出す文言は
+    /// 「相手は動いているが、こちらからは操作できない」としか言わず、場所も権限も断定しない
+    /// (設計 §4 の訂正 2026-09-15。理由は <see cref="SingleInstanceOutcome.ForeignPeer"/> の
+    /// remarks)。post-mortem で区別が要るときのために、Trace のメッセージだけ 2 系統に
+    /// 分けてある(<c>peer image mismatch</c> / <c>cannot verify</c>)。
     /// </para>
     /// <para>
     /// パス比較は <see cref="StringComparison.OrdinalIgnoreCase"/> で、正規化はしない。
@@ -182,9 +192,9 @@ internal static class SingleInstanceClient
     /// それで期限を掛ける。呼び出し側は起動直後の同期経路なので、ここで待ち合わせる。
     /// </para>
     /// <para>
-    /// <b><c>ConfigureAwait(false)</c> を外してはならない</b>。この <c>GetAwaiter().GetResult()</c>
-    /// は UI スレッドから呼ばれうる。1 か所でも同期コンテキストへ戻す設定にすると、
-    /// 継続が UI スレッドを待ち、UI スレッドが結果を待つデッドロックになる(実測で追認済み)。
+    /// <b>この <c>GetAwaiter().GetResult()</c> は UI スレッドから呼ばれうる</b>。そのため
+    /// この先の <c>await</c> からは <c>ConfigureAwait(false)</c> を外してはならない ——
+    /// 理由の全文は <see cref="SingleInstanceWire"/> の remarks が正(1 か所に集約してある)。
     /// </para>
     /// </remarks>
     private static bool SendAndAwaitAck(NamedPipeClientStream client, TimeSpan timeout)
@@ -208,36 +218,11 @@ internal static class SingleInstanceClient
     {
         byte[] payload = Encoding.UTF8.GetBytes(SingleInstanceRequest.Activate.Serialize() + "\n");
         await client.WriteAsync(payload, ct).ConfigureAwait(false);
-        return await ReadAckAsync(client, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// ACK を 1 行読む。
-    /// </summary>
-    /// <remarks>
-    /// バッファ 64 バイトの根拠: ACK は <c>SingleInstanceRequest.Ack</c> + <c>"\n"</c> の
-    /// 11 バイト固定で、将来応答にフィールドが増えても同じ桁に収まる。行が 64 バイトに
-    /// 収まらなければ ACK ではないので、読み捨てずに <c>false</c>(= 応答なし扱い)でよい。
-    /// </remarks>
-    private static async Task<bool> ReadAckAsync(Stream stream, CancellationToken ct)
-    {
-        byte[] buffer = new byte[64];
-        int total = 0;
-        while (total < buffer.Length)
-        {
-            int read = await stream
-                .ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct)
-                .ConfigureAwait(false);
-            if (read == 0)
-                break;
-            int newline = Array.IndexOf(buffer, (byte)'\n', 0, total + read);
-            total += read;
-            if (newline >= 0)
-            {
-                string line = Encoding.UTF8.GetString(buffer, 0, newline);
-                return string.Equals(line, SingleInstanceRequest.Ack, StringComparison.Ordinal);
-            }
-        }
-        return false;
+        // 1 行読めなければ null が返る(相手が閉じた / 上限超過)。null は ACK と一致しないので
+        // そのまま false = 応答なし扱いになる。
+        string? line = await SingleInstanceWire
+            .ReadLineAsync(client, AckBufferBytes, ct)
+            .ConfigureAwait(false);
+        return string.Equals(line, SingleInstanceRequest.Ack, StringComparison.Ordinal);
     }
 }

@@ -39,7 +39,7 @@ internal static class NativeMethods
     /// <summary>
     /// オーナーウィンドウに対する「現在有効な最前面のポップアップ」。
     /// モーダルダイアログ表示中にオーナーを前面化すると入力を吸われるため、
-    /// 実際に前面化すべき相手をこれで求める(設計 §4 ★2・Task 5 で使用)。
+    /// 実際に前面化すべき相手をこれで求める(設計 §4 ★2。<see cref="WindowActivator"/> で使用)。
     /// </summary>
     [DllImport("user32.dll")]
     internal static extern nint GetLastActivePopup(nint hWnd);

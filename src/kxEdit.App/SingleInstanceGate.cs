@@ -11,8 +11,10 @@ namespace kxEdit.App;
 /// <remarks>
 /// 設計 §3 の表は 3 状態だったが、§4 の精密化で失敗を 2 つに分けた。
 /// <see cref="NoResponse"/> と <see cref="ForeignPeer"/> は<b>出す文言が違う</b> ——
-/// 別フォルダの別ビルドが動いている状況で「応答しません」と言うのは誤診であり、
+/// 相手が正常に動いている状況で「応答しません」と言うのは誤診であり、
 /// ユーザーはタスク マネージャーを開いて「応答している kxEdit」を見ることになる。
+/// <see cref="ForeignPeer"/> に落ちる経路は 2 つあるので、文言の作り方はそちらの
+/// remarks を参照すること。
 /// </remarks>
 internal enum SingleInstanceOutcome
 {
@@ -25,7 +27,26 @@ internal enum SingleInstanceOutcome
     /// <summary>既存インスタンスが応答しない。エラーを出して終了する(設計 D4)。</summary>
     NoResponse,
 
-    /// <summary>別の場所の kxEdit が起動している。エラーを出して終了する。</summary>
+    /// <summary>
+    /// 別の kxEdit が動いているが、<b>こちらからは操作できない</b>。エラーを出して終了する。
+    /// </summary>
+    /// <remarks>
+    /// <b>「別の場所にある」と断定してはならない</b>(設計 §4 の訂正 2026-09-15)。
+    /// この結果に落ちる経路は 2 つあり、片方では「別の場所」が事実ではない:
+    /// <list type="number">
+    /// <item><b>実行ファイルパスの不一致</b>(設計 §4 ★3。
+    /// <c>SingleInstanceClient.TryVerifyPeer</c>)—— 本当に別フォルダの別ビルドが
+    /// 起動している。</item>
+    /// <item><b><c>Connect</c> の <see cref="UnauthorizedAccessException"/></b> ——
+    /// <b>同じ場所・同じビルドで、権限(整合性レベル)だけが違う</b>。高 IL の kxEdit が
+    /// 先に起動していると、そのパイプには High の必須整合性ラベルが付き、中 IL からの
+    /// 書き込みアクセスが NO_WRITE_UP で拒否される(設計 §7「昇格の順序」)。
+    /// <c>PipeOptions.CurrentUserOnly</c> の所有者 SID 不一致も同じ例外でここへ来る。</item>
+    /// </list>
+    /// 2 経路に共通するのは「相手は正常に動いているが、こちらからは操作できない」ことだけ。
+    /// ユーザーが取るべき行動(先に起動している kxEdit を終了する)はどちらでも同じなので、
+    /// 場所にも権限にも触れない文言にしてある(<c>Program.Main</c> の分岐)。
+    /// </remarks>
     ForeignPeer,
 }
 
@@ -44,7 +65,19 @@ internal enum SingleInstanceOutcome
 /// <b>このゲートは例外を投げてはならない。</b>失敗経路はすべて
 /// <see cref="SingleInstanceOutcome"/> のいずれかに落ちる。ここから例外が漏れると、
 /// D4 のエラーダイアログを出す前に起動時例外で落ち、「必ず理由を伝えて終了する」という
-/// 不変条件をゲート自身が破る(設計 §7)。
+/// 不変条件をゲート自身が破る(設計 §7)。呼ばれる位置も効いている ——
+/// <c>Program.Main</c> はこの時点でまだ <c>Application.SetUnhandledExceptionMode</c> も
+/// <c>AppDomain.UnhandledException</c> も配線していないので、漏れた例外は
+/// <b>WER のクラッシュダイアログ</b>になる。
+/// </para>
+/// <para>
+/// <b>ただし実装のバグ由来の <see cref="ArgumentException"/> 系は除く</b> ——
+/// <see cref="TryBecomeFirst"/> は Mutex 名が不正な場合を意図的に捕まえない。
+/// <see cref="SingleInstanceServer.Start"/> が同じ「名前が不正」を全例外で飲んで
+/// 劣化させるのと非対称だが、これは意図した非対称である:
+/// <b>Mutex 名が壊れれば排他が丸ごと効かない(2 インスタンスが黙って並走する)ので
+/// 大声で落ちるべき。パイプ名が壊れても排他は効く(引き渡しだけ死ぬ)ので劣化でよい。</b>
+/// 壊れ方の重さが違うので、握り潰しの是非も違う。
 /// </para>
 /// </remarks>
 internal sealed class SingleInstanceGate : IDisposable
@@ -68,12 +101,16 @@ internal sealed class SingleInstanceGate : IDisposable
     /// 前面化要求の受理ハンドラ。<b>パイプスレッドから呼ばれる</b> ——
     /// 契約は <see cref="SingleInstanceServer"/> の該当引数を参照。
     /// </param>
-    /// <param name="connectTimeout">引き渡しの接続確立の上限。</param>
+    /// <param name="connectTimeout">
+    /// 引き渡しの接続確立の上限。<b><paramref name="handOff"/> を指定した場合は使われない。</b>
+    /// </param>
     /// <param name="ackTimeout">
-    /// 引き渡しの ACK 待ちの上限。<b>受け側の前面化待ち(Task 7 の <c>ActivateTimeout</c>)より
-    /// 明確に長く、かつ <see cref="SingleInstanceServer.DefaultPerConnectionTimeout"/> より
-    /// 短いこと</b>。等号でも「前面化は成功しているのにエラーダイアログが出る」窓が開く。
+    /// 引き渡しの ACK 待ちの上限。<b>受け側の前面化待ち(<see cref="PendingActivation"/> の
+    /// <c>ActivateTimeout</c>)より明確に長く、かつ
+    /// <see cref="SingleInstanceServer.DefaultPerConnectionTimeout"/> より短いこと</b>。
+    /// 等号でも「前面化は成功しているのにエラーダイアログが出る」窓が開く。
     /// 予算の入れ子の全体像は <see cref="SingleInstanceServer"/> の remarks を参照。
+    /// <b><paramref name="handOff"/> を指定した場合は使われない。</b>
     /// </param>
     /// <param name="handOff">
     /// 引き渡しの実処理。既定は <see cref="SingleInstanceClient.TryHandOff"/> へ
@@ -81,6 +118,12 @@ internal sealed class SingleInstanceGate : IDisposable
     /// 決定論的に固定するための seam</b> —— 実パイプのタイミングに依存させると、
     /// <see cref="SingleInstanceOutcome.ForeignPeer"/> への写像や「引き渡し失敗の直後に
     /// 相手が Mutex を手放した」状況を狙って作れない。
+    /// <para>
+    /// <b>指定した場合、<paramref name="connectTimeout"/> / <paramref name="ackTimeout"/> は
+    /// まったく使われない</b>(2 つの期限を読むのは <see cref="DefaultHandOff"/> の束縛だけ)。
+    /// テストは既定の束縛と揃えるために両方を渡してくるが、注入時にその値が期限として
+    /// 効いているわけではない。
+    /// </para>
     /// </param>
     /// <returns>
     /// 判定結果と、1 つ目だった場合のゲート。<b>1 つ目以外では <c>null</c> を返す</b>
@@ -110,7 +153,28 @@ internal sealed class SingleInstanceGate : IDisposable
         if (TryBecomeFirst(mutexName, pipeName, onActivate) is { } first)
             return (SingleInstanceOutcome.FirstInstance, first);
 
-        var result = (handOff ?? DefaultHandOff(connectTimeout, ackTimeout))(pipeName);
+        HandoffResult result;
+        try
+        {
+            result = (handOff ?? DefaultHandOff(connectTimeout, ackTimeout))(pipeName);
+        }
+        // 【意図的に全例外を捕まえる】クラス remarks の不変条件「このゲートは例外を投げない」を
+        // 構造的に保証する。SingleInstanceClient.TryHandOff の catch は
+        // UnauthorizedAccessException / TimeoutException / IOException の 3 種のみで、
+        // 現行 .NET の例外面では他が出る経路を見つけられなかった —— つまり今日は成立しない。
+        // それでも包むのは【位置】が理由で、ここは Application.SetUnhandledExceptionMode も
+        // AppDomain.UnhandledException もまだ配線されていない。漏らすと D4 のダイアログ
+        // どころか WER のクラッシュダイアログになる(設計 §7 が最も避けたかった壊れ方)。
+        // 【NoResponse に倒す理由】引き渡しが成立したかどうかが分からない以上、
+        // 最も保守的な「応答しません」に落とす —— Success に倒すと前面化されていない
+        // かもしれない相手に黙って譲って終了し、ForeignPeer に倒すと下の Mutex 取り直し
+        // (終了中レースの救済)が働かなくなる。NoResponse なら取り直しを 1 回試みたうえで、
+        // 駄目なら理由を伝えて終了する = ゲートの契約どおりに振る舞える。
+        catch (Exception ex)
+        {
+            Trace.TraceWarning($"single-instance: handoff threw {ex.GetType().Name}: {ex.Message}");
+            result = HandoffResult.NoResponse;
+        }
         if (result == HandoffResult.Success)
             return (SingleInstanceOutcome.HandedOff, null);
         if (result == HandoffResult.ForeignPeer)

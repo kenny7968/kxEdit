@@ -49,12 +49,32 @@ public class SingleInstanceGateTests
             handOff
         );
 
-    /// <summary>呼ばれてはならない前面化ハンドラ。</summary>
-    private static bool MustNotActivate(CancellationToken ct)
+    /// <summary><see cref="MustNotActivate"/> が呼ばれた回数。</summary>
+    private int _forbiddenActivations;
+
+    /// <summary>
+    /// 呼ばれてはならない前面化ハンドラ。
+    /// </summary>
+    /// <remarks>
+    /// <b>ここで <c>Assert.Fail</c> を呼んではならない。</b>本ハンドラはゲートが組み立てた
+    /// <c>SingleInstanceServer</c> の待受スレッドから呼ばれうるが、<c>RunAsync</c> の
+    /// <c>catch (Exception)</c> が例外を飲んで <c>Trace.TraceWarning</c> にするため、
+    /// assertion は握り潰され<b>テストは緑のまま通る</b>(= 空虚な assertion)。
+    /// 現在の使用箇所はいずれもサーバへ配線されない経路なので実害は無いが、
+    /// 「待受中のゲートに本ハンドラを渡す」テストを足した瞬間に踏む。
+    /// カウンタを立てて <see cref="AssertNeverActivated"/> で<b>テスト本体のスレッドから</b>
+    /// 検証すること。同じ理由で、注入する <c>handOff</c> の中でも assertion を書かない
+    /// (<c>SingleInstanceGate.Acquire</c> が全例外を飲んで <c>NoResponse</c> へ倒すため)。
+    /// </remarks>
+    private bool MustNotActivate(CancellationToken ct)
     {
-        Assert.Fail("2 つ目のインスタンスは待受を始めてはならない");
+        Interlocked.Increment(ref _forbiddenActivations);
         return false;
     }
+
+    /// <summary>前面化が一度も起きていないことを、テスト本体のスレッドで検証する。</summary>
+    private void AssertNeverActivated() =>
+        Assert.Equal(0, Volatile.Read(ref _forbiddenActivations));
 
     [Fact]
     public void Acquire_FirstCall_BecomesFirstInstance()
@@ -87,6 +107,7 @@ public class SingleInstanceGateTests
             Assert.Equal(SingleInstanceOutcome.HandedOff, second);
             Assert.Null(secondGate);
             Assert.Equal(1, Volatile.Read(ref activations));
+            AssertNeverActivated();
         }
     }
 
@@ -96,30 +117,34 @@ public class SingleInstanceGateTests
         // 抜け道(設計 D3)。2 回続けて FirstInstance になり、引き渡しも待受も起きない。
         // 【待受を始めない点が本質】始めてしまうと、本来の 1 つ目が居ないときに
         // --new-instance で起動したプロセスが次の起動を引き受けてしまう。
+        // 【引き渡しの試行も回数で数える】注入したデリゲートの中で Assert.Fail を呼ぶと、
+        // Acquire の防御的 catch(全例外を飲んで NoResponse へ倒す)に握り潰される。
+        // MustNotActivate と同じ理由で、本体スレッドから検証する。
+        int handoffAttempts = 0;
+        HandoffResult CountAttempt(string _)
+        {
+            Interlocked.Increment(ref handoffAttempts);
+            return HandoffResult.NoResponse;
+        }
+
         var (first, a) = Acquire(
             newInstance: true,
             onActivate: MustNotActivate,
-            handOff: _ =>
-            {
-                Assert.Fail("--new-instance では引き渡しを試みてはならない");
-                return HandoffResult.NoResponse;
-            }
+            handOff: CountAttempt
         );
         using (a)
         {
             var (second, b) = Acquire(
                 newInstance: true,
                 onActivate: MustNotActivate,
-                handOff: _ =>
-                {
-                    Assert.Fail("--new-instance では引き渡しを試みてはならない");
-                    return HandoffResult.NoResponse;
-                }
+                handOff: CountAttempt
             );
             using (b)
             {
                 Assert.Equal(SingleInstanceOutcome.FirstInstance, first);
                 Assert.Equal(SingleInstanceOutcome.FirstInstance, second);
+                Assert.Equal(0, Volatile.Read(ref handoffAttempts));
+                AssertNeverActivated();
                 // 待受が無い = Mutex だけ取っていない。パイプ名は空いたままのはず。
                 using var listener = new SingleInstanceServer(_pipeName, _ => true);
                 Assert.True(listener.Start());
@@ -167,7 +192,7 @@ public class SingleInstanceGateTests
             PipeOptions.Asynchronous,
             0,
             0,
-            CurrentUserOnlyAcl()
+            PipeAcl.CurrentUserOnly()
         );
         _ = mute.WaitForConnectionAsync(); // 接続だけ受け付ける。完了は待たない。
 
@@ -186,20 +211,6 @@ public class SingleInstanceGateTests
         );
     }
 
-    /// <summary>現在のユーザーだけを許可する ACL(サーバ実装と同じ形)。</summary>
-    private static PipeSecurity CurrentUserOnlyAcl()
-    {
-        var security = new PipeSecurity();
-        security.AddAccessRule(
-            new PipeAccessRule(
-                WindowsIdentity.GetCurrent().User!,
-                PipeAccessRights.FullControl,
-                AccessControlType.Allow
-            )
-        );
-        return security;
-    }
-
     [Fact]
     public void Acquire_WhenHandoffReportsForeignPeer_ReportsForeignPeer()
     {
@@ -210,17 +221,21 @@ public class SingleInstanceGateTests
         using var held = new Mutex(initiallyOwned: true, _mutexName, out bool createdNew);
         Assert.True(createdNew);
 
+        // 【assertion はデリゲートの中で書かない】Acquire の防御的 catch が飲むため、
+        // 中で落としても「NoResponse になった」としか見えなくなる。観測だけして本体で検証する。
         int calls = 0;
+        string? observedName = null;
         var (outcome, gate) = Acquire(handOff: name =>
         {
             calls++;
-            Assert.Equal(_pipeName, name);
+            observedName = name;
             return HandoffResult.ForeignPeer;
         });
 
         Assert.Equal(SingleInstanceOutcome.ForeignPeer, outcome);
         Assert.Null(gate);
         Assert.Equal(1, calls);
+        Assert.Equal(_pipeName, observedName);
     }
 
     [Fact]
@@ -291,6 +306,7 @@ public class SingleInstanceGateTests
             );
             Assert.Equal(SingleInstanceOutcome.HandedOff, outcome);
             Assert.Null(gate);
+            AssertNeverActivated();
         }
         finally
         {
@@ -323,6 +339,7 @@ public class SingleInstanceGateTests
             );
             Assert.Equal(SingleInstanceOutcome.ForeignPeer, outcome);
             Assert.Null(gate);
+            AssertNeverActivated();
         }
         finally
         {
@@ -407,6 +424,8 @@ public class SingleInstanceGateTests
             using var probe = new Mutex(initiallyOwned: true, _mutexName, out bool createdNew);
             Assert.False(createdNew);
             GC.KeepAlive(gate);
+            // 待受は始まっていない(squatter が名前を握っている)ので前面化も起きない。
+            AssertNeverActivated();
         }
     }
 

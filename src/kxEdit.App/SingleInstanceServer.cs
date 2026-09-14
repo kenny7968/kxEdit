@@ -29,8 +29,8 @@ namespace kxEdit.App;
 /// 1 つでも逆転すると「前面化は成功しているのにエラーダイアログが出る」等の誤診になる。
 /// <code>
 ///   ActivateTimeout  &lt;  ackTimeout  &lt;  PerConnectionTimeout  &lt;  Dispose の待ち
-///   (Task 7 の       ) (クライアント) (本クラス・既定 5 秒 ) (PerConnection + 余裕)
-///   (前面化待ち      ) (ACK 待ち    )
+///   (PendingActivation) (クライアント) (本クラス・既定 5 秒 ) (PerConnection + 余裕)
+///   (前面化待ち       ) (ACK 待ち    )
 /// </code>
 /// <list type="bullet">
 /// <item><c>ActivateTimeout &lt; ackTimeout</c>: 逆だと、前面化が成功しているのに
@@ -41,7 +41,10 @@ namespace kxEdit.App;
 /// 待ちきれず <c>_loop</c> を取り残す。本クラスはこれを自動で満たす
 /// (<see cref="Dispose"/> は <c>PerConnectionTimeout + 2 秒</c> 待つ)。</item>
 /// </list>
-/// 具体値は Task 6 / 7 が決める。本クラスは既定値と上の関係だけを定める。
+/// 本クラスが定めるのは既定値と上の関係だけで、具体値は使う側が決める。現状は
+/// <see cref="PendingActivation"/> の <c>ActivateTimeout</c>(3 秒)・<c>Program.AckTimeout</c>
+/// (4 秒)・<see cref="DefaultPerConnectionTimeout"/>(5 秒)・<see cref="Dispose"/> の待ち
+/// (7 秒)で、<c>SingleInstanceTimeoutBudgetTests</c> がこの順序を固定している。
 /// </para>
 /// </remarks>
 internal sealed class SingleInstanceServer : IDisposable
@@ -83,10 +86,10 @@ internal sealed class SingleInstanceServer : IDisposable
     /// <param name="pipeName">待ち受けるパイプ名。</param>
     /// <param name="onActivate">
     /// 前面化要求の受理ハンドラ。<b>パイプスレッドから呼ばれる</b> —— UI スレッドへの
-    /// マーシャルは呼び出し側(Task 7 の <c>PendingActivation</c>)の責務。
+    /// マーシャルは呼び出し側(<see cref="PendingActivation"/>)の責務。
     /// <para>
     /// <b>戻り値は「要求を引き受けたか(= ACK を返してよいか)」</b>であって
-    /// 「前面化が完了したか」ではない。Task 7 の <c>PendingActivation.Request()</c> は
+    /// 「前面化が完了したか」ではない。<see cref="PendingActivation.Request"/> は
     /// ウィンドウ未生成時に保留へ積んで <c>true</c> を返すが、その時点で前面化は
     /// 起きていない —— それでも引き渡しは成立しているので ACK を返すのが正しい。
     /// <c>false</c> は「引き受けられなかった」を意味し、ACK を返さない。2 つ目はそれを見て
@@ -123,6 +126,14 @@ internal sealed class SingleInstanceServer : IDisposable
     /// 呼び、戻り値を見てゲートを組み立てる間に <c>try</c>/<c>finally</c> を置いていない。
     /// ここが throw するようになると、Mutex ハンドルのリークではなく
     /// <b>起動時クラッシュ</b>(= ゲートが D4 のエラーを出せずに落ちる)という重い形で壊れる。
+    /// <para>
+    /// <b>「名前が不正」の扱いが Mutex 側と非対称なのは意図的である。</b>本メソッドは
+    /// <see cref="ArgumentException"/> 系(= パイプ名が壊れている = 実装のバグ)も飲んで
+    /// 劣化させるが、<c>SingleInstanceGate.TryBecomeFirst</c> は Mutex 名の同じ例外を
+    /// 意図的に投げ返す。壊れ方の重さが違うため:
+    /// <b>Mutex 名が壊れれば排他が丸ごと効かない(2 インスタンスが黙って並走する)ので
+    /// 大声で落ちるべき。パイプ名が壊れても排他は効く(引き渡しだけ死ぬ)ので劣化でよい。</b>
+    /// </para>
     /// </remarks>
     internal bool Start()
     {
@@ -300,7 +311,13 @@ internal sealed class SingleInstanceServer : IDisposable
 
     private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        string? wire = await ReadLineAsync(pipe, ct).ConfigureAwait(false);
+        // 行フレーミングの実装は送受で共有する(<see cref="SingleInstanceWire"/>)。
+        // 読み込みループには順序依存の非自明な不変条件があり、2 か所に置くと
+        // 片方だけ直される / 壊される —— 理由と <c>ConfigureAwait(false)</c> の根拠は
+        // あちらの remarks が正。
+        string? wire = await SingleInstanceWire
+            .ReadLineAsync(pipe, MaxRequestBytes, ct)
+            .ConfigureAwait(false);
         if (SingleInstanceRequest.TryParse(wire) is null)
         {
             // ACK を返さずに切る。前面化もしない。
@@ -325,34 +342,6 @@ internal sealed class SingleInstanceServer : IDisposable
         // 相手は既に読んでおり、そもそも Flush の必要が無い(CreatePipe のコメント参照)。
         byte[] ack = Encoding.UTF8.GetBytes(SingleInstanceRequest.Ack + "\n");
         await pipe.WriteAsync(ack, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// 改行までを読む。<see cref="MaxRequestBytes"/> を超えたら <c>null</c>(=不正)。
-    /// <c>StreamReader</c> を使わないのは、上限を自分で決めるため。
-    /// </summary>
-    /// <remarks>
-    /// <b><c>ConfigureAwait(false)</c> を外してはならない</b>。本クラスの待受ループは
-    /// UI スレッドから <c>GetAwaiter().GetResult()</c> で待ち合わせられうる経路に繋がる。
-    /// 1 か所でも同期コンテキストへ戻すと、そこでデッドロックする(実測で追認済み)。
-    /// </remarks>
-    private static async Task<string?> ReadLineAsync(Stream stream, CancellationToken ct)
-    {
-        byte[] buffer = new byte[MaxRequestBytes];
-        int total = 0;
-        while (total < buffer.Length)
-        {
-            int read = await stream
-                .ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct)
-                .ConfigureAwait(false);
-            if (read == 0)
-                break; // 相手が閉じた
-            int newline = Array.IndexOf(buffer, (byte)'\n', 0, total + read);
-            total += read;
-            if (newline >= 0)
-                return Encoding.UTF8.GetString(buffer, 0, newline);
-        }
-        return null;
     }
 
     /// <summary>
