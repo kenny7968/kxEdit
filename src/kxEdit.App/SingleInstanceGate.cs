@@ -121,7 +121,7 @@ internal sealed class SingleInstanceGate : IDisposable
         }
 
         // 終了中レース(設計 §4): 既存インスタンスが終了処理の途中で、Mutex はまだ
-        // 保持しているがパイプは閉じていた可能性がある。<b>1 回だけ</b>取り直す。
+        // 保持しているがパイプは閉じていた可能性がある。【1 回だけ】取り直す。
         // これが無いと、kxEdit を閉じた直後の再起動が「応答しません」エラーになる。
         // 繰り返さないのは、本当にハングしている相手に対して起動が期限の倍数だけ
         // 待たされるのを避けるため —— 待たせるくらいなら D4 のエラーを早く出す。
@@ -157,7 +157,12 @@ internal sealed class SingleInstanceGate : IDisposable
         {
             mutex = new Mutex(initiallyOwned: true, mutexName, out createdNew);
         }
-        // 【名前付きオブジェクトの作成は 3 通りの失敗をする。どれも投げてはならない】
+        // 【名前付き Mutex の作成が投げうるのは次の 3 系統。どれも投げ返してはならない】
+        // 根拠: 引数検証(ArgumentException 系)を除くと、new Mutex の失敗はすべて
+        // Win32 エラーコードを Win32Marshal.GetExceptionForWin32Error が写したものになる。
+        // その写像の行き先が UnauthorizedAccessException(ERROR_ACCESS_DENIED)・
+        // WaitHandleCannotBeOpenedException(ERROR_INVALID_HANDLE = 同名が別種の
+        // カーネルオブジェクト)・IOException(それ以外の Win32 エラーの既定の行き先)の 3 つ。
         //  - UnauthorizedAccessException: 昇格の順序(設計 §7 受容リスク)。同一ユーザーが
         //    管理者として先に起動していると名前は一致するが、高 IL プロセスが作った
         //    オブジェクトへの MUTEX_ALL_ACCESS 要求が中 IL から拒否される。
@@ -166,8 +171,9 @@ internal sealed class SingleInstanceGate : IDisposable
         //  - IOException: 上記以外の Win32 エラー。
         // ここを捕まえないと、D4 のエラーダイアログを出す前に起動時例外で落ち、
         // ゲート自身が「必ず理由を伝えて終了する」という不変条件を破る。
-        // ArgumentException 系は<b>意図的に捕まえない</b> —— 名前は
-        // SingleInstanceNames が組み立てるので、不正名は実装のバグであり握り潰さない。
+        // 【ArgumentException 系は意図的に捕まえない】名前は SingleInstanceNames が
+        // 組み立てるので、不正名が来るのは実装のバグである。握り潰すと、名前がドリフトして
+        // 排他が丸ごと効かなくなった状態が「正常起動」に見えてしまう。
         catch (Exception ex)
             when (ex
                     is UnauthorizedAccessException
@@ -190,6 +196,14 @@ internal sealed class SingleInstanceGate : IDisposable
         // 待受は MainForm 構築より前に始める(設計 §4「起動中レース」)。
         // 作れなくても起動は止めない ——「待受なしの 1 つ目」に劣化するだけで、
         // Mutex は握ったままにする(手放すと 2 つ目が黙って並走する)。
+        //
+        // 【ここに try/finally が無いのは SingleInstanceServer.Start() が例外を出さないから】
+        // Mutex を作ってからゲートへ格納するまでの間で投げるものがあると、その Mutex は
+        // どこからも Dispose されない。Start() は「失敗しても起動は止めない」ために
+        // 全例外を飲む実装で、Dispose も同様に飲む —— この 2 つに寄りかかっている。
+        // 将来 Start() が throw するように変わると、ここはハンドルのリークではなく
+        // 【起動時クラッシュ】という重い形で壊れる(ゲートの不変条件が破れる)。
+        // 変えるときは、ここに try/finally を入れてから変えること。
         var server = new SingleInstanceServer(pipeName, onActivate);
         if (!server.Start())
         {

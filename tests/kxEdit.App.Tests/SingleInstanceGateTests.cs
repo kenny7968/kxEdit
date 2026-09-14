@@ -14,8 +14,11 @@ namespace kxEdit.App.Tests;
 /// <para>
 /// 引き渡し(<c>handOff</c>)は<b>注入できる</b>ので、4 状態の写像・終了中レースは
 /// タイミングに頼らず決定論的に固定する。逆に、注入で置き換えると
-/// 「既定の束縛が期限を正しく渡しているか」が検証できなくなるため、
-/// <c>UsesConnectTimeout</c> / <c>UsesAckTimeout</c> の 2 本だけは既定の束縛を通す。
+/// 「既定の束縛が期限を正しく渡しているか」が検証できなくなるため、次の 3 本だけは
+/// 既定の束縛(実パイプ)を通す:
+/// <c>Acquire_SecondCall_HandsOffToFirst</c> /
+/// <c>Acquire_WhenMutexHeldButNobodyListens_ReportsNoResponse</c> /
+/// <c>Acquire_WhenPeerAcceptsButNeverAnswers_ReportsNoResponse_WithinAckTimeout</c>。
 /// </para>
 /// </summary>
 public class SingleInstanceGateTests
@@ -296,6 +299,38 @@ public class SingleInstanceGateTests
     }
 
     [Fact]
+    public void Acquire_DoesNotRetryMutex_WhenPeerIsForeign()
+    {
+        // 相手は正常に動いている別ビルド。たとえ直後に Mutex が空いても 1 つ目にはならない。
+        // ForeignPeer の early return を消して再試行経路へ流す変異は、
+        // 「別ビルドと自分が黙って並走する」= 本機能が塞ごうとしている状態そのものを作る。
+        // #6(ForeignPeer の写像)は Mutex を握ったままなので再試行が空振りし、
+        // この変異を検出できない —— 名前を空けて初めて分岐が観測できる。
+        var held = new Mutex(initiallyOwned: true, _mutexName, out bool createdNew);
+        Assert.True(createdNew);
+        try
+        {
+            var (outcome, gate) = Acquire(
+                onActivate: MustNotActivate,
+                handOff: _ =>
+                {
+                    // ハンドルごと閉じて名前を空ける。ReleaseMutex だけでは
+                    // 名前付きオブジェクトが残り、取り直しは元々失敗する。
+                    held.ReleaseMutex();
+                    held.Dispose();
+                    return HandoffResult.ForeignPeer;
+                }
+            );
+            Assert.Equal(SingleInstanceOutcome.ForeignPeer, outcome);
+            Assert.Null(gate);
+        }
+        finally
+        {
+            held.Dispose();
+        }
+    }
+
+    [Fact]
     public void Acquire_WhenMutexAccessIsDenied_ReportsNoResponse_WithoutThrowing()
     {
         // 昇格の順序(設計 §7 受容リスク)の代理再現。実際は高 IL プロセスが作った
@@ -361,8 +396,17 @@ public class SingleInstanceGateTests
             Assert.NotNull(gate);
 
             // 排他が効いていること(取り直せない = ゲートが握っている)。
+            // 【GC を先に回すのが要点】到達不能になった名前付き Mutex はファイナライザが
+            // ハンドルを閉じて OS に解放させる(実測)。回さないと、「ゲートが Mutex を
+            // 保持しない」変異でも GC のタイミング次第で probe が createdNew=false になり、
+            // 変異が擦り抜ける。回してから見れば、緑の理由が「ゲートが握っているから」に
+            // 一意に決まる。
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect(); // ファイナライザが解放したオブジェクトを回収する 2 回目
             using var probe = new Mutex(initiallyOwned: true, _mutexName, out bool createdNew);
             Assert.False(createdNew);
+            GC.KeepAlive(gate);
         }
     }
 

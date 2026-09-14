@@ -117,6 +117,13 @@ internal sealed class SingleInstanceServer : IDisposable
     /// 待ち受けを開始する。<b>失敗しても起動は止めない</b>(呼び出し側は <c>false</c> を
     /// 受けても通常起動を続ける)。名前を先回りされた場合がここに来る。
     /// </summary>
+    /// <remarks>
+    /// <b>本メソッドは例外を投げない</b>(失敗は <c>false</c> で返す)。これは実装の都合では
+    /// なく契約である —— <see cref="SingleInstanceGate"/> は Mutex を取ってから本メソッドを
+    /// 呼び、戻り値を見てゲートを組み立てる間に <c>try</c>/<c>finally</c> を置いていない。
+    /// ここが throw するようになると、Mutex ハンドルのリークではなく
+    /// <b>起動時クラッシュ</b>(= ゲートが D4 のエラーを出せずに落ちる)という重い形で壊れる。
+    /// </remarks>
     internal bool Start()
     {
         NamedPipeServerStream pipe;
