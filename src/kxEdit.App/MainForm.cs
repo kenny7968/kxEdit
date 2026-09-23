@@ -1186,22 +1186,37 @@ public sealed partial class MainForm : Form
 
         // モード（マークダウンプレビュー / CSVモード）。CSV 操作系はメニューに出さず
         // キー専用（CsvCommands・キー一覧は将来のヘルプに記載する）。
+        // 2026-09-23 設計書: ショートカットは ShortcutKeys に登録する＝キーとメニュークリックが
+        // 同一ハンドラになり、2 つの動線で挙動がズレない。Ctrl+Shift+J は既存の
+        // 「折り返し整形（禁則処理）」が使用中のため、プレビューは Ctrl+Shift+M（Markdown の M）。
         var mode = new ToolStripMenuItem("モード(&M)");
         var mdPreview = new ToolStripMenuItem(
             "マークダウンプレビュー(&P)",
             null,
             (_, _) => ShowMarkdownPreview()
-        );
+        )
+        {
+            ShortcutKeys = Keys.Control | Keys.Shift | Keys.M,
+        };
         mode.DropDownItems.Add(mdPreview);
         mode.DropDownItems.Add(new ToolStripSeparator());
-        var csvToggle = new ToolStripMenuItem("CSVモード(&C)", null, (_, _) => _csv.ToggleMode());
-        mode.DropDownItems.Add(csvToggle);
+        // 進入専用（EnterMode）。再選択でモードを解除しない＝終了は Esc に一本化した
+        // （2026-09-23 設計書の意図的な挙動変更 1 件目）。Checked は状態の提示として残す。
+        var csvEnter = new ToolStripMenuItem("CSVモード(&C)", null, (_, _) => _csv.EnterMode())
+        {
+            ShortcutKeys = Keys.Control | Keys.Shift | Keys.K,
+        };
+        mode.DropDownItems.Add(csvEnter);
         // 開く度に活性状態を更新（プレビューはアクティブタブがあれば拡張子を問わず有効、
-        // CSVトグルは現在のモードを Checked で表示）。
+        // CSVモードは現在のモードを Checked で表示）。
+        // CSVモード中にプレビュー項目を Enabled=false にはしない: 無効な ToolStripMenuItem は
+        // ShortcutKeys が発火せず、Enabled の更新は DropDownOpening でしか走らないため
+        // 「モード中にメニューを開く → Esc で抜ける → Ctrl+Shift+M が黙って死ぬ」が起きる。
+        // CSVモード判定は ShowMarkdownPreview 側のガードで行う（2026-09-23 設計書）。
         mode.DropDownOpening += (_, _) =>
         {
             mdPreview.Enabled = _docs.Active is not null;
-            csvToggle.Checked = _docs.Active?.State.CsvMode == true;
+            csvEnter.Checked = _docs.Active?.State.CsvMode == true;
         };
 
         var options = new ToolStripMenuItem("オプション(&O)");
@@ -1771,6 +1786,13 @@ public sealed partial class MainForm : Form
     {
         var doc = _docs.Active;
         if (doc is null)
+            return;
+
+        // 2026-09-23 設計書（意図的な挙動変更 2 件目）: CSVモード中はプレビューを開かない。
+        // CSV として読んでいる本文をマークダウンとして描く意味が薄く、「モード中は今のモードに
+        // 留まる」という規則に揃える。発声もしない（要件どおり無反応）。キー・メニューの
+        // どちらもこのハンドラを通るので、判定はここ 1 箇所で足りる。
+        if (doc.State.CsvMode)
             return;
 
         // M-23: cap 超過は SnapshotText を呼ぶ前に弾く。全文 string 化してから Render 内で

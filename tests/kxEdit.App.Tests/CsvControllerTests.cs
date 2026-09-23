@@ -292,6 +292,92 @@ public class CsvControllerTests
             Assert.Empty(host.Announcer.Said);
         });
 
+    // ===== EnterMode(Ctrl+Shift+K / モードメニュー用の進入専用 API・トグルしない) =====
+
+    [Fact]
+    public void EnterMode_FromNormal_EntersMode_AnnouncesModeOnWithCell() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3);
+
+            host.Csv.EnterMode();
+
+            Assert.True(doc.State.CsvMode);
+            Assert.True(doc.Editor.ReadOnly);
+            Assert.False(doc.Editor.RaiseUiaSelectionEvents); // モード遷移中の生読み抑止
+            Assert.Equal(
+                CsvAnnounceFormatter.ModeOn + " " + CsvAnnounceFormatter.Cell("a1", 1, 1),
+                host.Announcer.Said[^1]
+            );
+        });
+
+    // 既にモード中なら「現在CSVモードです」だけを発声し、モードは落とさない(=トグルしない)。
+    // CLAUDE.md §4-B: no-change のテストは既定値と区別するため非既定位置から始める
+    // => EnterAt22 でセル (2,2)・モード ON・ReadOnly ON の非既定状態を作ってから検証する。
+    [Fact]
+    public void EnterMode_WhenAlreadyInMode_AnnouncesModeAlreadyOn_KeepsMode() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = EnterAt22(host); // モード ON・(2,2)・通知履歴クリア済み
+            Assert.True(doc.State.CsvMode); // 前提(guard の発火条件)を固定
+
+            host.Csv.EnterMode();
+
+            Assert.True(doc.State.CsvMode); // モードが落ちていない
+            Assert.True(doc.Editor.ReadOnly); // 通常編集へ戻っていない
+            Assert.False(doc.Editor.RaiseUiaSelectionEvents);
+            Assert.Equal(2, doc.State.CsvRow); // セル位置も動かない
+            Assert.Equal(2, doc.State.CsvCol);
+            Assert.Single(host.Announcer.Said); // ModeOff / Cell 等を余計に言わない
+            Assert.Equal(CsvAnnounceFormatter.ModeAlreadyOn, host.Announcer.Said[^1]);
+        });
+
+    [Fact]
+    public void EnterMode_NoActiveDoc_IsNoOp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // Docs.CreateNew を呼ばない(Active=null)
+            host.Csv.EnterMode();
+
+            Assert.Empty(host.Announcer.Said); // 通知も発火しない
+        });
+
+    // F2 編集中は進入も発声もしない(ToggleMode / ExitMode の既存ガードと揃える)。
+    [Fact]
+    public void EnterMode_WhileEditing_IsNoOp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3);
+            host.Csv.TryEnterMode(doc);
+            host.Csv.BeginEdit();
+            Assert.True(host.Csv.IsEditing); // 前提(guard の発火条件)を固定
+            host.Announcer.Said.Clear();
+
+            host.Csv.EnterMode();
+
+            Assert.True(doc.State.CsvMode);
+            Assert.True(host.Csv.IsEditing); // 編集も巻き込んで落としていない
+            Assert.Empty(host.Announcer.Said); // ModeAlreadyOn も言わない
+        });
+
+    // 解析不能な本文では進入せず ParseError のみ(TryEnterMode の既存挙動をそのまま通す)。
+    [Fact]
+    public void EnterMode_UnparseableCsv_AnnouncesParseError_DoesNotEnter() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc("a1,\"b1\na2,b2"); // 引用符未終端 => Ok=false
+
+            host.Csv.EnterMode();
+
+            Assert.False(doc.State.CsvMode);
+            Assert.Equal(CsvAnnounceFormatter.ParseError, host.Announcer.Said[^1]);
+        });
+
     // ===== ToggleMode(進入方向) =====
 
     [Fact]
