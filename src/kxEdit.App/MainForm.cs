@@ -1042,7 +1042,7 @@ public sealed partial class MainForm : Form
             case Keys.Control | Keys.G:
                 GoToLine();
                 return true;
-            case Keys.Control | Keys.Shift | Keys.K:
+            case Keys.Control | Keys.Shift | Keys.I:
                 // 進入専用。モード中は「現在CSVモードです」を発声するだけでトグルしない
                 // （終了は Esc = CsvCommands.ByKey の ExitMode）。メニュー項目は従来どおりトグルする
                 // ので、こちらは ShortcutKeys ではなく ProcessCmdKey で処理する（最終レビュー I-2）。
@@ -1193,11 +1193,11 @@ public sealed partial class MainForm : Form
         // モード（マークダウンプレビュー / CSVモード）。CSV 操作系はメニューに出さず
         // キー専用（CsvCommands・キー一覧は将来のヘルプに記載する）。
         // 2026-09-23 設計書 + 最終レビュー I-2: 2 項目でキーの登録方式が分かれる。
-        // - マークダウンプレビュー = ShortcutKeys（Ctrl+Shift+M）。OFF 状態を持たない単発コマンドで、
+        // - マークダウンプレビュー = ShortcutKeys（Ctrl+Shift+U）。OFF 状態を持たない単発コマンドで、
         //   CSVモード中の挙動（BlockedInCsvMode の発声）もキーとメニュークリックで同一であるべきなので、
         //   同一ハンドラを通す ShortcutKeys が正しい。Ctrl+Shift+J は既存の「折り返し整形（禁則処理）」が
-        //   使用中のため M（Markdown の M）にした。
-        // - CSVモード = ShortcutKeyDisplayString で表示のみ + キーは ProcessCmdKey（Ctrl+Shift+K）。
+        //   使用中。当初の Ctrl+Shift+M / K は他のショートカットと衝突したため U / I へ変更した。
+        // - CSVモード = ShortcutKeyDisplayString で表示のみ + キーは ProcessCmdKey（Ctrl+Shift+I）。
         //   メニューはトグル（再選択で OFF）だがキーは進入専用という非対称な要件で、ShortcutKeys は
         //   メニュー項目の Click を起こすため両立できない。表示専用にする既存パターンは
         //   F3 / Shift+F3 / Ctrl+G / Ctrl+Alt+P と同じ（二重発火の回避）。
@@ -1208,11 +1208,11 @@ public sealed partial class MainForm : Form
             (_, _) => ShowMarkdownPreview()
         )
         {
-            ShortcutKeys = Keys.Control | Keys.Shift | Keys.M,
+            ShortcutKeys = Keys.Control | Keys.Shift | Keys.U,
         };
         mode.DropDownItems.Add(mdPreview);
         mode.DropDownItems.Add(new ToolStripSeparator());
-        // 進入は Ctrl+Shift+K（ProcessCmdKey）、メニューの再選択は従来どおりトグル（OFF も可）。
+        // 進入は Ctrl+Shift+I（ProcessCmdKey）、メニューの再選択は従来どおりトグル（OFF も可）。
         // 最終レビュー I-2: CSVモードの視覚的表示はこのチェックマークだけで、Esc は
         // ステータスバー・アプリ内ヘルプ・説明書のどこにも出ていない。メニューから OFF に
         // できなくすると晴眼・弱視ユーザーが出口を失う（CLAUDE.md §2）。
@@ -1220,14 +1220,14 @@ public sealed partial class MainForm : Form
         // ProcessCmdKey で EnterMode へ振る（F3 / Ctrl+G / Ctrl+Alt+P と同方式・二重発火の回避）。
         var csvToggle = new ToolStripMenuItem("CSVモード(&C)", null, (_, _) => _csv.ToggleMode())
         {
-            ShortcutKeyDisplayString = "Ctrl+Shift+K",
+            ShortcutKeyDisplayString = "Ctrl+Shift+I",
         };
         mode.DropDownItems.Add(csvToggle);
         // 開く度に活性状態を更新（プレビューはアクティブタブがあれば拡張子を問わず有効、
         // CSVモードは現在のモードを Checked で表示）。
         // CSVモード中にプレビュー項目を Enabled=false にはしない: 無効な ToolStripMenuItem は
         // ShortcutKeys が発火せず、Enabled の更新は DropDownOpening でしか走らないため
-        // 「モード中にメニューを開く → Esc で抜ける → Ctrl+Shift+M が黙って死ぬ」が起きる。
+        // 「モード中にメニューを開く → Esc で抜ける → Ctrl+Shift+U が黙って死ぬ」が起きる。
         // CSVモード判定は ShowMarkdownPreview 側のガードで行う（2026-09-23 設計書）。
         mode.DropDownOpening += (_, _) =>
         {
