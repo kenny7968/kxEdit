@@ -89,6 +89,8 @@ public class MainFormPreviewStructureTests
 
     /// <summary>
     /// 2026-09-23 設計書: CSVモード中はプレビューを開かない(キー・メニューとも)。
+    /// 抑止時は <c>CsvAnnounceFormatter.BlockedInCsvMode</c> を発声する(最終レビュー I-1)。
+    /// ここで固定するのは「開かないこと」と「判定の位置」だけで、発声の文言は対象外。
     /// <para>
     /// <b>なぜ挙動テストで代替できないか</b>: ガードが効いていれば即座に return するが、
     /// <b>ガードが消えた退行では <c>ShowDialog</c>(WebView2 実体)やその初期化失敗の
@@ -98,7 +100,7 @@ public class MainFormPreviewStructureTests
     /// <para>
     /// 位置も同時に固定する: CSVモード判定は <c>ExceedsMaxChars</c> / <c>SnapshotText</c> より
     /// <b>前</b>。後ろへ移ると 4M 文字超の CSV で「大きすぎます」ダイアログが先に出てしまい、
-    /// 「CSVモード中は無反応」という要件が崩れる。
+    /// 「CSVモード中はプレビューを開かず理由だけを発声する」という要件が崩れる。
     /// </para>
     /// </summary>
     [Fact]

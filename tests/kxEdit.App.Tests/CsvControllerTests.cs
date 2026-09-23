@@ -180,7 +180,7 @@ public class CsvControllerTests
             Assert.Equal(1, doc.State.CsvCol); // 0 始まり=2 列目
         });
 
-    // ===== ExitMode(ToggleMode 経由・外部 API は ToggleMode のみ) =====
+    // ===== 終了方向(ToggleMode 経由・モードメニューの再選択に相当) =====
 
     [Fact]
     public void ToggleMode_FromOn_ExitsMode_RestoresReadWriteAndUia_AnnouncesModeOff() =>
@@ -292,7 +292,7 @@ public class CsvControllerTests
             Assert.Empty(host.Announcer.Said);
         });
 
-    // ===== EnterMode(Ctrl+Shift+K / モードメニュー用の進入専用 API・トグルしない) =====
+    // ===== EnterMode(Ctrl+Shift+K 用の進入専用 API・トグルしない) =====
 
     [Fact]
     public void EnterMode_FromNormal_EntersMode_AnnouncesModeOnWithCell() =>
