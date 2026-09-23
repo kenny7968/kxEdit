@@ -292,7 +292,7 @@ public class CsvControllerTests
             Assert.Empty(host.Announcer.Said);
         });
 
-    // ===== EnterMode(Ctrl+Shift+K 用の進入専用 API・トグルしない) =====
+    // ===== EnterMode(Ctrl+Shift+I 用の進入専用 API・トグルしない) =====
 
     [Fact]
     public void EnterMode_FromNormal_EntersMode_AnnouncesModeOnWithCell() =>

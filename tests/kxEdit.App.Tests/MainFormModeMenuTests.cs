@@ -6,7 +6,7 @@ namespace kxEdit.App.Tests;
 
 /// <summary>
 /// モードメニュー(モード(&amp;M))のショートカットキー配線(2026-09-23 設計書 + 最終レビュー I-2)。
-/// マークダウンプレビュー = Ctrl+Shift+M / CSVモード = Ctrl+Shift+K。
+/// マークダウンプレビュー = Ctrl+Shift+U / CSVモード = Ctrl+Shift+I。
 /// <para>
 /// <b>2 項目で登録方式が違う</b>: プレビューは <c>ShortcutKeys</c>(キーとメニュークリックが
 /// 同一ハンドラ)。CSVモードは<b>メニューはトグル・キーは進入専用</b>という非対称な要件のため
@@ -87,7 +87,7 @@ public class MainFormModeMenuTests
         Keys.Shift | Keys.F3,
         Keys.Control | Keys.Alt | Keys.P,
         Keys.Control | Keys.G,
-        Keys.Control | Keys.Shift | Keys.K,
+        Keys.Control | Keys.Shift | Keys.I,
         Keys.Insert,
         Keys.Control | Keys.D1,
         Keys.Control | Keys.D2,
@@ -111,13 +111,13 @@ public class MainFormModeMenuTests
             using var form = ShowMainForm(tmp);
 
             Assert.Equal(
-                Keys.Control | Keys.Shift | Keys.M,
+                Keys.Control | Keys.Shift | Keys.U,
                 ItemOf(form, "マークダウンプレビュー(&P)").ShortcutKeys
             );
 
             var csvItem = ItemOf(form, "CSVモード(&C)");
             Assert.Equal(Keys.None, csvItem.ShortcutKeys);
-            Assert.Equal("Ctrl+Shift+K", csvItem.ShortcutKeyDisplayString);
+            Assert.Equal("Ctrl+Shift+I", csvItem.ShortcutKeyDisplayString);
         });
 
     // 陽性対照: 既存の Ctrl+Shift+J(折り返し整形)を奪っていないこと。
@@ -148,7 +148,7 @@ public class MainFormModeMenuTests
                 .ToList();
 
             // 陽性対照: 走査が空だと「重複なし」が空虚に緑になる。
-            Assert.Contains(Keys.Control | Keys.Shift | Keys.M, shortcuts);
+            Assert.Contains(Keys.Control | Keys.Shift | Keys.U, shortcuts);
             Assert.Equal(shortcuts.Count, shortcuts.Distinct().Count());
         });
 
@@ -166,7 +166,7 @@ public class MainFormModeMenuTests
 
             // 陽性対照: 走査が空／表が空だと「衝突なし」が空虚に緑になる。
             Assert.NotEmpty(shortcuts);
-            Assert.Contains(Keys.Control | Keys.Shift | Keys.K, OwnedByProcessCmdKey);
+            Assert.Contains(Keys.Control | Keys.Shift | Keys.I, OwnedByProcessCmdKey);
 
             Assert.Empty(shortcuts.Intersect(OwnedByProcessCmdKey));
         });
@@ -193,20 +193,20 @@ public class MainFormModeMenuTests
             Assert.Equal(CsvAnnounceFormatter.ModeOff, form.LastAnnouncementForTest);
         });
 
-    // キー Ctrl+Shift+K は ProcessCmdKey 経由で EnterMode(進入専用)へ繋がる。
+    // キー Ctrl+Shift+I は ProcessCmdKey 経由で EnterMode(進入専用)へ繋がる。
     // メニューと違いトグルしない = 2 回目は ModeAlreadyOn を言うだけでモードが落ちないこと。
     // 非既定状態(モード ON)から 2 回目を撃つので、既定値との区別が付く(CLAUDE.md §4-B)。
     [Fact]
-    public void Ctrl_shift_k_enters_csv_mode_and_does_not_toggle_off() =>
+    public void Ctrl_shift_i_enters_csv_mode_and_does_not_toggle_off() =>
         Sta.Run(() =>
         {
             using var tmp = new TempDir();
             using var form = ShowMainForm(tmp);
 
-            SendCmdKey(form, Keys.Control | Keys.Shift | Keys.K); // 1 回目: 進入
+            SendCmdKey(form, Keys.Control | Keys.Shift | Keys.I); // 1 回目: 進入
             Assert.Equal(CsvAnnounceFormatter.ModeOn, form.LastAnnouncementForTest);
 
-            SendCmdKey(form, Keys.Control | Keys.Shift | Keys.K); // 2 回目: トグルしない
+            SendCmdKey(form, Keys.Control | Keys.Shift | Keys.I); // 2 回目: トグルしない
 
             // ToggleMode 配線への退行なら ModeOff になり、モードも落ちる。
             Assert.Equal(CsvAnnounceFormatter.ModeAlreadyOn, form.LastAnnouncementForTest);

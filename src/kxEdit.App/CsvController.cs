@@ -55,7 +55,7 @@ public sealed class CsvController : IDisposable
     }
 
     /// <summary>
-    /// CSVモードへ入る（Ctrl+Shift+K = MainForm.ProcessCmdKey）。既にモード中なら
+    /// CSVモードへ入る（Ctrl+Shift+I =MainForm.ProcessCmdKey）。既にモード中なら
     /// <see cref="CsvAnnounceFormatter.ModeAlreadyOn"/> を発声するだけで<b>トグルしない</b>
     /// （終了は Esc = <see cref="ExitMode()"/> に一本化。2026-09-23 設計書）。
     /// アクティブ文書なし・F2 編集中は何もしない（冪等・発声もしない）。
