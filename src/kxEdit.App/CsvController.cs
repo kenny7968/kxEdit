@@ -55,6 +55,30 @@ public sealed class CsvController : IDisposable
     }
 
     /// <summary>
+    /// CSVモードへ入る（Ctrl+Shift+K = MainForm.ProcessCmdKey）。既にモード中なら
+    /// <see cref="CsvAnnounceFormatter.ModeAlreadyOn"/> を発声するだけで<b>トグルしない</b>
+    /// （終了は Esc = <see cref="ExitMode()"/> に一本化。2026-09-23 設計書）。
+    /// アクティブ文書なし・F2 編集中は何もしない（冪等・発声もしない）。
+    /// <para>
+    /// <c>ToggleMode()</c> を流用せず進入専用の公開 API を分けてあるのは、
+    /// <see cref="ExitMode()"/> と同じ理由——「このキーは入る専用」という意図を
+    /// コードに残し、呼出側の取り違えをコンパイル時に見えるようにするため。
+    /// </para>
+    /// </summary>
+    public void EnterMode()
+    {
+        var doc = _docs.Active;
+        if (doc is null || _editor.IsEditing)
+            return;
+        if (doc.State.CsvMode)
+        {
+            _announcer.Say(CsvAnnounceFormatter.ModeAlreadyOn);
+            return;
+        }
+        TryEnterMode(doc); // 解析不可なら TryEnterMode が ParseError を通知して通常モードのまま
+    }
+
+    /// <summary>
     /// CSVモードへ入る（手動トグルと .csv 自動モードの共通経路）。解析不可なら通知して false を返し、
     /// 通常モードのまま残す。読取専用化・UIA 抑止・シンク退避・初期セル確定・読み上げは従来の ON 側と同一。
     /// </summary>

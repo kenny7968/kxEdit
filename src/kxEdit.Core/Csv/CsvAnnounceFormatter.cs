@@ -59,6 +59,12 @@ public static class CsvAnnounceFormatter
     /// <summary>CSV モードをオフにしたときの読み上げ。</summary>
     public const string ModeOff = "CSVモード オフ";
 
+    /// <summary>既に CSVモード中に CSVモード進入のショートカットを押したときの読み上げ。
+    /// モードはトグルせず「今どのモードにいるか」だけを伝える（2026-09-23 設計書。終了は Esc）。
+    /// <para>具体的なキー名は書かない —— この層は App のキーバインドを知らないので、
+    /// キーを変えたときに黙って陳腐化する（最終レビュー M-4）。</para></summary>
+    public const string ModeAlreadyOn = "現在CSVモードです";
+
     /// <summary>オープン時に CSV として解析できず、テキストとして開いたときの読み上げ。</summary>
     public const string OpenParseFailed = "CSVとして解析できませんでした。テキストとして開きます";
 

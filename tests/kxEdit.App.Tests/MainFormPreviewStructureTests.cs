@@ -86,4 +86,44 @@ public class MainFormPreviewStructureTests
         Assert.True(textLength < snapshot, "TextLength は SnapshotText より前で読むこと");
         Assert.True(exceeds < snapshot, "ExceedsMaxChars は SnapshotText より前で判定すること");
     }
+
+    /// <summary>
+    /// 2026-09-23 設計書: CSVモード中はプレビューを開かない(キー・メニューとも)。
+    /// 抑止時は <c>CsvAnnounceFormatter.BlockedInCsvMode</c> を発声する(最終レビュー I-1)。
+    /// ここで固定するのは「開かないこと」と「判定の位置」だけで、発声の文言は対象外。
+    /// <para>
+    /// <b>なぜ挙動テストで代替できないか</b>: ガードが効いていれば即座に return するが、
+    /// <b>ガードが消えた退行では <c>ShowDialog</c>(WebView2 実体)やその初期化失敗の
+    /// <c>MessageBox</c> に入り、テストは「落ちる」のではなく「固まる」</b>。
+    /// CI を無限に止める網は網にならないので、構造(IL)で固定する。
+    /// </para>
+    /// <para>
+    /// 位置も同時に固定する: CSVモード判定は <c>ExceedsMaxChars</c> / <c>SnapshotText</c> より
+    /// <b>前</b>。後ろへ移ると 4M 文字超の CSV で「大きすぎます」ダイアログが先に出てしまい、
+    /// 「CSVモード中はプレビューを開かず理由だけを発声する」という要件が崩れる。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ShowMarkdownPreview_BailsOutInCsvMode_BeforeAnyWork()
+    {
+        var callees = IlCallees.Of(ShowMarkdownPreview());
+
+        int csvMode = callees.FindIndex(m =>
+            m.DeclaringType == typeof(DocumentState) && m.Name == "get_CsvMode"
+        );
+        int exceeds = callees.FindIndex(m =>
+            m.DeclaringType == typeof(MarkdownRenderer)
+            && m.Name == nameof(MarkdownRenderer.ExceedsMaxChars)
+        );
+        int snapshot = callees.FindIndex(m => m.Name == "get_SnapshotText");
+
+        // 陽性対照: 3 つとも実在すること。FindIndex は見つからないと -1 を返すので、
+        // 比較だけだと片方が消えた状態が「-1 < n」で空虚に緑になる。
+        Assert.True(csvMode >= 0, "CSVモードの判定が見つからない");
+        Assert.True(exceeds >= 0, "ExceedsMaxChars の呼出が見つからない");
+        Assert.True(snapshot >= 0, "SnapshotText の取得が見つからない");
+
+        Assert.True(csvMode < exceeds, "CSVモード判定は上限判定より前で行うこと");
+        Assert.True(csvMode < snapshot, "CSVモード判定は SnapshotText より前で行うこと");
+    }
 }
