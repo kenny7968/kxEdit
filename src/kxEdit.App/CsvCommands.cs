@@ -35,6 +35,9 @@ internal static class CsvCommands
             { Keys.Control | Keys.Right, c => c.MoveRowEnd() }, // 行末へ
             { Keys.Control | Keys.Home, c => c.MoveTopLeft() }, // 左上へ
             { Keys.Control | Keys.End, c => c.MoveBottomRight() }, // 右下へ
+            // モード終了（Esc は CSVモード中これまで無反応だったので、割り当てても既存挙動を奪わない。
+            // ExitMode は TryContext を通らないため解析不能な本文でも抜けられる＝脱出ハッチ）
+            { Keys.Escape, c => c.ExitMode() }, // CSVモードを終了
             // セル指定・編集
             { Keys.G, c => c.GoToCell() }, // セルへ移動
             { Keys.F2, c => c.BeginEdit() }, // セルを編集

@@ -225,6 +225,73 @@ public class CsvControllerTests
             Assert.Empty(host.Announcer.Said); // 通知も発火しない
         });
 
+    // ===== ExitMode(Esc 用の終了専用 API) =====
+
+    [Fact]
+    public void ExitMode_FromOn_ExitsMode_RestoresReadWriteAndUia_AnnouncesModeOff() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3);
+            host.Csv.TryEnterMode(doc);
+            host.Announcer.Said.Clear();
+
+            host.Csv.ExitMode();
+
+            Assert.False(doc.State.CsvMode);
+            Assert.False(doc.Editor.ReadOnly);
+            Assert.True(doc.Editor.RaiseUiaSelectionEvents); // 通常編集の SR 挙動に戻す
+            Assert.Equal(CsvAnnounceFormatter.ModeOff, host.Announcer.Said[^1]);
+        });
+
+    // モード外で呼んでも ReadOnly を落とさない(ExitMode が通常編集の状態を触らない)。
+    // 既定値と区別するため、あえて読取専用にした非既定状態から検証する。
+    [Fact]
+    public void ExitMode_WhenNotInCsvMode_IsNoOp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3); // CSV モードには入らない
+            doc.Editor.ReadOnly = true;
+            host.Announcer.Said.Clear();
+
+            host.Csv.ExitMode();
+
+            Assert.False(doc.State.CsvMode);
+            Assert.True(doc.Editor.ReadOnly); // 触っていない=モード終了処理が走っていない
+            Assert.Empty(host.Announcer.Said);
+        });
+
+    [Fact]
+    public void ExitMode_NoActiveDoc_IsNoOp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            // Docs.CreateNew を呼ばない(Active=null)
+            host.Csv.ExitMode();
+
+            Assert.Empty(host.Announcer.Said); // 通知も発火しない
+        });
+
+    // F2 編集中は終了しない(MainForm.ProcessCmdKey の IsEditing ガードに対する二重防御)。
+    [Fact]
+    public void ExitMode_WhileEditing_IsNoOp() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewCsvDoc(Grid3x3);
+            host.Csv.TryEnterMode(doc);
+            host.Csv.BeginEdit();
+            Assert.True(host.Csv.IsEditing); // 前提(guard の発火条件)を固定
+            host.Announcer.Said.Clear();
+
+            host.Csv.ExitMode();
+
+            Assert.True(doc.State.CsvMode);
+            Assert.True(host.Csv.IsEditing); // 編集も巻き込んで落としていない
+            Assert.Empty(host.Announcer.Said);
+        });
+
     // ===== ToggleMode(進入方向) =====
 
     [Fact]
@@ -1393,10 +1460,10 @@ public class CsvControllerTests
     // ===== CsvCommands.ByKey(素キー表=SR ユーザーの主要動線。キー→コマンドの対応固定) =====
 
     // kill 対象: 表エントリの追加/削除の黙殺(Theory 側は ByKey.Keys 列挙+default throw で自動追随)。
-    // 21 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ素キー 4+Ctrl+Home/End 2
-    //      +端ジャンプ別名 4(Ctrl+矢印)+G/F2+別名 2(Shift+Tab/Ctrl+G)。
+    // 22 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ素キー 4+Ctrl+Home/End 2
+    //      +端ジャンプ別名 4(Ctrl+矢印)+G/F2+別名 2(Shift+Tab/Ctrl+G)+モード終了 1(Esc)。
     [Fact]
-    public void ByKey_HasExactly21Entries() => Assert.Equal(21, CsvCommands.ByKey.Count);
+    public void ByKey_HasExactly22Entries() => Assert.Equal(22, CsvCommands.ByKey.Count);
 
     /// <summary>ByKey の全キーを列挙する(表にエントリが増えると Theory の default 分岐が落ちる=網羅の機械保証)。</summary>
     public static TheoryData<Keys> ByKeyAllKeys()
@@ -1408,8 +1475,8 @@ public class CsvControllerTests
     }
 
     // kill 対象: キー→delegate の取り違え全般(変異 B=Home↔End 入替など)。
-    // 全 21 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
-    // (到達セル/現在セル読み/見出し読み/Picker 移動/F2 編集開始)を assert する。
+    // 全 22 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
+    // (到達セル/現在セル読み/見出し読み/Picker 移動/F2 編集開始/モード終了)を assert する。
     // 隣接(Up/Down/Left/Right)と端ジャンプ(Home/End/PageUp/PageDown・Ctrl+矢印)は
     // 到達先が必ず異なる。Ctrl+矢印は Home/End/PageUp/PageDown の別名なので同じ case にまとめる。
     [Theory]
@@ -1485,6 +1552,12 @@ public class CsvControllerTests
                     break;
                 case Keys.F2:
                     Assert.True(host.Csv.IsEditing); // 後始末は Host.Dispose の AbortEdit
+                    break;
+                // モード終了(移動系と異なり State ではなくモードそのものが落ちる)
+                case Keys.Escape:
+                    Assert.False(doc.State.CsvMode);
+                    Assert.False(doc.Editor.ReadOnly); // 通常編集へ戻す
+                    Assert.Equal(CsvAnnounceFormatter.ModeOff, host.Announcer.Said[^1]);
                     break;
                 default:
                     throw new Xunit.Sdk.XunitException(
