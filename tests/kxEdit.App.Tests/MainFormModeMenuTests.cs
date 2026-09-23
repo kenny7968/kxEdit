@@ -85,7 +85,6 @@ public class MainFormModeMenuTests
         Keys.Control | Keys.Shift | Keys.Tab,
         Keys.F3,
         Keys.Shift | Keys.F3,
-        Keys.Control | Keys.Alt | Keys.P,
         Keys.Control | Keys.G,
         Keys.Control | Keys.Shift | Keys.I,
         Keys.Insert,
@@ -210,5 +209,21 @@ public class MainFormModeMenuTests
 
             // ToggleMode 配線への退行なら ModeOff になり、モードも落ちる。
             Assert.Equal(CsvAnnounceFormatter.ModeAlreadyOn, form.LastAnnouncementForTest);
+        });
+
+    // 2026-09-24 「読み上げ」メニュー廃止: 現在位置(Ctrl+Alt+P)は機能ごと削除した。
+    // ProcessCmdKey が食わない(false)= 位置読み上げの配線が残っていないこと。
+    [Fact]
+    public void Ctrl_alt_p_is_no_longer_handled() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(tmp);
+
+            var m = typeof(MainForm).GetMethod("ProcessCmdKey", Priv);
+            Assert.NotNull(m);
+            object?[] args = { default(Message), Keys.Control | Keys.Alt | Keys.P };
+
+            Assert.False((bool)m!.Invoke(form, args)!);
         });
 }

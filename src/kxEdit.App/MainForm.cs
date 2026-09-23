@@ -3,7 +3,6 @@ using kxEdit.App.Speech;
 using kxEdit.Core.Backup;
 using kxEdit.Core.Csv;
 using kxEdit.Core.IO;
-using kxEdit.Core.Reading;
 using kxEdit.Core.Search;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
@@ -1036,9 +1035,6 @@ public sealed partial class MainForm : Form
             case Keys.Shift | Keys.F3:
                 _search.FindPrev();
                 return true;
-            case Keys.Control | Keys.Alt | Keys.P:
-                AnnouncePosition();
-                return true;
             case Keys.Control | Keys.G:
                 GoToLine();
                 return true;
@@ -1174,17 +1170,11 @@ public sealed partial class MainForm : Form
             (_, _) => _grep.Open(),
             Keys.Control | Keys.Shift | Keys.F
         );
-
-        // 読み上げ（SR 照会）。キーは ProcessCmdKey で処理し、ここは表示のみ（二重発火回避・M3 同方式）。
-        var read = new ToolStripMenuItem("読み上げ(&R)");
-        read.DropDownItems.Add(
-            new ToolStripMenuItem("現在位置(&P)", null, (_, _) => AnnouncePosition())
-            {
-                ShortcutKeyDisplayString = "Ctrl+Alt+P",
-            }
-        );
-        read.DropDownItems.Add(
-            new ToolStripMenuItem("行へ移動(&G)...", null, (_, _) => GoToLine())
+        // 行へ移動（2026-09-24: 廃止した「読み上げ」メニューから移設。grep が &G を使うため &J）。
+        // キーは ProcessCmdKey で処理し、ここは表示のみ（二重発火回避・F3 と同方式）。
+        search.DropDownItems.Add(new ToolStripSeparator());
+        search.DropDownItems.Add(
+            new ToolStripMenuItem("行へ移動(&J)...", null, (_, _) => GoToLine())
             {
                 ShortcutKeyDisplayString = "Ctrl+G",
             }
@@ -1200,7 +1190,7 @@ public sealed partial class MainForm : Form
         // - CSVモード = ShortcutKeyDisplayString で表示のみ + キーは ProcessCmdKey（Ctrl+Shift+I）。
         //   メニューはトグル（再選択で OFF）だがキーは進入専用という非対称な要件で、ShortcutKeys は
         //   メニュー項目の Click を起こすため両立できない。表示専用にする既存パターンは
-        //   F3 / Shift+F3 / Ctrl+G / Ctrl+Alt+P と同じ（二重発火の回避）。
+        //   F3 / Shift+F3 / Ctrl+G と同じ（二重発火の回避）。
         var mode = new ToolStripMenuItem("モード(&M)");
         var mdPreview = new ToolStripMenuItem(
             "マークダウンプレビュー(&P)",
@@ -1217,7 +1207,7 @@ public sealed partial class MainForm : Form
         // ステータスバー・アプリ内ヘルプ・説明書のどこにも出ていない。メニューから OFF に
         // できなくすると晴眼・弱視ユーザーが出口を失う（CLAUDE.md §2）。
         // キーは進入専用（トグルしない）なので ShortcutKeys には登録せず表示だけにし、
-        // ProcessCmdKey で EnterMode へ振る（F3 / Ctrl+G / Ctrl+Alt+P と同方式・二重発火の回避）。
+        // ProcessCmdKey で EnterMode へ振る（F3 / Ctrl+G と同方式・二重発火の回避）。
         var csvToggle = new ToolStripMenuItem("CSVモード(&C)", null, (_, _) => _csv.ToggleMode())
         {
             ShortcutKeyDisplayString = "Ctrl+Shift+I",
@@ -1251,7 +1241,7 @@ public sealed partial class MainForm : Form
                 )
         );
 
-        menu.Items.AddRange(file, edit, search, read, mode, options, help);
+        menu.Items.AddRange(file, edit, search, mode, options, help);
         return menu;
     }
 
@@ -1740,21 +1730,7 @@ public sealed partial class MainForm : Form
         _announcer.Say(t.Kind == GrepJumpKind.Stale ? $"{where} 内容が変わっています" : where);
     }
 
-    // ==================== 読み上げ照会（SR 利便・M6） ====================
-
-    /// <summary>現在位置（行/総行/桁）を読み上げる。
-    /// 2026-07-25: 文字数と選択数は本メソッドから削除し、詳細は [ファイル]&gt;文書情報 へ集約した
-    /// （位置照会=編集位置の指標・文書情報=文書全体の内容量の指標という棲み分け。設計 2026-07-25 §0）。</summary>
-    private void AnnouncePosition()
-    {
-        var ed = _docs.Active?.Editor;
-        if (ed is null)
-            return;
-        int line = ed.CurrentLine + 1;
-        int totalLines = ed.LineCount;
-        int column = ed.GetColumn(ed.CurrentPosition) + 1;
-        _announcer.Say(PositionFormatter.Format(line, totalLines, column, ed.Overtype));
-    }
+    // ==================== 行へ移動 / 挿入・上書き ====================
 
     /// <summary>行番号を入力して移動する。</summary>
     private void GoToLine()
