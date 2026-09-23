@@ -212,7 +212,10 @@ public class MainFormModeMenuTests
         });
 
     // 2026-09-24 「読み上げ」メニュー廃止: 現在位置(Ctrl+Alt+P)は機能ごと削除した。
-    // ProcessCmdKey が食わない(false)= 位置読み上げの配線が残っていないこと。
+    // (a) ProcessCmdKey の switch が食わない(false)= switch に位置照会の配線が残っていない。
+    //     default(Message) は HWnd=0 でメニューショートカット配送が発火しないため、
+    //     こちらはメニュー側の登録を検出できない → (b) でメニューを走査する。
+    // (b) メニューに現在位置の項目も Ctrl+Alt+P の登録・表示も残っていない。
     [Fact]
     public void Ctrl_alt_p_is_no_longer_handled() =>
         Sta.Run(() =>
@@ -220,10 +223,21 @@ public class MainFormModeMenuTests
             using var tmp = new TempDir();
             using var form = ShowMainForm(tmp);
 
+            // 陽性対照: 同じ経路で true が返り得ること(常に false になる退行で空虚に緑にしない)。
+            // タブ 1 枚なので Ctrl+Tab は無害。
+            SendCmdKey(form, Keys.Control | Keys.Tab);
+
             var m = typeof(MainForm).GetMethod("ProcessCmdKey", Priv);
             Assert.NotNull(m);
             object?[] args = { default(Message), Keys.Control | Keys.Alt | Keys.P };
-
             Assert.False((bool)m!.Invoke(form, args)!);
+
+            Assert.DoesNotContain(
+                AllMenuItems(form),
+                mi =>
+                    mi.ShortcutKeys == (Keys.Control | Keys.Alt | Keys.P)
+                    || mi.ShortcutKeyDisplayString == "Ctrl+Alt+P"
+                    || (mi.Text?.StartsWith("現在位置", StringComparison.Ordinal) ?? false)
+            );
         });
 }
