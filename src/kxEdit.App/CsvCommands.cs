@@ -22,19 +22,19 @@ internal static class CsvCommands
             { Keys.Tab, c => c.ReadCurrent() }, // 現在セルを読み上げ
             { Keys.C, c => c.ReadColumnTop() }, // 列の見出しを読み上げ
             { Keys.R, c => c.ReadRowHead() }, // 行の見出しを読み上げ
-            // 行/列の端へのジャンプ
+            // 行/列の端へのジャンプ（素キー）
             { Keys.Home, c => c.MoveRowStart() }, // 行頭へ
             { Keys.End, c => c.MoveRowEnd() }, // 行末へ
             { Keys.PageUp, c => c.MoveColumnTop() }, // 列頭へ
             { Keys.PageDown, c => c.MoveColumnBottom() }, // 列末へ
-            { Keys.Control | Keys.Home, c => c.MoveTopLeft() }, // 左上へ
-            { Keys.Control | Keys.End, c => c.MoveBottomRight() }, // 右下へ
-            // 行/列の端へのジャンプ（Ctrl+矢印。表計算ソフト風の別名。
+            // 行/列の端へのジャンプ（Ctrl 系。Ctrl+矢印は上 4 つの別名＝表計算ソフト風の動線。
             // 横取りしないと CSVモード中に InputRouter の単語移動/行移動へ素通りする）
             { Keys.Control | Keys.Up, c => c.MoveColumnTop() }, // 列頭へ
             { Keys.Control | Keys.Down, c => c.MoveColumnBottom() }, // 列末へ
             { Keys.Control | Keys.Left, c => c.MoveRowStart() }, // 行頭へ
             { Keys.Control | Keys.Right, c => c.MoveRowEnd() }, // 行末へ
+            { Keys.Control | Keys.Home, c => c.MoveTopLeft() }, // 左上へ
+            { Keys.Control | Keys.End, c => c.MoveBottomRight() }, // 右下へ
             // セル指定・編集
             { Keys.G, c => c.GoToCell() }, // セルへ移動
             { Keys.F2, c => c.BeginEdit() }, // セルを編集

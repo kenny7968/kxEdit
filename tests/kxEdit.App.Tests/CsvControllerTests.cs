@@ -1393,7 +1393,8 @@ public class CsvControllerTests
     // ===== CsvCommands.ByKey(素キー表=SR ユーザーの主要動線。キー→コマンドの対応固定) =====
 
     // kill 対象: 表エントリの追加/削除の黙殺(Theory 側は ByKey.Keys 列挙+default throw で自動追随)。
-    // 21 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ 6+Ctrl+矢印 4+G/F2+別名 2(Shift+Tab/Ctrl+G)。
+    // 21 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ素キー 4+Ctrl+Home/End 2
+    //      +端ジャンプ別名 4(Ctrl+矢印)+G/F2+別名 2(Shift+Tab/Ctrl+G)。
     [Fact]
     public void ByKey_HasExactly21Entries() => Assert.Equal(21, CsvCommands.ByKey.Count);
 
