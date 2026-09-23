@@ -4,8 +4,8 @@ namespace kxEdit.App;
 
 /// <summary>
 /// <see cref="IFileDialogService"/> の本番実装。既存ダイアログ
-/// (OpenFileDialog/SaveAsDialog/EncodingPickDialog)を従来と同一の引数・フィルタで
-/// 表示し、結果だけを返す薄い Adapter(ロジックなし=挙動不変)。
+/// (OpenFileDialog/SaveAsDialog/EncodingPickDialog)を表示し、結果だけを返す
+/// 薄い Adapter(ロジックなし)。
 /// </summary>
 internal sealed class WinFormsFileDialogService : IFileDialogService
 {
@@ -13,8 +13,8 @@ internal sealed class WinFormsFileDialogService : IFileDialogService
     {
         using var dlg = new OpenFileDialog
         {
-            Filter =
-                "対応ファイル (*.txt, *.md, *.csv)|*.txt;*.md;*.csv|すべてのファイル (*.*)|*.*",
+            // 拡張子で絞り込まない(どの拡張子も最初から選べる)。
+            Filter = "すべてのファイル (*.*)|*.*",
         };
         return dlg.ShowDialog(owner) == DialogResult.OK ? dlg.FileName : null;
     }
