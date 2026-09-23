@@ -1475,8 +1475,8 @@ public class CsvControllerTests
     }
 
     // kill 対象: キー→delegate の取り違え全般(変異 B=Home↔End 入替など)。
-    // 全 21 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
-    // (到達セル/現在セル読み/見出し読み/Picker 移動/F2 編集開始)を assert する。
+    // 全 22 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
+    // (到達セル/現在セル読み/見出し読み/Picker 移動/F2 編集開始/モード終了)を assert する。
     // 隣接(Up/Down/Left/Right)と端ジャンプ(Home/End/PageUp/PageDown・Ctrl+矢印)は
     // 到達先が必ず異なる。Ctrl+矢印は Home/End/PageUp/PageDown の別名なので同じ case にまとめる。
     [Theory]
