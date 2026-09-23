@@ -18,8 +18,8 @@
 
 | 箇所 | 現状 |
 |------|------|
-| `WinFormsFileDialogService.PickOpenPath` | `Filter = "対応ファイル (*.txt, *.md, *.csv)|*.txt;*.md;*.csv|すべてのファイル (*.*)|*.*"`(既定=対応ファイル) |
-| `SaveAsDialog.OnBrowseClicked` | `Filter = txt|md|csv|すべて` の 4 択。`FilterIndex` 未指定(=1: txt 固定)。`FileName = Path.GetFileName(_path.Text)` |
+| `WinFormsFileDialogService.PickOpenPath` | `Filter = "対応ファイル (*.txt, *.md, *.csv)\|*.txt;*.md;*.csv\|すべてのファイル (*.*)\|*.*"`(既定=対応ファイル) |
+| `SaveAsDialog.OnBrowseClicked` | `Filter = txt\|md\|csv\|すべて` の 4 択。`FilterIndex` 未指定(=1: txt 固定)。`FileName = Path.GetFileName(_path.Text)` |
 
 ## 設計
 
@@ -68,3 +68,11 @@ SR 経路(`kxEdit.Accessibility` / `EditorControl` の UIA 部 / Speech 系)に�
 
 - `説明書/kxEdit説明書.md:64`「対応する拡張子の初期値は…『すべてのファイル』を選べば任意のテキストファイルを開けます。」
   が変更後の挙動と合わなくなる。説明書はユーザー編集版が正のため本変更では書き換えず、PR に文案を提示する。
+
+## 実施記録
+
+- 最終レビュー(§3 簡略化基準によりコード品質+脆弱性を 1 回に統合・別エージェント): Critical / Important なし。Minor 4 件をすべて fixup で反映。
+  - Minor-1: 空白のみ・末尾区切り文字(ファイル名部分なし)のパスが 4 になっていた → ファイル名部分なしは 1(未指定扱い)に精密化。
+  - Minor-2: Filter の並びと index の対応がコメント頼み → `SaveFilter` を internal にしテストで固定。
+  - Minor-3: `FilterIndex` 代入行に網が手動確認のみである旨を注記。
+  - Minor-4: 本書「現状」表のセル内 `|` をエスケープ(表示崩れ修正のみ)。

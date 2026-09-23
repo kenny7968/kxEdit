@@ -11,9 +11,26 @@ public class SaveAsDialogTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    public void FilterIndexFor_NoPath_ReturnsText(string? path)
+    [InlineData("   ")]
+    [InlineData(@"C:\work\")]
+    public void FilterIndexFor_NoFileName_ReturnsText(string? path)
     {
         Assert.Equal(1, SaveAsDialog.FilterIndexFor(path));
+    }
+
+    /// <summary>
+    /// 戻り値の index が <see cref="SaveAsDialog.SaveFilter"/> の該当区画を指すことを固定する
+    /// (Filter の並べ替えで index とずれたら落ちる)。区画 n の pattern は Split('|')[2n-1]。
+    /// </summary>
+    [Theory]
+    [InlineData(@"C:\work\a.txt", "*.txt")]
+    [InlineData(@"C:\work\a.md", "*.md")]
+    [InlineData(@"C:\work\a.csv", "*.csv")]
+    [InlineData(@"C:\work\a.log", "*.*")]
+    public void FilterIndexFor_PointsToMatchingSaveFilterPattern(string path, string pattern)
+    {
+        var parts = SaveAsDialog.SaveFilter.Split('|');
+        Assert.Equal(pattern, parts[(SaveAsDialog.FilterIndexFor(path) * 2) - 1]);
     }
 
     [Theory]

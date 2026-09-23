@@ -161,8 +161,9 @@ public sealed class SaveAsDialog : Form
         browseButton.Click += (_, _) => OnBrowseClicked();
     }
 
-    // FilterIndexFor の戻り値(1 始まり)はこの並びに対応する。並びを変えるときは両方を直す。
-    private const string SaveFilter =
+    // FilterIndexFor の戻り値(1 始まり)はこの並びに対応する(対応は SaveAsDialogTests で固定)。
+    // テスト都合で internal。
+    internal const string SaveFilter =
         "テキスト ファイル (*.txt)|*.txt|マークダウン ファイル (*.md)|*.md|CSV ファイル (*.csv)|*.csv|すべてのファイル (*.*)|*.*";
 
     private void OnBrowseClicked()
@@ -176,6 +177,7 @@ public sealed class SaveAsDialog : Form
             // 本ファイルは Form=自動テスト対象外。この行の網は L5 の手動確認のみ。
             OverwritePrompt = false,
             Filter = SaveFilter,
+            // 判定は FilterIndexFor で L3 検証済み。この代入行自体の網は手動確認のみ(Form=自動テスト対象外)。
             FilterIndex = FilterIndexFor(_path.Text),
         };
         if (!string.IsNullOrEmpty(_path.Text))
@@ -187,15 +189,17 @@ public sealed class SaveAsDialog : Form
     /// <summary>
     /// 参照ダイアログの初期「ファイルの種類」(<see cref="SaveFilter"/> の 1 始まり index)を
     /// 元パスの拡張子(大文字小文字無視)から決める。
-    /// パス未指定=1(テキスト。従来どおり)/ .txt=1 / .md=2 / .csv=3 / それ以外・拡張子なし=4(すべて)。
+    /// ファイル名部分なし(null・空・空白のみ・末尾が区切り文字)=1(テキスト。従来どおり)/
+    /// .txt=1 / .md=2 / .csv=3 / それ以外・拡張子なし=4(すべて)。
     /// 拡張子なしを「すべて」にするのは、*.txt のままだと AddExtension で .txt が付与されるため。
     /// テスト都合で <c>internal</c>(<c>InternalsVisibleTo kxEdit.App.Tests</c>)。
     /// </summary>
     internal static int FilterIndexFor(string? path)
     {
-        if (string.IsNullOrEmpty(path))
+        var name = System.IO.Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(name))
             return 1;
-        return System.IO.Path.GetExtension(path).ToLowerInvariant() switch
+        return System.IO.Path.GetExtension(name).ToLowerInvariant() switch
         {
             ".txt" => 1,
             ".md" => 2,
