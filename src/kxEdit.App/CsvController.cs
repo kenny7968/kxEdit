@@ -123,6 +123,21 @@ public sealed class CsvController : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// CSVモードを終了する（Esc）。モード外・アクティブ文書なし・F2 編集中は何もしない（冪等）。
+    /// F2 編集中の Esc は <see cref="CsvCellEditor"/> の「編集取消」へ届く（MainForm.ProcessCmdKey の
+    /// <see cref="IsEditing"/> ガードでそもそも横取りされない）ので、ここの
+    /// <c>_editor.IsEditing</c> は別経路が生えたとき用の二重防御。
+    /// <see cref="TryContext"/> を通らないので、解析不能な本文でもモードから抜けられる（脱出ハッチ）。
+    /// </summary>
+    public void ExitMode()
+    {
+        var doc = _docs.Active;
+        if (doc is null || !doc.State.CsvMode || _editor.IsEditing)
+            return;
+        ExitMode(doc);
+    }
+
     /// <summary>CSVモードを抜けて通常編集へ戻す（既存 OFF 側の移設・無変更）。</summary>
     private void ExitMode(Document doc)
     {
