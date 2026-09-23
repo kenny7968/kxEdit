@@ -29,6 +29,12 @@ internal static class CsvCommands
             { Keys.PageDown, c => c.MoveColumnBottom() }, // 列末へ
             { Keys.Control | Keys.Home, c => c.MoveTopLeft() }, // 左上へ
             { Keys.Control | Keys.End, c => c.MoveBottomRight() }, // 右下へ
+            // 行/列の端へのジャンプ（Ctrl+矢印。表計算ソフト風の別名。
+            // 横取りしないと CSVモード中に InputRouter の単語移動/行移動へ素通りする）
+            { Keys.Control | Keys.Up, c => c.MoveColumnTop() }, // 列頭へ
+            { Keys.Control | Keys.Down, c => c.MoveColumnBottom() }, // 列末へ
+            { Keys.Control | Keys.Left, c => c.MoveRowStart() }, // 行頭へ
+            { Keys.Control | Keys.Right, c => c.MoveRowEnd() }, // 行末へ
             // セル指定・編集
             { Keys.G, c => c.GoToCell() }, // セルへ移動
             { Keys.F2, c => c.BeginEdit() }, // セルを編集

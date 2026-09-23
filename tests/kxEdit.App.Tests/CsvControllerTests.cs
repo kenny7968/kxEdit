@@ -1393,9 +1393,9 @@ public class CsvControllerTests
     // ===== CsvCommands.ByKey(素キー表=SR ユーザーの主要動線。キー→コマンドの対応固定) =====
 
     // kill 対象: 表エントリの追加/削除の黙殺(Theory 側は ByKey.Keys 列挙+default throw で自動追随)。
-    // 17 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ 6+G/F2+別名 2(Shift+Tab/Ctrl+G)。
+    // 21 = 隣接 4+読み上げ 3(Tab/C/R)+端ジャンプ 6+Ctrl+矢印 4+G/F2+別名 2(Shift+Tab/Ctrl+G)。
     [Fact]
-    public void ByKey_HasExactly17Entries() => Assert.Equal(17, CsvCommands.ByKey.Count);
+    public void ByKey_HasExactly21Entries() => Assert.Equal(21, CsvCommands.ByKey.Count);
 
     /// <summary>ByKey の全キーを列挙する(表にエントリが増えると Theory の default 分岐が落ちる=網羅の機械保証)。</summary>
     public static TheoryData<Keys> ByKeyAllKeys()
@@ -1407,9 +1407,10 @@ public class CsvControllerTests
     }
 
     // kill 対象: キー→delegate の取り違え全般(変異 B=Home↔End 入替など)。
-    // 全 17 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
+    // 全 21 エントリを (2,2) 起点の独立セットアップで invoke し、キーごとの期待効果
     // (到達セル/現在セル読み/見出し読み/Picker 移動/F2 編集開始)を assert する。
-    // 隣接(Up/Down/Left/Right)と端ジャンプ(Home/End/PageUp/PageDown)は到達先が必ず異なる。
+    // 隣接(Up/Down/Left/Right)と端ジャンプ(Home/End/PageUp/PageDown・Ctrl+矢印)は
+    // 到達先が必ず異なる。Ctrl+矢印は Home/End/PageUp/PageDown の別名なので同じ case にまとめる。
     [Theory]
     [MemberData(nameof(ByKeyAllKeys))]
     public void ByKey_MapsAllEntriesToExpectedCommands(Keys key) =>
@@ -1439,15 +1440,19 @@ public class CsvControllerTests
                     break;
                 // 行/列の端へのジャンプ(隣接と異なる到達先=取り違え kill)
                 case Keys.Home:
+                case Keys.Control | Keys.Left:
                     AssertAt(host, doc, 2, 0);
                     break;
                 case Keys.End:
+                case Keys.Control | Keys.Right:
                     AssertAt(host, doc, 2, 4);
                     break;
                 case Keys.PageUp:
+                case Keys.Control | Keys.Up:
                     AssertAt(host, doc, 0, 2);
                     break;
                 case Keys.PageDown:
+                case Keys.Control | Keys.Down:
                     AssertAt(host, doc, 4, 2);
                     break;
                 case Keys.Control | Keys.Home:
