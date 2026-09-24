@@ -529,4 +529,656 @@ if ($Recover) {
     exit 0
 }
 
-# (計測本体は次の commit で追加する)
+# =====================================================================
+#  計測本体(M-1〜M-7)。仕様は調査記録 §9.5。
+# =====================================================================
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class KxPerfNative
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx, dy; public int mouseData; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+
+    const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
+    const uint KEYEVENTF_EXTENDEDKEY = 1, KEYEVENTF_KEYUP = 2, KEYEVENTF_UNICODE = 4;
+    const uint MOUSEEVENTF_WHEEL = 0x0800;
+
+    [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rc, IntPtr rgn, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+
+    static void Send(params INPUT[] inputs)
+    {
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        if (sent != inputs.Length) throw new InvalidOperationException("SendInput が失敗しました(err " + Marshal.GetLastWin32Error() + ")。UIPI(相手が昇格)か、入力がブロックされています。");
+    }
+
+    static INPUT Key(ushort vk, bool up, bool ext)
+    {
+        var i = new INPUT { type = INPUT_KEYBOARD };
+        i.u.ki.wVk = vk;
+        i.u.ki.dwFlags = (up ? KEYEVENTF_KEYUP : 0) | (ext ? KEYEVENTF_EXTENDEDKEY : 0);
+        return i;
+    }
+
+    // 矢印・Home・End・PageUp・PageDown・Insert・Delete は拡張キー(調査記録 §9.5)。
+    static bool IsExtended(ushort vk) { return (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E; }
+
+    /// <summary>修飾キー(0 個以上)を押したまま vk を 1 回押す。</summary>
+    public static void Tap(ushort vk, params ushort[] mods)
+    {
+        var list = new List<INPUT>();
+        foreach (var m in mods) list.Add(Key(m, false, false));
+        list.Add(Key(vk, false, IsExtended(vk)));
+        list.Add(Key(vk, true, IsExtended(vk)));
+        for (int k = mods.Length - 1; k >= 0; k--) list.Add(Key(mods[k], true, false));
+        Send(list.ToArray());
+    }
+
+    /// <summary>文字列を KEYEVENTF_UNICODE で送る(IME を通らず WM_CHAR として届く)。</summary>
+    public static void TypeText(string s)
+    {
+        var list = new List<INPUT>();
+        foreach (char c in s)
+        {
+            foreach (bool up in new[] { false, true })
+            {
+                var i = new INPUT { type = INPUT_KEYBOARD };
+                i.u.ki.wScan = c;
+                i.u.ki.dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0);
+                list.Add(i);
+            }
+        }
+        Send(list.ToArray());
+    }
+
+    public static void Wheel(int delta)
+    {
+        var i = new INPUT { type = INPUT_MOUSE };
+        i.u.mi.mouseData = delta;
+        i.u.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        Send(i);
+    }
+
+    public static void CursorToCenter(IntPtr h)
+    {
+        RECT r; GetWindowRect(h, out r);
+        SetCursorPos((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
+    }
+
+    /// <summary>前面化を最大 20 回試す(AttachThreadInput 併用)。成否を返す。</summary>
+    public static bool Foreground(IntPtr h)
+    {
+        for (int k = 0; k < 20; k++)
+        {
+            if (GetForegroundWindow() == h) return true;
+            uint pid;
+            uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+            uint me = GetCurrentThreadId();
+            bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+            try { BringWindowToTop(h); SetForegroundWindow(h); }
+            finally { if (attached) AttachThreadInput(me, fgThread, false); }
+            Thread.Sleep(50);
+        }
+        return GetForegroundWindow() == h;
+    }
+
+    public static void Resize(IntPtr h, int w, int hgt)
+    {
+        const uint SWP_NOMOVE = 2, SWP_NOZORDER = 4, SWP_NOACTIVATE = 0x10;
+        SetWindowPos(h, IntPtr.Zero, 0, 0, w, hgt, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    /// <summary>外から全面の再描画を同期で起こす(RDW_INVALIDATE | RDW_UPDATENOW)。</summary>
+    public static void Redraw(IntPtr h) { RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0100); }
+
+    /// <summary>WM_NULL が処理されるまで待つ(= UI スレッドがメッセージを捌ける)。</summary>
+    public static bool Ping(IntPtr h, uint timeoutMs)
+    {
+        IntPtr res;
+        return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x0002 /*SMTO_ABORTIFHUNG*/, timeoutMs, out res) != IntPtr.Zero;
+    }
+
+    public static void Close(IntPtr h) { PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+
+    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
+    public static string TextOf(IntPtr h) { var sb = new StringBuilder(GetWindowTextLength(h) + 1); GetWindowText(h, sb, sb.Capacity); return sb.ToString(); }
+
+    /// <summary>
+    /// エディタ本体の HWND: メインウィンドウの子孫で、可視・クラス名 WindowsForms10.Window.8.*・
+    /// タイトル空(TabPage はタブ名を持つ)の中で面積が最大のもの(調査記録 §9.5)。
+    /// </summary>
+    public static IntPtr FindEditor(IntPtr main)
+    {
+        IntPtr best = IntPtr.Zero; long bestArea = 0;
+        EnumChildWindows(main, (h, l) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            if (!ClassOf(h).StartsWith("WindowsForms10.Window.8.", StringComparison.Ordinal)) return true;
+            if (GetWindowTextLength(h) != 0) return true;
+            RECT r; GetWindowRect(h, out r);
+            long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+            if (area > bestArea) { bestArea = area; best = h; }
+            return true;
+        }, IntPtr.Zero);
+        return best;
+    }
+
+    /// <summary>プロセス pid の可視なトップレベル窓のうち、main 以外で最初に見つかったもの(ダイアログ)。</summary>
+    public static IntPtr FindOtherTopLevel(int pid, IntPtr main)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) =>
+        {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p == (uint)pid && h != main && IsWindowVisible(h)) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+'@
+
+# ---- 仮想キー ----
+$VK = @{
+    Back = 0x08; Tab = 0x09; Enter = 0x0D; Shift = 0x10; Ctrl = 0x11; Escape = 0x1B
+    PageUp = 0x21; PageDown = 0x22; End = 0x23; Home = 0x24; Left = 0x25; Up = 0x26; Right = 0x27; Down = 0x28
+    N = 0x4E; O = 0x4F; F = 0x46; V = 0x56
+}
+# 送る直前に、前面の窓が計測対象のプロセスのものであることを確かめる。単一インスタンスの転送や
+# 利用者の操作で前面が変わっていたら、キー(Ctrl+V・x・BackSpace)を他のアプリへ送らずに中止する。
+$script:TargetPid = 0
+function Assert-TargetForeground {
+    $fgPid = [uint32]0
+    [void][KxPerfNative]::GetWindowThreadProcessId([KxPerfNative]::GetForegroundWindow(), [ref]$fgPid)
+    if ($script:TargetPid -eq 0 -or $fgPid -ne $script:TargetPid) {
+        throw "前面の窓が計測対象の kxEdit(pid $($script:TargetPid))ではありません(pid $fgPid)。入力を送らずに中止します。"
+    }
+}
+function Tap([int]$Key, [int[]]$Mods = @()) { Assert-TargetForeground; [KxPerfNative]::Tap([uint16]$Key, [uint16[]]$Mods) }
+function Send-Text([string]$Text) { Assert-TargetForeground; [KxPerfNative]::TypeText($Text) }
+function Send-Wheel([int]$Delta) { Assert-TargetForeground; [KxPerfNative]::Wheel($Delta) }
+
+# ---- 文書の生成(調査記録 §9.5。UTF-8・BOM なし・CRLF。バイト数を検査する) ----
+function New-Doc([string]$Path, [string]$Format, [int]$Lines, [long]$ExpectedBytes) {
+    $sb = [Text.StringBuilder]::new()
+    for ($i = 1; $i -le $Lines; $i++) {
+        [void]$sb.Append([string]::Format([Globalization.CultureInfo]::InvariantCulture, $Format, $i)).Append("`r`n")
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($sb.ToString())
+    if ($bytes.Length -ne $ExpectedBytes) { throw "$Path の生成が仕様と違う: $($bytes.Length) バイト(仕様 $ExpectedBytes)" }
+    [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+$JaLine = '{0:D5}: 吾輩は猫である。名前はまだ無い。kxEdit の性能計測 sample 行です。'
+$EnLine = '{0:D5}: The quick brown fox jumps over the lazy dog; perf sample line.'
+$PasteLine = '{0:D3}: 吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。'
+
+function Initialize-Docs([string]$Dir) {
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $docs = @{
+        ja10k = Join-Path $Dir 'ja10k.txt'
+        en10k = Join-Path $Dir 'en10k.txt'
+        ja30k = Join-Path $Dir 'ja30k.txt'
+    }
+    New-Doc $docs.ja10k $JaLine 10000 990000
+    New-Doc $docs.en10k $EnLine 10000 710000
+    New-Doc $docs.ja30k $JaLine 30000 2970000
+    $sb = [Text.StringBuilder]::new()
+    for ($i = 1; $i -le 100; $i++) {
+        [void]$sb.Append([string]::Format([Globalization.CultureInfo]::InvariantCulture, $PasteLine, $i)).Append("`r`n")
+    }
+    $docs.paste = $sb.ToString()
+    return $docs
+}
+
+# ---- 結果 ----
+$script:Results = [System.Collections.Generic.List[object]]::new()
+function Add-Result([string]$Scenario, [string]$Condition, [string]$Doc, [int]$N, [double]$Value, [string]$Unit) {
+    $row = [pscustomobject]@{ scenario = $Scenario; condition = $Condition; doc = $Doc; n = $N; value = [math]::Round($Value, 2); unit = $Unit }
+    $script:Results.Add($row)
+    Write-Host ("  {0,-4} {1,-28} {2,-6} n={3,-4} {4,9:F2} {5}" -f $Scenario, $Condition, $Doc, $N, $Value, $Unit)
+}
+
+# ---- kxEdit の起動と終了 ----
+$script:Launched = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+
+# 起動した Process オブジェクトだけを止める(名前で kill しない)。終了を確認できなければ例外。
+function Stop-Proc([Diagnostics.Process]$P) {
+    if (-not $P.HasExited) {
+        try { $P.Kill() } catch [InvalidOperationException] { } # 直前に終了した
+        if (-not $P.WaitForExit(10000)) { throw "kxEdit(pid $($P.Id))が停止しません。" }
+    }
+    [void]$script:Launched.Remove($P)
+}
+
+function Stop-Launched {
+    foreach ($p in @($script:Launched)) { Stop-Proc $p }
+}
+
+# プロフィールを空にする前に、計測対象以外の kxEdit が動いていないことを確かめる
+# (利用者が計測中に kxEdit を起動していたら、その実データの下でプロフィールを消すことになる)。
+function Assert-NoKxEditRunning {
+    if (Test-KxEditRunning $script:ProcessName $script:KxMutexName) {
+        throw 'kxEdit が動いています(計測中に起動された可能性)。プロフィールに触れずに中止します。'
+    }
+}
+
+# 空のプロフィールで起動し、窓を 900×700 にして前面へ出す。{ Proc, Main, Editor } を返す。
+function Start-KxEdit([string]$Exe) {
+    Assert-NoKxEditRunning
+    Clear-ProfileForRun $script:ProfileDir $script:HarnessRoot
+    $p = Start-Process -FilePath $Exe -PassThru
+    $script:Launched.Add($p)
+    $script:TargetPid = $p.Id
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $p.Refresh()
+        if ($p.MainWindowHandle -ne 0 -and [KxPerfNative]::IsWindowVisible($p.MainWindowHandle)) { break }
+        if ($p.HasExited) { throw "kxEdit が起動直後に終了しました(exit $($p.ExitCode))" }
+        if ($sw.ElapsedMilliseconds -gt 15000) { throw 'kxEdit の窓が 15 秒以内に出ません' }
+        Start-Sleep -Milliseconds 20
+    }
+    [void]$p.WaitForInputIdle(10000)
+    if ($p.HasExited) { throw 'kxEdit が起動直後に終了しました(単一インスタンスの転送の可能性)。入力を送らずに中止します。' }
+    $main = $p.MainWindowHandle
+    [KxPerfNative]::Resize($main, 900, 700)
+    Enter-Foreground $main
+    Wait-Quiet $p
+    $editor = [KxPerfNative]::FindEditor($main)
+    if ($editor -eq 0) { throw 'エディタの HWND が見つかりません' }
+    return [pscustomobject]@{ Proc = $p; Main = $main; Editor = $editor }
+}
+
+function Enter-Foreground([IntPtr]$Hwnd) {
+    if (-not [KxPerfNative]::Foreground($Hwnd)) {
+        throw "kxEdit を前面に出せません(SetForegroundWindow を 20 回試行)。計測中は画面・キーボード・マウスに触らないでください。"
+    }
+}
+
+# 前面にあるのが kxEdit のメインウィンドウであることを確かめる(キーを他のアプリへ送らないため)。
+function Assert-Foreground($Kx, [IntPtr]$Expected = $Kx.Main) {
+    Assert-TargetForeground
+    if ([KxPerfNative]::GetForegroundWindow() -ne $Expected) {
+        throw '前面の窓が計測対象ではありません(フォーカスが奪われた)。計測を中止します。'
+    }
+}
+
+function Stop-KxEdit($Kx) {
+    Stop-Proc $Kx.Proc
+    $script:TargetPid = 0
+}
+
+# Ctrl+O → ファイルを開くダイアログにフルパスを打って Enter(kxEdit はコマンドラインでファイルを開けない)。
+function Open-Doc($Kx, [string]$Path) {
+    Assert-Foreground $Kx
+    Tap $VK.O @($VK.Ctrl)
+    $dlg = Wait-Dialog $Kx
+    Start-Sleep -Milliseconds 300 # ファイル名欄にフォーカスが入るまで
+    Send-Text $Path
+    Tap $VK.Enter
+    $name = [IO.Path]::GetFileName($Path)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not ([KxPerfNative]::TextOf($Kx.Main)).StartsWith($name)) {
+        if ($sw.ElapsedMilliseconds -gt 20000) { throw "$name を開けません(タイトル: $([KxPerfNative]::TextOf($Kx.Main)))" }
+        Start-Sleep -Milliseconds 50
+    }
+    Wait-Quiet $Kx.Proc
+    Enter-Foreground $Kx.Main
+    $Kx.Editor = [KxPerfNative]::FindEditor($Kx.Main)
+}
+
+function Wait-Dialog($Kx, [int]$TimeoutMs = 5000) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $h = [KxPerfNative]::FindOtherTopLevel($Kx.Proc.Id, $Kx.Main)
+        if ($h -ne 0 -and [KxPerfNative]::GetForegroundWindow() -eq $h) { return $h }
+        if ($sw.ElapsedMilliseconds -gt $TimeoutMs) { throw 'ダイアログが出ません' }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+# ---- 1 回あたり CPU の測り方(調査記録 §9.5 Measure-Op) ----
+function Get-CpuMs([Diagnostics.Process]$P) { $P.Refresh(); return $P.TotalProcessorTime.TotalMilliseconds }
+
+# 100 ms ごとに CPU を見て、増分 < 2 ms が 3 回続くまで待つ(最大 30 秒)。
+function Wait-Quiet([Diagnostics.Process]$P) {
+    $calm = 0; $prev = Get-CpuMs $P
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($calm -lt 3 -and $sw.ElapsedMilliseconds -lt 30000) {
+        Start-Sleep -Milliseconds 100
+        $now = Get-CpuMs $P
+        if ($now - $prev -lt 2) { $calm++ } else { $calm = 0 }
+        $prev = $now
+    }
+}
+
+# $Op を n 回(各回の後に interval ms)行い、1 回あたりの CPU ms を返す。$Op にはインデックスを渡す。
+function Measure-Op($Kx, [int]$N, [int]$IntervalMs, [scriptblock]$Op, [IntPtr]$ExpectForeground = $Kx.Main) {
+    Wait-Quiet $Kx.Proc
+    Assert-Foreground $Kx $ExpectForeground
+    $t0 = Get-CpuMs $Kx.Proc
+    for ($i = 0; $i -lt $N; $i++) {
+        & $Op $i
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+    Wait-Quiet $Kx.Proc
+    Assert-Foreground $Kx $ExpectForeground
+    return ((Get-CpuMs $Kx.Proc) - $t0) / $N
+}
+
+function Get-ThreadCpu([Diagnostics.Process]$P) {
+    $P.Refresh()
+    $map = @{}
+    foreach ($t in $P.Threads) {
+        try { $map[$t.Id] = @($t.TotalProcessorTime.TotalMilliseconds, $t.UserProcessorTime.TotalMilliseconds) } catch { }
+    }
+    return $map
+}
+
+# =====================================================================
+#  シナリオ
+# =====================================================================
+
+function Invoke-M1([string]$Exe) {
+    Write-Host '== M-1 起動(6 回・1 回目を除く中央値) =='
+    $runs = @()
+    for ($k = 0; $k -lt 6; $k++) {
+        Assert-NoKxEditRunning
+        Clear-ProfileForRun $script:ProfileDir $script:HarnessRoot
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $p = Start-Process -FilePath $Exe -PassThru
+        $script:Launched.Add($p)
+        while ($true) {
+            $p.Refresh()
+            if ($p.MainWindowHandle -ne 0 -and [KxPerfNative]::IsWindowVisible($p.MainWindowHandle)) { break }
+            if ($sw.ElapsedMilliseconds -gt 15000) { throw 'kxEdit の窓が 15 秒以内に出ません' }
+            Start-Sleep -Milliseconds 5
+        }
+        $show = $sw.Elapsed.TotalMilliseconds
+        [void]$p.WaitForInputIdle(10000)
+        [void][KxPerfNative]::Ping($p.MainWindowHandle, 10000)
+        $inputMs = $sw.Elapsed.TotalMilliseconds
+        $rest = 800 - $sw.ElapsedMilliseconds
+        if ($rest -gt 0) { Start-Sleep -Milliseconds $rest }
+        $p.Refresh()
+        $cpu = $p.TotalProcessorTime.TotalMilliseconds
+        $ws = $p.WorkingSet64 / 1MB
+        [KxPerfNative]::Close($p.MainWindowHandle)
+        [void]$p.WaitForExit(10000)
+        Stop-Proc $p
+        Write-Host ("  run {0}: 表示 {1:F0} ms / 入力受付 {2:F0} ms / CPU@0.8s {3:F0} ms / WS {4:F0} MB" -f ($k + 1), $show, $inputMs, $cpu, $ws)
+        if ($k -gt 0) { $runs += [pscustomobject]@{ Show = $show; Input = $inputMs; Cpu = $cpu; Ws = $ws } }
+    }
+    function Median([double[]]$xs) { $s = $xs | Sort-Object; return $s[[int][math]::Floor($s.Count / 2)] }
+    Add-Result 'M-1' '窓の表示まで' '-' 5 (Median $runs.Show) 'ms'
+    Add-Result 'M-1' '入力受付まで' '-' 5 (Median $runs.Input) 'ms'
+    Add-Result 'M-1' '0.8秒時点のCPU' '-' 5 (Median $runs.Cpu) 'ms'
+    Add-Result 'M-1' 'ワーキングセット' '-' 5 (Median $runs.Ws) 'MB'
+}
+
+function Invoke-M2([string]$Exe, $Docs) {
+    Write-Host '== M-2 キャレット移動・打鍵(CPU ms/回) =='
+    foreach ($doc in 'ja10k', 'en10k') {
+        $kx = Start-KxEdit $Exe
+        try {
+            Open-Doc $kx $Docs[$doc]
+            Add-Result 'M-2' 'アイドル' $doc 100 (Measure-Op $kx 100 100 { }) 'cpu_ms/op'
+            Tap $VK.Home @($VK.Ctrl); for ($i = 0; $i -lt 10; $i++) { Tap $VK.Down }
+            Add-Result 'M-2' '→←の交互' $doc 100 (Measure-Op $kx 100 100 { param($i) if ($i % 2 -eq 0) { Tap $VK.Right } else { Tap $VK.Left } }) 'cpu_ms/op'
+            Add-Result 'M-2' '↓↑の交互' $doc 100 (Measure-Op $kx 100 100 { param($i) if ($i % 2 -eq 0) { Tap $VK.Down } else { Tap $VK.Up } }) 'cpu_ms/op'
+            Add-Result 'M-2' 'Shift+→' $doc 40 (Measure-Op $kx 40 100 { Tap $VK.Right @($VK.Shift) }) 'cpu_ms/op'
+            Tap $VK.Right
+            Add-Result 'M-2' '文字入力x' $doc 60 (Measure-Op $kx 60 100 { Send-Text 'x' }) 'cpu_ms/op'
+            Add-Result 'M-2' 'BackSpace' $doc 60 (Measure-Op $kx 60 100 { Tap $VK.Back }) 'cpu_ms/op'
+            Add-Result 'M-2' 'PageDown/PageUpの交互' $doc 50 (Measure-Op $kx 50 150 { param($i) if ($i % 2 -eq 0) { Tap $VK.PageDown } else { Tap $VK.PageUp } }) 'cpu_ms/op'
+            $ed = $kx.Editor
+            Add-Result 'M-2' '基準:全面の再描画' $doc 100 (Measure-Op $kx 100 50 { [KxPerfNative]::Redraw($ed) }) 'cpu_ms/op'
+            Tap $VK.Home @($VK.Ctrl)
+            Add-Result 'M-2' '基準:文書先頭での←' $doc 100 (Measure-Op $kx 100 100 { Tap $VK.Left }) 'cpu_ms/op'
+            Add-Result 'M-2' '基準:Shiftの単押し' $doc 100 (Measure-Op $kx 100 100 { Tap $VK.Shift }) 'cpu_ms/op'
+        }
+        finally { Stop-KxEdit $kx }
+    }
+}
+
+function Invoke-M3([string]$Exe, $Docs) {
+    Write-Host '== M-3 新規文書への連続入力(F-6・CPU ms/打鍵) =='
+    $kx = Start-KxEdit $Exe
+    $saved = $null
+    try {
+        try { $saved = Get-Clipboard -Raw } catch { $saved = $null }
+        Set-Clipboard -Value $Docs.paste
+        $pos = 0
+        $pasteBytes = [Text.Encoding]::UTF8.GetByteCount($Docs.paste)
+        for ($k = 0; $k -le 9; $k++) {
+            if ($k -gt 0) {
+                Assert-Foreground $kx
+                Tap $VK.V @($VK.Ctrl)
+                $pos += $pasteBytes
+            }
+            Add-Result 'M-3' "書込位置≈$pos" 'new' 40 (Measure-Op $kx 40 100 { Send-Text 'x' }) 'cpu_ms/op'
+            $pos += 40
+        }
+    }
+    finally {
+        Stop-KxEdit $kx
+        # クリップボードを戻す(テキストのみ・ベストエフォート)。
+        try { if ($null -ne $saved) { Set-Clipboard -Value $saved } } catch { Write-Warning "クリップボードを戻せませんでした: $_" }
+    }
+}
+
+function Invoke-M4([string]$Exe, $Docs) {
+    Write-Host '== M-4 スクロール(ja10k・CPU ms/回) =='
+    $kx = Start-KxEdit $Exe
+    try {
+        Open-Doc $kx $Docs.ja10k
+        [KxPerfNative]::CursorToCenter($kx.Editor)
+        Add-Result 'M-4' 'ホイール下' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel -120 }) 'cpu_ms/op'
+        Add-Result 'M-4' 'ホイール上' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel 120 }) 'cpu_ms/op'
+    }
+    finally { Stop-KxEdit $kx }
+}
+
+function Invoke-M5([string]$Exe, $Docs) {
+    Write-Host '== M-5 検索語の打鍵(CPU ms/実打鍵・×16/14 で補正) =='
+    $term = '名前はまだ無い'
+    foreach ($doc in 'empty', 'ja10k', 'ja30k') {
+        $kx = Start-KxEdit $Exe
+        try {
+            if ($doc -ne 'empty') { Open-Doc $kx $Docs[$doc] }
+            Assert-Foreground $kx
+            Tap $VK.F @($VK.Ctrl)
+            $dlg = Wait-Dialog $kx
+            # ダイアログへ送る間は、メインウィンドウを前面に戻さない(戻すとキーが本文に入る)。
+            $v = Measure-Op $kx 64 200 {
+                param($i)
+                $k = $i % 16
+                if ($k -lt 7) { Send-Text ($term.Substring($k, 1)) }
+                elseif ($k -lt 14) { Tap $VK.Back }
+            } -ExpectForeground $dlg
+            Add-Result 'M-5' '検索語の打鍵' $doc 56 ($v * 16 / 14) 'cpu_ms/op'
+        }
+        finally { Stop-KxEdit $kx }
+    }
+}
+
+function Invoke-M6([string]$Exe, $Docs) {
+    Write-Host '== M-6 タブ切替(Ctrl+Tab・CPU ms/回) =='
+    foreach ($cond in '空の新規タブ4枚', '3ファイル+空', '3ファイル未保存+空') {
+        $kx = Start-KxEdit $Exe
+        try {
+            if ($cond -eq '空の新規タブ4枚') {
+                for ($i = 0; $i -lt 3; $i++) { Assert-Foreground $kx; Tap $VK.N @($VK.Ctrl); Wait-Quiet $kx.Proc }
+            }
+            else {
+                foreach ($d in 'ja10k', 'en10k', 'ja30k') { Open-Doc $kx $Docs[$d] }
+                if ($cond -eq '3ファイル未保存+空') {
+                    # 各ファイルのタブで x を 1 文字打って未保存にする(4 タブを一巡)。
+                    for ($i = 0; $i -lt 4; $i++) {
+                        $title = [KxPerfNative]::TextOf($kx.Main)
+                        if ($title -match '^(ja10k|en10k|ja30k)\.txt') { Send-Text 'x'; Wait-Quiet $kx.Proc }
+                        Tap $VK.Tab @($VK.Ctrl); Wait-Quiet $kx.Proc
+                    }
+                }
+            }
+            $before = Get-ThreadCpu $kx.Proc
+            $v = Measure-Op $kx 40 250 { Tap $VK.Tab @($VK.Ctrl) }
+            Add-Result 'M-6' $cond '-' 40 $v 'cpu_ms/op'
+            $after = Get-ThreadCpu $kx.Proc
+            $rows = foreach ($id in $after.Keys) {
+                if ($before.ContainsKey($id)) {
+                    [pscustomobject]@{ Id = $id; Total = ($after[$id][0] - $before[$id][0]) / 40; User = ($after[$id][1] - $before[$id][1]) / 40 }
+                }
+            }
+            $top = @($rows | Sort-Object Total -Descending | Select-Object -First 2)
+            for ($r = 0; $r -lt $top.Count; $r++) {
+                Add-Result 'M-6' "$cond/スレッド$($r + 1)合計" '-' 40 $top[$r].Total 'cpu_ms/op'
+                Add-Result 'M-6' "$cond/スレッド$($r + 1)ユーザー" '-' 40 $top[$r].User 'cpu_ms/op'
+            }
+        }
+        finally { Stop-KxEdit $kx }
+    }
+}
+
+function Invoke-M7([string]$Exe, $Docs) {
+    Write-Host '== M-7 UIA GetBoundingRectangles(ja10k・先頭から・所要 ms) =='
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $kx = Start-KxEdit $Exe
+    try {
+        Open-Doc $kx $Docs.ja10k
+        Tap $VK.Home @($VK.Ctrl); Wait-Quiet $kx.Proc
+        $el = [System.Windows.Automation.AutomationElement]::FromHandle($kx.Editor)
+        $tp = [System.Windows.Automation.TextPattern]$el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        $EP = [System.Windows.Automation.Text.TextPatternRangeEndpoint]
+        $UNIT = [System.Windows.Automation.Text.TextUnit]
+        foreach ($case in @(@('1行', 1, 10), @('40行', 40, 10), @('1000行', 1000, 3), @('全文', 0, 2))) {
+            $label, $lines, $reps = $case
+            if ($lines -eq 0) { $range = $tp.DocumentRange }
+            else {
+                $range = $tp.DocumentRange.Clone()
+                $range.MoveEndpointByRange($EP::End, $range, $EP::Start)
+                $range.ExpandToEnclosingUnit($UNIT::Line)
+                if ($lines -gt 1) { [void]$range.MoveEndpointByUnit($EP::End, $UNIT::Line, $lines - 1) }
+            }
+            $times = @(); $count = 0
+            for ($r = 0; $r -lt $reps; $r++) {
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $rects = $range.GetBoundingRectangles()
+                $times += $sw.Elapsed.TotalMilliseconds
+                $count = $rects.Count
+            }
+            $s = $times | Sort-Object
+            Add-Result 'M-7' "$label(矩形$count)" 'ja10k' $reps $s[[int][math]::Floor($s.Count / 2)] 'ms'
+        }
+    }
+    finally { Stop-KxEdit $kx }
+}
+
+# =====================================================================
+#  実行
+# =====================================================================
+
+$exe = Join-Path (Resolve-Path -LiteralPath $PublishDir).ProviderPath 'kxEdit.exe'
+if (-not (Test-Path -LiteralPath $exe)) { throw "kxEdit.exe がありません: $exe" }
+if (-not $OutCsv) { $OutCsv = Join-Path $script:HarnessRoot ("results-{0:yyyyMMdd-HHmmss}.csv" -f (Get-Date)) }
+if (Test-Path -LiteralPath $OutCsv) { throw "結果の CSV が既にあります(上書きしません): $OutCsv" }
+
+$reasons = Test-HarnessPreconditions $script:ProfileDir $script:HarnessRoot $script:ProcessName $script:KxMutexName
+if ($reasons.Count -gt 0) {
+    Write-Host '計測を開始できません(何も変更していません):' -ForegroundColor Yellow
+    foreach ($r in $reasons) { Write-Host "- $r" }
+    exit 2
+}
+
+$docs = Initialize-Docs $WorkDir
+Write-Host @"
+計測を始めます。終わるまで(全シナリオで十数分)画面・キーボード・マウスに触らないでください。
+計測中に kxEdit を起動しないでください(計測中の窓に入り、打った内容は失われます)。
+プロフィールを退避します: $($script:ProfileDir)
+"@
+# 退避は try の外。失敗したら Save-ProfileStash が自分で後始末する(プロフィールは無傷)。
+Save-ProfileStash $script:ProfileDir $script:HarnessRoot
+$exitCode = 0
+try {
+    foreach ($s in $Scenario) {
+        switch ($s) {
+            'M-1' { Invoke-M1 $exe }
+            'M-2' { Invoke-M2 $exe $docs }
+            'M-3' { Invoke-M3 $exe $docs }
+            'M-4' { Invoke-M4 $exe $docs }
+            'M-5' { Invoke-M5 $exe $docs }
+            'M-6' { Invoke-M6 $exe $docs }
+            'M-7' { Invoke-M7 $exe $docs }
+        }
+    }
+}
+catch {
+    Write-Host "計測を中止しました: $_" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace
+    $exitCode = 1
+}
+finally {
+    $restorable = $true
+    try { Stop-Launched } catch { Write-Host "$_" -ForegroundColor Red; $restorable = $false }
+    if ($restorable -and (Test-KxEditRunning $script:ProcessName $script:KxMutexName)) {
+        Write-Host 'kxEdit が動いているので、プロフィールの復元を見送ります。' -ForegroundColor Red
+        $restorable = $false
+    }
+    if ($restorable) {
+        try {
+            [void](Restore-ProfileStash $script:ProfileDir $script:HarnessRoot)
+            Write-Host "プロフィールを復元しました(照合済み): $($script:ProfileDir)"
+        }
+        catch {
+            Write-Host "プロフィールの復元に失敗しました: $_" -ForegroundColor Red
+            $restorable = $false
+        }
+    }
+    if (-not $restorable) {
+        Write-Host (Get-RestoreGuide $script:ProfileDir $script:HarnessRoot $null)
+        $exitCode = 3
+    }
+    if ($script:Results.Count -gt 0) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutCsv) | Out-Null
+        $script:Results | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding utf8 -NoClobber
+        Write-Host "結果: $OutCsv"
+    }
+}
+exit $exitCode
