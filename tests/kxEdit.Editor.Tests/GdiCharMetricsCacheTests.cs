@@ -121,9 +121,11 @@ public class GdiCharMetricsCacheTests
             Assert.True(m.MeasureRun(" ") > 0);
         });
 
+    /// <summary>
     /// 2026-09-24 性能改善フェーズ 1(P-2): 非 ASCII を含む複数コードポイントの run も
     /// MeasureText の結果そのものを返す(キャッシュ経由でも参照実装と一致)。
     /// 先頭が ASCII で途中から非 ASCII になる run(行番号付きの行など)も含める。
+    /// </summary>
     [Theory]
     [InlineData("あいうえお")]
     [InlineData("あa")]
@@ -143,7 +145,9 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(run.Length, m.TestHook_RunCacheChars);
         });
 
+    /// <summary>
     /// span キー(部分 span)と string キーが同じエントリを引くこと。
+    /// </summary>
     [Fact]
     public void Span_slice_and_string_share_an_entry() =>
         Sta.Run(() =>
@@ -158,7 +162,9 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(1, m.TestHook_RunCacheCount);
         });
 
+    /// <summary>
     /// 1 件の上限(4,096 文字)を超える run は格納しない。ちょうど上限は格納する。
+    /// </summary>
     [Fact]
     public void Runs_longer_than_the_per_entry_limit_are_not_cached() =>
         Sta.Run(() =>
@@ -173,8 +179,10 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(1, m.TestHook_RunCacheCount);
         });
 
+    /// <summary>
     /// 合計文字数の上限を超える格納で全消去し、その run だけが残る。
     /// 上限ちょうどまでは消去しない(境界を両側から見る)。
+    /// </summary>
     [Fact]
     public void Exceeding_the_total_char_budget_clears_the_cache() =>
         Sta.Run(() =>
@@ -193,7 +201,9 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(2, m.TestHook_RunCacheChars);
         });
 
+    /// <summary>
     /// i ごとに内容の異なる、長さ len の非 ASCII run。
+    /// </summary>
     private static string UniqueRun(int i, int len)
     {
         var s = new string('あ', len).ToCharArray();
@@ -202,7 +212,9 @@ public class GdiCharMetricsCacheTests
         return new string(s);
     }
 
+    /// <summary>
     /// ASCII だけの run と単一コードポイントは、run のメモに入らない(経路不変)。
+    /// </summary>
     [Fact]
     public void Ascii_runs_and_single_codepoints_do_not_use_the_run_cache() =>
         Sta.Run(() =>
