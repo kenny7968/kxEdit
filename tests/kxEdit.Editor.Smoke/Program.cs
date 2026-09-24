@@ -24,6 +24,14 @@ if (args.Length > 0 && args[0] == "--perf")
     return PerfBench.Run(args);
 }
 
+// 2026-09-24 性能改善フェーズ 1: --paint-snapshot。描画を変えるフェーズの「ピクセル不変」を
+// 変更前後の画像比較で確かめる(docs/plans/2026-09-24-perf-paint-cost.md §0.2)。
+// 状態の列と EXIT の意味は PaintSnapshot のクラス doc が正本。
+if (args.Length > 0 && args[0] == "--paint-snapshot")
+{
+    return PaintSnapshot.Run(args[1..]);
+}
+
 // 2026-08-02 巨大 1 行調査 Task 3: --largeline。空白・改行を一切含まない単一長大行を
 // 実 EditorControl へ載せ、バッファ差し込みと初回描画を GDI 込みで測る
 // (GDI 抜きの構造コストは kxEdit.Core.Bench --largeline が対)。
