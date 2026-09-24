@@ -138,11 +138,21 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     public EditorControl()
     {
         SetStyle(
+            // 2026-09-24 性能改善フェーズ 1(P-20): OptimizedDoubleBuffer は外し、OnPaint が専用の
+            // BufferedGraphicsContext でダブルバッファする(EditorControl.Paint.cs の PaintBuffer)。
+            // AllPaintingInWmPaint は残す(WM_ERASEBKGND を捨てる意味は変わらない)。
             ControlStyles.AllPaintingInWmPaint
-                | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw
                 | ControlStyles.UserPaint
-                | ControlStyles.Selectable,
+                | ControlStyles.Selectable
+                // 2026-09-24 性能改善フェーズ 1(P-24): WinForms は描画のたびに WindowText を読み、
+                // 自 HWND に WM_GETTEXTLENGTH / WM_GETTEXT を送る(描画 1 回で 4 往復)。本コントロールは
+                // 本文非公開のため WM_GETTEXT に 0 を返し、Text も new で隠蔽しているので、結果は常に ""。
+                // CacheText で読みを止める。base の Control.Text は _text ?? "" を返す(誰も設定しない = "")。
+                | ControlStyles.CacheText
+                // 2026-09-24 性能改善フェーズ 1(P-17): 背景層(OnPaintBackground)を塗らない。
+                // 全面は PaintBody 冒頭の g.Clear と FrameBuilder の工程 1 が塗るので、背景層は三重目だった。
+                | ControlStyles.Opaque,
             true
         );
         TabStop = true;
@@ -2100,6 +2110,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // P5 Task 7: ネイティブ表面原則 = 本文非公開(WM_GETTEXT / WM_GETTEXTLENGTH に応答しない)
         if (m.Msg == NativeMethods.WM_GETTEXT || m.Msg == NativeMethods.WM_GETTEXTLENGTH)
         {
+            _testHook_getTextCount++;
             m.Result = IntPtr.Zero;
             return;
         }

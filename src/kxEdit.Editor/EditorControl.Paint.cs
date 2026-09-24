@@ -14,9 +14,107 @@ public sealed partial class EditorControl
 {
     // OnPaint + RenderFrame + IME overlay 描画 + style/color helpers
 
+    // 2026-09-24 性能改善フェーズ 1(P-20): WinForms の OptimizedDoubleBuffer は既定の
+    // MaximumBuffer(225×96)を超える面積で、描画のたびに一時コンテキストと DIB を作って捨てる。
+    // MaximumBuffer を画面サイズにした専用のコンテキストを使い回す。
+    // ・プロセス全体の BufferedGraphicsManager.Current は変えない(他コントロールへの影響が読めない)。
+    // ・[ThreadStatic] にするのは、BufferedGraphicsContext がスレッド安全でなく、テストは STA スレッドを
+    //   並行に立てるため。製品は UI スレッド 1 本なので、タブ数によらず 1 個になる。
+    // ・コンテキスト(と DIB)はスレッドの寿命まで持ち続け、Dispose しない(意図的)。
+    //   使い回しが目的であり、製品では UI スレッド = プロセスの寿命と一致する。
+    // ・VirtualScreen がモニタの抜き差しで広がっても、Allocate は MaximumBuffer を超える分を
+    //   一時バッファに逃がすだけで、描画結果は変わらない(遅くなるだけ)。
+    [ThreadStatic]
+    private static BufferedGraphicsContext? t_paintBuffer;
+
+    private static BufferedGraphicsContext PaintBuffer =>
+        t_paintBuffer ??= new BufferedGraphicsContext
+        {
+            MaximumBuffer = SystemInformation.VirtualScreen.Size,
+        };
+
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        // 更新矩形が空なら何もしない(Paint イベントも発火しない)。旧 WmPaint(OptimizedDoubleBuffer)は
+        // 更新矩形が空なら OnPaint 自体を呼ばずに return していたので、それに揃える
+        // (クライアントに面積があって更新領域だけが空の WM_PAINT = RDW_INTERNALPAINT 等で、
+        // PaintBody・_lastFrame の更新・Paint イベントを走らせない)。OnPrint 経路のクリップは
+        // ClientRectangle なので、クライアント面積 0 もここで返る = 面積 0 の DIB は作らない。
+        var clip = e.ClipRectangle;
+        if (clip.Width <= 0 || clip.Height <= 0)
+            return;
+
+        // Allocate が失敗したときはバッファなしで直接描く(TryAllocatePaintBuffer の注記を参照)。
+        var buffer = TryAllocatePaintBuffer(e.Graphics, ClientRectangle);
+        if (buffer is null)
+        {
+            PaintBody(e.Graphics);
+        }
+        else
+        {
+            using (buffer)
+            {
+                // 旧 OptimizedDoubleBuffer と同じく、バッファ側の Graphics にも更新領域のクリップを掛ける
+                // (WinForms の WmPaint はバッファの Graphics に SetClip(clip) してから描かせていた)。
+                // Allocate が返す Graphics は target のクリップを引き継がない。画面への反映範囲は
+                // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
+                // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
+                buffer.Graphics.SetClip(clip);
+                PaintBody(buffer.Graphics);
+                buffer.Render(e.Graphics);
+            }
+        }
+        // 本コントロールの描画を確定させた後に Paint イベント購読者に描かせる
+        // (App 層の overlay 拡張余地を残す)。base.OnPaint は Paint イベントを発火する。
+        // P-20 以降、購読者の e.Graphics はバッファではなく描画先(画面の DC 等)になる。
+        base.OnPaint(e);
+    }
+
+    /// <summary>
+    /// バックバッファを確保する。失敗したら null を返し、呼び出し側はバッファなしで直接描く。
+    /// 旧 Control.WmPaint(OptimizedDoubleBuffer)は Allocate を try で囲み、致命的でない例外と
+    /// OutOfMemoryException のときバッファなしの描画に切り替えていた(GDI 資源の枯渇等)。
+    /// ここで例外を外へ出すと PaintWithErrorHandling が描画失敗の印を立て、以後ずっと赤い × に
+    /// なるため、同じ判定で退避する。catch するのは Allocate だけ(PaintBody / Render の例外は従来どおり外へ)。
+    /// 判定(<see cref="IsCriticalForPaintFallback"/>)は System.ExceptionExtensions.IsCriticalException
+    /// (System.Private.Windows.Core。9.0.20 の IL で確認)の 6 型(NullReference・StackOverflow・
+    /// OutOfMemory・ThreadAbort・IndexOutOfRange・AccessViolation)から OutOfMemory を除いたもの。
+    /// 旧 WmPaint の <c>!IsCritical || ex is OutOfMemoryException</c> と同値。
+    /// </summary>
+    private static BufferedGraphics? TryAllocatePaintBuffer(Graphics target, Rectangle bounds)
+    {
+        try
+        {
+            return PaintBuffer.Allocate(target, bounds);
+        }
+        catch (Exception ex) when (!IsCriticalForPaintFallback(ex))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// バックバッファ確保の失敗を退避せず外へ出すべき(致命的)例外なら true。
+    /// System.ExceptionExtensions.IsCriticalException の 6 型から OutOfMemoryException を除いたもの
+    /// (旧 WmPaint の <c>!IsCritical || ex is OutOfMemoryException</c> を裏返した判定)。
+    /// 表形式のテスト(EditorControlPaintCostTests)で型ごとの判定を固定するため internal。
+    /// </summary>
+    internal static bool IsCriticalForPaintFallback(Exception ex) =>
+        ex
+            is NullReferenceException
+                or StackOverflowException
+                or ThreadAbortException
+                or IndexOutOfRangeException
+                or AccessViolationException;
+
+    private void PaintBody(Graphics g)
+    {
+        // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
+        // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
+        // (背景全域 FillRect)があっても消さない: RenderFrame の _scrollX シフトで右端に生じる隙間は、
+        // この塗りしか覆わない。_buffer が null(ソース未設定)の間も、この行が空のコントロールを
+        // BackColor で塗る。なお右下の角は VScrollBar(高さいっぱいに dock する子)が覆っており、
+        // この行の役目ではない(ctor の Dock 順の注意を参照)。
         g.Clear(BackColor);
         if (_buffer is not null)
         {
@@ -82,15 +180,12 @@ public sealed partial class EditorControl
             // (元 `_clientToScreenX = origin.X; _clientToScreenY = origin.Y;`)。
             _uia.RefreshClientToScreenOrigin();
         }
-        // 本コントロールの描画を確定させた後に Paint イベント購読者に描かせる
-        // (App 層の overlay 拡張余地を残す)。base.OnPaint は Paint イベントを発火する。
-        base.OnPaint(e);
     }
 
     /// <summary>
     /// Frame の Ops を GDI 呼び出しに変換する。折り返し OFF 時の水平スクロール(<see cref="_scrollX"/>)は
     /// <b>全 op の X から一様に差し引く</b>形で反映する(_wrapColumns&gt;0 時は _scrollX=0 で実質シフトなし)。
-    /// 先頭 op(背景全域 FillRect)も一緒にシフトされるが、OnPaint 冒頭で
+    /// 先頭 op(背景全域 FillRect)も一緒にシフトされるが、PaintBody 冒頭で
     /// <c>g.Clear(BackColor)</c> が全 client 領域を BackColor で塗っており、DefaultStyle.Background
     /// と BackColor が一致している(共に White)ため、シフトで生じる右側の隙間は視覚的にクリアの
     /// BackColor と同色になり結果は同じ。行番号マージンも一緒にシフトされる(仕様=YAGNI)。
