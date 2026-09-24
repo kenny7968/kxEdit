@@ -92,7 +92,8 @@ public class GdiCharMetricsCacheTests
             var m = new GdiCharMetrics(font);
 
             // 複数コードポイントの run は一括計測の既存挙動を維持する
-            // (コードポイント幅の和と一致するとは限らないため、キャッシュを使ってはならない)。
+            // (コードポイント幅の和と一致するとは限らないため、コードポイント幅の和で代用してはならない。
+            // run 全体の MeasureText の結果を使う。run 単位のメモは可)。
             Assert.Equal(Reference("あいうえお", font), m.MeasureRun("あいうえお"));
             Assert.Equal(Reference("あa", font), m.MeasureRun("あa"));
         });
@@ -118,5 +119,99 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(m.MeasureRun(" "), m.MeasureRun("\t"));
             // スペース幅そのものが 0 だと上の等値が無意味になるため、前提を明示しておく。
             Assert.True(m.MeasureRun(" ") > 0);
+        });
+
+    /// 2026-09-24 性能改善フェーズ 1(P-2): 非 ASCII を含む複数コードポイントの run も
+    /// MeasureText の結果そのものを返す(キャッシュ経由でも参照実装と一致)。
+    /// 先頭が ASCII で途中から非 ASCII になる run(行番号付きの行など)も含める。
+    [Theory]
+    [InlineData("あいうえお")]
+    [InlineData("あa")]
+    [InlineData("00001: 吾輩は猫である。")]
+    [InlineData("𠮷野家")]
+    [InlineData("é")] // 結合文字
+    public void MeasureRun_multi_codepoint_run_matches_reference_and_is_cached(string run) =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+            int first = m.MeasureRun(run);
+            int second = m.MeasureRun(run);
+            Assert.Equal(Reference(run, font), first);
+            Assert.Equal(first, second);
+            Assert.Equal(1, m.TestHook_RunCacheCount);
+            Assert.Equal(run.Length, m.TestHook_RunCacheChars);
+        });
+
+    /// span キー(部分 span)と string キーが同じエントリを引くこと。
+    [Fact]
+    public void Span_slice_and_string_share_an_entry() =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+            string line = "xxあいうえおyy";
+            int bySpan = m.MeasureRun(line.AsSpan(2, 5));
+            int byString = m.MeasureRun("あいうえお");
+            Assert.Equal(Reference("あいうえお", font), bySpan);
+            Assert.Equal(bySpan, byString);
+            Assert.Equal(1, m.TestHook_RunCacheCount);
+        });
+
+    /// 1 件の上限(4,096 文字)を超える run は格納しない。ちょうど上限は格納する。
+    [Fact]
+    public void Runs_longer_than_the_per_entry_limit_are_not_cached() =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+            string atLimit = new('あ', GdiCharMetrics.MaxCachedRunChars);
+            string over = new('い', GdiCharMetrics.MaxCachedRunChars + 1);
+            Assert.Equal(Reference(over, font), m.MeasureRun(over));
+            Assert.Equal(0, m.TestHook_RunCacheCount);
+            Assert.Equal(Reference(atLimit, font), m.MeasureRun(atLimit));
+            Assert.Equal(1, m.TestHook_RunCacheCount);
+        });
+
+    /// 合計文字数の上限を超える格納で全消去し、その run だけが残る。
+    /// 上限ちょうどまでは消去しない(境界を両側から見る)。
+    [Fact]
+    public void Exceeding_the_total_char_budget_clears_the_cache() =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+            int per = GdiCharMetrics.MaxCachedRunChars;
+            Assert.Equal(0, GdiCharMetrics.RunCacheBudgetChars % per); // 前提
+            int fit = GdiCharMetrics.RunCacheBudgetChars / per;
+            for (int i = 0; i < fit; i++)
+                m.MeasureRun(UniqueRun(i, per));
+            Assert.Equal(fit, m.TestHook_RunCacheCount);
+            Assert.Equal(GdiCharMetrics.RunCacheBudgetChars, m.TestHook_RunCacheChars);
+            m.MeasureRun("あい"); // 予算を 2 文字超える
+            Assert.Equal(1, m.TestHook_RunCacheCount);
+            Assert.Equal(2, m.TestHook_RunCacheChars);
+        });
+
+    /// i ごとに内容の異なる、長さ len の非 ASCII run。
+    private static string UniqueRun(int i, int len)
+    {
+        var s = new string('あ', len).ToCharArray();
+        s[0] = (char)('ア' + (i % 80));
+        s[1] = (char)('亜' + (i / 80));
+        return new string(s);
+    }
+
+    /// ASCII だけの run と単一コードポイントは、run のメモに入らない(経路不変)。
+    [Fact]
+    public void Ascii_runs_and_single_codepoints_do_not_use_the_run_cache() =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 12f);
+            var m = new GdiCharMetrics(font);
+            m.MeasureRun("hello world");
+            m.MeasureRun("あ");
+            m.MeasureRun("😀");
+            Assert.Equal(0, m.TestHook_RunCacheCount);
         });
 }

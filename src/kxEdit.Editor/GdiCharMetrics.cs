@@ -9,6 +9,8 @@ namespace kxEdit.Editor;
 /// 1000 文字行なら 1000 回呼ばれる)ではキャッシュ加算で完結させる。カーニングは無視する。
 /// TAB は半角スペース幅として扱う(タブ揃えの本実装は入力側 P3 に配置)。
 /// 非 ASCII の 1 コードポイントは初回だけ GDI で測り、以後はメモ化した値を返す(下記)。
+/// 非 ASCII を含む複数コードポイントの run も、run 全体の MeasureText の結果を
+/// 合計文字数の上限付きでメモ化する(<see cref="MaxCachedRunChars"/> / <see cref="RunCacheBudgetChars"/>)。
 /// </summary>
 /// <remarks>
 /// <b>スレッド安全性(重要)</b>: 本クラスは <b>UI スレッド専用</b>である。
@@ -51,6 +53,24 @@ public sealed class GdiCharMetrics : ICharMetrics
     // エントリ数は文書に現れるコードポイント数で有界。
     private readonly Dictionary<int, int> _nonAsciiWidths = new();
 
+    // 2026-09-24 性能改善フェーズ 1(P-2): 非 ASCII を含む複数コードポイントの run の幅メモ。
+    // 描画(FrameBuilder の本文 run)・横スクロールバー(UpdateHorizontalScrollbar の全可視行)・
+    // キャレット X(PixelMapper.OffsetToPx の prefix)が、同じ run を描画・打鍵ごとに測り直していた
+    // (ja10k で 2.5 ms/打鍵 = 調査記録 §9.2)。格納するのは MeasureText の結果そのもの = 返す値は不変。
+    //
+    // 上限は件数ではなくキーの合計文字数で決める(件数だと最悪 4,096 字 × 件数に膨らみ、
+    // それがタブ数倍になる)。溢れたら全消去する。1 件が MaxCachedRunChars を超える run は格納しない。
+    // 寿命は _nonAsciiWidths と同じ = フォントの寿命。UI スレッド専用(クラス doc の契約)。
+    internal const int MaxCachedRunChars = 4096;
+    internal const int RunCacheBudgetChars = 256 * 1024;
+
+    private readonly Dictionary<string, int> _runWidths = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int>.AlternateLookup<ReadOnlySpan<char>> _runWidthsBySpan;
+    private int _runCacheChars;
+
+    internal int TestHook_RunCacheCount => _runWidths.Count;
+    internal int TestHook_RunCacheChars => _runCacheChars;
+
     public GdiCharMetrics(Font font)
     {
         ArgumentNullException.ThrowIfNull(font);
@@ -64,6 +84,7 @@ public sealed class GdiCharMetrics : ICharMetrics
                 .Width;
         }
         _asciiWidths['\t'] = _asciiWidths[' '];
+        _runWidthsBySpan = _runWidths.GetAlternateLookup<ReadOnlySpan<char>>();
     }
 
     public int LineHeightPx { get; }
@@ -72,7 +93,7 @@ public sealed class GdiCharMetrics : ICharMetrics
     {
         // ホットパス: 非 ASCII の単一コードポイント(= LineLayout.Wrap の呼び方)はメモ化で返す。
         // 複数コードポイントの run は一括 MeasureText の既存挙動を維持する
-        // (run 全体の計測結果はコードポイント幅の和と一致するとは限らないため)。
+        // (run 全体の計測結果はコードポイント幅の和と一致するとは限らないため。run 単位でメモ化する)。
         if (
             text.Length > 0
             && text[0] >= 128
@@ -87,9 +108,7 @@ public sealed class GdiCharMetrics : ICharMetrics
         {
             char c = text[i];
             if (c >= 128)
-                return TextRenderer
-                    .MeasureText(text.ToString(), _font, MaxSize, MeasureFlags)
-                    .Width;
+                return CachedRunWidth(text);
             px += _asciiWidths[c];
         }
         return px;
@@ -116,6 +135,29 @@ public sealed class GdiCharMetrics : ICharMetrics
 
         int width = TextRenderer.MeasureText(cp.ToString(), _font, MaxSize, MeasureFlags).Width;
         _nonAsciiWidths[key] = width;
+        return width;
+    }
+
+    /// <summary>
+    /// 非 ASCII を含む複数コードポイントの run の幅をメモ化して返す(フィールドのコメント参照)。
+    /// ヒット時は文字列を割り当てない(span のまま引く)。
+    /// </summary>
+    private int CachedRunWidth(ReadOnlySpan<char> text)
+    {
+        if (text.Length <= MaxCachedRunChars && _runWidthsBySpan.TryGetValue(text, out int cached))
+            return cached;
+        string s = text.ToString();
+        int width = TextRenderer.MeasureText(s, _font, MaxSize, MeasureFlags).Width;
+        if (s.Length <= MaxCachedRunChars)
+        {
+            if (_runCacheChars + s.Length > RunCacheBudgetChars)
+            {
+                _runWidths.Clear();
+                _runCacheChars = 0;
+            }
+            _runWidths[s] = width;
+            _runCacheChars += s.Length;
+        }
         return width;
     }
 }
