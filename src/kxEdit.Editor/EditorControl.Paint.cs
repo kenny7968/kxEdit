@@ -93,7 +93,13 @@ public sealed partial class EditorControl
         }
     }
 
-    private static bool IsCriticalForPaintFallback(Exception ex) =>
+    /// <summary>
+    /// バックバッファ確保の失敗を退避せず外へ出すべき(致命的)例外なら true。
+    /// System.ExceptionExtensions.IsCriticalException の 6 型から OutOfMemoryException を除いたもの
+    /// (旧 WmPaint の <c>!IsCritical || ex is OutOfMemoryException</c> を裏返した判定)。
+    /// 表形式のテスト(EditorControlPaintCostTests)で型ごとの判定を固定するため internal。
+    /// </summary>
+    internal static bool IsCriticalForPaintFallback(Exception ex) =>
         ex
             is NullReferenceException
                 or StackOverflowException

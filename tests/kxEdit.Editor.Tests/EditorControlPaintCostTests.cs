@@ -64,4 +64,32 @@ public class EditorControlPaintCostTests
                 Assert.True(string.IsNullOrEmpty(c.AccessibilityObject.Name));
             }
         });
+
+    /// <summary>
+    /// バックバッファ確保失敗時の退避判定を型ごとに固定する。
+    /// System.ExceptionExtensions.IsCriticalException の 6 型から OutOfMemoryException を除いたものが
+    /// 致命的(true = 退避せず外へ出す)。OOM と GDI 資源枯渇(Win32Exception)等は退避する(false)。
+    /// 旧 WmPaint の <c>!IsCritical || ex is OutOfMemoryException</c> と同値であること。
+    /// ThreadAbortException は公開コンストラクタがないため、全型を GetUninitializedObject で作る
+    /// (判定は型だけを見るので、コンストラクタを通さなくてよい)。
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(NullReferenceException), true)]
+    [InlineData(typeof(StackOverflowException), true)]
+    [InlineData(typeof(ThreadAbortException), true)]
+    [InlineData(typeof(IndexOutOfRangeException), true)]
+    [InlineData(typeof(AccessViolationException), true)]
+    [InlineData(typeof(OutOfMemoryException), false)]
+    [InlineData(typeof(System.ComponentModel.Win32Exception), false)]
+    [InlineData(typeof(ArgumentException), false)]
+    [InlineData(typeof(InvalidOperationException), false)]
+    public void Paint_buffer_fallback_treats_only_critical_exceptions_as_fatal(
+        Type exceptionType,
+        bool critical
+    )
+    {
+        var ex = (Exception)
+            System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(exceptionType);
+        Assert.Equal(critical, EditorControl.IsCriticalForPaintFallback(ex));
+    }
 }
