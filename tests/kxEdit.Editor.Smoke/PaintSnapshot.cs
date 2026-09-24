@@ -283,7 +283,7 @@ internal static class PaintSnapshot
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => s_error ??= e.Exception;
 
-        using var form = new Form
+        var form = new Form
         {
             Text = "kxEdit.Editor.Smoke --paint-snapshot",
             Width = 640,
@@ -294,8 +294,9 @@ internal static class PaintSnapshot
             ShowInTaskbar = false,
         };
         // フォーカスの受け皿。クライアント領域の外に置く=自身も写らず、エディタのキャレットも点滅しない。
-        using var sink = new Button { Location = new Point(-200, -200), Size = new Size(10, 10) };
-        using var editor = new EditorControl { Dock = DockStyle.Fill };
+        // editor と sink は form の子なので、form の破棄で一緒に破棄される(finally の CloseQuietly)。
+        var sink = new Button { Location = new Point(-200, -200), Size = new Size(10, 10) };
+        var editor = new EditorControl { Dock = DockStyle.Fill };
         form.Controls.Add(editor);
         form.Controls.Add(sink);
         form.Show(); // ハンドル生成(Show しないと描画が配送されない)
@@ -332,12 +333,39 @@ internal static class PaintSnapshot
         catch (PaintSnapshotException e)
         {
             Console.Error.WriteLine($"[自己チェック失敗] {e.Message}");
-            form.Close();
             return 1;
         }
-
-        form.Close();
+        finally
+        {
+            CloseQuietly(form);
+        }
         return 0;
+    }
+
+    /// <summary>
+    /// 窓を閉じて破棄する。破棄の競合による <see cref="InvalidOperationException"/> だけは吸収する
+    /// (撮影と自己チェックの結果はこの時点で確定しているため)。
+    /// </summary>
+    /// <remarks>
+    /// 以前は <c>form.Close()</c> の後に <c>using</c> でもう一度 Dispose しており、1/7 の頻度で
+    /// 「CreateHandle() の実行中は Dispose() を呼び出せません」で落ちた(GdiBench にも同じ前例がある =
+    /// 2026-08-02-large-line-wrap-perf-design.md §9.7)。有力な仮説は、NVDA などの UIA クライアントが
+    /// WinForms 標準の FormAccessibleObject.Name(→ WindowText → Handle getter)を RPC スレッドから読み、
+    /// 破棄中の窓を別スレッドで作り直すところに UI スレッドの Dispose が重なる、というもの
+    /// (docs/plans/2026-09-24-perf-paint-cost.md の実施記録)。
+    /// </remarks>
+    private static void CloseQuietly(Form form)
+    {
+        try
+        {
+            form.Close(); // 非モーダルの Form は WM_CLOSE の中で子まで Dispose される
+            if (!form.IsDisposed)
+                form.Dispose();
+        }
+        catch (InvalidOperationException e)
+        {
+            Console.Error.WriteLine($"[警告] 窓の破棄で競合(結果には影響しない): {e.Message}");
+        }
     }
 
     /// <summary>1 状態を組み立てて描かせ、自己チェックの後に撮影する。画素のハッシュを返す。</summary>
