@@ -78,10 +78,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     private readonly ImeController _imeCtrl;
 
     // Phase 3 (Task 3d) で抽出した UIA テキストホスト adapter。IUiaTextHost 全メンバ実装 +
-    // Uia 系 12 field (_bufferSnapshot / _bounds / _boundsSync / _clientToScreenX/Y /
-    // _lastLineSegs / _hwnd / _provider / _testHook_LastGetObjectServed /
-    // _uiaTextChangedCount / _uiaSelectionChangedCount / _uiaFocusChangedCount) の所有権をここに移譲。
-    // UI thread 側からは OnSnapshotChanged / OnBoundsChanged / RaiseTextChanged 等の通知経路で呼ぶ。
+    // Uia 系 8 field (_bufferSnapshot / _lastLineSegs / _hwnd / _provider /
+    // _testHook_LastGetObjectServed / _uiaTextChangedCount / _uiaSelectionChangedCount /
+    // _uiaFocusChangedCount) の所有権をここに移譲(フェーズ 2 S-1 で座標キャッシュ 4 field を削除)。
+    // UI thread 側からは OnSnapshotChanged / RaiseTextChanged 等の通知経路で呼ぶ。
     // EditorControl 側の IUiaTextHost 実装 (EditorControl.Uia.cs) はこの Adapter への薄いラッパのみ。
     private readonly UiaTextHostAdapter _uia;
 
@@ -112,11 +112,11 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 発火閾値 (>=120 / <=-120) に達したら SystemInformation.MouseWheelScrollLines 行送りを 1 回発動する。
     private int _wheelAccum;
 
-    // Phase 3 Task 3d: Uia 系 12 field (_bufferSnapshot / _bounds / _boundsSync /
-    // _clientToScreenX/Y / _lastLineSegs / _hwnd / _provider / _testHook_LastGetObjectServed /
-    // _uiaTextChangedCount / _uiaSelectionChangedCount / _uiaFocusChangedCount) の所有権は
+    // Phase 3 Task 3d: Uia 系 field (_bufferSnapshot / _lastLineSegs / _hwnd / _provider /
+    // _testHook_LastGetObjectServed / _uiaTextChangedCount / _uiaSelectionChangedCount /
+    // _uiaFocusChangedCount の 8 個。フェーズ 2 S-1 で座標キャッシュ 4 field を削除) の所有権は
     // UiaTextHostAdapter (_uia) へ移譲済み。EditorControl 本体は Adapter への通知経路
-    // (OnSnapshotChanged / OnBoundsChanged / RaiseTextChanged) のみを持つ。
+    // (OnSnapshotChanged / RaiseTextChanged) のみを持つ。
     //
     // _lastFrame は Paint (OnPaint) のスナップショットで Uia 座標 API 用に公開している独立フィールド
     // (Adapter 移譲対象外=Test hook TestHook_GetLastFrame でも参照)。
@@ -2786,26 +2786,12 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _uia.InvalidateLastLineSegs();
     }
 
-    protected override void OnSizeChanged(EventArgs e)
-    {
-        base.OnSizeChanged(e);
-        // Task 3d: bounds キャッシュ更新は Adapter へ委譲 (元 UpdateBoundsCache)。
-        _uia.OnBoundsChanged();
-    }
-
-    protected override void OnLocationChanged(EventArgs e)
-    {
-        base.OnLocationChanged(e);
-        // Task 3d: bounds キャッシュ更新は Adapter へ委譲 (元 UpdateBoundsCache)。
-        _uia.OnBoundsChanged();
-    }
-
     // Task 3d (§C.4 例外解消): OnHandleCreated / OnHandleDestroyed は EditorControl 本体側に統一。
     // 元 EditorControl.Uia.cs 帰属を解消し、他の OnXxx オーバーライドと同じ場所 (本体) にまとめる。
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        // Adapter への通知: _hwnd キャッシュ + 初期 bounds 計算 (元 _hwnd = Handle + UpdateBoundsCache)。
+        // Adapter への通知: _hwnd キャッシュ (フェーズ 2 S-1 で初期 bounds 計算は廃止=座標は問い合わせ時に求める)。
         _uia.OnHandleCreated();
     }
 

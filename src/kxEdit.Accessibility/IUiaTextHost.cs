@@ -93,7 +93,7 @@ public interface IUiaTextHost
 
     // ---------- 座標 ----------
 
-    /// <summary>コントロール全体のスクリーン座標矩形(UI スレッドで更新したキャッシュ値)。</summary>
+    /// <summary>コントロールのクライアント領域のスクリーン座標矩形。問い合わせのたびに求める(RPC スレッド安全・マーシャリングしない)。Handle がなければ既定値。</summary>
     Rect BoundingRectangle { get; }
 
     /// <summary>[start, end) の各行スクリーン矩形を UIA 形式 (x,y,w,h, ...) で返す。空なら長さ 0。</summary>

@@ -175,10 +175,6 @@ public sealed partial class EditorControl
 
             // P5 Task 10: 描画完了時点の Frame を UIA 座標 API 用に公開(不変参照)。
             _lastFrame = frame;
-            // Task 3d: client→screen オフセットも念のため refresh(スクロールでウィンドウ位置が
-            // 動かなくても、DPI 変化・親コントロール移動などで値が変わり得る)。Adapter へ委譲
-            // (元 `_clientToScreenX = origin.X; _clientToScreenY = origin.Y;`)。
-            _uia.RefreshClientToScreenOrigin();
         }
     }
 

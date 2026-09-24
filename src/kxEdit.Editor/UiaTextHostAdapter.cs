@@ -4,13 +4,14 @@
 // を解消し、EditorControl 本体側の OnHandle*/On*Changed から Adapter へ通知する形に統一する。
 //
 // 責務:
-//   - Uia 系 12 field の単一所有 (_bufferSnapshot / _bounds / _boundsSync /
-//     _clientToScreenX / _clientToScreenY / _lastLineSegs / _hwnd / _provider /
+//   - Uia 系 8 field の単一所有 (_bufferSnapshot / _lastLineSegs / _hwnd / _provider /
 //     _testHook_LastGetObjectServed / _uiaTextChangedCount / _uiaSelectionChangedCount /
-//     _uiaFocusChangedCount)
+//     _uiaFocusChangedCount)。フェーズ 2(S-1・2026-09-25)で座標キャッシュ 4 field
+//     (_bounds / _boundsSync / _clientToScreenX / _clientToScreenY) を削除し、座標は
+//     問い合わせのたびに求めるようにした。
 //   - IUiaTextHost 全メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
 //     キャッシュ値応答。SetSelection / SetFocus / ScrollRangeIntoView のみ UI スレッドへ Invoke)
-//   - UI スレッド側からの通知経路: OnSnapshotChanged / OnBoundsChanged /
+//   - UI スレッド側からの通知経路: OnSnapshotChanged /
 //     OnHandleCreated / OnHandleDestroyed / RaiseTextChanged / RaiseSelectionChanged /
 //     RaiseFocusChanged / EnsureProvider
 //   - UIA プロバイダ (TextControlProviderV2) の lazy 生成
@@ -50,15 +51,12 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // 既定 null で silent 継続=本番挙動は不変 (視覚のみに縮退)。
     private readonly IUiaTraceSink? _trace;
 
-    // === 12 field: Uia 系 state の単一所有 (Task 3d) ===
+    // === 8 field: Uia 系 state の単一所有 (Task 3d。フェーズ 2 S-1 で座標キャッシュ 4 field を削除) ===
 
     // P5 Task 5: UIA v2 用 RPC スレッド安全キャッシュ。
     // _bufferSnapshot は不変(TextSnapshot は immutable)なので UI スレッドで参照を差し替えるだけで
     // RPC スレッドは自己整合なスナップショットを読める。編集経路(SetSource/AfterEdit)で更新する。
-    // _bounds は WPF Rect のためロック越しで読み書き(参照差替不可の struct)。
     private volatile TextSnapshot? _bufferSnapshot;
-    private readonly object _boundsSync = new();
-    private System.Windows.Rect _bounds;
 
     // P8 Minor-5: SR の Line 単位連続読み(LineStartOf/LineEndNoBreakOf/LineEnd)で
     // 同一 (snap, logicalLine, wrap) が繰り返されるため単一エントリキャッシュ。
@@ -69,11 +67,6 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // (correctness は ReferenceEquals(c.Snap) 判定で守られるが、旧 TextSnapshot の Root
     //  PieceTree が強参照で pin されて大容量ファイル差替後の GC を阻害するため)。
     private (TextSnapshot Snap, int Line, int Wrap, IReadOnlyList<WrapSegment> Segs)? _lastLineSegs;
-
-    // P5 Task 10: client→screen オフセットキャッシュ (座標 API 用)。
-    // OnPaint / OnBoundsChanged で更新した client 原点のスクリーン座標。
-    private int _clientToScreenX,
-        _clientToScreenY;
 
     // P5 Task 14 (I-2): UIA プロバイダは RPC スレッドから Handle を取得する。Control.Handle は
     // Handle 未生成時に CreateHandle を誘発し得るため、OnHandleCreated で捕捉した値をキャッシュ。
@@ -132,46 +125,16 @@ internal class UiaTextHostAdapter : IUiaTextHost
     }
 
     /// <summary>
-    /// bounds キャッシュ更新 (OnHandleCreated / OnSizeChanged / OnLocationChanged から)。
-    /// hwnd == 0 (Handle 破棄済) や Handle 未生成では早期 return (元 UpdateBoundsCache の
-    /// IsHandleCreated ガード相当)。lock 越しで _bounds を書き、_clientToScreenX/Y も更新する。
-    /// </summary>
-    public void OnBoundsChanged()
-    {
-        if (!_host.IsHandleCreated)
-            return;
-        var r = _host.RectangleToScreen(_host.ClientRectangle);
-        lock (_boundsSync)
-            _bounds = new System.Windows.Rect(r.Left, r.Top, r.Width, r.Height);
-        // P5 Task 10: client→screen オフセットも同時に更新
-        var origin = _host.PointToScreen(new System.Drawing.Point(0, 0));
-        _clientToScreenX = origin.X;
-        _clientToScreenY = origin.Y;
-    }
-
-    /// <summary>
-    /// OnPaint 末尾からの client→screen オフセット refresh。DPI 変化・親コントロール移動などで
-    /// スクロールなしでも値が変わり得る (元 EditorControl.Paint.cs 末尾のコード)。
+    /// Handle 生成通知 (EditorControl.OnHandleCreated から)。_hwnd をキャッシュする。
     /// </summary>
     /// <remarks>
-    /// Task 3d fixup (FIX-2): 元コード (EditorControl.Paint.cs OnPaint 末尾 2 行代入) は
-    /// IsHandleCreated guard を持たなかったため、guard を削除して bit-perfect に戻す。
-    /// 呼び出し元 (OnPaint) は Handle 生成後にしか動かない = WinForms 保証で実挙動影響なし。
+    /// フェーズ 2(S-1): 以前はここで初期 bounds も計算していた。座標は問い合わせのたびに
+    /// 求めるようになったので(<c>BoundingRectangle</c> / <c>ComputeBoundingRectangles</c> /
+    /// <c>ComputeOffsetFromScreenPoint</c>)、ここで持つのは hwnd だけ。
     /// </remarks>
-    public void RefreshClientToScreenOrigin()
-    {
-        var origin = _host.PointToScreen(new System.Drawing.Point(0, 0));
-        _clientToScreenX = origin.X;
-        _clientToScreenY = origin.Y;
-    }
-
-    /// <summary>
-    /// Handle 生成通知 (EditorControl.OnHandleCreated から)。_hwnd キャッシュ + 初期 bounds 計算。
-    /// </summary>
     public void OnHandleCreated()
     {
         _hwnd = _host.Handle; // P5 Task 14 (I-2): RPC スレッドが安全に読める hwnd キャッシュ
-        OnBoundsChanged();
     }
 
     /// <summary>
@@ -553,12 +516,32 @@ internal class UiaTextHostAdapter : IUiaTextHost
         );
     }
 
+    // フェーズ 2(S-1・2026-09-25): 以前は OnPaint 末尾と OnBoundsChanged で更新したキャッシュを
+    // 返していた。LocationChanged は親から見た位置の変化なので、メインウィンドウを動かしても
+    // 発火せず、次の描画まで古い位置を返していた(監査 M-10)。RPC スレッドから呼ばれるので
+    // Invoke せず、キャッシュ済みの _hwnd に対するスレッド安全な Win32 API でその場で求める。
+    // _hwnd == 0(Handle 未生成 / 破棄後)や Win32 の失敗は、従来の初期値と同じ default を返す
+    // (破棄後に最後の値を返し続けていたのは、設計書 §3.5 の意図的な挙動差として変える)。
+    // 2 回の呼び出しの間にリサイズが挟まると「新しい原点と古い大きさ」が返りうるが、
+    // 次の問い合わせで戻る一過性のずれで、従来の「次の描画まで古い」より窓が狭い。
     System.Windows.Rect IUiaTextHost.BoundingRectangle
     {
         get
         {
-            lock (_boundsSync)
-                return _bounds;
+            nint hwnd = _hwnd;
+            if (hwnd == 0)
+                return default;
+            if (!NativeMethods.GetClientRect(hwnd, out var rc))
+                return default;
+            var origin = new NativeMethods.POINT();
+            if (!NativeMethods.ClientToScreen(hwnd, ref origin))
+                return default;
+            return new System.Windows.Rect(
+                origin.x,
+                origin.y,
+                rc.right - rc.left,
+                rc.bottom - rc.top
+            );
         }
     }
 
@@ -597,8 +580,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (s >= en)
             return Array.Empty<double>();
 
-        int csx = _clientToScreenX,
-            csy = _clientToScreenY;
+        // フェーズ 2(S-1): client 原点のスクリーン座標は問い合わせのたびに求める
+        // (本メソッドは UI スレッド上でのみ走る=下の _host.ScrollX と同じ理由で PointToScreen を呼べる)。
+        var origin = _host.PointToScreen(System.Drawing.Point.Empty);
+        int csx = origin.X,
+            csy = origin.Y;
         // A-12 (2026-08-22): ComputeCaretPointForUia は _scrollX 適用前の X (描画原点座標) を返す。
         // 描画 (EditorControl.Paint.cs)・PointFromCharOffset・逆変換 OffsetFromClientPoint は
         // いずれも _scrollX を引いており、ここだけ引いていないと往復が非対称になる
@@ -659,10 +645,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
         var snap = _bufferSnapshot;
         if (snap is null)
             return 0;
-        // スクリーン→クライアント変換(client 原点は _clientToScreenX/Y)。範囲外は
-        // OffsetFromClientPoint 側で「Y<0=先頭視覚行の X」「exhausted=文書末尾」に丸める。
-        int clientX = (int)(x - _clientToScreenX);
-        int clientY = (int)(y - _clientToScreenY);
+        // スクリーン→クライアント変換。原点は問い合わせのたびに求める(フェーズ 2 S-1・UI スレッド上)。
+        // 範囲外は OffsetFromClientPoint 側で「Y<0=先頭視覚行の X」「exhausted=文書末尾」に丸める。
+        var origin = _host.PointToScreen(System.Drawing.Point.Empty);
+        int clientX = (int)(x - origin.X);
+        int clientY = (int)(y - origin.Y);
         // 負座標はゼロ扱い(文書先頭 0 に落ちる=clamp)。上限は OffsetFromClientPoint が自然に処理。
         if (clientX < 0)
             clientX = 0;
