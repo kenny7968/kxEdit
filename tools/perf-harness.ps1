@@ -157,6 +157,13 @@ function Get-RestoreGuide([string]$ProfileDir, [string]$Root, $Marker) {
   pwsh -File tools\perf-harness.ps1 -Recover
 "@
     }
+    if ($null -ne $Marker -and $Marker.State -eq 'stashed') {
+        return @"
+前回の計測はプロフィールを空にする前に止まっています。プロフィール($ProfileDir)は計測で変更していません。
+退避の残りを片づけるには、kxEdit を終了してから次を実行してください(プロフィールには触れません):
+  pwsh -File tools\perf-harness.ps1 -Recover
+"@
+    }
     return @"
 前回の計測の退避が残っています(異常終了した可能性があります)。
   退避: $(Get-StashDir $Root)
@@ -282,7 +289,7 @@ function Save-ProfileStash([string]$ProfileDir, [string]$Root) {
 # 退避が目印の目録どおりに揃っていること。揃っていなければ例外。
 function Assert-StashIntact([string]$ProfileDir, [string]$Root) {
     $marker = Read-Marker $Root
-    if ($null -eq $marker -or $marker.State -ne 'stashed') {
+    if ($null -eq $marker -or $marker.State -notin 'stashed', 'cleared') {
         throw "退避が完了していません(目印の状態: $(if ($marker) { $marker.State } else { 'なし' }))。プロフィールには触れません。"
     }
     if ($marker.ProfilePath -ne $ProfileDir) {
@@ -305,7 +312,12 @@ function Assert-StashIntact([string]$ProfileDir, [string]$Root) {
 
 # 計測用にプロフィールを空にする。退避の照合が済んでいなければ何もしない(例外)。
 function Clear-ProfileForRun([string]$ProfileDir, [string]$Root) {
-    Assert-StashIntact $ProfileDir $Root | Out-Null
+    $marker = Assert-StashIntact $ProfileDir $Root
+    if ($marker.State -eq 'stashed') {
+        # 初めて空にする直前に cleared へ進める。stashed のままなら「プロフィールは一度も空にしていない」
+        # =復元でプロフィールに触れてはならない(その間に利用者が kxEdit を使っていたら最新のデータがある)。
+        Write-Marker $Root (New-MarkerData $ProfileDir ([bool]$marker.ProfileExisted) 'cleared' $marker.Manifest)
+    }
     if (-not (Test-Path -LiteralPath $ProfileDir)) { return }
     if (-not (Test-Path -LiteralPath $ProfileDir -PathType Container)) { throw "$ProfileDir がフォルダーではありません。" }
     Assert-NoReparsePoints $ProfileDir
@@ -323,11 +335,27 @@ function Restore-ProfileStash([string]$ProfileDir, [string]$Root, [switch]$Displ
     $marker = Read-Marker $Root
     if ($null -ne $marker -and $marker.State -eq 'copying') {
         # 退避の途中で止まった=プロフィールは一度も変更されていない。退避と目印だけを片づける。
-        Remove-Item -LiteralPath (Join-Path $Root 'stash') -Recurse -Force -ErrorAction SilentlyContinue
+        # 目印を先に消す(途中で落ちても「目印のない退避」として中止・案内される安全側に倒れる)。
         Remove-Item -LiteralPath (Get-MarkerPath $Root) -Force
+        Remove-Item -LiteralPath (Join-Path $Root 'stash') -Recurse -Force -ErrorAction SilentlyContinue
         return $null
     }
     $marker = Assert-StashIntact $ProfileDir $Root
+    if ($marker.State -eq 'stashed') {
+        # 一度も空にしていない=プロフィールは計測で変更していない。プロフィールには触れない。
+        # 退避を消してよいのは、プロフィールが退避の時点と同じとき(=退避が不要と確かめられたとき)だけ。
+        $actual = Get-Manifest $ProfileDir
+        $same = if ($marker.ProfileExisted) {
+            Compare-Manifest (ConvertFrom-MarkerManifest $marker.Manifest) $actual ([System.Collections.Generic.List[string]]::new())
+        }
+        else { $null -eq $actual }
+        if (-not $same) {
+            throw "計測はプロフィールを空にする前に止まりましたが、プロフィールはその後に変更されています(kxEdit を使った可能性)。プロフィールには触れません。退避 $(Get-StashDir $Root) と目印 $(Get-MarkerPath $Root) は、内容を確かめてから手で削除してください。"
+        }
+        Remove-Item -LiteralPath (Get-MarkerPath $Root) -Force
+        Remove-Item -LiteralPath (Join-Path $Root 'stash') -Recurse -Force -ErrorAction SilentlyContinue
+        return $null
+    }
     if ((Test-Path -LiteralPath $ProfileDir) -and (Test-Path -LiteralPath $ProfileDir -PathType Container)) {
         Assert-NoReparsePoints $ProfileDir
     }
@@ -364,8 +392,8 @@ function Restore-ProfileStash([string]$ProfileDir, [string]$Root, [switch]$Displ
             throw "復元後の照合に失敗しました。退避は残しています: $(Get-StashDir $Root)`n$($diff -join "`n")"
         }
     }
-    Remove-Item -LiteralPath (Join-Path $Root 'stash') -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Get-MarkerPath $Root) -Force
+    Remove-Item -LiteralPath (Join-Path $Root 'stash') -Recurse -Force -ErrorAction SilentlyContinue
     return $displaced
 }
 
@@ -441,14 +469,35 @@ function Invoke-SelfTest {
         try { Check (HasReason (Test-HarnessPreconditions $prof $root $noProc $mname) 'が起動しています') '単一インスタンス mutex があれば中止する' }
         finally { $held.Dispose() }
 
-        # 4. 退避が壊れていたら、プロフィールを空にしないし復元もしない(退避を残す)
+        # 4. 退避が壊れていたら、プロフィールを空にしない
         Save-ProfileStash $prof $root
         Set-Content -LiteralPath (Join-Path (Get-StashDir $root) 'settings.json') -Value 'tampered' -Encoding utf8
         Check ((Throws { Clear-ProfileForRun $prof $root }) -and (Test-Path -LiteralPath (Join-Path $prof 'settings.json'))) '退避が壊れていたらプロフィールを空にしない'
-        Check ((Throws { Restore-ProfileStash $prof $root }) -and (Test-Path -LiteralPath (Get-MarkerPath $root))) '退避が壊れていたら復元せず目印を残す'
-        $diff = [System.Collections.Generic.List[string]]::new()
-        Check (Compare-Manifest $orig (Get-Manifest $prof) $diff) '復元を拒否した後もプロフィールは無傷'
+        Check ((Read-Marker $root).State -eq 'stashed') '空にするのを拒否したら目印は stashed のまま'
         Remove-Item -LiteralPath $root -Recurse -Force
+
+        # 4b. 空にした後に退避が壊れたら、復元せず目印と退避を残す
+        Save-ProfileStash $prof $root
+        Clear-ProfileForRun $prof $root
+        Check ((Read-Marker $root).State -eq 'cleared') '空にしたら目印は cleared'
+        Set-Content -LiteralPath (Join-Path (Get-StashDir $root) 'settings.json') -Value 'tampered' -Encoding utf8
+        Check ((Throws { Restore-ProfileStash $prof $root }) -and (Test-Path -LiteralPath (Get-MarkerPath $root)) -and (Test-Path -LiteralPath (Get-StashDir $root))) '退避が壊れていたら復元せず目印と退避を残す'
+        Remove-Item -LiteralPath $root -Recurse -Force
+        Remove-Item -LiteralPath $prof -Recurse -Force
+        New-FakeProfile
+
+        # 4c. 一度も空にしていない(stashed)まま止まった場合: プロフィールに触れない
+        Save-ProfileStash $prof $root
+        Check (HasReason (Pre) '空にする前に止まっています') 'stashed の目印では「プロフィールは変更していない」と案内する'
+        [void](Restore-ProfileStash $prof $root -Displace)
+        $diff = [System.Collections.Generic.List[string]]::new()
+        Check ((Compare-Manifest $orig (Get-Manifest $prof) $diff) -and -not (Test-Path -LiteralPath (Get-MarkerPath $root))) 'stashed からの Recover はプロフィールに触れず退避を片づける'
+        Save-ProfileStash $prof $root
+        Set-Content -LiteralPath (Join-Path $prof 'settings.json') -Value 'user changed later' -Encoding utf8
+        Check ((Throws { Restore-ProfileStash $prof $root -Displace }) -and ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw).Trim() -eq 'user changed later') -and (Test-Path -LiteralPath (Get-StashDir $root))) 'stashed の後に利用者が変えたプロフィールは差し替えない(退避も残す)'
+        Remove-Item -LiteralPath $root -Recurse -Force
+        Remove-Item -LiteralPath $prof -Recurse -Force
+        New-FakeProfile
 
         # 5. 目印の矛盾・改ざん
         Save-ProfileStash $prof $root
@@ -475,6 +524,8 @@ function Invoke-SelfTest {
         $saved = Join-Path $base 'saved-profile'
         Move-Item -LiteralPath $prof -Destination $saved
         Save-ProfileStash $prof $root
+        Clear-ProfileForRun $prof $root
+        Check ((Read-Marker $root).State -eq 'cleared') '元が無くても、空にする段で目印は cleared になる'
         New-Item -ItemType Directory -Force -Path $prof | Out-Null
         Set-Content -LiteralPath (Join-Path $prof 'settings.json') -Value '{}' -Encoding utf8
         [void](Restore-ProfileStash $prof $root)
@@ -525,6 +576,8 @@ if ($Recover) {
         Write-Host "復元するものはありません(目印がありません): $(Get-MarkerPath $script:HarnessRoot)"
         exit 0
     }
+    $mk = Read-Marker $script:HarnessRoot
+    Write-Host "退避の日時: $($mk.CreatedAt)(状態: $($mk.State))"
     $displaced = Restore-ProfileStash $script:ProfileDir $script:HarnessRoot -Displace
     Write-Host "復元しました(照合済み): $($script:ProfileDir)"
     if ($displaced) {
@@ -586,10 +639,28 @@ public static class KxPerfNative
     [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 
-    static void Send(params INPUT[] inputs)
+    /// <summary>
+    /// 送る直前(µs 級の隙間)に、前面の窓が期待するプロセスのものかを照合してから送る。
+    /// PowerShell 側で照合してから送ると、その間の ms 級の隙間で前面が変わりうる。
+    /// </summary>
+    static void Send(uint expectedPid, INPUT[] inputs, ushort[] modsToRelease)
     {
+        uint fgPid;
+        GetWindowThreadProcessId(GetForegroundWindow(), out fgPid);
+        if (expectedPid == 0 || fgPid != expectedPid)
+            throw new InvalidOperationException("前面の窓が計測対象(pid " + expectedPid + ")ではありません(pid " + fgPid + ")。入力を送らずに中止します。");
         uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
-        if (sent != inputs.Length) throw new InvalidOperationException("SendInput が失敗しました(err " + Marshal.GetLastWin32Error() + ")。UIPI(相手が昇格)か、入力がブロックされています。");
+        if (sent != inputs.Length)
+        {
+            // 一部だけ入ると修飾キーが押されたまま残り、以後の利用者の打鍵が Ctrl+キー等になる。離しておく。
+            if (modsToRelease != null && modsToRelease.Length > 0)
+            {
+                var ups = new List<INPUT>();
+                foreach (var m in modsToRelease) ups.Add(Key(m, true, false));
+                SendInput((uint)ups.Count, ups.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+            }
+            throw new InvalidOperationException("SendInput が失敗しました(err " + Marshal.GetLastWin32Error() + ")。UIPI(相手が昇格)か、入力がブロックされています。");
+        }
     }
 
     static INPUT Key(ushort vk, bool up, bool ext)
@@ -604,18 +675,18 @@ public static class KxPerfNative
     static bool IsExtended(ushort vk) { return (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E; }
 
     /// <summary>修飾キー(0 個以上)を押したまま vk を 1 回押す。</summary>
-    public static void Tap(ushort vk, params ushort[] mods)
+    public static void Tap(uint expectedPid, ushort vk, params ushort[] mods)
     {
         var list = new List<INPUT>();
         foreach (var m in mods) list.Add(Key(m, false, false));
         list.Add(Key(vk, false, IsExtended(vk)));
         list.Add(Key(vk, true, IsExtended(vk)));
         for (int k = mods.Length - 1; k >= 0; k--) list.Add(Key(mods[k], true, false));
-        Send(list.ToArray());
+        Send(expectedPid, list.ToArray(), mods);
     }
 
     /// <summary>文字列を KEYEVENTF_UNICODE で送る(IME を通らず WM_CHAR として届く)。</summary>
-    public static void TypeText(string s)
+    public static void TypeText(uint expectedPid, string s)
     {
         var list = new List<INPUT>();
         foreach (char c in s)
@@ -628,16 +699,81 @@ public static class KxPerfNative
                 list.Add(i);
             }
         }
-        Send(list.ToArray());
+        Send(expectedPid, list.ToArray(), null);
     }
 
-    public static void Wheel(int delta)
+    /// <summary>ホイールはカーソル直下の窓へ届くので、直下が target でなければ送らない。</summary>
+    public static void Wheel(uint expectedPid, IntPtr target, int delta)
     {
+        if (WindowUnderCursor() != target)
+            throw new InvalidOperationException("カーソル直下がエディタではありません(他の窓に覆われた・カーソルが動いた)。ホイールを送らずに中止します。");
         var i = new INPUT { type = INPUT_MOUSE };
         i.u.mi.mouseData = delta;
         i.u.mi.dwFlags = MOUSEEVENTF_WHEEL;
-        Send(i);
+        Send(expectedPid, new[] { i }, null);
     }
+
+    // ---- 起動した kxEdit を Job に入れる(pwsh の窓を閉じても計測用の kxEdit を残さない) ----
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr attr, string name);
+    [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint len);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    static IntPtr s_job = IntPtr.Zero;
+
+    /// <summary>
+    /// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE の Job に入れる。ハンドルは pwsh が持ち続け、pwsh が終わる
+    /// (窓を閉じる・強制終了)と OS が Job を閉じて kxEdit も終わる。空のプロフィールのまま計測用の
+    /// kxEdit が利用者の手に残るのを防ぐ。
+    /// </summary>
+    public static void KillOnHarnessExit(IntPtr processHandle)
+    {
+        if (s_job == IntPtr.Zero)
+        {
+            IntPtr job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) throw new InvalidOperationException("CreateJobObject に失敗しました。");
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if (!SetInformationJobObject(job, 9 /*JobObjectExtendedLimitInformation*/, ref info, (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION))))
+                throw new InvalidOperationException("SetInformationJobObject に失敗しました。");
+            s_job = job;
+        }
+        if (!AssignProcessToJobObject(s_job, processHandle))
+            throw new InvalidOperationException("AssignProcessToJobObject に失敗しました(err " + Marshal.GetLastWin32Error() + ")。");
+    }
+
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO info);
+    [StructLayout(LayoutKind.Sequential)]
+    struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
+
+    /// <summary>窓 h の UI スレッドでキーボードフォーカスを持つ HWND(取れなければ 0)。</summary>
+    public static IntPtr FocusOf(IntPtr h)
+    {
+        uint pid;
+        uint tid = GetWindowThreadProcessId(h, out pid);
+        var gi = new GUITHREADINFO { cbSize = Marshal.SizeOf(typeof(GUITHREADINFO)) };
+        return GetGUIThreadInfo(tid, ref gi) ? gi.hwndFocus : IntPtr.Zero;
+    }
+
+    /// <summary>窓 h の UI スレッドの ID。</summary>
+    public static uint ThreadOf(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
 
 
     /// <summary>前面化を最大 20 回試す(AttachThreadInput 併用)。成否を返す。</summary>
@@ -714,6 +850,20 @@ public static class KxPerfNative
         return false;
     }
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, StringBuilder l, uint flags, uint timeout, out IntPtr result);
+
+    /// <summary>
+    /// 別プロセスの入力欄の文字列(WM_GETTEXT)。GetWindowText は別プロセスのコントロールには
+    /// WM_GETTEXT を送らず、キャプションしか返さない。
+    /// </summary>
+    public static string ControlTextOf(IntPtr h)
+    {
+        var sb = new StringBuilder(1024);
+        IntPtr res;
+        SendMessageTimeout(h, 0x000D /*WM_GETTEXT*/, (IntPtr)sb.Capacity, sb, 0x0002, 2000, out res);
+        return sb.ToString();
+    }
+
     public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
     public static string TextOf(IntPtr h) { var sb = new StringBuilder(GetWindowTextLength(h) + 1); GetWindowText(h, sb, sb.Capacity); return sb.ToString(); }
 
@@ -758,8 +908,8 @@ $VK = @{
     PageUp = 0x21; PageDown = 0x22; End = 0x23; Home = 0x24; Left = 0x25; Up = 0x26; Right = 0x27; Down = 0x28
     N = 0x4E; O = 0x4F; F = 0x46; V = 0x56
 }
-# 送る直前に、前面の窓が計測対象のプロセスのものであることを確かめる。単一インスタンスの転送や
-# 利用者の操作で前面が変わっていたら、キー(Ctrl+V・x・BackSpace)を他のアプリへ送らずに中止する。
+# 入力は C# 側で送る直前に、前面の窓が計測対象のプロセスのものであることを照合する。単一インスタンスの
+# 転送や利用者の操作で前面が変わっていたら、キー(Ctrl+V・x・BackSpace)を他のアプリへ送らずに中止する。
 $script:TargetPid = 0
 function Assert-TargetForeground {
     $fgPid = [uint32]0
@@ -768,9 +918,21 @@ function Assert-TargetForeground {
         throw "前面の窓が計測対象の kxEdit(pid $($script:TargetPid))ではありません(pid $fgPid)。入力を送らずに中止します。"
     }
 }
-function Tap([int]$Key, [int[]]$Mods = @()) { Assert-TargetForeground; [KxPerfNative]::Tap([uint16]$Key, [uint16[]]$Mods) }
-function Send-Text([string]$Text) { Assert-TargetForeground; [KxPerfNative]::TypeText($Text) }
-function Send-Wheel([int]$Delta) { Assert-TargetForeground; [KxPerfNative]::Wheel($Delta) }
+function Tap([int]$Key, [int[]]$Mods = @()) { [KxPerfNative]::Tap([uint32]$script:TargetPid, [uint16]$Key, [uint16[]]$Mods) }
+function Send-Text([string]$Text) { [KxPerfNative]::TypeText([uint32]$script:TargetPid, $Text) }
+function Send-Wheel([IntPtr]$Target, [int]$Delta) { [KxPerfNative]::Wheel([uint32]$script:TargetPid, $Target, $Delta) }
+
+# キーボードフォーカスが期待の窓にあること(前面の窓だけでは、フォーカスがボタン等にあってキーが
+# 黙って捨てられるのを検出できない=「何もしない費用」を測ってしまう)。
+function Assert-Focus($Kx, [IntPtr]$Expected, [string]$What) {
+    $f = [KxPerfNative]::FocusOf($Kx.Main)
+    if ($f -ne $Expected) {
+        throw "$What にキーボードフォーカスがありません(フォーカス 0x$($f.ToString('X'))[$([KxPerfNative]::ClassOf($f))])。"
+    }
+}
+
+# 入力の効果の確認に使う(計測区間の外で呼ぶ)。
+function Test-TitleDirty($Kx) { return ([KxPerfNative]::TextOf($Kx.Main)).StartsWith('* ') }
 
 # ---- 文書の生成(調査記録 §9.5。UTF-8・BOM なし・CRLF。バイト数を検査する) ----
 function New-Doc([string]$Path, [string]$Format, [int]$Lines, [long]$ExpectedBytes) {
@@ -807,10 +969,14 @@ function Initialize-Docs([string]$Dir) {
 
 # ---- 結果 ----
 $script:Results = [System.Collections.Generic.List[object]]::new()
+# flags: 値の信頼性に関わる出来事(quiet_timeout=静穏待ちがタイムアウトし、背景の CPU が混ざった可能性)。
+$script:PendingFlags = [System.Collections.Generic.List[string]]::new()
 function Add-Result([string]$Scenario, [string]$Condition, [string]$Doc, [int]$N, [double]$Value, [string]$Unit) {
-    $row = [pscustomobject]@{ scenario = $Scenario; condition = $Condition; doc = $Doc; n = $N; value = [math]::Round($Value, 2); unit = $Unit }
+    $flags = ($script:PendingFlags | Select-Object -Unique) -join ';'
+    $script:PendingFlags.Clear()
+    $row = [pscustomobject]@{ scenario = $Scenario; condition = $Condition; doc = $Doc; n = $N; value = [math]::Round($Value, 2); unit = $Unit; flags = $flags }
     $script:Results.Add($row)
-    Write-Host ("  {0,-4} {1,-28} {2,-6} n={3,-4} {4,9:F2} {5}" -f $Scenario, $Condition, $Doc, $N, $Value, $Unit)
+    Write-Host ("  {0,-4} {1,-28} {2,-6} n={3,-4} {4,9:F2} {5} {6}" -f $Scenario, $Condition, $Doc, $N, $Value, $Unit, $flags)
 }
 
 # ---- kxEdit の起動と終了 ----
@@ -843,6 +1009,7 @@ function Start-KxEdit([string]$Exe) {
     Clear-ProfileForRun $script:ProfileDir $script:HarnessRoot
     $p = Start-Process -FilePath $Exe -PassThru
     $script:Launched.Add($p)
+    [KxPerfNative]::KillOnHarnessExit($p.Handle)
     $script:TargetPid = $p.Id
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
@@ -857,7 +1024,7 @@ function Start-KxEdit([string]$Exe) {
     $main = $p.MainWindowHandle
     [KxPerfNative]::Resize($main, 900, 700)
     Enter-Foreground $main
-    Wait-Quiet $p
+    [void](Wait-Quiet $p)
     $editor = [KxPerfNative]::FindEditor($main)
     if ($editor -eq 0) { throw 'エディタの HWND が見つかりません' }
     return [pscustomobject]@{ Proc = $p; Main = $main; Editor = $editor }
@@ -896,7 +1063,7 @@ function Open-Doc($Kx, [string]$Path) {
         if ($sw.ElapsedMilliseconds -gt 20000) { throw "$name を開けません(タイトル: $([KxPerfNative]::TextOf($Kx.Main)))" }
         Start-Sleep -Milliseconds 50
     }
-    Wait-Quiet $Kx.Proc
+    [void](Wait-Quiet $Kx.Proc)
     Enter-Foreground $Kx.Main
     $Kx.Editor = [KxPerfNative]::FindEditor($Kx.Main)
 }
@@ -914,7 +1081,7 @@ function Wait-Dialog($Kx, [int]$TimeoutMs = 5000) {
 # ---- 1 回あたり CPU の測り方(調査記録 §9.5 Measure-Op) ----
 function Get-CpuMs([Diagnostics.Process]$P) { $P.Refresh(); return $P.TotalProcessorTime.TotalMilliseconds }
 
-# 100 ms ごとに CPU を見て、増分 < 2 ms が 3 回続くまで待つ(最大 30 秒)。
+# 100 ms ごとに CPU を見て、増分 < 2 ms が 3 回続くまで待つ(最大 30 秒)。静穏になったかを返す。
 function Wait-Quiet([Diagnostics.Process]$P) {
     $calm = 0; $prev = Get-CpuMs $P
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -924,20 +1091,29 @@ function Wait-Quiet([Diagnostics.Process]$P) {
         if ($now - $prev -lt 2) { $calm++ } else { $calm = 0 }
         $prev = $now
     }
+    return $calm -ge 3
 }
 
 # $Op を n 回(各回の後に interval ms)行い、1 回あたりの CPU ms を返す。$Op にはインデックスを渡す。
-function Measure-Op($Kx, [int]$N, [int]$IntervalMs, [scriptblock]$Op, [IntPtr]$ExpectForeground = $Kx.Main) {
-    Wait-Quiet $Kx.Proc
+# 前後で、前面の窓とキーボードフォーカス($ExpectFocus。0 なら見ない)を確かめる。
+# 静穏待ちがタイムアウトしたら警告し、次の Add-Result の flags に quiet_timeout を残す。
+# -OnStart は静穏待ちの直後・計測開始の直前に呼ぶ(M-6 のスレッド別 CPU の開始点を揃えるため)。
+function Measure-Op($Kx, [int]$N, [int]$IntervalMs, [scriptblock]$Op,
+    [IntPtr]$ExpectForeground = $Kx.Main, [IntPtr]$ExpectFocus = $Kx.Editor, [scriptblock]$OnStart = $null) {
+    if (-not (Wait-Quiet $Kx.Proc)) { $script:PendingFlags.Add('quiet_timeout'); Write-Warning '静穏待ちがタイムアウトしました(計測前)。' }
     Assert-Foreground $Kx $ExpectForeground
+    if ($ExpectFocus -ne 0) { Assert-Focus $Kx $ExpectFocus '計測対象' }
+    if ($OnStart) { $null = & $OnStart }
     $t0 = Get-CpuMs $Kx.Proc
     for ($i = 0; $i -lt $N; $i++) {
-        & $Op $i
+        $null = & $Op $i
         Start-Sleep -Milliseconds $IntervalMs
     }
-    Wait-Quiet $Kx.Proc
+    if (-not (Wait-Quiet $Kx.Proc)) { $script:PendingFlags.Add('quiet_timeout'); Write-Warning '静穏待ちがタイムアウトしました(計測後)。' }
+    $t1 = Get-CpuMs $Kx.Proc
     Assert-Foreground $Kx $ExpectForeground
-    return ((Get-CpuMs $Kx.Proc) - $t0) / $N
+    if ($ExpectFocus -ne 0) { Assert-Focus $Kx $ExpectFocus '計測対象' }
+    return ($t1 - $t0) / $N
 }
 
 function Get-ThreadCpu([Diagnostics.Process]$P) {
@@ -962,6 +1138,7 @@ function Invoke-M1([string]$Exe) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $p = Start-Process -FilePath $Exe -PassThru
         $script:Launched.Add($p)
+        [KxPerfNative]::KillOnHarnessExit($p.Handle)
         while ($true) {
             $p.Refresh()
             if ($p.MainWindowHandle -ne 0 -and [KxPerfNative]::IsWindowVisible($p.MainWindowHandle)) { break }
@@ -996,13 +1173,16 @@ function Invoke-M2([string]$Exe, $Docs) {
         $kx = Start-KxEdit $Exe
         try {
             Open-Doc $kx $Docs[$doc]
+            # アイドル: 何も送らない周期の費用(キャレットの点滅等)。各操作の値に interval ぶん乗るので、差し引きの目安。
             Add-Result 'M-2' 'アイドル' $doc 100 (Measure-Op $kx 100 100 { }) 'cpu_ms/op'
             Tap $VK.Home @($VK.Ctrl); for ($i = 0; $i -lt 10; $i++) { Tap $VK.Down }
             Add-Result 'M-2' '→←の交互' $doc 100 (Measure-Op $kx 100 100 { param($i) if ($i % 2 -eq 0) { Tap $VK.Right } else { Tap $VK.Left } }) 'cpu_ms/op'
             Add-Result 'M-2' '↓↑の交互' $doc 100 (Measure-Op $kx 100 100 { param($i) if ($i % 2 -eq 0) { Tap $VK.Down } else { Tap $VK.Up } }) 'cpu_ms/op'
             Add-Result 'M-2' 'Shift+→' $doc 40 (Measure-Op $kx 40 100 { Tap $VK.Right @($VK.Shift) }) 'cpu_ms/op'
             Tap $VK.Right
+            if (Test-TitleDirty $kx) { throw 'M-2: 打鍵の前から文書が変更済みになっている' }
             Add-Result 'M-2' '文字入力x' $doc 60 (Measure-Op $kx 60 100 { Send-Text 'x' }) 'cpu_ms/op'
+            if (-not (Test-TitleDirty $kx)) { throw 'M-2: x を打っても文書が変更済みにならない(打鍵が本文に届いていない)' }
             Add-Result 'M-2' 'BackSpace' $doc 60 (Measure-Op $kx 60 100 { Tap $VK.Back }) 'cpu_ms/op'
             Add-Result 'M-2' 'PageDown/PageUpの交互' $doc 50 (Measure-Op $kx 50 150 { param($i) if ($i % 2 -eq 0) { Tap $VK.PageDown } else { Tap $VK.PageUp } }) 'cpu_ms/op'
             $ed = $kx.Editor
@@ -1015,29 +1195,44 @@ function Invoke-M2([string]$Exe, $Docs) {
     }
 }
 
+# UIA で本文の長さ(文字数)を読む(計測区間の外で、入力の効果を確かめるため)。
+function Get-DocLength($Kx) {
+    $el = [System.Windows.Automation.AutomationElement]::FromHandle($Kx.Editor)
+    $tp = [System.Windows.Automation.TextPattern]$el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+    return $tp.DocumentRange.GetText(-1).Length
+}
+
 function Invoke-M3([string]$Exe, $Docs) {
     Write-Host '== M-3 新規文書への連続入力(F-6・CPU ms/打鍵) =='
+    # クリップボードは上書きし、終了時に空にする(元の内容は戻さない)。戻すと、パスワードマネージャーが
+    # 履歴・同期から外すための形式を付けずにパスワードを再投入し、自動消去も無効にしてしまうため。
     $kx = Start-KxEdit $Exe
-    $saved = $null
     try {
-        try { $saved = Get-Clipboard -Raw } catch { $saved = $null }
         Set-Clipboard -Value $Docs.paste
         $pos = 0
         $pasteBytes = [Text.Encoding]::UTF8.GetByteCount($Docs.paste)
         for ($k = 0; $k -le 9; $k++) {
             if ($k -gt 0) {
                 Assert-Foreground $kx
+                Assert-Focus $kx $kx.Editor '本文'
+                $len0 = Get-DocLength $kx
                 Tap $VK.V @($VK.Ctrl)
+                [void](Wait-Quiet $kx.Proc)
+                $len1 = Get-DocLength $kx
+                if ($len1 - $len0 -ne $Docs.paste.Length) { throw "M-3: 貼り付けが効いていない(本文長 $len0 → $len1)" }
                 $pos += $pasteBytes
             }
+            $len0 = Get-DocLength $kx
             Add-Result 'M-3' "書込位置≈$pos" 'new' 40 (Measure-Op $kx 40 100 { Send-Text 'x' }) 'cpu_ms/op'
+            if ((Get-DocLength $kx) - $len0 -ne 40) { throw 'M-3: 打鍵が本文に届いていない' }
             $pos += 40
         }
     }
     finally {
-        Stop-KxEdit $kx
-        # クリップボードを戻す(テキストのみ・ベストエフォート)。
-        try { if ($null -ne $saved) { Set-Clipboard -Value $saved } } catch { Write-Warning "クリップボードを戻せませんでした: $_" }
+        try { Stop-KxEdit $kx }
+        finally {
+            try { [Windows.Forms.Clipboard]::Clear() } catch { Write-Warning "クリップボードを空にできませんでした: $_" }
+        }
     }
 }
 
@@ -1049,18 +1244,17 @@ function Invoke-M4([string]$Exe, $Docs) {
         if (-not [KxPerfNative]::CursorToVisiblePoint($kx.Editor)) {
             throw 'M-4: エディタの見えている点が見つかりません(最前面の窓に覆われている)。'
         }
+        $ed = $kx.Editor
         # ホイールが本当に届いてスクロールすることを確かめる(届かないと「何もしない費用」を測る)。
-        $pos0 = [KxPerfNative]::VScrollPos($kx.Editor)
-        Send-Wheel -120; Wait-Quiet $kx.Proc
-        $pos1 = [KxPerfNative]::VScrollPos($kx.Editor)
-        Send-Wheel 120; Wait-Quiet $kx.Proc
+        $pos0 = [KxPerfNative]::VScrollPos($ed)
+        Send-Wheel $ed -120; [void](Wait-Quiet $kx.Proc)
+        $pos1 = [KxPerfNative]::VScrollPos($ed)
+        Send-Wheel $ed 120; [void](Wait-Quiet $kx.Proc)
         if ($pos0 -lt 0 -or $pos1 -le $pos0) {
-            $under = [KxPerfNative]::WindowUnderCursor()
-            $upid = [uint32]0; [void][KxPerfNative]::GetWindowThreadProcessId($under, [ref]$upid)
-            throw "M-4: ホイールでスクロールしません(縦スクロール位置 $pos0 → $pos1・カーソル直下 0x$($under.ToString('X'))[$([KxPerfNative]::ClassOf($under))・pid $upid]・エディタ 0x$($kx.Editor.ToString('X'))・kxEdit pid $($kx.Proc.Id))"
+            throw "M-4: ホイールでスクロールしません(縦スクロール位置 $pos0 → $pos1)"
         }
-        Add-Result 'M-4' 'ホイール下' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel -120 }) 'cpu_ms/op'
-        Add-Result 'M-4' 'ホイール上' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel 120 }) 'cpu_ms/op'
+        Add-Result 'M-4' 'ホイール下' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel $ed -120 }) 'cpu_ms/op'
+        Add-Result 'M-4' 'ホイール上' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel $ed 120 }) 'cpu_ms/op'
     }
     finally { Stop-KxEdit $kx }
 }
@@ -1076,12 +1270,27 @@ function Invoke-M5([string]$Exe, $Docs) {
             Tap $VK.F @($VK.Ctrl)
             $dlg = Wait-Dialog $kx
             # ダイアログへ送る間は、メインウィンドウを前面に戻さない(戻すとキーが本文に入る)。
+            # ダイアログが出てから入力欄にフォーカスが入るまで少し遅れることがある(最大 2 秒待つ)。
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                $box = [KxPerfNative]::FocusOf($dlg)
+                if ($box -ne 0 -and [KxPerfNative]::ClassOf($box) -match 'EDIT') { break }
+                Start-Sleep -Milliseconds 50
+            } while ($sw.ElapsedMilliseconds -lt 2000)
+            if ($box -eq 0 -or [KxPerfNative]::ClassOf($box) -notmatch 'EDIT') {
+                throw "M-5: 検索語の入力欄にフォーカスがありません($([KxPerfNative]::ClassOf($box)))"
+            }
+            # 打鍵が入力欄に届くことを確かめる(計測区間の外)。
+            Send-Text $term; [void](Wait-Quiet $kx.Proc)
+            $typed = [KxPerfNative]::ControlTextOf($box)
+            for ($i = 0; $i -lt $term.Length; $i++) { Tap $VK.Back }
+            if ($typed -ne $term) { throw "M-5: 検索語が入力欄に入らない('$typed')" }
             $v = Measure-Op $kx 64 200 {
                 param($i)
                 $k = $i % 16
                 if ($k -lt 7) { Send-Text ($term.Substring($k, 1)) }
                 elseif ($k -lt 14) { Tap $VK.Back }
-            } -ExpectForeground $dlg
+            } -ExpectForeground $dlg -ExpectFocus $box
             Add-Result 'M-5' '検索語の打鍵' $doc 56 ($v * 16 / 14) 'cpu_ms/op'
         }
         finally { Stop-KxEdit $kx }
@@ -1094,7 +1303,7 @@ function Invoke-M6([string]$Exe, $Docs) {
         $kx = Start-KxEdit $Exe
         try {
             if ($cond -eq '空の新規タブ4枚') {
-                for ($i = 0; $i -lt 3; $i++) { Assert-Foreground $kx; Tap $VK.N @($VK.Ctrl); Wait-Quiet $kx.Proc }
+                for ($i = 0; $i -lt 3; $i++) { Assert-Foreground $kx; Tap $VK.N @($VK.Ctrl); [void](Wait-Quiet $kx.Proc) }
             }
             else {
                 foreach ($d in 'ja10k', 'en10k', 'ja30k') { Open-Doc $kx $Docs[$d] }
@@ -1102,24 +1311,41 @@ function Invoke-M6([string]$Exe, $Docs) {
                     # 各ファイルのタブで x を 1 文字打って未保存にする(4 タブを一巡)。
                     for ($i = 0; $i -lt 4; $i++) {
                         $title = [KxPerfNative]::TextOf($kx.Main)
-                        if ($title -match '^(ja10k|en10k|ja30k)\.txt') { Send-Text 'x'; Wait-Quiet $kx.Proc }
-                        Tap $VK.Tab @($VK.Ctrl); Wait-Quiet $kx.Proc
+                        if ($title -match '^(ja10k|en10k|ja30k)\.txt') { Send-Text 'x'; [void](Wait-Quiet $kx.Proc) }
+                        Tap $VK.Tab @($VK.Ctrl); [void](Wait-Quiet $kx.Proc)
                     }
+                    # もう一巡して、変更済みのタブが 3 枚あることを確かめる。
+                    $dirty = 0
+                    for ($i = 0; $i -lt 4; $i++) {
+                        if (Test-TitleDirty $kx) { $dirty++ }
+                        Tap $VK.Tab @($VK.Ctrl); [void](Wait-Quiet $kx.Proc)
+                    }
+                    if ($dirty -ne 3) { throw "M-6: 未保存のタブが 3 枚にならない($dirty 枚)" }
                 }
             }
-            $before = Get-ThreadCpu $kx.Proc
-            $v = Measure-Op $kx 40 250 { Tap $VK.Tab @($VK.Ctrl) }
-            Add-Result 'M-6' $cond '-' 40 $v 'cpu_ms/op'
+            # スレッド別の CPU は、Measure-Op の静穏待ちの直後(= プロセス全体と同じ開始点)で採る。
+            $uiTid = [int][KxPerfNative]::ThreadOf($kx.Main)
+            $script:M6Before = $null
+            $title0 = [KxPerfNative]::TextOf($kx.Main)
+            # タブごとにエディタの HWND が変わるので、フォーカスの照合はしない(前面の窓だけ見る)。
+            $v = Measure-Op $kx 40 250 { Tap $VK.Tab @($VK.Ctrl) } -ExpectFocus 0 -OnStart { $script:M6Before = Get-ThreadCpu $kx.Proc }
             $after = Get-ThreadCpu $kx.Proc
+            # 40 回(4 タブの倍数)で一巡して元のタブに戻る=Ctrl+Tab が効いていれば題名は元に戻る。
+            if ([KxPerfNative]::TextOf($kx.Main) -ne $title0) { throw 'M-6: Ctrl+Tab の後に元のタブへ戻らない' }
+            Add-Result 'M-6' $cond '-' 40 $v 'cpu_ms/op'
             $rows = foreach ($id in $after.Keys) {
-                if ($before.ContainsKey($id)) {
-                    [pscustomobject]@{ Id = $id; Total = ($after[$id][0] - $before[$id][0]) / 40; User = ($after[$id][1] - $before[$id][1]) / 40 }
+                if ($script:M6Before.ContainsKey($id)) {
+                    [pscustomobject]@{ Id = $id; Total = ($after[$id][0] - $script:M6Before[$id][0]) / 40; User = ($after[$id][1] - $script:M6Before[$id][1]) / 40 }
                 }
             }
-            $top = @($rows | Sort-Object Total -Descending | Select-Object -First 2)
-            for ($r = 0; $r -lt $top.Count; $r++) {
-                Add-Result 'M-6' "$cond/スレッド$($r + 1)合計" '-' 40 $top[$r].Total 'cpu_ms/op'
-                Add-Result 'M-6' "$cond/スレッド$($r + 1)ユーザー" '-' 40 $top[$r].User 'cpu_ms/op'
+            $ui = @($rows | Where-Object Id -eq $uiTid)
+            $other = @($rows | Where-Object Id -ne $uiTid | Sort-Object Total -Descending | Select-Object -First 1)
+            foreach ($pair in @(@('UIスレッド', $ui), @('その他で最大のスレッド', $other))) {
+                $label, $r = $pair
+                if ($r.Count -gt 0) {
+                    Add-Result 'M-6' "$cond/$label/合計" '-' 40 $r[0].Total 'cpu_ms/op'
+                    Add-Result 'M-6' "$cond/$label/ユーザー" '-' 40 $r[0].User 'cpu_ms/op'
+                }
             }
         }
         finally { Stop-KxEdit $kx }
@@ -1128,17 +1354,17 @@ function Invoke-M6([string]$Exe, $Docs) {
 
 function Invoke-M7([string]$Exe, $Docs) {
     Write-Host '== M-7 UIA GetBoundingRectangles(ja10k・先頭から・所要 ms) =='
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
     $kx = Start-KxEdit $Exe
     try {
         Open-Doc $kx $Docs.ja10k
-        Tap $VK.Home @($VK.Ctrl); Wait-Quiet $kx.Proc
+        Tap $VK.Home @($VK.Ctrl); [void](Wait-Quiet $kx.Proc)
         $el = [System.Windows.Automation.AutomationElement]::FromHandle($kx.Editor)
         $tp = [System.Windows.Automation.TextPattern]$el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
         $EP = [System.Windows.Automation.Text.TextPatternRangeEndpoint]
         $UNIT = [System.Windows.Automation.Text.TextUnit]
-        foreach ($case in @(@('1行', 1, 10), @('40行', 40, 10), @('1000行', 1000, 3), @('全文', 0, 2))) {
+        $visible = $tp.DocumentRange.GetBoundingRectangles().Count
+        if ($visible -lt 1) { throw 'M-7: 全文の範囲で矩形が返らない' }
+        foreach ($case in @(@('1行', 1, 10), @('40行', 40, 10), @('1000行', 1000, 3), @('全文', 0, 3))) {
             $label, $lines, $reps = $case
             if ($lines -eq 0) { $range = $tp.DocumentRange }
             else {
@@ -1154,8 +1380,12 @@ function Invoke-M7([string]$Exe, $Docs) {
                 $times += $sw.Elapsed.TotalMilliseconds
                 $count = $rects.Count
             }
-            $s = $times | Sort-Object
-            Add-Result 'M-7' "$label(矩形$count)" 'ja10k' $reps $s[[int][math]::Floor($s.Count / 2)] 'ms'
+            # 範囲の行数ぶん。ただし可視域で頭打ち(Smoke S8 と同じ期待値)。
+            $expected = if ($lines -eq 0) { $visible } else { [math]::Min($lines, $visible) }
+            if ($count -ne $expected) { throw "M-7: $label の矩形数 $count(期待 $expected)" }
+            $s = @($times | Sort-Object)
+            $median = if ($s.Count % 2 -eq 1) { $s[[int][math]::Floor($s.Count / 2)] } else { ($s[$s.Count / 2 - 1] + $s[$s.Count / 2]) / 2 }
+            Add-Result 'M-7' "$label(矩形$count)" 'ja10k' $reps $median 'ms'
         }
     }
     finally { Stop-KxEdit $kx }
@@ -1168,7 +1398,18 @@ function Invoke-M7([string]$Exe, $Docs) {
 $exe = Join-Path (Resolve-Path -LiteralPath $PublishDir).ProviderPath 'kxEdit.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "kxEdit.exe がありません: $exe" }
 if (-not $OutCsv) { $OutCsv = Join-Path $script:HarnessRoot ("results-{0:yyyyMMdd-HHmmss}.csv" -f (Get-Date)) }
+# 相対パスは開始時に絶対化する(finally の中で親フォルダーを解決できずに結果を失わないため)。
+$OutCsv = [IO.Path]::GetFullPath($OutCsv, (Get-Location).ProviderPath)
 if (Test-Path -LiteralPath $OutCsv) { throw "結果の CSV が既にあります(上書きしません): $OutCsv" }
+$WorkDir = [IO.Path]::GetFullPath($WorkDir, (Get-Location).ProviderPath).TrimEnd('\')
+foreach ($guarded in $script:ProfileDir, $script:HarnessRoot) {
+    if ($WorkDir -eq $guarded -or $WorkDir.StartsWith("$guarded\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "-WorkDir を $guarded の中に置かないでください(退避・消去に巻き込まれます): $WorkDir"
+    }
+}
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
 
 $reasons = Test-HarnessPreconditions $script:ProfileDir $script:HarnessRoot $script:ProcessName $script:KxMutexName
 if ($reasons.Count -gt 0) {
@@ -1182,12 +1423,22 @@ $docs = Initialize-Docs $WorkDir
 $nvda = [bool](Get-Process -Name nvda -ErrorAction SilentlyContinue)
 if ($nvda) { Write-Host '[注意] NVDA が起動しています。調査記録 §9 の値(NVDA なし)とは条件が違います。' -ForegroundColor Yellow }
 Add-Result 'env' 'NVDA起動中' '-' 1 ([int]$nvda) 'bool'
+# 前後比較で条件を取り違えないための記録(値は value 列ではなく condition 列に入れる)。
+$exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.Substring(0, 12)
+$dllPath = Join-Path (Split-Path -Parent $exe) 'kxEdit.dll'
+$ver = if (Test-Path -LiteralPath $dllPath) { (Get-Item -LiteralPath $dllPath).VersionInfo.ProductVersion } else { '?' }
+$scr = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+Add-Result 'env' "kxEdit=$ver sha256(exe)=$exeHash" '-' 1 0 'info'
+Add-Result 'env' "screen=$($scr.Width)x$($scr.Height)" '-' 1 0 'info'
+Add-Result 'env' "scenarios=$($Scenario -join ',')" '-' 1 0 'info'
 Write-Host @"
 計測を始めます。終わるまで(全シナリオで十数分)画面・キーボード・マウスに触らないでください。
 計測中に kxEdit を起動しないでください(計測中の窓に入り、打った内容は失われます)。
 プロフィールを退避します: $($script:ProfileDir)
 "@
 # 退避は try の外。失敗したら Save-ProfileStash が自分で後始末する(プロフィールは無傷)。
+# 開始前の検査から文書の生成までの間に kxEdit が起動されていないことを、退避の直前にもう一度確かめる。
+Assert-NoKxEditRunning
 Save-ProfileStash $script:ProfileDir $script:HarnessRoot
 $exitCode = 0
 try {
@@ -1211,7 +1462,14 @@ catch {
 finally {
     $restorable = $true
     try { Stop-Launched } catch { Write-Host "$_" -ForegroundColor Red; $restorable = $false }
-    if ($restorable -and (Test-KxEditRunning $script:ProcessName $script:KxMutexName)) {
+    $mk = $null
+    try { $mk = Read-Marker $script:HarnessRoot } catch { $mk = $null }
+    $neverCleared = $null -ne $mk -and $mk.State -eq 'stashed'
+    if ($neverCleared) {
+        # プロフィールを一度も空にしていない。kxEdit が動いていても、プロフィールに触れずに退避だけ片づけられる。
+        $restorable = $true
+    }
+    elseif ($restorable -and (Test-KxEditRunning $script:ProcessName $script:KxMutexName)) {
         Write-Host 'kxEdit が動いているので、プロフィールの復元を見送ります。' -ForegroundColor Red
         $restorable = $false
     }
@@ -1226,9 +1484,13 @@ finally {
         }
     }
     if (-not $restorable) {
-        Write-Host (Get-RestoreGuide $script:ProfileDir $script:HarnessRoot $null)
+        $m = $null
+        try { $m = Read-Marker $script:HarnessRoot } catch { $m = $null }
+        Write-Host (Get-RestoreGuide $script:ProfileDir $script:HarnessRoot $m)
         $exitCode = 3
     }
+    # 中止したときの途中までの結果を、完走した結果と取り違えないように記録する。
+    Add-Result 'env' "status=$(if ($exitCode -eq 0) { 'completed' } else { "aborted(exit $exitCode)" })" '-' 1 $exitCode 'info'
     if ($script:Results.Count -gt 0) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutCsv) | Out-Null
         $script:Results | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding utf8 -NoClobber

@@ -43,6 +43,14 @@ namespace kxEdit.Editor.Smoke;
 /// 実キー入力の対になる片側(文字キーの WM_KEYDOWN・BackSpace の WM_CHAR 0x08)、
 /// PreProcessMessage / ProcessCmdKey、App 層のステータスバー更新、UIA イベントの配信(クライアント不在)、
 /// S8 の RPC スレッドからの Invoke によるマーシャリング、IME の Imm 呼び出し。
+/// <b>計測中はメッセージを汲まないので、BeginInvoke やタイマーに回した処理も計上しない</b>
+/// (現状の打鍵経路には無い)。処理を投函・間引きに回すフェーズ(例: フェーズ 3・5)の効果は、
+/// 静穏待ちまで含めて CPU を測る perf-harness で判定すること。
+/// </para>
+/// <para>
+/// <b>WM_PAINT の数え方</b>: <c>Paint</c> イベントで数えるので、<c>OnPaint</c> が末尾で
+/// <c>base.OnPaint</c> を呼ぶことに依存する(EditorControl.Paint.cs)。OnPaint に早期 return を入れると
+/// <c>paints_per_op</c> は過少になる(S7 は自己チェックで EXIT 1 になるので安全側)。
 /// </para>
 /// <para>
 /// <b>比較の規則</b>: JIT やキャッシュの状態がシナリオの順序に依存するので、変更前後は同じ
@@ -113,7 +121,8 @@ internal static class PerfBench
         int DeviceDpi,
         string ClientSize,
         int LineHeightPx,
-        bool Focused,
+        string FontName,
+        float FontSize,
         bool Optimized,
         string Runtime,
         string Os
@@ -242,7 +251,11 @@ internal static class PerfBench
                 editor.DeviceDpi,
                 $"{editor.ClientSize.Width}x{editor.ClientSize.Height}",
                 editor.LineHeightPx,
-                editor.Focused,
+                // 描画に使うフォント(Control.Font ではない)。既定フォント名の解決が変わったときに気づけるよう記録する。
+                ((IImeOverlayHost)editor)
+                    .Font
+                    .Name,
+                ((IImeOverlayHost)editor).Font.SizeInPoints,
                 optimized,
                 RuntimeInformation.FrameworkDescription,
                 RuntimeInformation.OSDescription
@@ -734,6 +747,8 @@ internal static class PerfBench
                             throw new ArgumentException($"未知のシナリオ: {s}");
                         opt.Scenarios.Add(id);
                     }
+                    if (opt.Scenarios.Count == 0)
+                        throw new ArgumentException("--scenario が空");
                     i++;
                     break;
                 case "--json" when next.Length > 0:
