@@ -35,14 +35,17 @@ public sealed partial class EditorControl
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var client = ClientRectangle;
-        // 面積 0 では DIB を作れないので直接描く(旧 WmPaint は更新領域が空なら OnPaint 自体を
-        // 呼ばなかった。ここで直接描いても何も写らず、害はない)。
-        // Allocate が失敗したときも直接描く(TryAllocatePaintBuffer の注記を参照)。
-        var buffer =
-            (client.Width <= 0 || client.Height <= 0)
-                ? null
-                : TryAllocatePaintBuffer(e.Graphics, client);
+        // 更新矩形が空なら何もしない(Paint イベントも発火しない)。旧 WmPaint(OptimizedDoubleBuffer)は
+        // 更新矩形が空なら OnPaint 自体を呼ばずに return していたので、それに揃える
+        // (クライアントに面積があって更新領域だけが空の WM_PAINT = RDW_INTERNALPAINT 等で、
+        // PaintBody・_lastFrame の更新・Paint イベントを走らせない)。OnPrint 経路のクリップは
+        // ClientRectangle なので、クライアント面積 0 もここで返る = 面積 0 の DIB は作らない。
+        var clip = e.ClipRectangle;
+        if (clip.Width <= 0 || clip.Height <= 0)
+            return;
+
+        // Allocate が失敗したときはバッファなしで直接描く(TryAllocatePaintBuffer の注記を参照)。
+        var buffer = TryAllocatePaintBuffer(e.Graphics, ClientRectangle);
         if (buffer is null)
         {
             PaintBody(e.Graphics);
@@ -56,7 +59,7 @@ public sealed partial class EditorControl
                 // Allocate が返す Graphics は target のクリップを引き継がない。画面への反映範囲は
                 // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
                 // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
-                buffer.Graphics.SetClip(e.ClipRectangle);
+                buffer.Graphics.SetClip(clip);
                 PaintBody(buffer.Graphics);
                 buffer.Render(e.Graphics);
             }
@@ -73,8 +76,10 @@ public sealed partial class EditorControl
     /// OutOfMemoryException のときバッファなしの描画に切り替えていた(GDI 資源の枯渇等)。
     /// ここで例外を外へ出すと PaintWithErrorHandling が描画失敗の印を立て、以後ずっと赤い × に
     /// なるため、同じ判定で退避する。catch するのは Allocate だけ(PaintBody / Render の例外は従来どおり外へ)。
-    /// 判定は WinForms 内部の IsCriticalException(internal)と同じ型の列挙に
-    /// 「OutOfMemoryException は退避する」を足したもの。
+    /// 判定(<see cref="IsCriticalForPaintFallback"/>)は System.ExceptionExtensions.IsCriticalException
+    /// (System.Private.Windows.Core。9.0.20 の IL で確認)の 6 型(NullReference・StackOverflow・
+    /// OutOfMemory・ThreadAbort・IndexOutOfRange・AccessViolation)から OutOfMemory を除いたもの。
+    /// 旧 WmPaint の <c>!IsCritical || ex is OutOfMemoryException</c> と同値。
     /// </summary>
     private static BufferedGraphics? TryAllocatePaintBuffer(Graphics target, Rectangle bounds)
     {
