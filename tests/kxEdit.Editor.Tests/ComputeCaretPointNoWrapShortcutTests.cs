@@ -15,18 +15,22 @@ namespace kxEdit.Editor.Tests;
 public class ComputeCaretPointNoWrapShortcutTests
 {
     // rows: 窓の高さを行高の何行分にするか。frac: 端数(-1 は「行高 - 1」を意味する)。
+    // expectedVisibleLines: Visible になる論理行の数(fixture 前提。境界を踏んでいることを固定する。
+    // 例えば hscroll が出て PaintHeightPx が縮むと 11 行目の 1px が消え、この値が変わって気づける)。
+    // topSegment=3 のケースは TopLine 自身が不可視(segIdx 0 < 3)になり、その下の 10 行 + 1px 分で 10 行。
     [Theory]
-    [InlineData(10, 0, 0, 0)] //    高さがちょうど 10 行(最終可視行と 1 行はみ出しの境界)
-    [InlineData(10, 1, 0, 0)] //    10 行 + 1px(11 行目が 1px だけ見える)
-    [InlineData(10, -1, 0, 0)] //   10 行 + (行高 - 1)px
-    [InlineData(10, 0, 37, 0)] //   TopLine > 0
-    [InlineData(10, 1, 37, 3)] //   古い _topSegment(折り返し OFF でも SetTopPosition で残せる)
-    [InlineData(0, 0, 37, 0)] //    PaintHeightPx = 0
+    [InlineData(10, 0, 0, 0, 10)] //    高さがちょうど 10 行(最終可視行と 1 行はみ出しの境界)
+    [InlineData(10, 1, 0, 0, 11)] //    10 行 + 1px(11 行目が 1px だけ見える)
+    [InlineData(10, -1, 0, 0, 11)] //   10 行 + (行高 - 1)px
+    [InlineData(10, 0, 37, 0, 10)] //   TopLine > 0
+    [InlineData(10, 1, 37, 3, 10)] //   古い _topSegment(折り返し OFF でも SetTopPosition で残せる)
+    [InlineData(0, 0, 37, 0, 0)] //     PaintHeightPx = 0
     public void Shortcut_MatchesAccumulation_ForEveryLine(
         int rows,
         int frac,
         int topLine,
-        int topSegment
+        int topSegment,
+        int expectedVisibleLines
     )
     {
         Sta.Run(() =>
@@ -57,26 +61,29 @@ public class ComputeCaretPointNoWrapShortcutTests
                 Assert.Equal(topSegment, ctrl.TopSegment); // fixture 前提
 
                 var snap = buf.Current;
-                int visible = 0,
+                int visibleLines = 0,
                     hiddenBelow = 0;
                 for (int line = 0; line < snap.LineCount; line++)
                 {
                     int start = snap.GetLineStart(line);
                     int end = snap.GetLineEnd(line, includeBreak: false);
+                    bool lineVisible = false;
                     foreach (int off in new[] { start, (start + end) / 2, end })
                     {
                         var expected = ctrl.TestHook_ComputeCaretPointByAccumulation(off);
                         var actual = ctrl.ComputeCaretPoint(off);
                         Assert.Equal(expected, actual);
                         if (actual.Visible)
-                            visible++;
+                            lineVisible = true;
                         else if (line > topLine)
                             hiddenBelow++;
                     }
+                    if (lineVisible)
+                        visibleLines++;
                 }
-                // fixture 前提: 可視と「下にはみ出して不可視」の両方を踏んでいる(PaintHeightPx = 0 を除く)
-                if (rows > 0)
-                    Assert.True(visible > 0, "可視の行がない");
+                // fixture 前提: 可視の論理行数が境界どおりで、下にはみ出して不可視の行も踏んでいる。
+                // オフセット数ではなく行数で数える(1 行あたりのオフセット数の変更に左右されない)。
+                Assert.Equal(expectedVisibleLines, visibleLines);
                 Assert.True(hiddenBelow > 0, "下にはみ出した行がない");
             }
             finally
