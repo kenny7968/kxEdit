@@ -14,9 +14,53 @@ public sealed partial class EditorControl
 {
     // OnPaint + RenderFrame + IME overlay 描画 + style/color helpers
 
+    // 2026-09-24 性能改善フェーズ 1(P-20): WinForms の OptimizedDoubleBuffer は既定の
+    // MaximumBuffer(225×96)を超える面積で、描画のたびに一時コンテキストと DIB を作って捨てる。
+    // MaximumBuffer を画面サイズにした専用のコンテキストを使い回す。
+    // ・プロセス全体の BufferedGraphicsManager.Current は変えない(他コントロールへの影響が読めない)。
+    // ・[ThreadStatic] にするのは、BufferedGraphicsContext がスレッド安全でなく、テストは STA スレッドを
+    //   並行に立てるため。製品は UI スレッド 1 本なので、タブ数によらず 1 個になる。
+    // ・コンテキスト(と DIB)はスレッドの寿命まで持ち続け、Dispose しない(意図的)。
+    //   使い回しが目的であり、製品では UI スレッド = プロセスの寿命と一致する。
+    // ・VirtualScreen がモニタの抜き差しで広がっても、Allocate は MaximumBuffer を超える分を
+    //   一時バッファに逃がすだけで、描画結果は変わらない(遅くなるだけ)。
+    [ThreadStatic]
+    private static BufferedGraphicsContext? t_paintBuffer;
+
+    private static BufferedGraphicsContext PaintBuffer =>
+        t_paintBuffer ??= new BufferedGraphicsContext
+        {
+            MaximumBuffer = SystemInformation.VirtualScreen.Size,
+        };
+
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
+        var client = ClientRectangle;
+        // 面積 0 では DIB を作れない。WinForms の WmPaint も空のときはバッファを使わない。
+        if (client.Width <= 0 || client.Height <= 0)
+        {
+            PaintBody(e.Graphics);
+        }
+        else
+        {
+            using var buffer = PaintBuffer.Allocate(e.Graphics, client);
+            // 旧 OptimizedDoubleBuffer と同じく、バッファ側の Graphics にも更新領域のクリップを掛ける
+            // (WinForms の WmPaint はバッファの Graphics に SetClip(clip) してから描かせていた)。
+            // Allocate が返す Graphics は target のクリップを引き継がない。画面への反映範囲は
+            // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
+            // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
+            buffer.Graphics.SetClip(e.ClipRectangle);
+            PaintBody(buffer.Graphics);
+            buffer.Render(e.Graphics);
+        }
+        // 本コントロールの描画を確定させた後に Paint イベント購読者に描かせる
+        // (App 層の overlay 拡張余地を残す)。base.OnPaint は Paint イベントを発火する。
+        // P-20 以降、購読者の e.Graphics はバッファではなく描画先(画面の DC 等)になる。
+        base.OnPaint(e);
+    }
+
+    private void PaintBody(Graphics g)
+    {
         // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
         // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
         // (背景全域 FillRect)があっても消さない: RenderFrame の _scrollX シフトで右端に生じる隙間は、
@@ -88,9 +132,6 @@ public sealed partial class EditorControl
             // (元 `_clientToScreenX = origin.X; _clientToScreenY = origin.Y;`)。
             _uia.RefreshClientToScreenOrigin();
         }
-        // 本コントロールの描画を確定させた後に Paint イベント購読者に描かせる
-        // (App 層の overlay 拡張余地を残す)。base.OnPaint は Paint イベントを発火する。
-        base.OnPaint(e);
     }
 
     /// <summary>

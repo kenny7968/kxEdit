@@ -138,8 +138,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     public EditorControl()
     {
         SetStyle(
+            // 2026-09-24 性能改善フェーズ 1(P-20): OptimizedDoubleBuffer は外し、OnPaint が専用の
+            // BufferedGraphicsContext でダブルバッファする(EditorControl.Paint.cs の PaintBuffer)。
+            // AllPaintingInWmPaint は残す(WM_ERASEBKGND を捨てる意味は変わらない)。
             ControlStyles.AllPaintingInWmPaint
-                | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw
                 | ControlStyles.UserPaint
                 | ControlStyles.Selectable
