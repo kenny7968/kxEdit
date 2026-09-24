@@ -268,7 +268,7 @@ internal static class PaintSnapshot
                         or ArgumentException
             )
         {
-            Console.Error.WriteLine($"[入出力の失敗] {e.GetType().Name}: {e.Message}");
+            Console.Error.WriteLine($"[失敗] {e.GetType().Name}: {e.Message}");
             return 1;
         }
     }
@@ -371,11 +371,12 @@ internal static class PaintSnapshot
         RedrawWindow(form.Handle, 0, 0, RdwInvalidate | RdwErase | RdwAllChildren | RdwUpdateNow);
         Application.DoEvents();
         _ = DwmFlush(); // 失敗しても致命ではない
-        Check(s_paints > p0, $"{name}: WM_PAINT が配送されない(画面がロック中?)");
+        // 例外を先に見る(OnPaint が base.OnPaint より前で投げると Paint が数えられず、
+        // 「配送されない」という誤った理由になるため)。
         CheckNoError(name);
+        Check(s_paints > p0, $"{name}: WM_PAINT が配送されない(画面がロック中?)");
 
         string hash = Capture(form, name, Path.Combine(outDir, name + ".png"));
-        CheckNoError(name);
         def.Reset?.Invoke(editor);
         CheckNoError(name);
         return hash;
@@ -405,6 +406,7 @@ internal static class PaintSnapshot
                 g.ReleaseHdc(hdc);
             }
         }
+        CheckNoError(name); // 描画回数より先に見る(理由は ShootOne と同じ)
         Check(
             s_paints > p0,
             $"{name}: 撮影中に WM_PAINT が起きない(撮影方法の前提が崩れた。クラス doc 参照)"
