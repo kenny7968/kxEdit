@@ -177,6 +177,9 @@ public class GdiCharMetricsCacheTests
             Assert.Equal(0, m.TestHook_RunCacheCount);
             Assert.Equal(Reference(atLimit, font), m.MeasureRun(atLimit));
             Assert.Equal(1, m.TestHook_RunCacheCount);
+            Assert.Equal(Reference(atLimit, font), m.MeasureRun(atLimit)); // 2 回目 = ヒット(検索と格納の条件が揃っていること)
+            Assert.Equal(1, m.TestHook_RunCacheCount);
+            Assert.Equal(GdiCharMetrics.MaxCachedRunChars, m.TestHook_RunCacheChars);
         });
 
     /// <summary>
@@ -199,6 +202,11 @@ public class GdiCharMetricsCacheTests
             m.MeasureRun("あい"); // 予算を 2 文字超える
             Assert.Equal(1, m.TestHook_RunCacheCount);
             Assert.Equal(2, m.TestHook_RunCacheChars);
+            // 全消去(TrimExcess 込み)の後も span 検索が同じ辞書を引けること(ヒットで件数・文字数が不変)。
+            Assert.Equal(Reference("あい", font), m.MeasureRun("あい"));
+            m.MeasureRun("うえ");
+            Assert.Equal(2, m.TestHook_RunCacheCount);
+            Assert.Equal(4, m.TestHook_RunCacheChars);
         });
 
     /// <summary>

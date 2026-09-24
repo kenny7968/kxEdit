@@ -153,10 +153,14 @@ public sealed class GdiCharMetrics : ICharMetrics
             if (_runCacheChars + s.Length > RunCacheBudgetChars)
             {
                 _runWidths.Clear();
+                // Dictionary.Clear は内部配列の容量を保持するので、最悪時(短い run が大量)の数 MB を返す。
+                // 同じインスタンスのままなので _runWidthsBySpan はそのまま有効。
+                _runWidths.TrimExcess();
                 _runCacheChars = 0;
             }
-            _runWidths[s] = width;
-            _runCacheChars += s.Length;
+            // 検索と格納の条件が将来ずれても文字数を二重計上しないよう、新規格納のときだけ加算する。
+            if (_runWidths.TryAdd(s, width))
+                _runCacheChars += s.Length;
         }
         return width;
     }
