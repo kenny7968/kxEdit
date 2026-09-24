@@ -147,7 +147,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
                 // 自 HWND に WM_GETTEXTLENGTH / WM_GETTEXT を送る(描画 1 回で 4 往復)。本コントロールは
                 // 本文非公開のため WM_GETTEXT に 0 を返し、Text も new で隠蔽しているので、結果は常に ""。
                 // CacheText で読みを止める。base の Control.Text は _text ?? "" を返す(誰も設定しない = "")。
-                | ControlStyles.CacheText,
+                | ControlStyles.CacheText
+                // 2026-09-24 性能改善フェーズ 1(P-17): 背景層(OnPaintBackground)を塗らない。
+                // 全面は OnPaint 冒頭の g.Clear と FrameBuilder の工程 1 が塗るので、背景層は三重目だった。
+                | ControlStyles.Opaque,
             true
         );
         TabStop = true;
