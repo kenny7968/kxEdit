@@ -39,7 +39,6 @@ param(
     [Parameter(ParameterSetName = 'Run', Mandatory = $true)]
     [string]$PublishDir,
     [Parameter(ParameterSetName = 'Run')]
-    [ValidateSet('M-1', 'M-2', 'M-3', 'M-4', 'M-5', 'M-6', 'M-7')]
     [string[]]$Scenario = @('M-1', 'M-2', 'M-3', 'M-4', 'M-5', 'M-6', 'M-7'),
     [Parameter(ParameterSetName = 'Run')]
     [string]$OutCsv,
@@ -54,6 +53,11 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
+# pwsh -File では -Scenario M-2,M-7 が 1 つの文字列で届くので、カンマでも分割して検証する。
+$Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ })
+foreach ($s in $Scenario) {
+    if ($s -notin 'M-1', 'M-2', 'M-3', 'M-4', 'M-5', 'M-6', 'M-7') { throw "未知のシナリオ: $s(M-1〜M-7)" }
+}
 # kxEdit は環境変数 APPDATA ではなく既知フォルダー(SHGetKnownFolderPath)でプロフィールを決める
 # (SettingsStore / BackupStore ほか)。ハーネスも同じ解決をしないと、別の場所を退避して空にし、
 # kxEdit は実プロフィールのまま起動する、という取り違えが起きうる。
@@ -635,11 +639,6 @@ public static class KxPerfNative
         Send(i);
     }
 
-    public static void CursorToCenter(IntPtr h)
-    {
-        RECT r; GetWindowRect(h, out r);
-        SetCursorPos((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
-    }
 
     /// <summary>前面化を最大 20 回試す(AttachThreadInput 併用)。成否を返す。</summary>
     public static bool Foreground(IntPtr h)
@@ -675,6 +674,45 @@ public static class KxPerfNative
     }
 
     public static void Close(IntPtr h) { PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+
+    [DllImport("user32.dll")] static extern int GetScrollPos(IntPtr h, int bar);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+
+    /// <summary>エディタ内の縦スクロールバー(子の SCROLLBAR コントロール)の位置。見つからなければ -1。</summary>
+    public static int VScrollPos(IntPtr editor)
+    {
+        IntPtr best = IntPtr.Zero;
+        EnumChildWindows(editor, (h, l) =>
+        {
+            if (!IsWindowVisible(h) || ClassOf(h).IndexOf("SCROLLBAR", StringComparison.OrdinalIgnoreCase) < 0) return true;
+            RECT r; GetWindowRect(h, out r);
+            if (r.Bottom - r.Top > r.Right - r.Left) { best = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return best == IntPtr.Zero ? -1 : GetScrollPos(best, 2 /*SB_CTL*/);
+    }
+
+    /// <summary>カーソル直下の窓(ホイールの配送先の確認用)。</summary>
+    public static IntPtr WindowUnderCursor() { POINT p; GetCursorPos(out p); return WindowFromPoint(p); }
+
+    /// <summary>
+    /// エディタの中で、他の窓(NVDA のスピーチビューアー等の最前面の窓)に覆われていない点へカーソルを置く。
+    /// ホイールはカーソル直下の窓へ届くため。見つからなければ false。
+    /// </summary>
+    public static bool CursorToVisiblePoint(IntPtr editor)
+    {
+        RECT r; GetWindowRect(editor, out r);
+        for (int fy = 5; fy <= 95; fy += 10)
+            for (int fx = 5; fx <= 75; fx += 10)
+            {
+                int x = r.Left + (r.Right - r.Left) * fx / 100, y = r.Top + (r.Bottom - r.Top) * fy / 100;
+                SetCursorPos(x, y);
+                if (WindowUnderCursor() == editor) return true;
+            }
+        return false;
+    }
 
     public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
     public static string TextOf(IntPtr h) { var sb = new StringBuilder(GetWindowTextLength(h) + 1); GetWindowText(h, sb, sb.Capacity); return sb.ToString(); }
@@ -1008,7 +1046,19 @@ function Invoke-M4([string]$Exe, $Docs) {
     $kx = Start-KxEdit $Exe
     try {
         Open-Doc $kx $Docs.ja10k
-        [KxPerfNative]::CursorToCenter($kx.Editor)
+        if (-not [KxPerfNative]::CursorToVisiblePoint($kx.Editor)) {
+            throw 'M-4: エディタの見えている点が見つかりません(最前面の窓に覆われている)。'
+        }
+        # ホイールが本当に届いてスクロールすることを確かめる(届かないと「何もしない費用」を測る)。
+        $pos0 = [KxPerfNative]::VScrollPos($kx.Editor)
+        Send-Wheel -120; Wait-Quiet $kx.Proc
+        $pos1 = [KxPerfNative]::VScrollPos($kx.Editor)
+        Send-Wheel 120; Wait-Quiet $kx.Proc
+        if ($pos0 -lt 0 -or $pos1 -le $pos0) {
+            $under = [KxPerfNative]::WindowUnderCursor()
+            $upid = [uint32]0; [void][KxPerfNative]::GetWindowThreadProcessId($under, [ref]$upid)
+            throw "M-4: ホイールでスクロールしません(縦スクロール位置 $pos0 → $pos1・カーソル直下 0x$($under.ToString('X'))[$([KxPerfNative]::ClassOf($under))・pid $upid]・エディタ 0x$($kx.Editor.ToString('X'))・kxEdit pid $($kx.Proc.Id))"
+        }
         Add-Result 'M-4' 'ホイール下' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel -120 }) 'cpu_ms/op'
         Add-Result 'M-4' 'ホイール上' 'ja10k' 60 (Measure-Op $kx 60 100 { Send-Wheel 120 }) 'cpu_ms/op'
     }
@@ -1128,6 +1178,10 @@ if ($reasons.Count -gt 0) {
 }
 
 $docs = Initialize-Docs $WorkDir
+# NVDA(UIA クライアント)が動いていると、UIA イベントとフォーカス変更の費用が乗る(調査記録 §9.1 は NVDA なし)。
+$nvda = [bool](Get-Process -Name nvda -ErrorAction SilentlyContinue)
+if ($nvda) { Write-Host '[注意] NVDA が起動しています。調査記録 §9 の値(NVDA なし)とは条件が違います。' -ForegroundColor Yellow }
+Add-Result 'env' 'NVDA起動中' '-' 1 ([int]$nvda) 'bool'
 Write-Host @"
 計測を始めます。終わるまで(全シナリオで十数分)画面・キーボード・マウスに触らないでください。
 計測中に kxEdit を起動しないでください(計測中の窓に入り、打った内容は失われます)。
