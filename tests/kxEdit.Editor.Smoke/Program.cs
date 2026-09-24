@@ -15,6 +15,15 @@ if (args.Length > 0 && args[0] == "--bench")
     return GdiBench.Run(args);
 }
 
+// 2026-09-24 性能改善フェーズ 0: --perf。日常操作(移動・打鍵・IME・スクロール・全面再描画・
+// UIA 矩形)を「操作 → 同期描画」単位で測る共通ベンチ。判定はしない(自己チェック失敗のみ EXIT 1)。
+// 手順は tools/README.md §3、シナリオの正本は PerfBench のクラス doc と実装計画
+// docs/plans/2026-09-24-perf-bench.md。
+if (args.Length > 0 && args[0] == "--perf")
+{
+    return PerfBench.Run(args);
+}
+
 // 2026-08-02 巨大 1 行調査 Task 3: --largeline。空白・改行を一切含まない単一長大行を
 // 実 EditorControl へ載せ、バッファ差し込みと初回描画を GDI 込みで測る
 // (GDI 抜きの構造コストは kxEdit.Core.Bench --largeline が対)。
