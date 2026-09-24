@@ -1,5 +1,6 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
@@ -17,13 +18,17 @@ namespace kxEdit.Editor.Smoke;
 /// <remarks>
 /// <para>
 /// <b>EXIT</b>: 0 = 撮影成功(比較ありなら全画素一致)。1 = 自己チェックの失敗
-/// (状態が効いていない・描画が配送されない・撮影失敗)または比較で差あり。2 = 引数の誤り。
+/// (状態が効いていない・描画が配送されない・撮影や入出力の失敗・描画中の例外・撮った絵が
+/// 互いに区別できない)または比較で差あり。2 = 引数の誤り(出力先に既に PNG がある場合を含む)。
 /// </para>
 /// <para>
-/// <b>撮影方法</b>: <c>PrintWindow(PW_CLIENTONLY | PW_RENDERFULLCONTENT)</c>。
-/// <c>PW_RENDERFULLCONTENT</c> を付けるのは、WM_PRINT 経路(<c>OnPrint</c>)で描き直させるのではなく
-/// <b>WM_PAINT で実際に画面へ描いた結果</b>(DWM のリダイレクト面)を取るため。描画の固定費削減は
-/// WM_PAINT 経路(背景層・二重バッファ)を変えるので、WM_PRINT で撮っても検証にならない。
+/// <b>撮影方法</b>: <c>PrintWindow(PW_CLIENTONLY | PW_RENDERFULLCONTENT)</c>。実測では、この呼び出しは
+/// 撮影の時点で<b>現在の状態から WM_PAINT の経路(<c>OnPrint</c> ではない)で全面を描き直した絵</b>を
+/// 撮る(PrintWindow → NativeWindow.Callback → Control.WmPaint → EditorControl.OnPaint。クリップは本文全面)。
+/// したがって<b>描画処理そのもののピクセル不変は確かめられる</b>が、<b>Invalidate の省略や部分再描画で
+/// 画面に古い絵が残る不具合は写らない</b>(そちらは別の手段で確かめること)。この前提
+/// (撮影中に WM_PAINT が起きること)は撮影のたびに自己チェックする。撮影前の <c>RedrawWindow</c> は
+/// 子(スクロールバー)を含めて描画を配送し終えておくためのもの。
 /// </para>
 /// <para>
 /// <b>測定条件</b>。(1) Form は<b>画面内</b>に置く(画面外の窓には <c>UpdateWindow</c> が WM_PAINT を
@@ -33,9 +38,25 @@ namespace kxEdit.Editor.Smoke;
 /// (3) 状態ごとに <c>ApplyAppearance</c>(製品と同じ経路)→ 新しいバッファを差し込む
 /// (<c>ReplaceSource</c> がキャレット・選択・スクロール・IME を初期化する)→ 状態固有の操作、の順で
 /// 組み立てる=前の状態を持ち越さない。
+/// (4) 描画中の例外は <c>Application.ThreadException</c> で捕まえて EXIT 1 にする
+/// (既定の ThreadExceptionDialog で止まらない・例外で欠けた絵を「一致」にしない)。
 /// </para>
 /// <para>
-/// <b>状態を足すとき</b>(フェーズ 3・9 など)は <see cref="StateDefs"/> に 1 行足すだけでよい。
+/// <b>撮った絵の自己チェック</b>: 全画像の画素のハッシュを比べ、互いに同一の組があれば EXIT 1。
+/// これで (a) 全画像が互いに異なる、(b) 各状態が同じテーマの plain と異なる、(c) 2 テーマの plain が
+/// 異なる、をまとめて確かめる(状態が絵に効いていないのに「一致」になるのを防ぐ)。
+/// 将来「同じであるべき組」を足すときは <see cref="ExpectedIdentical"/> に名前の組を登録する。
+/// </para>
+/// <para>
+/// <b>運用</b>: 出力先に既に PNG があれば断る(EXIT 2・消さない)=古い絵と混ざらない。
+/// <b>基準画像は同じ版の道具で撮り直す</b>(道具の状態や本文を変えると絵が変わる。
+/// 変更前のコミットで基準を撮る → 変更後のコミットで <c>--compare</c>、の順で、道具自体は
+/// 両方で同じにする)。出力先には撮影環境(DPI・クライアント寸法・フォントの平滑化・OS)を
+/// <c>env.txt</c> に書き、<c>--compare</c> 時に基準と食い違えば「環境差」と表示する
+/// (判定は画素だけで行う)。
+/// </para>
+/// <para>
+/// <b>状態を足すとき</b>(フェーズ 3・9 など)は <see cref="StateDefs"/> に 1 要素足すだけでよい。
 /// 名前はファイル名になるので、既存の名前を変えると基準画像との比較が「片方にしかない」差分になる。
 /// </para>
 /// </remarks>
@@ -49,28 +70,38 @@ internal static class PaintSnapshot
     private const uint RdwAllChildren = 0x0080;
     private const uint RdwUpdateNow = 0x0100;
 
+    private const uint SpiGetFontSmoothing = 0x004A;
+    private const uint SpiGetFontSmoothingType = 0x200A;
+    private const uint SpiGetFontSmoothingContrast = 0x200C;
+
+    private const string EnvFileName = "env.txt";
+
     private const string Usage = "使い方: --paint-snapshot <outDir> [--compare <baseDir>]";
 
     /// <summary>撮影するテーマ(AppearanceThemes の Id)。</summary>
     private static readonly string[] Themes = ["default", "white-on-black"];
 
     /// <summary>
-    /// 1 状態の定義。<paramref name="Suffix"/> はファイル名の後半(<c>&lt;theme&gt;-&lt;Suffix&gt;.png</c>)。
-    /// <paramref name="Configure"/> は外観設定(ApplyAppearance に渡す AppSettings)の変更、
-    /// <paramref name="Arrange"/> は本文差し込み後の操作、<paramref name="Verify"/> は状態が効いたかの
-    /// 自己チェック(失敗なら理由を返す)、<paramref name="Reset"/> は撮影後の後始末。
-    /// <see cref="TopLine"/> / <see cref="ScrollX"/> は撮影時に期待する位置(状態固有の操作が
-    /// 追従スクロール等で位置を動かしていないことの自己チェック)。
+    /// 1 状態の定義。<see cref="Suffix"/> はファイル名の後半(<c>&lt;theme&gt;-&lt;Suffix&gt;.png</c>)。
     /// </summary>
-    private sealed record StateDef(
-        string Suffix,
-        Action<AppSettings>? Configure,
-        Action<EditorControl, Body>? Arrange,
-        Func<EditorControl, Body, string?>? Verify,
-        Action<EditorControl>? Reset
-    )
+    private sealed record StateDef(string Suffix)
     {
+        /// <summary>外観設定(ApplyAppearance に渡す AppSettings)の変更。</summary>
+        public Action<AppSettings>? Configure { get; init; }
+
+        /// <summary>本文差し込み後の操作。</summary>
+        public Action<EditorControl, Body>? Arrange { get; init; }
+
+        /// <summary>状態が効いたかの自己チェック(失敗なら理由を返す)。</summary>
+        public Func<EditorControl, Body, string?>? Verify { get; init; }
+
+        /// <summary>撮影後の後始末。</summary>
+        public Action<EditorControl>? Reset { get; init; }
+
+        /// <summary>撮影時に期待する TopLine(状態固有の操作が追従スクロール等で動かしていないこと)。</summary>
         public int TopLine { get; init; }
+
+        /// <summary>撮影時に期待する ScrollX(同上)。</summary>
         public int ScrollX { get; init; }
     }
 
@@ -95,63 +126,51 @@ internal static class PaintSnapshot
 
     private static readonly StateDef[] StateDefs =
     [
-        new("plain", null, null, null, null),
-        new(
-            "selection",
-            null,
-            (e, b) =>
+        new("plain"),
+        new("selection")
+        {
+            Arrange = (e, b) =>
                 e.SetSelectionCharRange(
                     b.Line(SelStartLine) + SelStartCol,
                     b.Line(SelEndLine) + SelEndCol
                 ),
-            (e, b) =>
+            Verify = (e, b) =>
                 e.GetSelectionCharRange()
                 == (b.Line(SelStartLine) + SelStartCol, b.Line(SelEndLine) + SelEndCol)
                     ? null
                     : $"選択が張られない({e.GetSelectionCharRange()})",
-            null
-        ),
-        new(
-            "curline",
-            s => s.HighlightCurrentLine = true,
-            (e, b) => e.SetCaretCharOffset(b.Line(CurLine) + CurCol),
-            (e, b) =>
+        },
+        new("curline")
+        {
+            Configure = s => s.HighlightCurrentLine = true,
+            Arrange = (e, b) => e.SetCaretCharOffset(b.Line(CurLine) + CurCol),
+            Verify = (e, b) =>
                 e.HighlightCurrentLine && e.CaretCharOffset == b.Line(CurLine) + CurCol
                     ? null
                     : $"現在行の強調/キャレット位置が効かない(caret={e.CaretCharOffset})",
-            null
-        ),
-        new(
-            "linenum",
-            s => s.ShowLineNumbers = true,
-            null,
-            (e, _) => e.ShowLineNumbers ? null : "ShowLineNumbers が効かない",
-            null
-        ),
-        new(
-            "whitespace",
-            s => s.ShowWhitespace = true,
-            null,
-            (e, _) => e.ShowWhitespace ? null : "ShowWhitespace が効かない",
-            null
-        ),
-        new(
-            "hscroll",
-            null,
-            (e, _) => e.ScrollX = HScrollPx,
-            (e, _) =>
+        },
+        new("linenum")
+        {
+            Configure = s => s.ShowLineNumbers = true,
+            Verify = (e, _) => e.ShowLineNumbers ? null : "ShowLineNumbers が効かない",
+        },
+        new("whitespace")
+        {
+            Configure = s => s.ShowWhitespace = true,
+            Verify = (e, _) => e.ShowWhitespace ? null : "ShowWhitespace が効かない",
+        },
+        new("hscroll")
+        {
+            Arrange = (e, _) => e.ScrollX = HScrollPx,
+            Verify = (e, _) =>
                 e.ScrollX == HScrollPx
                     ? null
                     : $"ScrollX が {e.ScrollX}(期待 {HScrollPx}。横スクロールバーが出ていない)",
-            null
-        )
-        {
             ScrollX = HScrollPx,
         },
-        new(
-            "ime",
-            null,
-            (e, b) =>
+        new("ime")
+        {
+            Arrange = (e, b) =>
             {
                 e.SetCaretCharOffset(b.Line(ImeLine) + ImeCol);
                 e.__TestApplyComposition(
@@ -161,31 +180,35 @@ internal static class PaintSnapshot
                     []
                 );
             },
-            (e, _) =>
-                e.__TestIsComposing() && e.__TestImeText() == ImeText
+            Verify = (e, b) =>
+                e.__TestIsComposing()
+                && e.__TestImeText() == ImeText
+                && e.CaretCharOffset == b.Line(ImeLine) + ImeCol
                     ? null
-                    : "__TestApplyComposition で未確定状態にならない",
-            e =>
+                    : $"__TestApplyComposition で未確定状態にならない/キャレット位置が違う(caret={e.CaretCharOffset})",
+            Reset = e =>
             {
                 e.__TestApplyResult(""); // 未確定を解除(本文は変えない)
                 if (e.__TestIsComposing())
                     throw new PaintSnapshotException("ime: 未確定を解除できない");
-            }
-        ),
-        new(
-            "scrolled",
-            null,
-            (e, _) => e.TopLine = ScrolledTopLine,
-            (e, _) =>
+            },
+        },
+        new("scrolled")
+        {
+            Arrange = (e, _) => e.TopLine = ScrolledTopLine,
+            Verify = (e, _) =>
                 e.TopLine == ScrolledTopLine
                     ? null
                     : $"TopLine が {e.TopLine}(期待 {ScrolledTopLine})",
-            null
-        )
-        {
             TopLine = ScrolledTopLine,
         },
     ];
+
+    /// <summary>
+    /// 画素が同一であってよい画像名(拡張子なし)の組。撮った絵の自己チェック(全画像が互いに異なる)から
+    /// 除外する。現在は空。「同じであるべき組」の状態を足すときに登録する(順不同)。
+    /// </summary>
+    private static readonly (string A, string B)[] ExpectedIdentical = [];
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -195,11 +218,23 @@ internal static class PaintSnapshot
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool RedrawWindow(nint hwnd, nint rcUpdate, nint hrgnUpdate, uint flags);
 
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfo(
+        uint action,
+        uint param,
+        out uint value,
+        uint winIni
+    );
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmFlush();
 
-    /// <summary>描画が本当に配送されたかの観測(状態ごとに増えることを自己チェックする)。</summary>
+    /// <summary>描画が本当に配送されたかの観測(状態ごと・撮影ごとに増えることを自己チェックする)。</summary>
     private static int s_paints;
+
+    /// <summary>メッセージ処理中(描画中など)に起きた最初の例外。撮影ごとに null であることを確かめる。</summary>
+    private static Exception? s_error;
 
     public static int Run(string[] args)
     {
@@ -216,9 +251,38 @@ internal static class PaintSnapshot
             return 2;
         }
 
+        try
+        {
+            int shot = Shoot(outDir);
+            if (shot != 0)
+                return shot;
+            Console.WriteLine($"出力: {outDir}");
+            return compareDir is null ? 0 : Compare(outDir, compareDir);
+        }
+        catch (Exception e)
+            when (e
+                    is IOException
+                        or UnauthorizedAccessException
+                        or ExternalException
+                        // 壊れた/PNG でないファイルを Bitmap で読むと ArgumentException になる
+                        or ArgumentException
+            )
+        {
+            Console.Error.WriteLine($"[入出力の失敗] {e.GetType().Name}: {e.Message}");
+            return 1;
+        }
+    }
+
+    /// <summary>全状態を撮影して <paramref name="outDir"/> に書く。自己チェック失敗は 1。</summary>
+    private static int Shoot(string outDir)
+    {
         Directory.CreateDirectory(outDir);
 
         ApplicationConfiguration.Initialize();
+        // 描画中の例外で ThreadExceptionDialog(モーダル)を出して止まらないよう、捕まえて記録する。
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => s_error ??= e.Exception;
+
         using var form = new Form
         {
             Text = "kxEdit.Editor.Smoke --paint-snapshot",
@@ -241,23 +305,29 @@ internal static class PaintSnapshot
 
         try
         {
+            CheckNoError("起動");
             var body = BuildBody();
             Check(
                 Screen.FromControl(form).WorkingArea.Contains(form.Bounds),
                 $"窓 {form.Bounds} が画面の作業領域に収まらない(WM_PAINT が来ない)"
             );
-            Console.WriteLine(
-                $"DeviceDpi={editor.DeviceDpi} / ClientSize={form.ClientSize} / 状態数={Themes.Length * StateDefs.Length}"
-            );
+            string env = DescribeEnvironment(editor, form);
+            File.WriteAllText(Path.Combine(outDir, EnvFileName), env, new UTF8Encoding(false));
+            Console.Write(env);
+            Console.WriteLine($"状態数={Themes.Length * StateDefs.Length}");
+
+            var hashes = new List<(string Name, string Hash)>();
             foreach (string theme in Themes)
             {
                 foreach (var def in StateDefs)
                 {
                     string name = $"{theme}-{def.Suffix}";
-                    Shoot(form, editor, body, theme, def, Path.Combine(outDir, name + ".png"));
+                    string hash = ShootOne(form, editor, body, theme, def, outDir);
+                    hashes.Add((name, hash));
                     Console.WriteLine($"撮影: {name}.png");
                 }
             }
+            CheckDistinct(hashes);
         }
         catch (PaintSnapshotException e)
         {
@@ -267,18 +337,17 @@ internal static class PaintSnapshot
         }
 
         form.Close();
-        Console.WriteLine($"出力: {outDir}");
-        return compareDir is null ? 0 : Compare(outDir, compareDir);
+        return 0;
     }
 
-    /// <summary>1 状態を組み立てて描かせ、自己チェックの後に撮影する。</summary>
-    private static void Shoot(
+    /// <summary>1 状態を組み立てて描かせ、自己チェックの後に撮影する。画素のハッシュを返す。</summary>
+    private static string ShootOne(
         Form form,
         EditorControl editor,
         Body body,
         string theme,
         StateDef def,
-        string path
+        string outDir
     )
     {
         string name = $"{theme}-{def.Suffix}";
@@ -301,17 +370,26 @@ internal static class PaintSnapshot
         // エディタ本体と子(スクロールバー)を同期で描き直させる。Control.Update は子を描かない。
         RedrawWindow(form.Handle, 0, 0, RdwInvalidate | RdwErase | RdwAllChildren | RdwUpdateNow);
         Application.DoEvents();
-        _ = DwmFlush(); // 失敗しても致命ではない(撮影は DWM のリダイレクト面から読む)
+        _ = DwmFlush(); // 失敗しても致命ではない
         Check(s_paints > p0, $"{name}: WM_PAINT が配送されない(画面がロック中?)");
+        CheckNoError(name);
 
-        Capture(form, path);
+        string hash = Capture(form, name, Path.Combine(outDir, name + ".png"));
+        CheckNoError(name);
         def.Reset?.Invoke(editor);
+        CheckNoError(name);
+        return hash;
     }
 
-    private static void Capture(Form form, string path)
+    /// <summary>
+    /// クライアント領域を撮って PNG に書き、画素(32bpp ARGB)の SHA-256 を返す。
+    /// 撮影中に WM_PAINT が起きること(クラス doc の前提)を自己チェックする。
+    /// </summary>
+    private static string Capture(Form form, string name, string path)
     {
         var size = form.ClientSize;
         using var bmp = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
+        int p0 = s_paints;
         using (var g = Graphics.FromImage(bmp))
         {
             nint hdc = g.GetHdc();
@@ -319,7 +397,7 @@ internal static class PaintSnapshot
             {
                 if (!PrintWindow(form.Handle, hdc, PwClientOnly | PwRenderFullContent))
                     throw new PaintSnapshotException(
-                        $"PrintWindow が失敗した(Win32 {Marshal.GetLastWin32Error()})"
+                        $"{name}: PrintWindow が失敗した(Win32 {Marshal.GetLastWin32Error()})"
                     );
             }
             finally
@@ -327,14 +405,117 @@ internal static class PaintSnapshot
                 g.ReleaseHdc(hdc);
             }
         }
+        Check(
+            s_paints > p0,
+            $"{name}: 撮影中に WM_PAINT が起きない(撮影方法の前提が崩れた。クラス doc 参照)"
+        );
         bmp.Save(path, ImageFormat.Png);
+        int[] pixels = ReadPixels(bmp);
+        return Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(pixels.AsSpan())));
     }
+
+    /// <summary>
+    /// 撮った絵が互いに異なることを確かめる(<see cref="ExpectedIdentical"/> の組は除く)。
+    /// 全組を見るので「各状態 ≠ 同じテーマの plain」「2 テーマの plain が異なる」も含む。
+    /// </summary>
+    private static void CheckDistinct(List<(string Name, string Hash)> hashes)
+    {
+        var same = new List<string>();
+        for (int i = 0; i < hashes.Count; i++)
+        {
+            for (int j = i + 1; j < hashes.Count; j++)
+            {
+                if (hashes[i].Hash != hashes[j].Hash)
+                    continue;
+                string a = hashes[i].Name;
+                string b = hashes[j].Name;
+                bool allowed = ExpectedIdentical.Any(p =>
+                    (p.A == a && p.B == b) || (p.A == b && p.B == a)
+                );
+                if (!allowed)
+                    same.Add($"{a} = {b}");
+            }
+        }
+        Check(
+            same.Count == 0,
+            $"画素が同一の画像がある(状態が絵に効いていない): {string.Join(" / ", same)}"
+        );
+    }
+
+    private static void CheckNoError(string name)
+    {
+        if (s_error is not null)
+            throw new PaintSnapshotException($"{name}: メッセージ処理中に例外: {s_error}");
+    }
+
+    // ---- 環境 ----
+
+    /// <summary>絵を左右する環境の記述(<c>env.txt</c> の内容。1 行 1 項目の <c>key=value</c>)。</summary>
+    private static string DescribeEnvironment(EditorControl editor, Form form)
+    {
+        var sb = new StringBuilder();
+        sb.Append("DeviceDpi=").Append(editor.DeviceDpi).Append('\n');
+        sb.Append("ClientSize=")
+            .Append(form.ClientSize.Width)
+            .Append('x')
+            .Append(form.ClientSize.Height)
+            .Append('\n');
+        sb.Append("FontSmoothing=").Append(Spi(SpiGetFontSmoothing)).Append('\n');
+        sb.Append("FontSmoothingType=").Append(Spi(SpiGetFontSmoothingType)).Append('\n');
+        sb.Append("FontSmoothingContrast=").Append(Spi(SpiGetFontSmoothingContrast)).Append('\n');
+        sb.Append("OS=").Append(Environment.OSVersion.VersionString).Append('\n');
+        return sb.ToString();
+    }
+
+    private static string Spi(uint action) =>
+        SystemParametersInfo(action, 0, out uint v, 0)
+            ? v.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : $"(取得失敗 {Marshal.GetLastWin32Error()})";
+
+    /// <summary>基準と今回の env.txt を比べ、食い違いを表示する(判定には使わない)。</summary>
+    private static void CompareEnvironment(string outDir, string baseDir)
+    {
+        string basePath = Path.Combine(baseDir, EnvFileName);
+        string outPath = Path.Combine(outDir, EnvFileName);
+        if (!File.Exists(basePath) || !File.Exists(outPath))
+        {
+            Console.WriteLine(
+                $"[警告] {EnvFileName} が{(File.Exists(basePath) ? "今回の出力" : "基準")}に無い(撮影環境を照合できない)"
+            );
+            return;
+        }
+        var a = ReadEnv(basePath);
+        var b = ReadEnv(outPath);
+        var diffs = a
+            .Keys.Union(b.Keys)
+            .Order(StringComparer.Ordinal)
+            .Where(k => a.GetValueOrDefault(k) != b.GetValueOrDefault(k))
+            .Select(k =>
+                $"{k}: 基準 {a.GetValueOrDefault(k) ?? "(無し)"} ⇔ 今回 {b.GetValueOrDefault(k) ?? "(無し)"}"
+            )
+            .ToList();
+        if (diffs.Count == 0)
+        {
+            Console.WriteLine("撮影環境: 基準と同じ");
+            return;
+        }
+        Console.WriteLine("[環境差] 基準と撮影環境が違う(画素の差は環境由来の可能性がある):");
+        foreach (string d in diffs)
+            Console.WriteLine($"  {d}");
+    }
+
+    private static Dictionary<string, string> ReadEnv(string path) =>
+        File.ReadAllLines(path)
+            .Select(l => l.Split('=', 2))
+            .Where(p => p.Length == 2)
+            .GroupBy(p => p[0], StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Last()[1], StringComparer.Ordinal);
 
     // ---- 比較 ----
 
     /// <summary>
     /// 2 つのフォルダーの *.png を同名同士で画素比較する。片方にしかないファイル・大きさ違いは差分扱い。
-    /// 差が 1 画素でもあれば 1、全一致なら 0。
+    /// 差が 1 画素でもあれば 1、全一致なら 0。env.txt は比較対象外(食い違いは表示のみ)。
     /// </summary>
     private static int Compare(string outDir, string baseDir)
     {
@@ -348,6 +529,7 @@ internal static class PaintSnapshot
             .ToList();
         Console.WriteLine();
         Console.WriteLine($"比較: {outDir} ⇔ 基準 {baseDir}");
+        CompareEnvironment(outDir, baseDir);
         int differing = 0;
         foreach (string file in names)
         {
@@ -461,11 +643,15 @@ internal static class PaintSnapshot
         return new Body(sb.ToString(), starts);
     }
 
+    /// <summary>末尾の区切り文字を落とした完全パス(同一フォルダーの判定を末尾の <c>\</c> ですり抜けさせない)。</summary>
+    private static string NormalizeDir(string path) =>
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
     private static (string OutDir, string? CompareDir) ParseArgs(string[] args)
     {
         if (args.Length == 0 || args[0].StartsWith("--", StringComparison.Ordinal))
             throw new ArgumentException("出力フォルダーの指定がない");
-        string outDir = Path.GetFullPath(args[0]);
+        string outDir = NormalizeDir(args[0]);
         string? compareDir = null;
         for (int i = 1; i < args.Length; i++)
         {
@@ -473,7 +659,7 @@ internal static class PaintSnapshot
             switch (args[i])
             {
                 case "--compare" when next.Length > 0:
-                    compareDir = Path.GetFullPath(next);
+                    compareDir = NormalizeDir(next);
                     i++;
                     break;
                 default:
@@ -489,6 +675,11 @@ internal static class PaintSnapshot
             if (string.Equals(compareDir, outDir, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("出力フォルダーと基準フォルダーが同じ");
         }
+        // 古い絵と混ざらないよう、既に PNG がある出力先は断る(消さない)。
+        if (Directory.Exists(outDir) && Directory.EnumerateFiles(outDir, "*.png").Any())
+            throw new ArgumentException(
+                $"出力フォルダーに既に PNG がある(新しいフォルダーを指定する): {outDir}"
+            );
         return (outDir, compareDir);
     }
 
