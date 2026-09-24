@@ -151,7 +151,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
                 // CacheText で読みを止める。base の Control.Text は _text ?? "" を返す(誰も設定しない = "")。
                 | ControlStyles.CacheText
                 // 2026-09-24 性能改善フェーズ 1(P-17): 背景層(OnPaintBackground)を塗らない。
-                // 全面は OnPaint 冒頭の g.Clear と FrameBuilder の工程 1 が塗るので、背景層は三重目だった。
+                // 全面は PaintBody 冒頭の g.Clear と FrameBuilder の工程 1 が塗るので、背景層は三重目だった。
                 | ControlStyles.Opaque,
             true
         );
