@@ -19,9 +19,10 @@ public sealed partial class EditorControl
         var g = e.Graphics;
         // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
         // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
-        // (背景全域 FillRect)があっても消さない: RenderFrame の _scrollX シフトで右端に生じる隙間と、
-        // 縦横スクロールバーの交差する右下の角は、この塗りしか覆わない。_buffer が null(ソース未設定)
-        // の間も、この行が空のコントロールを BackColor で塗る。
+        // (背景全域 FillRect)があっても消さない: RenderFrame の _scrollX シフトで右端に生じる隙間は、
+        // この塗りしか覆わない。_buffer が null(ソース未設定)の間も、この行が空のコントロールを
+        // BackColor で塗る。なお右下の角は VScrollBar(高さいっぱいに dock する子)が覆っており、
+        // この行の役目ではない(ctor の Dock 順の注意を参照)。
         g.Clear(BackColor);
         if (_buffer is not null)
         {
