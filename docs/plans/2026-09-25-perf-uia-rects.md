@@ -1105,6 +1105,11 @@ description に、変更前後の計測値(min / 中央 / max)・意図的な挙
   - M7(境界を 1 行ずらす)と M8(`n - _topSegment`)は殺された。
   - M9(短絡の分岐から `allowNoWrapShortcut &&` を外す)は生存。出力は変わらない等価変異で、参照の健全性の網がないことを示した → Minor-3 で対応。
 
+**fixup の再レビュー**(b3233d7 / 9ae13ca・別エージェント): ✅。
+- 原点を旧実装の `PointToScreen` に片方ずつ戻すと、新しい回帰テストがそれぞれ FAIL することも確かめた(偽の緑ではない)。
+- Minor-1(ワーカーが例外を投げると「戻らない」で失敗し、本当の原因が隠れる): ① fixup。終了フラグを finally で立てるようにした。
+- 参考(対象外): RecreateHandle の途中で `_hwnd` に新しい値が入った直後に RPC スレッドが `InvokeRequired == false` を見ると、`TryGetClientOrigin` が成功して後続の UI 専有状態を読む。下の「既存の競合」と同じ種類の窓なので、そちらに含める。根本的に塞ぐ案: Compute の先頭で `GetWindowThreadProcessId(_hwnd) == GetCurrentThreadId()` を確かめる。
+
 ### 申し送り(以後のフェーズへ)
 - **フェーズ 3**: `_lastFrame` のコメント(`EditorControl.cs:121-123`・`EditorControl.Paint.cs:176`)を「テスト観測用」に直す。OnPaint を省いても UIA には影響しない(座標は問い合わせのたびに求める。`UiaTextHostAdapter_HasNoScreenCoordinateCache` で固定)。
 - **既存の食い違い(割り当てなし)**: 折り返し OFF でも `SetTopPosition` で古い `_topSegment`(> 0)が残ると、`ComputeCaretPoint` は TopLine を不可視にして下の行を y = 行高から置く。一方、描画(`ViewportLayout.Build`)はセグメントをクランプして TopLine を y = 0 に描く。本フェーズは従来の挙動を保った(M6・M8 で固定)。実運用でこの状態に入れるかは未確認。
