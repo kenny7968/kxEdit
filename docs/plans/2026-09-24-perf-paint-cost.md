@@ -824,3 +824,45 @@ description に、変更前後の計測値(min / 中央 / max)・P-20 の採否�
 | S7 | en10k | 6.79 | 6.80 | 6.91 |
 
 フェーズ 0 の現状値(S7 ja10k 9.05 ms)と同程度である。
+
+### `--paint-snapshot` の破棄時の例外(Task 3 の実行中に 1/7 回・fixup 548d311)
+
+**症状**
+- 16 枚を撮り終えた後、`form.Close()` の後の `using` でもう一度 Dispose したところで落ちた。
+- 例外は「CreateHandle() の実行中は Dispose() を呼び出せません」(`InvalidOperationException`)。
+
+**調査結果**(別エージェントによる調査)
+- 30 回実行しても再現しなかった(0/30)。
+- 同じ例外が `GdiBench` でも出たことがある(`2026-08-02-large-line-wrap-perf-design.md` §9.7)。本道具だけの問題ではない。
+- 有力な仮説
+  - NVDA などの UIA クライアントが、WinForms 標準の `FormAccessibleObject.Name` を読む。この読み取りは `WindowText` → `Handle` getter を通る。
+  - そのため RPC スレッドの上で、破棄中の窓が作り直される。そこに UI スレッドの Dispose が重なると、この例外になる。
+  - RPC スレッドで `Form.CreateHandle` が走るスタックは実測で捕えた。ただし、その実行では例外にはならなかった。
+- kxEdit 自前の UIA 経路(`UiaTextHostAdapter`)は主因ではない。`_hwnd` のキャッシュと `IsHandleCreated` のガードで、`Handle` getter を通らない。
+
+**対処**: 二重の Dispose をやめ、後片付けで出るこの例外だけを警告にとどめる(`CloseQuietly`)。例外が出る時点で、撮影と比較の結果はもう決まっている。
+
+**申し送り**
+- **製品**: 同じ競合は、NVDA を常用する製品のフォーム・ダイアログ・タブを閉じる処理(`DocumentManager.TryClose`)でも、理論上は起きうる。実害の報告はなく、原因も未確定なので、本フェーズでは扱わない。
+- **`GdiBench`**: 同じ形の後片付け(Close の後に using で Dispose)なので、同じ対処の候補になる。範囲外なので今回は変えない。
+
+### Task 5: P-20 の測定と採否(2026-09-25)
+
+**条件**
+- Task 4 まで入れた状態で測った。NVDA は起動中。
+- `--perf --scenario S7` を各 3 回。
+- `PerfBench.Run` に `BufferedGraphicsManager.Current.MaximumBuffer = SystemInformation.VirtualScreen.Size` を一時的に入れた版と、入れない版を比べた。
+  - この 1 行はコミットしていない。
+  - 入れた版では、実行中に MaximumBuffer = 1024×767 になっていることを表示させて確かめた。
+- 1 回目の測定は捨てた。破棄時の例外を調べるエージェントが、同じ時刻に Smoke を繰り返し起動していて、変更なしの版でも 6.5〜8.3 ms と大きく揺れたため。調査が終わってから測り直した値を下に載せる。
+
+S7 の各回の中央値(ms)。3 回の最小〜最大:
+
+| 文書 | 変更なし | MaximumBuffer を画面サイズ | 差(中央) |
+|---|---|---|---|
+| ja10k | 8.54〜8.58(中央 8.55) | 7.69〜7.79(中央 7.79) | −0.76 |
+| en10k | 6.49〜6.61(中央 6.51) | 5.69〜5.69(中央 5.69) | −0.82 |
+
+**判断**: 両方の文書で、採用の基準 0.5 ms/描画を超えたので**採用する**。
+
+参考: 変更なしの版の S7(ja10k 8.55 ms)は、Task 2 の 8.88 ms より 0.33 ms 低い。Task 3・4(P-24・P-17)の効果と見られるが、効果の判定は Task 7 で同じ条件で測ってから行う。
