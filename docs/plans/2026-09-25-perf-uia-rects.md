@@ -1082,3 +1082,30 @@ description に、変更前後の計測値(min / 中央 / max)・意図的な挙
 - S8: 全文 0.58 ms は、可視域 40 行ぶん(0.53 ms)と同程度で、範囲の行数によらなくなった。1 行は 0.01 ms 未満に丸められるので「1 行の数倍以内」は比で言えないが、1 行と全文の差は 0.6 ms 未満。完了条件を満たす。
 - M-7: 全文が 2.6〜2.9 ms で、1 行(0.3 ms)と同じ桁の十数 ms 以下になった。完了条件を満たす。
 - S1〜S3: ja10k・en10k とも、変更前の揺れ(min〜max)の範囲に収まった。悪化も、揺れを超える改善もない。(c) が省くのは可視域の各行の `LineTextOf` で、全面再描画(約 7 ms)に比べて小さいため。
+
+### Task 6: 最終ブランチレビュー(2 パス)の指摘と扱い(fixup b3233d7 / 9ae13ca)
+
+**脆弱性パス**
+- **I-1(Important)**: 既存の TOCTOU 窓で、Task 2 で入れた `PointToScreen` が RPC スレッドで `CreateHandle` を起こす。窓は、RPC スレッドが `IsHandleCreated` を通った直後に UI スレッドが Handle を破棄し、`InvokeRequired` が false を返して Compute が RPC スレッドで走る、というもの。レビューの実験では、破棄済みの Control に対してワーカーから `PointToScreen` を呼ぶと、ワーカーが所有する HWND が作られた。→ ① b3233d7。
+  - 原点の取得を `TryGetClientOrigin`(キャッシュ済みの `_hwnd` に対する `ClientToScreen`)に集約し、`BoundingRectangle` と 2 つの Compute で共有した。
+  - 失敗したら空配列 / 0 を返す。
+  - 回帰テスト `ComputePaths_AfterHandleDestroyed_DoNotRecreateHandle` は、修正前の HEAD で FAIL した。
+  - Task 2 の仕様レビュー Minor-1 の「受容」は、この壊れ方を評価していなかったので、ここで取り消して直した。幅メモの競合(以前からある)は残る。
+- **M-1**: `_hwnd` を volatile にした(① b3233d7)。
+- **M-2**(`ClientToScreen` と `MapWindowPoints` の RTL での差): I-1 の修正で 3 経路とも `ClientToScreen` になり、消えた。
+- 問題なしと判断された観点: HWND の再利用(窓が μs 級で、漏れるのは任意のプロセスが取れる窓の矩形だけ。対策不要)、P/Invoke 宣言、外部入力の範囲、テスト用の入口。
+
+**コード品質パス**(マージ可・Minor 5 件)
+- Minor-1(「12 field」・`RectangleToScreen`・`On*Changed` のコメントの取り残し): ① b3233d7。
+- Minor-2(脆弱性 I-1 と同じ箇所): ① b3233d7。
+- Minor-3(参照 `TestHook_ComputeCaretPointByAccumulation` が壊れても、相対比較だけでは気づけない。レビューの変異 M9 が生存): ① 9ae13ca。可視のオフセットで `Y == (line - topLine) * lh` という絶対値の assert を足した。
+- Minor-4(STA の `Thread.Join` はメッセージを汲むので、Invoke に戻っても検出できない可能性): ① 9ae13ca。メッセージを汲まない `SpinWait.SpinUntil` で待つ形にした。`BoundingRectangle` に一時的に `Invoke` を入れると、5 秒でタイムアウトして FAIL することを確かめた。
+- Minor-5(`_lastFrame` のコメント「Uia 座標 API 用に公開」が実態と合わない。読むのはテストフックだけ): ② 申し送り(フェーズ 3)。
+- **ミューテーションのスポットチェック**(P-9 (c) のみ)
+  - M7(境界を 1 行ずらす)と M8(`n - _topSegment`)は殺された。
+  - M9(短絡の分岐から `allowNoWrapShortcut &&` を外す)は生存。出力は変わらない等価変異で、参照の健全性の網がないことを示した → Minor-3 で対応。
+
+### 申し送り(以後のフェーズへ)
+- **フェーズ 3**: `_lastFrame` のコメント(`EditorControl.cs:121-123`・`EditorControl.Paint.cs:176`)を「テスト観測用」に直す。OnPaint を省いても UIA には影響しない(座標は問い合わせのたびに求める。`UiaTextHostAdapter_HasNoScreenCoordinateCache` で固定)。
+- **既存の食い違い(割り当てなし)**: 折り返し OFF でも `SetTopPosition` で古い `_topSegment`(> 0)が残ると、`ComputeCaretPoint` は TopLine を不可視にして下の行を y = 行高から置く。一方、描画(`ViewportLayout.Build`)はセグメントをクランプして TopLine を y = 0 に描く。本フェーズは従来の挙動を保った(M6・M8 で固定)。実運用でこの状態に入れるかは未確認。
+- **既存の競合(割り当てなし)**: `IsHandleCreated` と `InvokeRequired` の間で Handle が破棄されると、Compute が RPC スレッドで走り、`ComputeCaretPoint` → `GdiCharMetrics` の幅メモ(非スレッドセーフな Dictionary)に書き込みうる。座標の経路は I-1 の修正で Handle に触れなくなった。
