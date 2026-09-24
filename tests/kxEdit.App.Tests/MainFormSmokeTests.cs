@@ -2242,36 +2242,6 @@ public class MainFormSmokeTests
             Assert.Contains("バックアップを 1 件復元しました", announce.Text);
         });
 
-    // ===== AnnouncePosition: 位置のみを読む(2026-07-25 文書情報ダイアログ導入) =====
-
-    // 設計 2026-07-25 §0: 位置照会からは「文字数 M」も「選択 K 文字」も削除し、
-    // 文字数の詳細は [ファイル]>文書情報 へ集約する。ここでは
-    // (a) 行/全/桁 が読まれること (b) 文字数・選択が読まれないこと の両側を固定する。
-    // 「選択あり」「非先頭行」という非既定状態から検証を始める(既定状態だと選択削除の
-    // 変異が vacuous に通ってしまうため)。
-    [Fact]
-    public void AnnouncePosition_ReadsLineTotalAndColumnOnly() =>
-        Sta.Run(() =>
-        {
-            using var tmp = new TempDir();
-            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
-
-            var doc = form.FileForTest.DocsForTest[0];
-            doc.Editor.ReplaceCharRange(0, 0, "abc\r\ndef"); // 2 行・CharLength=8
-            doc.Editor.SelectCharRange(0, 8); // 全選択(旧仕様なら「選択 7 文字」が付いた)
-
-            // AnnouncePosition は private=リフレクションで呼ぶ(Ctrl+Alt+P/メニューの薄いラッパ)。
-            var method = typeof(MainForm).GetMethod(
-                "AnnouncePosition",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-            );
-            Assert.NotNull(method);
-            method!.Invoke(form, null);
-
-            var announce = form.Controls.OfType<Label>().Single(l => l.AccessibleName == "通知");
-            Assert.Equal("行 2 / 全 2、桁 4", announce.Text);
-        });
-
     // ===== [ファイル] > 文書情報(設計 2026-07-25) =====
 
     /// <summary>メニュー項目テキストのアクセラレータ("...(&amp;I)" の I)。持たなければ null。</summary>
@@ -2319,6 +2289,65 @@ public class MainFormSmokeTests
                 .ToList();
 
             Assert.Contains('I', keys); // 文書情報(&I) が居る
+            Assert.Equal(keys.Count, keys.Distinct().Count()); // 重複なし
+        });
+
+    // ===== [検索] > 行へ移動(2026-09-24 「読み上げ」メニュー廃止) =====
+
+    private static ToolStripMenuItem SearchMenuOf(MainForm form) =>
+        form.MainMenuStrip!.Items.OfType<ToolStripMenuItem>().Single(mi => mi.Text == "検索(&S)");
+
+    [Fact]
+    public void Read_menu_is_removed_from_menu_bar() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var tops = form.MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
+                .Select(mi => mi.Text!)
+                .ToList();
+
+            Assert.Contains("検索(&S)", tops); // 陽性対照: 走査が空だと空虚に緑になる
+            Assert.DoesNotContain(tops, t => t.StartsWith("読み上げ", StringComparison.Ordinal));
+        });
+
+    // 行へ移動は [検索] の最後・直前は区切り線(設計 §1)。Ctrl+G は ProcessCmdKey 所有なので
+    // ShortcutKeys は None のまま表示だけを持つ(ShortcutKeys にすると二重発火/衝突する)。
+    [Fact]
+    public void Go_to_line_is_last_item_of_search_menu_after_separator() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var items = SearchMenuOf(form).DropDownItems;
+            var last = Assert.IsType<ToolStripMenuItem>(items[items.Count - 1]);
+
+            Assert.Equal("行へ移動(&J)...", last.Text);
+            Assert.IsType<ToolStripSeparator>(items[items.Count - 2]);
+            Assert.Equal("Ctrl+G", last.ShortcutKeyDisplayString);
+            Assert.Equal(Keys.None, last.ShortcutKeys);
+        });
+
+    // [検索] 内でアクセラレータが衝突しないこと。grep が &G を使っているため、
+    // 行へ移動を &G のまま移すと Alt→S→G が巡回になる(設計 §1)。
+    [Fact]
+    public void Search_menu_accelerators_are_unique() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            var keys = SearchMenuOf(form)
+                .DropDownItems.OfType<ToolStripMenuItem>()
+                .Select(mi => AccelOf(mi.Text!))
+                .Where(c => c is not null)
+                .Select(c => c!.Value)
+                .ToList();
+
+            Assert.Contains('J', keys); // 行へ移動(&J) が居る
+            Assert.Contains('G', keys); // フォルダ検索(grep)(&G) が居る
             Assert.Equal(keys.Count, keys.Distinct().Count()); // 重複なし
         });
 
