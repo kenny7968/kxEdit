@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Windows.Forms;
 using kxEdit.Accessibility;
 using kxEdit.Core.Buffers;
@@ -131,6 +135,209 @@ public class EditorControlBoundingRectsTests
                 // (最終ブランチレビュー品質パス Minor 4 で実際に生存した)。
                 Assert.Equal(before[1], after[1]);
                 Assert.Equal(before[3], after[3]);
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
+
+    /// <summary>
+    /// フェーズ 2(P-9 (a)(b))の突き合わせ用: 変更前の ComputeBoundingRectangles と同じ走査。
+    /// 範囲の全論理行について ComputeCaretPointForUia を呼び、可視なものだけ矩形にする。
+    /// safety(10 万反復)は設計書 §3.5 の意図的な挙動差なので入れない。
+    /// </summary>
+    private static double[] ReferenceRects(
+        EditorControl ctrl,
+        TextSnapshot snap,
+        int start,
+        int end
+    )
+    {
+        int s = Math.Clamp(start, 0, snap.CharLength);
+        int en = Math.Clamp(end, 0, snap.CharLength);
+        var list = new List<double>();
+        if (s >= en)
+            return list.ToArray();
+        var origin = ctrl.PointToScreen(System.Drawing.Point.Empty);
+        int sx = ctrl.ScrollX;
+        int lh = ctrl.Metrics.LineHeightPx;
+        int pos = s;
+        while (pos < en)
+        {
+            int line = snap.GetLineIndexOfChar(pos);
+            int rangeEnd = Math.Min(en, snap.GetLineEnd(line, includeBreak: false));
+            var (x1, y1, visible) = ctrl.ComputeCaretPointForUia(pos);
+            var (x2, _, _) = ctrl.ComputeCaretPointForUia(rangeEnd);
+            if (visible)
+            {
+                list.Add(origin.X + x1 - sx);
+                list.Add(origin.Y + y1);
+                list.Add(Math.Max(1, x2 - x1));
+                list.Add(lh);
+            }
+            int next = line + 1 < snap.LineCount ? snap.GetLineStart(line + 1) : snap.CharLength;
+            if (next <= pos)
+                break;
+            pos = next;
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>
+    /// 200 行。空行(i % 17 == 5)・CRLF(i % 3 == 0)・非 ASCII を混ぜ、最終行は改行なし。
+    /// </summary>
+    private static string MixedDoc()
+    {
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 200; i++)
+        {
+            if (i % 17 != 5)
+                sb.Append(CultureInfo.InvariantCulture, $"line{i:D3} あいう");
+            if (i < 199)
+                sb.Append(i % 3 == 0 ? "\r\n" : "\n");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// (line, col) を文字オフセットにする。col は行頭からの UTF-16 位置で、行の長さ+1 を渡すと
+    /// CRLF の中間(CR と LF の間)を指せる。
+    /// </summary>
+    private static int Off(TextSnapshot snap, int line, int col) =>
+        Math.Min(snap.GetLineStart(line) + col, snap.CharLength);
+
+    // 各ケース: 範囲 [(sl,sc), (el,ec)) と TopLine / 窓の高さ。expectNonEmpty は
+    // 「参照も新実装も空」で一致する空振りを防ぐための fixture 前提。
+    [Theory]
+    [InlineData(50, 200, 0, 0, 199, 5, true)] //   全文(可視域の上・中・下にまたがる)
+    [InlineData(50, 200, 0, 0, 30, 3, false)] //   可視域より上だけ
+    [InlineData(50, 200, 120, 0, 199, 5, false)] // 可視域より下だけ
+    [InlineData(50, 200, 20, 4, 55, 2, true)] //   上の行の途中から可視域の途中まで
+    [InlineData(50, 200, 53, 4, 150, 0, true)] //  可視域の途中から下まで
+    [InlineData(51, 200, 48, 12, 60, 0, true)] //  可視域の上の 48 行目(CRLF)の CR と LF の間から
+    [InlineData(0, 200, 0, 0, 199, 5, true)] //    TopLine=0・下端超過
+    [InlineData(190, 200, 100, 0, 199, 5, true)] // 改行なしの最終行を含む
+    [InlineData(50, 0, 0, 0, 199, 5, false)] //    PaintHeightPx = 0(すべて不可視)
+    public void GetBoundingRectangles_MatchesFullScan_WrapOff(
+        int topLine,
+        int clientHeight,
+        int sl,
+        int sc,
+        int el,
+        int ec,
+        bool expectNonEmpty
+    )
+    {
+        Sta.Run(() =>
+        {
+            var buf = TextBuffer.FromString(MixedDoc());
+            using var form = HostForm.CreateVisible();
+            var ctrl = new EditorControl();
+            form.ClientSize = new System.Drawing.Size(400, 400);
+            form.Controls.Add(ctrl);
+            ctrl.SetSource(buf);
+            try
+            {
+                ctrl.Size = new System.Drawing.Size(300, clientHeight);
+                ctrl.WrapColumns = 0;
+                ctrl.TopLine = topLine;
+                Assert.Equal(topLine, ctrl.TopLine); // fixture 前提: クランプされていない
+                var snap = buf.Current;
+                // fixture 前提: 48 行目は CRLF で、col=12 が CR と LF の間を指す
+                Assert.Equal(
+                    12,
+                    snap.GetLineEnd(48, includeBreak: false) - snap.GetLineStart(48) + 1
+                );
+                int s = Off(snap, sl, sc);
+                int e = Off(snap, el, ec);
+                IUiaTextHost host = ctrl;
+                var expected = ReferenceRects(ctrl, snap, s, e);
+                Assert.Equal(expectNonEmpty, expected.Length > 0); // fixture 前提
+                Assert.Equal(expected, host.GetBoundingRectangles(s, e));
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
+
+    // 折り返し ON。TopLine の途中セグメントから描いている(_topSegment > 0)ときは、
+    // TopLine の上のセグメントが不可視になる。(b) の打ち切りは line > TopLine に限るので、
+    // TopLine の隠れたセグメントから始まる範囲でも、後続行の矩形が出なければならない。
+    [Theory]
+    [InlineData(3, 2, 0)] //  TopLine の隠れたセグメント(先頭)から
+    [InlineData(3, 2, 25)] // TopLine の可視セグメントの途中から
+    [InlineData(3, 0, 0)] //  _topSegment = 0
+    public void GetBoundingRectangles_MatchesFullScan_WrapOn(
+        int topLine,
+        int topSegment,
+        int startCol
+    )
+    {
+        Sta.Run(() =>
+        {
+            // 各行 100 字 = 折り返し 10 桁で 10 セグメント
+            var text = string.Join(
+                "\n",
+                Enumerable.Range(0, 30).Select(i => new string((char)('a' + i % 26), 100))
+            );
+            var buf = TextBuffer.FromString(text);
+            using var form = HostForm.CreateVisible();
+            var ctrl = new EditorControl();
+            form.ClientSize = new System.Drawing.Size(400, 400);
+            form.Controls.Add(ctrl);
+            ctrl.SetSource(buf);
+            try
+            {
+                ctrl.Size = new System.Drawing.Size(300, 300);
+                ctrl.WrapColumns = 10;
+                ctrl.SetTopPosition(topLine, topSegment);
+                Assert.Equal(topLine, ctrl.TopLine); // fixture 前提
+                Assert.Equal(topSegment, ctrl.TopSegment); // fixture 前提
+                var snap = buf.Current;
+                int s = snap.GetLineStart(topLine) + startCol;
+                IUiaTextHost host = ctrl;
+                var expected = ReferenceRects(ctrl, snap, s, snap.CharLength);
+                Assert.NotEmpty(expected); // fixture 前提
+                Assert.Equal(expected, host.GetBoundingRectangles(s, snap.CharLength));
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
+
+    // 設計書 §3.5: 範囲先頭から 10 万行より先に可視域がある場合、従来は safety で打ち切られて
+    // 空配列だった。(a) で TopLine の先頭から走査するので矩形を返す。
+    [Fact]
+    public void GetBoundingRectangles_VisibleAreaBeyond100kLines_ReturnsRects()
+    {
+        Sta.Run(() =>
+        {
+            var buf = TextBuffer.FromString(string.Concat(Enumerable.Repeat("a\n", 150_000)));
+            using var form = HostForm.CreateVisible();
+            var ctrl = new EditorControl();
+            form.ClientSize = new System.Drawing.Size(400, 400);
+            form.Controls.Add(ctrl);
+            ctrl.SetSource(buf);
+            try
+            {
+                ctrl.Size = new System.Drawing.Size(300, 200);
+                ctrl.TopLine = 120_000;
+                Assert.Equal(120_000, ctrl.TopLine); // fixture 前提
+                var snap = buf.Current;
+                int e = snap.GetLineStart(120_050);
+                IUiaTextHost host = ctrl;
+                var actual = host.GetBoundingRectangles(0, e);
+                Assert.NotEmpty(actual);
+                Assert.Equal(ReferenceRects(ctrl, snap, 0, e), actual);
             }
             finally
             {

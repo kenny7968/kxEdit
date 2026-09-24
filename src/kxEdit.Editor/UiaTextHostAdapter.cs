@@ -597,9 +597,22 @@ internal class UiaTextHostAdapter : IUiaTextHost
         // 走るため、_host.ScrollX の読みは a11y 鉄則に抵触しない。
         int sx = _host.ScrollX;
         int lineHeight = _host.Metrics.LineHeightPx;
+        int topLine = _host.TopLine;
         var rects = new List<double>(16);
 
         int pos = s;
+        // フェーズ 2(P-9 (a)): TopLine より上の行は、ComputeCaretPoint が必ず即座に不可視を返し、
+        // 副作用もない。よって範囲の先頭が上にはみ出していれば TopLine の先頭まで一気に飛ばす
+        // (厳密に等価)。CRLF の中間は前の行に属する規約でも、飛び先は TopLine の先頭で同じ。
+        // 前提: _bufferSnapshot と host の _buffer.Current が同一であること。本文を差し替える経路は
+        // すべて同じ同期処理の中で OnSnapshotChanged を呼び、本メソッドは Invoke 経由
+        // (= UI スレッドがメッセージを汲んだとき)にしか走らないので成り立つ。
+        if (topLine < snap.LineCount)
+        {
+            int topStart = snap.GetLineStart(topLine);
+            if (pos < topStart)
+                pos = topStart;
+        }
         int safety = 0;
         while (pos < en && safety++ < 100_000)
         {
@@ -608,15 +621,25 @@ internal class UiaTextHostAdapter : IUiaTextHost
             int rangeEnd = Math.Min(en, lineEndNoBreak);
 
             var (x1, y1, visible) = _host.ComputeCaretPointForUia(pos);
-            var (x2, _, _) = _host.ComputeCaretPointForUia(rangeEnd);
             if (visible)
             {
+                // x2 は可視のときにしか使わない。ComputeCaretPointForUia は幅メモへの書き込み以外に
+                // 副作用がないので、不可視のとき呼ばなくても返す配列は変わらない。
+                var (x2, _, _) = _host.ComputeCaretPointForUia(rangeEnd);
                 // 幅 w は差分なので _scrollX の影響を受けない (両端から同量を引くため)。
                 double w = Math.Max(1, x2 - x1);
                 rects.Add(csx + x1 - sx);
                 rects.Add(csy + y1);
                 rects.Add(w);
                 rects.Add(lineHeight);
+            }
+            else if (line > topLine)
+            {
+                // フェーズ 2(P-9 (b)): TopLine より下の行で不可視になったら、後続の行は積み上げの
+                // 視覚行数が単調に増えるので必ず不可視。打ち切る。
+                // line == topLine は _topSegment による上方向のはみ出し(隠れたセグメント)で
+                // 不可視になりうるので、打ち切ってはならない(後続行は可視でありうる)。
+                break;
             }
 
             int nextLineStart =
