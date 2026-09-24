@@ -2522,7 +2522,18 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 呼び出すため internal 化 (元 private・呼び出し元は UI thread ドキュメントされている)。
     // 非 Uia 用途の内部呼び出し (PositionCaret / BringCaretIntoView / PointFromCharOffset /
     // IImeOverlayHost.ComputeCaretPoint) は引き続き同一アセンブリから呼ぶため可視性拡張のみで影響なし。
-    internal (int X, int Y, bool Visible) ComputeCaretPoint(int offset)
+    internal (int X, int Y, bool Visible) ComputeCaretPoint(int offset) =>
+        ComputeCaretPointCore(offset, allowNoWrapShortcut: true);
+
+    /// <summary>
+    /// テスト専用: 折り返し OFF の短絡(フェーズ 2 P-9 (c))を使わず、TopLine からの積み上げループで
+    /// 求める。短絡と積み上げの同値性を突き合わせるための参照(積み上げループは折り返し ON のために
+    /// 製品コードに残るので、テストに旧実装を複製するより確実)。
+    /// </summary>
+    internal (int X, int Y, bool Visible) TestHook_ComputeCaretPointByAccumulation(int offset) =>
+        ComputeCaretPointCore(offset, allowNoWrapShortcut: false);
+
+    private (int X, int Y, bool Visible) ComputeCaretPointCore(int offset, bool allowNoWrapShortcut)
     {
         if (_buffer is null)
             return (0, 0, false);
@@ -2579,40 +2590,62 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // この上限を 1 でも小さく取ると視覚行数を過小評価し、本来不可視の位置を可視として
         // 返す(=行がずれた座標を返す)ので、ceil を floor や -1 に緩めてはならない。
         int visualRowsBeforeThisLine = 0;
-        int maxUsefulRows =
-            lineHeight > 0 ? (paintHeight + lineHeight - 1) / lineHeight : int.MaxValue;
-        for (int line = _topLine; line < logicalLine; line++)
+        if (allowNoWrapShortcut && maxWidthPx <= 0 && lineHeight > 0)
         {
-            // I-2: 先頭論理行は _topSegment 本ぶん画面外にあるので積み上げから差し引く。
-            int skip = line == _topLine ? _topSegment : 0;
-            // Math.Max(1, ...) は到達可能な生きた防御(外してはならない)。
-            // PaintHeightPx は 0 になり得る(フォーム最小化・レイアウト確定前・
-            // hscroll より低いペイン)。そのとき maxUsefulRows=0 → rowsNeeded=0 となり、
-            // WrapFirstSegments の ThrowIfNegativeOrZero が発火して
-            // PositionCaret / OnPaint / UIA 経路へ ArgumentOutOfRangeException が抜ける
-            // (打ち切り導入で新設された例外面。変更前の Wrap は投げなかった)。
-            // ループ継続中の通常ケースでは accumulated < maxUsefulRows が成り立つため
-            // rowsNeeded は 1 以上になる。
-            //
-            // 読み飛ばす skip 本も Wrap の要求本数に足す(打ち切り結果は完全結果の prefix なので
-            // 「可視分 + 読み飛ばし分」を求めれば足りる)。maxUsefulRows は lineHeight <= 0 で
-            // int.MaxValue になり得るため skip の加算は long で受ける
-            // (CountVisualRowsForward の同旨の long 経由と同じ理由)。
-            long needed = (long)maxUsefulRows - visualRowsBeforeThisLine + skip;
-            int rowsNeeded = needed > int.MaxValue ? int.MaxValue : (int)needed;
-            var segs = LineLayout
-                .WrapFirstSegments(
-                    LineTextOf(snap, line),
-                    maxWidthPx,
-                    _metrics,
-                    Math.Max(1, rowsNeeded)
-                )
-                .Segments;
-            // ViewportLayout.Build と同じクランプ(topSegment が実数以上なら最終セグメント)。
-            int eff = Math.Min(skip, segs.Count - 1);
-            visualRowsBeforeThisLine += segs.Count - eff;
-            if (visualRowsBeforeThisLine * lineHeight >= paintHeight)
+            // フェーズ 2(P-9 (c)): 折り返しなし(maxWidthPx <= 0)では LineLayout の Wrap 系が
+            // 必ず 1 セグメントを返す(LineLayout.WrapCore 冒頭)。よって下のループの
+            // eff = Math.Min(skip, 0) = 0 で、k 行目までの積み上げは常に k になり、ループは
+            // 「k * lineHeight >= paintHeight となる k (1..n) があるか」を判定するだけ。
+            // k について単調なので n だけ見ればよい(厳密に等価)。n = 0 はループが回らない場合で、
+            // 0 >= paintHeight は paintHeight = 0 のときだけ真。そのとき従来も末尾の
+            // y (= 0) >= paintHeight で不可視を返していた。
+            // 毎打鍵の PositionCaret / BringCaretIntoView でも走る経路なので、可視域の各行の
+            // LineTextOf(文字列化)も消える。
+            // long で掛ける: n は文書の行数まで大きくなりうる(int だと溢れて可視と誤判定する)。
+            // この判定は _topSegment による上方向のはみ出し判定(上)より後に置く。折り返し OFF でも
+            // SetTopPosition で古い _topSegment が残りうるので、その扱いを従来どおりに保つため。
+            int n = logicalLine - _topLine;
+            if ((long)n * lineHeight >= paintHeight)
                 return (0, 0, false);
+            visualRowsBeforeThisLine = n;
+        }
+        else
+        {
+            int maxUsefulRows =
+                lineHeight > 0 ? (paintHeight + lineHeight - 1) / lineHeight : int.MaxValue;
+            for (int line = _topLine; line < logicalLine; line++)
+            {
+                // I-2: 先頭論理行は _topSegment 本ぶん画面外にあるので積み上げから差し引く。
+                int skip = line == _topLine ? _topSegment : 0;
+                // Math.Max(1, ...) は到達可能な生きた防御(外してはならない)。
+                // PaintHeightPx は 0 になり得る(フォーム最小化・レイアウト確定前・
+                // hscroll より低いペイン)。そのとき maxUsefulRows=0 → rowsNeeded=0 となり、
+                // WrapFirstSegments の ThrowIfNegativeOrZero が発火して
+                // PositionCaret / OnPaint / UIA 経路へ ArgumentOutOfRangeException が抜ける
+                // (打ち切り導入で新設された例外面。変更前の Wrap は投げなかった)。
+                // ループ継続中の通常ケースでは accumulated < maxUsefulRows が成り立つため
+                // rowsNeeded は 1 以上になる。
+                //
+                // 読み飛ばす skip 本も Wrap の要求本数に足す(打ち切り結果は完全結果の prefix なので
+                // 「可視分 + 読み飛ばし分」を求めれば足りる)。maxUsefulRows は lineHeight <= 0 で
+                // int.MaxValue になり得るため skip の加算は long で受ける
+                // (CountVisualRowsForward の同旨の long 経由と同じ理由)。
+                long needed = (long)maxUsefulRows - visualRowsBeforeThisLine + skip;
+                int rowsNeeded = needed > int.MaxValue ? int.MaxValue : (int)needed;
+                var segs = LineLayout
+                    .WrapFirstSegments(
+                        LineTextOf(snap, line),
+                        maxWidthPx,
+                        _metrics,
+                        Math.Max(1, rowsNeeded)
+                    )
+                    .Segments;
+                // ViewportLayout.Build と同じクランプ(topSegment が実数以上なら最終セグメント)。
+                int eff = Math.Min(skip, segs.Count - 1);
+                visualRowsBeforeThisLine += segs.Count - eff;
+                if (visualRowsBeforeThisLine * lineHeight >= paintHeight)
+                    return (0, 0, false);
+            }
         }
         int totalVisualRow =
             visualRowsBeforeThisLine + segIdx - (logicalLine == _topLine ? _topSegment : 0);
