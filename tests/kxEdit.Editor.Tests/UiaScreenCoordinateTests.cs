@@ -132,20 +132,25 @@ public class UiaScreenCoordinateTests
                 IUiaTextHost host = ctrl;
                 var onUi = host.BoundingRectangle;
                 System.Windows.Rect onWorker = default;
-                bool done = false;
+                bool finished = false;
                 Exception? workerError = null;
                 var t = new Thread(() =>
                 {
                     // 失敗時(UI 待ちのまま finally の Dispose を迎える)に Invoke が投げる
                     // ObjectDisposedException でテストホストごと落とさないよう、ここで受ける。
+                    // 終了フラグは finally で立てる: 例外のときも「戻らない」ではなく
+                    // その例外で失敗させるため(再レビュー Minor-1)。
                     try
                     {
                         onWorker = host.BoundingRectangle;
-                        Volatile.Write(ref done, true);
                     }
                     catch (Exception ex)
                     {
                         workerError = ex;
+                    }
+                    finally
+                    {
+                        Volatile.Write(ref finished, true);
                     }
                 });
                 t.IsBackground = true; // 失敗時(UI 待ちで戻らない)にテストプロセスを残さない
@@ -154,7 +159,7 @@ public class UiaScreenCoordinateTests
                 // 一部のメッセージを汲むため、Invoke する実装でも UI スレッドが応答してしまい
                 // デッドロックせずに通りうる。SpinWait.SpinUntil はメッセージを汲まない。
                 Assert.True(
-                    SpinWait.SpinUntil(() => Volatile.Read(ref done), 5000),
+                    SpinWait.SpinUntil(() => Volatile.Read(ref finished), 5000),
                     "ワーカースレッドが戻らない(Invoke して UI 待ちになっている)"
                 );
                 Assert.Null(workerError);
