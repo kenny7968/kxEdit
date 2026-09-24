@@ -74,7 +74,16 @@ public class ComputeCaretPointNoWrapShortcutTests
                         var actual = ctrl.ComputeCaretPoint(off);
                         Assert.Equal(expected, actual);
                         if (actual.Visible)
+                        {
                             lineVisible = true;
+                            // 最終レビュー(品質 Minor-3): 参照の積み上げループは短絡と同じメソッドを
+                            // 通るので、突き合わせだけでは両者が同じように壊れたとき気づけない。
+                            // 両者から独立した絶対値でも固定する: 折り返し OFF の Y は
+                            // (L - TopLine) * 行高(古い _topSegment は TopLine 自身を不可視にするだけで、
+                            // 下の行の Y をずらさない=可視なら L > TopLine か topSegment == 0)。
+                            Assert.True(line > topLine || topSegment == 0); // 前提
+                            Assert.Equal((line - topLine) * lh, actual.Y);
+                        }
                         else if (line > topLine)
                             hiddenBelow++;
                     }
