@@ -212,15 +212,18 @@ public class EditorControlBoundingRectsTests
     // 各ケース: 範囲 [(sl,sc), (el,ec)) と TopLine / 窓の高さ。expectNonEmpty は
     // 「参照も新実装も空」で一致する空振りを防ぐための fixture 前提。
     [Theory]
-    [InlineData(50, 200, 0, 0, 199, 5, true)] //   全文(可視域の上・中・下にまたがる)
-    [InlineData(50, 200, 0, 0, 30, 3, false)] //   可視域より上だけ
-    [InlineData(50, 200, 120, 0, 199, 5, false)] // 可視域より下だけ
-    [InlineData(50, 200, 20, 4, 55, 2, true)] //   上の行の途中から可視域の途中まで
-    [InlineData(50, 200, 53, 4, 150, 0, true)] //  可視域の途中から下まで
-    [InlineData(51, 200, 48, 12, 60, 0, true)] //  可視域の上の 48 行目(CRLF)の CR と LF の間から
-    [InlineData(0, 200, 0, 0, 199, 5, true)] //    TopLine=0・下端超過
-    [InlineData(190, 200, 100, 0, 199, 5, true)] // 改行なしの最終行を含む
-    [InlineData(50, 0, 0, 0, 199, 5, false)] //    PaintHeightPx = 0(すべて不可視)
+    // (199, 99) は Off のクランプで CharLength(文書末尾)になる。改行なしの最終行
+    // (199 行目 = 11 文字)を最後まで含み、最終行の nextLineStart = CharLength の分岐と
+    // 文書末尾でのループ終了を踏む。
+    [InlineData(50, 200, 0, 0, 199, 99, true)] //   全文(可視域の上・中・下にまたがる)
+    [InlineData(50, 200, 0, 0, 30, 3, false)] //    可視域より上だけ
+    [InlineData(50, 200, 120, 0, 199, 99, false)] // 可視域より下から文書末尾まで
+    [InlineData(50, 200, 20, 4, 55, 2, true)] //    上の行の途中から可視域の途中まで
+    [InlineData(50, 200, 53, 4, 150, 0, true)] //   可視域の途中から下まで
+    [InlineData(51, 200, 48, 12, 60, 0, true)] //   可視域の上の 48 行目(CRLF)の CR と LF の間から
+    [InlineData(0, 200, 0, 0, 199, 99, true)] //    全文・TopLine=0・下端超過
+    [InlineData(190, 200, 100, 0, 199, 99, true)] // 改行なしの最終行を文書末尾まで含む
+    [InlineData(50, 0, 0, 0, 199, 99, false)] //    全文・PaintHeightPx = 0(すべて不可視)
     public void GetBoundingRectangles_MatchesFullScan_WrapOff(
         int topLine,
         int clientHeight,
@@ -253,6 +256,12 @@ public class EditorControlBoundingRectsTests
                 );
                 int s = Off(snap, sl, sc);
                 int e = Off(snap, el, ec);
+                // fixture 前提: (199, 99) は文書末尾(最終行は改行なし)まで取る
+                if (el == 199 && ec == 99)
+                {
+                    Assert.Equal(snap.CharLength, e);
+                    Assert.Equal(snap.CharLength, snap.GetLineEnd(199, includeBreak: false));
+                }
                 IUiaTextHost host = ctrl;
                 var expected = ReferenceRects(ctrl, snap, s, e);
                 Assert.Equal(expectNonEmpty, expected.Length > 0); // fixture 前提
@@ -269,14 +278,21 @@ public class EditorControlBoundingRectsTests
     // 折り返し ON。TopLine の途中セグメントから描いている(_topSegment > 0)ときは、
     // TopLine の上のセグメントが不可視になる。(b) の打ち切りは line > TopLine に限るので、
     // TopLine の隠れたセグメントから始まる範囲でも、後続行の矩形が出なければならない。
+    // 下の 2 ケースは初回反復で s が TopLine より下の行の途中(下のセグメント)にある。
+    // 可視なら後続行も走査し、可視域より下なら 1 回目で打ち切る((b) の line > TopLine)。
+    // 後者が本当に可視域の下にあることは expectNonEmpty=false(参照が空)で fixture 前提として確かめる。
     [Theory]
-    [InlineData(3, 2, 0)] //  TopLine の隠れたセグメント(先頭)から
-    [InlineData(3, 2, 25)] // TopLine の可視セグメントの途中から
-    [InlineData(3, 0, 0)] //  _topSegment = 0
+    [InlineData(3, 2, 3, 0, true)] //    TopLine の隠れたセグメント(先頭)から
+    [InlineData(3, 2, 3, 25, true)] //   TopLine の可視セグメントの途中から
+    [InlineData(3, 0, 3, 0, true)] //    _topSegment = 0
+    [InlineData(3, 2, 4, 35, true)] //   TopLine+1 行の下のセグメント(4 本目)の途中から
+    [InlineData(3, 2, 23, 35, false)] // 可視域より下(TopLine+20 行)の下のセグメントの途中から
     public void GetBoundingRectangles_MatchesFullScan_WrapOn(
         int topLine,
         int topSegment,
-        int startCol
+        int startLine,
+        int startCol,
+        bool expectNonEmpty
     )
     {
         Sta.Run(() =>
@@ -300,10 +316,10 @@ public class EditorControlBoundingRectsTests
                 Assert.Equal(topLine, ctrl.TopLine); // fixture 前提
                 Assert.Equal(topSegment, ctrl.TopSegment); // fixture 前提
                 var snap = buf.Current;
-                int s = snap.GetLineStart(topLine) + startCol;
+                int s = snap.GetLineStart(startLine) + startCol;
                 IUiaTextHost host = ctrl;
                 var expected = ReferenceRects(ctrl, snap, s, snap.CharLength);
-                Assert.NotEmpty(expected); // fixture 前提
+                Assert.Equal(expectNonEmpty, expected.Length > 0); // fixture 前提
                 Assert.Equal(expected, host.GetBoundingRectangles(s, snap.CharLength));
             }
             finally
