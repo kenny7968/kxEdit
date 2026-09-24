@@ -492,3 +492,98 @@ ja30k のトレースでは、`SearchController.UpdateCount` が 1 打鍵あた�
 5. **P-2 と P-24**: 小規模・低リスクで、1 打鍵あたり 2〜4 ms。
 6. **P-4**
 7. **P-5・P-6・P-7・P-8・P-10〜P-23**: 効果が小さいか、条件付き。まとめて扱うか、必要が出たときに着手する。
+
+### 9.5 再現手順(フェーズ 0 で tools/ に固定するための仕様)
+
+作業用のハーネスは scratchpad の使い捨てで、リポジトリには残していない。同じ計測を作り直せるように、仕様をここに記録する。
+
+#### 文書の生成(いずれも UTF-8・BOM なし・改行 CRLF)
+
+`{0:D5}` / `{0:D3}` は .NET の書式で、行番号 i をゼロ埋めする。
+
+| 名前 | 1 行の書式 | 行数 | サイズ |
+|---|---|---|---|
+| `ja10k` | `{0:D5}: 吾輩は猫である。名前はまだ無い。kxEdit の性能計測 sample 行です。` | i = 1..10,000 | 990,000 バイト |
+| `en10k` | `{0:D5}: The quick brown fox jumps over the lazy dog; perf sample line.` | i = 1..10,000 | 710,000 バイト |
+| `ja30k` | `ja10k` と同じ書式 | i = 1..30,000 | 2,970,000 バイト |
+| M-3 の貼り付け片 | `{0:D3}: 吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。` | i = 1..100 | 10,600 バイト |
+
+#### 操作の送り方
+
+- `SendInput` を使う。
+  - 矢印・Home・End・PageUp・PageDown には `KEYEVENTF_EXTENDEDKEY` を立てる。
+  - 文字は `KEYEVENTF_UNICODE` で送る。IME を経由せず、WM_CHAR として届く。
+- 前面化は `SetForegroundWindow` を最大 20 回リトライする(`AttachThreadInput` を併用)。
+- エディタ本体の HWND は、次の条件で特定する。
+  - メインウィンドウの子孫のうち、可視で、クラス名が `WindowsForms10.Window.8.*`
+  - タイトルが空(TabPage はタブ名をタイトルに持つので区別できる)
+  - エディタ領域の大きさ
+
+#### 1 回あたり CPU の測り方(`Measure-Op`)
+
+1. **静穏待ち**: 100 ms ごとにプロセスの CPU 時間を見る。増分が 2 ms 未満の窓が 3 回続くまで待つ。
+2. CPU 時間の開始値を記録する。
+3. 操作を n 回行う。各回の後に interval ms 待つ。
+4. もう一度、静穏待ちをする。
+5. (CPU 時間の終了値 − 開始値) ÷ n を 1 回あたりの値とする。
+
+CPU 時間は `Process.TotalProcessorTime`(全スレッドの合計)を使う。
+
+#### シナリオ(n と interval)
+
+| ID | 事前状態 | 操作 | n | interval |
+|---|---|---|---|---|
+| M-2 | Ctrl+Home の後に ↓ を 10 回 | → と ← を交互 | 100 | 100 ms |
+| | 同上 | ↓ と ↑ を交互 | 100 | 100 ms |
+| | 同上 | Shift+→ | 40 | 100 ms |
+| | → を 1 回押してから | `x` を入力 | 60 | 100 ms |
+| | 同上 | BackSpace | 60 | 100 ms |
+| | 同上 | PageDown / PageUp | 50 | 150 ms |
+| M-2 基準 | — | エディタ HWND へ `RedrawWindow(RDW_INVALIDATE \| RDW_UPDATENOW)` | 100 | 50 ms |
+| | Ctrl+Home | ←(何も変わらない) | 60〜100 | 100 ms |
+| | — | Shift の単押し | 60〜100 | 100 ms |
+| M-3 | 新規タブ | `x` を入力 | 40 | 100 ms |
+| | 貼り付け片を Ctrl+V で 1 回貼るたびに、上の計測を行う。これを 9 回繰り返す | | | |
+| M-4 | カーソルを本文の上に置く | ホイール ±120 | 60 | 100 ms |
+| M-5 | Ctrl+F の後、検索ダイアログが前面にあること | 16 回周期の操作(下記) | 64 | 200 ms |
+| M-6 | — | Ctrl+Tab | 40 | 250 ms |
+| M-1 | 起動ごとにプロフィールを復元する | 下記 | 6 回 | — |
+
+**M-5 の 16 回周期**
+- 検索語「名前はまだ無い」の 1 文字目から順に 7 文字を打つ。
+- BackSpace を 7 回打つ。
+- 2 回は何もしない。
+- 1 実打鍵あたりの値は、測った値 × 16/14 で補正する。
+
+**M-6 のスレッド別の内訳**: `Process.Threads` の `TotalProcessorTime` と `UserProcessorTime` について、操作の前後の差を取る。
+
+**M-7 の手順**
+- `System.Windows.Automation` を使う。
+  1. `AutomationElement.FromHandle(エディタ HWND)` から `TextPattern` を取る。
+  2. `DocumentRange` を複製し、先頭に縮めてから `ExpandToEnclosingUnit(Line)` で 1 行の範囲を作る。
+  3. `MoveEndpointByUnit(End, Line, n−1)` で n 行に広げる。
+  4. `GetBoundingRectangles()` の所要時間を Stopwatch で測る。
+- 全文は `DocumentRange` を使う。
+
+**M-1 の手順**
+1. `Start-Process` で起動する。
+2. `MainWindowHandle` が非 0 かつ可視になるまで、5 ms ごとに確認する(「窓が表示されるまで」)。
+3. `WaitForInputIdle` と `SendMessageTimeout(WM_NULL)` の完了を待つ(「入力を受け付けるまで」)。
+4. 0.8 秒後にプロセスの CPU 時間を記録する。
+5. `WM_CLOSE` で閉じる。
+- 通常版と ReadyToRun 版を交互に 6 回ずつ起動し、1 回目を除く 5 回の中央値を取る。
+
+#### トレースの集計(dotnet-trace)
+
+**採取**
+- `dotnet-trace collect -p <pid> --profile dotnet-sampled-thread-time --format Speedscope --duration 00:00:00:16`
+- 採取中に上のシナリオを実行する。
+
+**集計**
+- speedscope の evented プロファイルを読む。
+- UI スレッドは、スタックに `RunMessageLoop` を含むスレッドとする。
+- スタックに `GetMessage` / `WaitMessage` / `MsgWaitForMultipleObjects` / `PeekMessage` を含む区間は待機として除く。それ以外の区間を稼働とし、フレーム名ごとに包含時間を合計する。
+
+**限界**
+- `RunMessageLoopInner` の直下が `UNMANAGED_CODE_TIME` になっている区間は、待機か、管理コード外のネイティブ処理(IME/TSF など)かを区別できない。
+- ネイティブ側の内訳は、WPR(ETW)で採る必要がある。
