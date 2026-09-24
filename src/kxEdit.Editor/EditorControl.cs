@@ -210,8 +210,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             insertConfirmedText: InsertConfirmedText
         );
 
-        // Task 3d: UiaTextHostAdapter (IUiaTextHost 全メンバ実装 + Uia 系 12 field 所有)。
-        // this を UI thread 側 host として渡す (RectangleToScreen / PointToScreen / InvokeRequired /
+        // Task 3d: UiaTextHostAdapter (IUiaTextHost 全メンバ実装 + Uia 系 8 field 所有。
+        // 当時 12。フェーズ 2 S-1 で座標キャッシュ 4 field を削除)。
+        // this を UI thread 側 host として渡す (InvokeRequired /
         // BeginInvoke / IsHandleCreated / IsDisposed / Handle / ComputeCaretPointForUia /
         // OffsetFromClientPoint / Metrics / WrapColumns / HasFocusCached / SetSelectionCharRange /
         // ScrollCharRangeIntoView / Focus を Adapter から呼ぶ)。

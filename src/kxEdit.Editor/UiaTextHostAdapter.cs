@@ -1,7 +1,9 @@
 // UiaTextHostAdapter.cs
-// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 全メンバ + Uia 系 12 field の
+// Phase 3 Task 3d で EditorControl.Uia.cs から IUiaTextHost 全メンバ + Uia 系 12 field (当時) の
 // 所有権を bit-perfect 移設した adapter。§C.4 例外 (OnHandle*/On*Changed の Uia.cs 帰属)
-// を解消し、EditorControl 本体側の OnHandle*/On*Changed から Adapter へ通知する形に統一する。
+// を解消し、EditorControl 本体側から Adapter へ通知する形に統一した。フェーズ 2 (S-1) で
+// OnSizeChanged / OnLocationChanged からの通知は削除し、現在は OnHandleCreated /
+// OnHandleDestroyed のみ。
 //
 // 責務:
 //   - Uia 系 8 field の単一所有 (_bufferSnapshot / _lastLineSegs / _hwnd / _provider /
@@ -75,7 +77,9 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // P5 Task 14 (I-2): UIA プロバイダは RPC スレッドから Handle を取得する。Control.Handle は
     // Handle 未生成時に CreateHandle を誘発し得るため、OnHandleCreated で捕捉した値をキャッシュ。
     // v1 ScintillaHost._hwnd と同形。
-    private nint _hwnd;
+    // volatile: UI スレッド(OnHandleCreated / OnHandleDestroyed)が書き、RPC スレッド
+    // (BoundingRectangle / TryGetClientOrigin)が読む。読む側は 1 回だけ local へ取る。
+    private volatile nint _hwnd;
 
     // P5 Task 6: UIA プロバイダ(v2)は WM_GETOBJECT(UiaRootObjectId)で lazy 生成する。
     // インスタンスの寿命は EditorControl と同じ(Dispose で解放不要=マネージ参照のみ)。
@@ -537,16 +541,40 @@ internal class UiaTextHostAdapter : IUiaTextHost
                 return default;
             if (!NativeMethods.GetClientRect(hwnd, out var rc))
                 return default;
-            var origin = new NativeMethods.POINT();
-            if (!NativeMethods.ClientToScreen(hwnd, ref origin))
+            if (!TryGetClientOrigin(hwnd, out int ox, out int oy))
                 return default;
-            return new System.Windows.Rect(
-                origin.x,
-                origin.y,
-                rc.right - rc.left,
-                rc.bottom - rc.top
-            );
+            return new System.Windows.Rect(ox, oy, rc.right - rc.left, rc.bottom - rc.top);
         }
+    }
+
+    /// <summary>
+    /// キャッシュ済み <see cref="_hwnd"/> の client 原点 (0,0) のスクリーン座標を求める。
+    /// Handle 未生成 / 破棄後(_hwnd == 0)や Win32 の失敗は false。
+    /// </summary>
+    /// <remarks>
+    /// 座標系 3 経路(<c>BoundingRectangle</c> / <c>ComputeBoundingRectangles</c> /
+    /// <c>ComputeOffsetFromScreenPoint</c>)の原点はすべてここから求める(同じ源なので 3 経路が
+    /// 食い違わない。PointToScreen = MapWindowPoints と ClientToScreen の RTL での差も出ない)。
+    /// <c>Control.Handle</c> / <c>PointToScreen</c> を使ってはならない: 呼び出し側の
+    /// IsHandleCreated → InvokeRequired の間に UI スレッドが Handle を破棄すると(TOCTOU 窓)
+    /// Compute* は RPC スレッド上で走り、そこで Control.Handle を読むと CreateHandle が走って
+    /// RPC スレッドが所有する HWND ができ、OnHandleCreated 経由で _hwnd も上書きされる。
+    /// ClientToScreen はキャッシュ済み hwnd に対してどのスレッドから呼んでも安全。
+    /// </remarks>
+    private bool TryGetClientOrigin(out int x, out int y) =>
+        TryGetClientOrigin(_hwnd, out x, out y);
+
+    private static bool TryGetClientOrigin(nint hwnd, out int x, out int y)
+    {
+        x = y = 0;
+        if (hwnd == 0)
+            return false;
+        var origin = new NativeMethods.POINT();
+        if (!NativeMethods.ClientToScreen(hwnd, ref origin))
+            return false;
+        x = origin.x;
+        y = origin.y;
+        return true;
     }
 
     // P5 Task 10: 座標 API 本実装
@@ -584,11 +612,12 @@ internal class UiaTextHostAdapter : IUiaTextHost
         if (s >= en)
             return Array.Empty<double>();
 
-        // フェーズ 2(S-1): client 原点のスクリーン座標は問い合わせのたびに求める
-        // (本メソッドは UI スレッド上でのみ走る=下の _host.ScrollX と同じ理由で PointToScreen を呼べる)。
-        var origin = _host.PointToScreen(System.Drawing.Point.Empty);
-        int csx = origin.X,
-            csy = origin.Y;
+        // フェーズ 2(S-1): client 原点のスクリーン座標は問い合わせのたびに求める。
+        // PointToScreen(= Control.Handle)ではなくキャッシュ済み _hwnd から求める
+        // (理由は TryGetClientOrigin。Handle 破棄後の TOCTOU 窓で RPC スレッド上を走っても
+        // Handle を作り直さず、ここで空配列に打ち切る)。
+        if (!TryGetClientOrigin(out int csx, out int csy))
+            return Array.Empty<double>();
         // A-12 (2026-08-22): ComputeCaretPointForUia は _scrollX 適用前の X (描画原点座標) を返す。
         // 描画 (EditorControl.Paint.cs)・PointFromCharOffset・逆変換 OffsetFromClientPoint は
         // いずれも _scrollX を引いており、ここだけ引いていないと往復が非対称になる
@@ -672,11 +701,13 @@ internal class UiaTextHostAdapter : IUiaTextHost
         var snap = _bufferSnapshot;
         if (snap is null)
             return 0;
-        // スクリーン→クライアント変換。原点は問い合わせのたびに求める(フェーズ 2 S-1・UI スレッド上)。
+        // スクリーン→クライアント変換。原点は問い合わせのたびに、キャッシュ済み _hwnd から求める
+        // (フェーズ 2 S-1。Control.Handle に触れない理由は TryGetClientOrigin。Handle 破棄後は 0)。
         // 範囲外は OffsetFromClientPoint 側で「Y<0=先頭視覚行の X」「exhausted=文書末尾」に丸める。
-        var origin = _host.PointToScreen(System.Drawing.Point.Empty);
-        int clientX = (int)(x - origin.X);
-        int clientY = (int)(y - origin.Y);
+        if (!TryGetClientOrigin(out int ox, out int oy))
+            return 0;
+        int clientX = (int)(x - ox);
+        int clientY = (int)(y - oy);
         // 負座標はゼロ扱い(文書先頭 0 に落ちる=clamp)。上限は OffsetFromClientPoint が自然に処理。
         if (clientX < 0)
             clientX = 0;

@@ -149,6 +149,79 @@ public class UiaScreenCoordinateTests
         });
     }
 
+    // 最終レビュー(脆弱性 I-1): RPC スレッドが IsHandleCreated を通過した直後に UI スレッドが
+    // Handle を破棄すると、InvokeRequired が false を返して Compute* が RPC スレッド上で走る
+    // (TOCTOU 窓)。そこで Control.Handle / PointToScreen を読むと CreateHandle が走り、
+    // RPC スレッドが所有する HWND ができて _hwnd も上書きされる。Compute* は Control.Handle に
+    // 触れず、キャッシュ済み _hwnd(破棄後は 0)で打ち切ること。
+    // 窓そのものはテストで再現できないので、「Handle 破棄後・未 Dispose の状態で Compute* を
+    // 直接呼ぶ」ことで、窓の中で走ったときと同じ入力を与える。
+    [Fact]
+    public void ComputePaths_AfterHandleDestroyed_DoNotRecreateHandle()
+    {
+        Sta.Run(() =>
+        {
+            var (form, ctrl) = MakeHosted("hello\nworld");
+            try
+            {
+                var adapter = typeof(EditorControl)
+                    .GetField(
+                        "_uia",
+                        System.Reflection.BindingFlags.Instance
+                            | System.Reflection.BindingFlags.NonPublic
+                    )!
+                    .GetValue(ctrl)!;
+                var adapterType = adapter.GetType();
+                var computeRects = adapterType.GetMethod(
+                    "ComputeBoundingRectangles",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                )!;
+                var computeOffset = adapterType.GetMethod(
+                    "ComputeOffsetFromScreenPoint",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                )!;
+                var destroyHandle = typeof(Control).GetMethod(
+                    "DestroyHandle",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic
+                )!;
+
+                // fixture 前提: Handle がある間は矩形が出る・行 1 を指せる(= 空 / 0 が既定値と区別できる)
+                Assert.NotEmpty((double[])computeRects.Invoke(adapter, new object[] { 0, 5 })!);
+                var origin = ctrl.PointToScreen(Point.Empty);
+                int lh = ctrl.Metrics.LineHeightPx;
+                double px = origin.X + 1,
+                    py = origin.Y + lh + lh / 2;
+                Assert.InRange((int)computeOffset.Invoke(adapter, new object[] { px, py })!, 6, 7);
+
+                destroyHandle.Invoke(ctrl, null);
+                Assert.False(ctrl.IsHandleCreated); // fixture 前提
+                Assert.False(ctrl.IsDisposed);
+
+                var rects = (double[])computeRects.Invoke(adapter, new object[] { 0, 5 })!;
+                Assert.False(
+                    ctrl.IsHandleCreated,
+                    "ComputeBoundingRectangles が Handle を作り直した"
+                );
+                Assert.Empty(rects);
+
+                int offset = (int)computeOffset.Invoke(adapter, new object[] { px, py })!;
+                Assert.False(
+                    ctrl.IsHandleCreated,
+                    "ComputeOffsetFromScreenPoint が Handle を作り直した"
+                );
+                Assert.Equal(0, offset);
+            }
+            finally
+            {
+                ctrl.Dispose();
+                form.Close();
+            }
+        });
+    }
+
     // 設計書 §3.5: Handle の破棄後は、最後にキャッシュした値ではなく空矩形を返す。
     [Fact]
     public void BoundingRectangle_AfterDispose_ReturnsDefault()
