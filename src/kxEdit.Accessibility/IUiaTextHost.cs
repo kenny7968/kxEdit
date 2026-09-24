@@ -13,7 +13,8 @@ namespace kxEdit.Accessibility;
 /// <see cref="ScrollRangeIntoView"/>)は <c>BeginInvoke</c>(戻り値が不要=RPC スレッドを待たせない)。</item>
 /// <item>UI スレッド専用状態を要する読み取り(<see cref="GetBoundingRectangles"/> /
 /// <see cref="OffsetFromScreenPoint"/> / <see cref="GetVisibleRange"/>)は同期 <c>Invoke</c>。</item>
-/// <item>それ以外は不変スナップショット参照 + キャッシュ値で応答(マーシャリングしない)。</item>
+/// <item>それ以外は不変スナップショット参照・キャッシュ値、またはスレッド安全な Win32 API
+/// (HWND を受けるだけのもの)で応答(マーシャリングしない)。</item>
 /// </list>
 /// </summary>
 public interface IUiaTextHost

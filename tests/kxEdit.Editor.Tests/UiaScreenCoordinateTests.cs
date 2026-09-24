@@ -52,6 +52,14 @@ public class UiaScreenCoordinateTests
                 Assert.Equal(before[1] + (origin.Y - originBefore.Y), after[1]);
                 Assert.Equal(before[2], after[2]);
                 Assert.Equal(before[3], after[3]);
+
+                // 絶対値でも確かめる: 移動後の矩形 = 新しい原点 + 描画原点座標 - ScrollX。
+                // PointFromCharOffset は ScrollX 反映済みで、不可視と (0,0) が Point.Empty で区別できない
+                // ため、adapter と同じ入口の ComputeCaretPointForUia を使う。
+                var (cx, cy, visible) = ctrl.ComputeCaretPointForUia(0);
+                Assert.True(visible); // fixture 前提
+                Assert.Equal(origin.X + cx - ctrl.ScrollX, after[0]);
+                Assert.Equal(origin.Y + cy, after[1]);
             }
             finally
             {

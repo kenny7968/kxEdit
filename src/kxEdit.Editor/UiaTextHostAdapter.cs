@@ -9,8 +9,12 @@
 //     _uiaFocusChangedCount)。フェーズ 2(S-1・2026-09-25)で座標キャッシュ 4 field
 //     (_bounds / _boundsSync / _clientToScreenX / _clientToScreenY) を削除し、座標は
 //     問い合わせのたびに求めるようにした。
-//   - IUiaTextHost 全メンバの実装 (RPC スレッドから呼ばれ得る=不変スナップショット参照 +
-//     キャッシュ値応答。SetSelection / SetFocus / ScrollRangeIntoView のみ UI スレッドへ Invoke)
+//   - IUiaTextHost 全メンバの実装 (RPC スレッドから呼ばれ得る)。応答の仕方は 4 通り:
+//       書き込み系 (SetSelection / SetFocus / ScrollRangeIntoView) = UI スレッドへ BeginInvoke
+//       UI スレッド専用状態を要する読み取り (GetBoundingRectangles / OffsetFromScreenPoint /
+//         GetVisibleRange / 折り返し ON の TryFindVisualSegment) = 同期 Invoke
+//       BoundingRectangle = キャッシュ済み _hwnd に対する Win32 API でその場計算 (マーシャリングしない)
+//       それ以外 = 不変スナップショット参照 (マーシャリングしない)
 //   - UI スレッド側からの通知経路: OnSnapshotChanged /
 //     OnHandleCreated / OnHandleDestroyed / RaiseTextChanged / RaiseSelectionChanged /
 //     RaiseFocusChanged / EnsureProvider
