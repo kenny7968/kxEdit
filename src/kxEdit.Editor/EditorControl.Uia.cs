@@ -41,6 +41,15 @@ public sealed partial class EditorControl
     internal static kxEdit.Core.Layout.Frame? TestHook_GetLastFrame(EditorControl c) =>
         c._lastFrame;
 
+    // 2026-09-24 性能改善フェーズ 1(P-24): 自 HWND が受けた WM_GETTEXT / WM_GETTEXTLENGTH の回数。
+    // 描画のたびに WinForms が WindowText を読んでいないことを固定する。UI スレッド専用。
+    private int _testHook_getTextCount;
+
+    internal static int TestHook_GetTextCount(EditorControl c) => c._testHook_getTextCount;
+
+    internal static void TestHook_ResetGetTextCount(EditorControl c) =>
+        c._testHook_getTextCount = 0;
+
     // ==================== P5 Task 8: UIA イベント発火配線 test hook ====================
     // TestHook_ForceUiaListen は AutomationInteropProvider.ClientsAreListening のバイパス
     // (Editor.Tests EditorControlUiaEventsTests / EditorControlUiaFocusEventTests から使用)。
