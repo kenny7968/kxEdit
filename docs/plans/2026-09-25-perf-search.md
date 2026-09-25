@@ -1949,3 +1949,36 @@ CLAUDE.md §3 の 5・§6 に従う。
 | ja30k | 12.83 | 13.95 | 14.79 |
 
   CSV は `%LOCALAPPDATA%\kxEdit-perf-harness\results-20260925-211913.csv`・`-212010.csv`・`-212106.csv`(`env` 行: NVDA 起動中・`status=completed`)。
+
+### Task 2: P-13 GetText の 1 コピー化(4e00974・fixup 14891b4)
+
+- 計画どおり実装した。Step 3 の失敗は予測どおり(`DecodeInto` がなくてビルドエラー、`GetText_throws_…` は旧実装で FAIL、全窓のテストは旧実装でも PASS)。
+- **仕様レビュー**: ロジックは計画どおり。ただし ① 修正 1 件があった。pre-commit の CSharpier が、波括弧のない入れ子の `for`(`GetText_every_window_…`)を平らに整形し、Sonar S3973 で HEAD がビルドできなかった。実装者の確認は整形前の状態で行われていた。外側の `for` に波括弧を付けて直した(14891b4)。
+  - 以後のタスクの指示に「確認は commit 後の状態で行う」を加えた。
+- `GetSubstring` への言及は、履歴として書かれたものだけが残る(現在の挙動としての記述はない)。
+
+### Task 3: P-5(a) SnapshotTextCache(e3fe349・fixup 1c9c2d5)
+
+- 計画どおり実装した。逸脱はない。
+- **仕様レビュー**: ✅。① 修正 1 件: `SnapshotSearcher` の寿命の段落の「照合条件の変化で参照を捨てる」が古くなっていた(P-5(a) では捨てない)。
+- **前倒しのコード品質レビュー**: 修正付きで承認。
+  - I-1 ① 修正: 破棄テストで、キャッシュの前提 assert(`NotNull`)が抜けていた。キャッシュが生成されない退行でも `Assert.Null` が素通りする形だった。6 件に前提を足した。
+  - M-1 ① 修正: 「保持は最大 1 本」の網を、所有者で直接持つようにした。`SnapshotTextCacheTests`(3 件)を新設した。
+  - M-2 ① 修正: テストの意図のコメントを足した。
+  - M-3: Task 5 への申し送り(表もスナップショットを掴むので、`SnapshotSearcher` の寿命の段落で触れる)。
+  - 再レビューで承認。新たな N-1(戦略側の `MaterializeCountForTest` の doc の重複)は Task 5 で直す。
+
+### Task 4: P-5(b) 件数表示の間引き(fa4342f・fixup 2991cd6)
+
+- **計画からの逸脱 2 点**(仕様レビューで妥当と判定)
+  - `ActiveDocumentChanged_CancelsPendingDebounce` の fixture: 計画の形では通らなかった。`host.NewDoc` は空の文書へ切り替えてから本文を入れるので、切替時の件数は空の文書を数える。2 文書を先に作り、`SelectAt(0)` で切り替える形にした。
+  - ダイアログのテストは、ファイル内の既存ヘルパー `Field<T>` を使った。
+- **仕様レビュー**: ✅。
+- **前倒しのコード品質レビュー**: 承認(軽微のみ)。6 件をすべて ① 修正した(2991cd6)。
+  1. 非表示時の `ActiveDocumentChanged` の Cancel に網がなかった(表示中は後続の `UpdateCount` が取り消す)。`ActiveDocumentChanged_WhileHidden_CancelsPendingDebounce` を足した。Cancel を消すとこのテストだけが落ちることを確かめた。
+  2. `ReplaceOne` / `ReplaceAll` の ReadOnly の早期 return は取り消しの後にある。到達経路が実質ないので、例外として受容する旨をコメントに書いた(PR にも記載する)。
+  3. `WinFormsDebounceScheduler` は、Dispose 後の Schedule で WinForms の Timer が生き返る(レビュアーが実測で確認)。`_disposed` で Schedule と Cancel を no-op にし、テストを足した。
+  4. `ManualDebounceScheduler.ScheduleCount` を使うようにした(連打で 2)。
+  5. テストの前提 assert とコメントを直した。
+  6. `IDebounceScheduler` の doc(1 インスタンスは 1 利用者、action の中から呼んでよい)を足した。
+  - 再レビューで承認。任意の指摘 1 件(非表示のテストの `SearcherForTest` の Null 検査は、ハンドラ自身の DropSearcher で満たされる)は ③ 却下した。事後条件を明示する検査として害がないため。
