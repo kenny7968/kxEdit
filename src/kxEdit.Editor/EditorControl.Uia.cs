@@ -1,5 +1,5 @@
 // EditorControl.Uia.cs
-// Phase 3 Task 3d 完了後: IUiaTextHost 全メンバ実装と Uia 系 12 field 所有権は UiaTextHostAdapter
+// Phase 3 Task 3d 完了後: IUiaTextHost 全メンバ実装と Uia 系 8 field (当時 12。フェーズ 2 S-1 で 8) 所有権は UiaTextHostAdapter
 // (_uia) へ完全移設済み。本ファイルには以下だけが残る:
 //   - EditorControl の IUiaTextHost explicit interface 実装 (全て _uia への薄い delegation)
 //   - Editor.Tests からの観測用 test hook forwarder (instance + static)

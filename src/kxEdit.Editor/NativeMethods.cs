@@ -39,6 +39,17 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetCaretPos(out System.Drawing.Point lpPoint);
 
+    // フェーズ 2(S-1・2026-09-25): UIA の BoundingRectangle を RPC スレッドでその場で求める。
+    // どちらも HWND を受けるだけのスレッド安全な Win32 API で、エディタ内部の状態
+    // (UI スレッド専有)に触れない=a11y 鉄則に反しない。
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(nint hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
     // ==========================================================================================
     // P4 (IME) 用: WM_IME_* メッセージ / IMM32 API / 関連構造体
     // ==========================================================================================

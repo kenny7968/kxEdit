@@ -84,8 +84,13 @@ public class EditorControlOffsetFromPointTests
             try
             {
                 IUiaTextHost host = ctrl;
-                // 範囲外の (-9999, -9999) → 0 (または clamp した先頭)
-                Assert.Equal(0, host.OffsetFromScreenPoint(-9999, -9999));
+                // client の左上より外 (原点 - 9999) → 0 (clamp した先頭)。
+                // フェーズ 2(S-1・2026-09-25): 以前は絶対座標 (-9999, -9999) を渡していた。HostForm は
+                // (-32000, -32000) にあるので、この点は実際には client の右下=文書末尾を指す。
+                // 旧実装は Handle 生成時(親付け前)にキャッシュした古い原点 (8, 31) で変換していたため
+                // 0 に落ちて通っていた=監査 M-10 の陳腐化そのものに依存していた。
+                var origin = ctrl.PointToScreen(System.Drawing.Point.Empty);
+                Assert.Equal(0, host.OffsetFromScreenPoint(origin.X - 9999, origin.Y - 9999));
             }
             finally
             {
