@@ -32,14 +32,16 @@ namespace kxEdit.Editor.Smoke;
 /// <para>
 /// <b>撮り方</b>: <c>GetDC(editor.Handle)</c> から <c>BitBlt(SRCCOPY)</c>。DWM の下では窓の描画面
 /// (リダイレクト面)を読むので、他の窓(NVDA のスピーチビューアー等の最前面の窓)に覆われても
-/// 読める。<b>撮影で WM_PAINT は起きない</b>(撮影の前後で描画回数が変わらないことを毎回自己チェック
-/// する)。ここが <see cref="PaintSnapshot"/>(<c>PrintWindow</c>。撮影の中で全面を描き直すので、
+/// 読める。<b>撮影で WM_PAINT は起きない</b>。撮り方の前提(描画を起こさずに画面の絵を読めること)は
+/// 陽性対照で確かめる。撮影の前後で描画回数が変わらないことの自己チェックは、撮り方を変えたときの
+/// 回帰を防ぐためのもの(今の撮り方では構造上失敗しない)。ここが <see cref="PaintSnapshot"/>(<c>PrintWindow</c>。撮影の中で全面を描き直すので、
 /// 古い絵が残る不具合は写らない)との違い。エディタの子(スクロールバー)も同じ描画面にあるので写る。
 /// </para>
 /// <para>
 /// <b>陽性対照</b>(<see cref="Expect.Stale"/>): 描画の入力を変えた直後に <c>ValidateRect</c> で
-/// 無効領域を取り消す。X が A と同じで Y と異なることを要求する。満たさなければ、撮り方が画面の絵を
-/// 読めていない(道具が壊れている)ので EXIT 1。
+/// 無効領域を取り消す。X が A と同じで Y と異なることを要求する。道具の前提を最初に確かめるため
+/// 表の先頭に置き、満たさなければ撮り方が画面の絵を読めていない(道具が壊れている)ので、
+/// 自己チェックの失敗としてそこで止める(EXIT 1)。
 /// </para>
 /// <para>
 /// <b>描画回数の期待</b>(<see cref="Expect"/>): <c>Paint</c> の遷移で操作中の描画が 0 回なら失敗
@@ -101,10 +103,16 @@ internal static class PaintTransition
         public required Action<EditorControl, Body> Arrange { get; init; }
 
         /// <summary>
-        /// 準備の後の (アンカー, キャレット)。自己チェックに使う。TopLine と ScrollX は 0・未確定は
-        /// <see cref="Composing"/> のとおりであることも確かめる。
+        /// 準備の後の (アンカー, キャレット)。自己チェックに使う。スクロール位置は
+        /// <see cref="ArrangedScroll"/>・未確定は <see cref="Composing"/> のとおりであることも確かめる。
         /// </summary>
         public required Func<Body, (int Anchor, int Caret)> Arranged { get; init; }
+
+        /// <summary>
+        /// 準備の後の (TopLine, ScrollX)。既定は (0, 0)。スクロールした状態から始める遷移
+        /// (フェーズ 9 の ScrollWindowEx など)はここに期待値を書く。
+        /// </summary>
+        public (int TopLine, int ScrollX) ArrangedScroll { get; init; }
 
         /// <summary>準備の後に未確定文字列があるか。</summary>
         public bool Composing { get; init; }
@@ -158,9 +166,22 @@ internal static class PaintTransition
     /// <summary>
     /// 遷移の表(実装計画 Task 5)。計画の <c>collapse-anchored</c> の (4,1) は空行の CR と LF の間で、
     /// (4,0) にスナップされるので、同じ意味(別の行の選択なしの位置へ)の (5,1) にした。
+    /// 陽性対照 <c>control-stale</c> は先頭に置く(道具の前提を最初に確かめる)。
     /// </summary>
     internal static readonly Transition[] Transitions =
     [
+        new("control-stale", Expect.Stale)
+        {
+            Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
+            Arranged = b => Caret(b, CurLine, CurCol),
+            Act = (e, _) =>
+            {
+                e.ShowWhitespace = true;
+                // 保留中の無効領域を取り消す = 描き直さない。画面は A のまま残るはず。
+                ValidateRect(e.Handle, 0);
+            },
+            VerifyAfter = (e, _) => e.ShowWhitespace ? null : "ShowWhitespace が効かない",
+        },
         CaretMove("caret-right", Expect.Skip, CurLine, CurCol + 1),
         CaretMove("caret-down", Expect.Skip, CurLine + 1, CurCol),
         CaretMove(
@@ -243,18 +264,6 @@ internal static class PaintTransition
             Act = (e, _) => e.ApplyAppearance(new AppSettings { Theme = DarkTheme }),
             VerifyAfter = (e, b) => CaretAt(e, At(b, CurLine, CurCol)),
         },
-        new("control-stale", Expect.Stale)
-        {
-            Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
-            Arranged = b => Caret(b, CurLine, CurCol),
-            Act = (e, _) =>
-            {
-                e.ShowWhitespace = true;
-                // 保留中の無効領域を取り消す = 描き直さない。画面は A のまま残るはず。
-                ValidateRect(e.Handle, 0);
-            },
-            VerifyAfter = (e, _) => e.ShowWhitespace ? null : "ShowWhitespace が効かない",
-        },
     ];
 
     [DllImport("user32.dll")]
@@ -333,7 +342,14 @@ internal static class PaintTransition
             return RunAll(expectSkip, outDir);
         }
         catch (Exception e)
-            when (e is IOException or UnauthorizedAccessException or ExternalException)
+            when (e
+                    is IOException
+                        or UnauthorizedAccessException
+                        or ExternalException
+                        // Act から直接投げられた例外・ClientSize が 0 の new Bitmap など(PaintSnapshot.Run と同じ扱い)
+                        or ArgumentException
+                        or InvalidOperationException
+            )
         {
             Console.Error.WriteLine($"[失敗] {e.GetType().Name}: {e.Message}");
             return 1;
@@ -426,8 +442,8 @@ internal static class PaintTransition
             $"{name}: 準備の後の位置が想定外(anchor={editor.SelectionAnchor}・caret={editor.CaretCharOffset}・期待 {anchor}/{caret})"
         );
         Check(
-            editor.TopLine == 0 && editor.ScrollX == 0,
-            $"{name}: 準備の後のスクロール位置が想定外(TopLine={editor.TopLine}・ScrollX={editor.ScrollX})"
+            (editor.TopLine, editor.ScrollX) == t.ArrangedScroll,
+            $"{name}: 準備の後のスクロール位置が想定外(TopLine={editor.TopLine}・ScrollX={editor.ScrollX}・期待 {t.ArrangedScroll})"
         );
         Check(
             editor.__TestIsComposing() == t.Composing,
@@ -506,6 +522,9 @@ internal static class PaintTransition
             SavePng(x, Path.Combine(outDir, $"{name}-x.png"));
             SavePng(y, Path.Combine(outDir, $"{name}-y.png"));
         }
+        // 陽性対照の失敗は道具の前提が崩れたことを意味する = 以降の遷移の結果に意味がないので止める。
+        if (failure is not null && t.Expect == Expect.Stale)
+            throw new PaintSnapshotException($"{name}: {failure}");
         return failure is null;
     }
 
@@ -525,7 +544,8 @@ internal static class PaintTransition
 
     /// <summary>
     /// エディタのクライアント領域の今の絵を、描画を起こさずに撮る(クラス doc の「撮り方」)。
-    /// 撮影の前後で描画回数が変わらないことを自己チェックする。
+    /// 撮影の前後で描画回数が変わらないことを自己チェックする(撮り方を変えたときの回帰を防ぐため。
+    /// 画面の絵を読めることそのものは陽性対照で確かめる)。
     /// </summary>
     private static Shot Capture(EditorControl editor, string what)
     {
