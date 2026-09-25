@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using kxEdit.Core.Backup;
@@ -617,6 +617,9 @@ public sealed class BackupCoordinator : IDisposable
                 case BackupAction.Delete:
                     _writer?.Delete(info.Id);
                     info.HasBackup = false;
+                    // Delete はクリーン時だけ=ここでの sig は常に info.LastSig で、署名は変わらない。
+                    // そのため LastSnapshot を残しても P-6 の不変条件は崩れない。クリーンでも署名を
+                    // 計算するように変えるなら、ここで LastSnapshot も更新すること。
                     info.LastSig = sig;
                     info.ForceWrite = false;
                     break;

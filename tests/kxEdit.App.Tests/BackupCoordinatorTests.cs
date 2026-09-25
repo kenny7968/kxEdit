@@ -1481,6 +1481,31 @@ public class BackupCoordinatorTests
         });
 
     [Fact]
+    public void Reconcile_EditInSameBuffer_WritesThenSkips_UndoWritesBack() =>
+        Sta.Run(() =>
+        {
+            // 実際の入力の主経路(同じバッファ内の編集と Undo)。どちらも新しいスナップショットを作るので省略されない。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+
+            doc.Editor.ReplaceCharRange(5, 0, "!");
+            host.Backup.Reconcile();
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal("hello!", host.Writer.Writes[^1].Content);
+
+            int before = host.Backup.MaterializeCountForTest;
+            host.Backup.Reconcile(); // 編集なし → 省略
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+
+            doc.Editor.Undo();
+            host.Backup.Reconcile();
+            Assert.Equal(before + 1, host.Backup.MaterializeCountForTest);
+            Assert.Equal(3, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
     public void Reconcile_ForceWrite_MaterializesAndRewrites() =>
         Sta.Run(() =>
         {
