@@ -118,9 +118,16 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // UiaTextHostAdapter (_uia) へ移譲済み。EditorControl 本体は Adapter への通知経路
     // (OnSnapshotChanged / RaiseTextChanged) のみを持つ。
     //
-    // _lastFrame は Paint (OnPaint) のスナップショットで Uia 座標 API 用に公開している独立フィールド
-    // (Adapter 移譲対象外=Test hook TestHook_GetLastFrame でも参照)。
+    // _lastFrame は最後に描いた Frame(テスト観測用。TestHook_GetLastFrame が読む)。
+    // フェーズ 2(S-1)以降、UIA の座標 API は問い合わせのたびに求めるので、これを読まない
+    // (UiaTextHostAdapter_HasNoScreenCoordinateCache で固定)。描画を省いても UIA には影響しない。
     private volatile kxEdit.Core.Layout.Frame? _lastFrame;
+
+    // 2026-09-25 性能改善フェーズ 3(設計書 §8.2): 最後に描き終えたフレームの入力。
+    // キャレット・選択の 4 経路は、今の入力がこれと等しければ Invalidate を省く(InvalidateIfFrameChanged)。
+    // null = 「画面の絵の入力が分からない」= 比較は必ず「変化あり」になる(描画前・描画の例外・
+    // 本文/フォントの丸ごと差し替え = InvalidateAndForgetPaintedFrame)。UI スレッド専用。
+    private FrameInputs? _lastPaintedInputs;
 
     // P6 Task 10 レビュー M-2: CurrentBuffer の null 経路で毎回 new すると
     // Assert.Same(ctrl.CurrentBuffer, ctrl.CurrentBuffer) が SetSource 前で失敗する反直観挙動になる。
@@ -401,37 +408,43 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     internal bool HasFocusCached => _hasFocus;
 
     /// <summary>
-    /// 可視の視覚行を列挙する唯一の入口。<c>OnPaint</c> と <see cref="GetVisibleCharRange"/> が
-    /// 同じ起点 (TopLine, TopSegment) と同じ折り返し設定を使うことを、言葉の約束ではなく
-    /// 呼び出しの共有で保証する(「どこまで見えているか」の定義を二重化しない)。
+    /// 可視の視覚行を列挙する唯一の入口。描画(<c>PaintBody</c>)と <see cref="GetVisibleCharRange"/> が
+    /// 同じ起点 (TopLine, TopSegment)・同じ折り返し設定・同じ可視高さを使うことを、言葉の約束ではなく
+    /// 呼び出しの共有で保証する(「どこまで見えているか」の定義を二重化しない。2026-08-22 A-6)。
     /// </summary>
     /// <remarks>
-    /// <paramref name="heightPx"/> だけは共有しない。<c>OnPaint</c> は同じ値を
-    /// <c>FrameBuilder.Build</c> にも渡す必要があり、ローカルへ 1 度だけ受けた
-    /// <c>paintHeight</c> をそのまま流す契約になっているため(<c>EditorControl.Paint.cs</c> の
-    /// 同旨のコメント参照)。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
+    /// 2026-09-25 フェーズ 3: 入力を <see cref="FrameInputs"/> から取る形にした。両者とも
+    /// <see cref="CaptureFrameInputs"/> を経由するので、従来は共有していなかった可視高さ
+    /// (<see cref="PaintHeightPx"/>)も共有される。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
     /// 折り返し OFF 専用で topSegment が 0 固定の別経路であり、起点の意味が違う。
     /// </remarks>
-    private IReadOnlyList<VisualRow> BuildVisibleRows(TextSnapshot snap, int heightPx) =>
-        ViewportLayout.Build(snap, _topLine, _topSegment, heightPx, _wrapColumns, _metrics);
+    private static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
+        ViewportLayout.Build(
+            inputs.Snapshot,
+            inputs.TopLine,
+            inputs.TopSegment,
+            inputs.PaintHeight,
+            inputs.WrapColumns,
+            inputs.Metrics
+        );
 
     /// <summary>
     /// UIA <c>ITextProvider.GetVisibleRanges</c> の実処理(UI スレッド専用)。
     /// 現在ビューポートに見えている本文の範囲 [Start, End) を返す。
     /// </summary>
     /// <remarks>
-    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="BuildVisibleRows"/> と
-    /// <see cref="PaintHeightPx"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
+    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="CaptureFrameInputs"/> と
+    /// <see cref="BuildVisibleRows"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
     /// 折り返し ON では視覚行境界になる。末尾行の改行は含めない。
     /// バッファ未設定・可視行ゼロでは (0, 0)。
     /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.2。
     /// </remarks>
     internal (int Start, int End) GetVisibleCharRange()
     {
-        if (_buffer is null)
+        var inputs = CaptureFrameInputs();
+        if (inputs is null)
             return (0, 0);
-        var snap = _buffer.Current;
-        var rows = BuildVisibleRows(snap, PaintHeightPx);
+        var rows = BuildVisibleRows(inputs);
         if (rows.Count == 0)
             return (0, 0);
         var first = rows[0];
