@@ -855,6 +855,54 @@ GetChar と GetText の相互比較では格子の破損を検出できない(se
 
 **成果物**: 本書のこの節の末尾に「調査結果」を追記し、対処の採否を決める。原因が OS / 環境にあって kxEdit では減らせない場合は、そう記録して対処を行わない。
 
+#### 11.1.1 調査結果(2026-09-26・フェーズ 6)
+
+**採取の条件**
+- WPR の `CPU` プロファイル(1 ms のサンプリング+スタック)を、harness M-6(Ctrl+Tab × 40・250 ms 間隔)の実行中に採った。対象は変更前の publish。
+- NVDA 起動中・windows-mcp 常駐(ユーザー判断で、どちらも止めずに ETW の帰属で見積もった)。セッション復元は OFF と ON の 2 本。
+- 集計は TraceEvent の使い捨ての解析器で行った。kxEdit のプロセスごとに、終了直前の 10 秒(Ctrl+Tab の区間)を、スレッド別・関数別(包含)に数えた。
+- 1 サンプル ≒ 1 ms。ETW の値は harness の CPU 時間(`GetProcessTimes`)より 1.5 倍前後大きく出る。そのため、以下は**比率で読む**。harness の値は計画 `docs/plans/2026-09-25-perf-tab-switch.md` の実施記録にある。
+
+**スレッド別の内訳**(Ctrl+Tab 1 回あたり・ETW のサンプル ms。3 条件 × OFF/ON の 6 プロセスで同じ傾向)
+
+| スレッド | ms/回 | 中身 |
+|---|---|---|
+| UI スレッド | 87〜100 | 下の表 |
+| 2 番目のスレッド(調査記録の「正体不明の別スレッド」) | 49〜50 | **UIA のサーバー側の I/O スレッド**(`uiautomationcore!OverlappedIOManager::IoThreadProc`)。UIA クライアントからの要求を受けて応答する。kxEdit のコードは動いていない |
+
+**UI スレッドの内訳**(包含・重なりあり)
+
+| 区分 | ms/回 | 関数 |
+|---|---|---|
+| Ctrl+Tab の処理全体(kxEdit の管理コード) | 13〜17 | `MainForm.ProcessCmdKey` |
+| └ タブの選択 | 7〜9 | `DocumentManager.SelectNext` → `TabControl.set_SelectedIndex` |
+| └ フォーカス移動 | 4〜5 | `ContainerControl.SetActiveControl`(うち `NtUserSetFocus` 6 前後) |
+| └ バックアップの照合(未保存 3 枚のときだけ) | 3.7 | `BackupCoordinator.ReconcileContent`(うち `ContentSignature.Of` 2.2・全文化 1.5)=P-6 |
+| 新しいタブの描画 | 5 | `EditorControl.OnPaint`(空タブの条件では 0.7) |
+| UI スレッドに回ってきた UIA の呼び出し | 12〜15 | `combase!ThreadWndProc`(クライアントの問い合わせを STA で処理する) |
+| NVDA の注入 DLL | 7〜11 | `nvdahelperremote` |
+| UIA の `WM_GETOBJECT` | 3 | `WmGetObject` |
+| 窓管理(仮説 1) | 約 4 | `SetWindowPos` 2・`SetVisibleCore` 2 |
+| TSF(仮説 2) | 約 1 | `msctf!CThreadInputMgr::OnInputFocusEvent` |
+| 残り | 大半 | カーネル時間(`ntoskrnl` が葉になるサンプルが UI スレッドの約 7 割) |
+
+**窓の中の他プロセス**(kxEdit の CPU と同じ区間。ms/回): NVDA 86〜91、ctfmon 24、python(windows-mcp と推定)15、dwm 11、TextInputHost 5。タブ切替 1 回ごとに、NVDA は kxEdit 本体に近い量の CPU を使っている。
+
+**仮説の判定**
+1. **窓管理**: 小さい(約 4 ms)。タブページの表示切替そのものは主因ではない。
+2. **TSF / IME**: kxEdit のプロセス内では約 1 ms。ctfmon のプロセスが 24 ms/回を使うが、kxEdit の外である。
+3. **UIA**: **主因**。I/O スレッドの 50 ms、UI スレッドに回ってきた呼び出しの 13 ms、NVDA の注入 DLL の 10 ms を合わせると、kxEdit のプロセスの CPU の約半分になる。フォーカス変更イベントを受けたクライアント(NVDA・windows-mcp)の問い合わせに、UIA のランタイムが応答する費用である。kxEdit のプロバイダーのコードそのもの(`UiaTextHostAdapter` など)は、上位に出てこない。
+4. **レイアウトの書込**: OFF と ON で、スレッド別の値に差がない。`ReconcileLayout` と背景ライターは上位に出てこない。**否定**。
+
+**kxEdit で減らせるもの・減らせないもの**
+- 減らせる(本フェーズで対処): P-6 の 3.7 ms(未保存タブがあるときだけ)。
+- 減らせない: UIA のランタイムとクライアントの費用、カーネル時間、TSF。どれも、フォーカス変更に対して OS と支援技術が行う処理である。本書 §11.1 に従い、対処を行わない。
+- 必要な処理: 新しいタブの描画(5 ms)、タブの選択とフォーカス移動(合わせて 10 ms 前後)。
+
+**§11.3 の採否**(ユーザー判断 2026-09-26)
+- **レイアウト書込のまとめ**: 仮説 4 を否定したので、**採らない**。
+- **フォーカス移動の二重化**: ETW では発声とフォーカスの順序を判定できない。未確認のまま残す(申し送り)。
+
 ### 11.2 コードから明らかな冗長処理(調査結果によらず行う・挙動不変)
 
 - **P-6**: `BackupCoordinator.DocBackup` に、最後に署名を計算したスナップショットへの **弱参照**を持たせる。
