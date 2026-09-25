@@ -26,6 +26,10 @@ public sealed class TextSearcher
 
     /// <summary>照合条件から照合エンジンを構築する。不正でも例外は投げず IsValid/Error で返す。</summary>
     public TextSearcher(SearchOptions options)
+        : this(options, TimeSpan.FromSeconds(1)) { }
+
+    /// <summary>照合のタイムアウトを指定して構築する(テスト用。本番は 1 秒の public ctor を使う)。</summary>
+    internal TextSearcher(SearchOptions options, TimeSpan matchTimeout)
     {
         _expand = options.UseRegex;
         if (string.IsNullOrEmpty(options.Pattern))
@@ -41,7 +45,7 @@ public sealed class TextSearcher
             opts |= RegexOptions.IgnoreCase;
         try
         {
-            _regex = new Regex(body, opts, TimeSpan.FromSeconds(1));
+            _regex = new Regex(body, opts, matchTimeout);
         }
         catch (ArgumentException ex)
         {
@@ -114,6 +118,28 @@ public sealed class TextSearcher
             }
         }
         return found ? (ordinal, total) : null;
+    }
+
+    /// <summary>
+    /// text の全ヒットを列挙順に表へ集める(P-14)。件数が <paramref name="limit"/> を超えたら null
+    /// (表を作らない)。列挙は <see cref="Locate"/> / <see cref="FindPrev"/> と同じ <c>Matches</c> で行う
+    /// =同じ集合・同じ順序。無効なら null。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る(捕捉しない)。
+    /// </summary>
+    internal MatchPositions? CollectMatches(string text, int limit)
+    {
+        if (_regex is null)
+            return null;
+        var starts = new List<int>();
+        var lengths = new List<int>();
+        foreach (Match m in _regex.Matches(text))
+        {
+            if (starts.Count == limit)
+                return null;
+            starts.Add(m.Index);
+            lengths.Add(m.Length);
+        }
+        return new MatchPositions(starts.ToArray(), lengths.ToArray());
     }
 
     /// <summary>
