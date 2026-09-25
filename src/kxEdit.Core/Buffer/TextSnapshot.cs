@@ -92,9 +92,10 @@ public sealed class TextSnapshot
                 var p = t.Piece;
                 // ピース境界はコードポイント境界なので、ピース内オフセット 0 は必ず
                 // コードポイント先頭 = CharToByte を呼ばずに読める(IsLfAt の FirstIsLf 早道と同じ)。
-                // AppendBuffer のチャンクは格子幅=ブロック長で格子表が先頭 1 エントリしかなく、
-                // CharToByte 内の CumAt(byteStart) が最大 64 KB 走査するため、この回避は
-                // 1 文字ピースが多数ある文書(散在する 1 文字挿入の繰り返し)で効く。
+                // CharToByte 内の CumAt(byteStart) は最寄りの格子点から走査する
+                // (AppendBuffer のチャンクも 2026-09-25 以後は 4KB ごとに格子点を持つが、
+                //  最大 4KB の走査は残る)。この回避は 1 文字ピースが多数ある文書
+                // (散在する 1 文字挿入の繰り返し)で効く。
                 if (pos == 0)
                     return DecodeUtf16At(p.Chunk.Span, p.ByteStart, wantLowSurrogate: false);
                 int b = p.Chunk.CharToByte(p.ByteStart, p.ByteLen, pos, out int actual);

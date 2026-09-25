@@ -377,8 +377,8 @@ if (largeLineMode)
     // --- F-6 の空白埋め: AppendBuffer 現ブロック経路 ---
     // 既存 --characcess は TextBuffer.FromString(builder チャンク)だけを測っており、
     // 「実際にタイプして育てた文書」= AppendBuffer の現ブロックに一度も触れていない。
-    // 同クラスの共有チャンクは格子表を先頭 1 エントリに固定しているため(設計書 §2.4)、
-    // CharToByte がブロック先頭からの線形走査になる=最大 64KB 走査が残る領域。
+    // 2026-09-25 フェーズ 4 までは共有チャンクの格子表が先頭 1 エントリだけで(設計書 §2.4)、
+    // 最大 64KB を走査していた。フェーズ 4 の前後比較に使う。
     Console.WriteLine();
     Console.WriteLine("F-6: AppendBuffer 現ブロック経路(タイプして育てた文書)");
     var typedBuf = new TextBufferBuilder().Build();

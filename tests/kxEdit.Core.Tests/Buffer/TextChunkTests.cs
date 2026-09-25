@@ -219,4 +219,60 @@ public class TextChunkTests
             b = ByteOff(doc, 20);
         Assert.Equal(doc[5..20], chunk.GetString(a, b - a));
     }
+
+    [Fact]
+    public void GridLimit_default_places_same_grid_as_before()
+    {
+        // 既定(int.MaxValue)は「上限 = バイト長」と等価。格子点はバイト長ちょうどには置かない
+        byte[] bytes = Encoding.UTF8.GetBytes(new string('a', 20));
+        var chunk = new TextChunk(bytes, gridBytes: 4);
+        AssertGrid(chunk, 0, 4, 8, 12, 16);
+    }
+
+    [Theory]
+    [InlineData(0, new[] { 0 })]
+    [InlineData(4, new[] { 0 })] // 上限ちょうど(厳密に未満の規則)
+    [InlineData(5, new[] { 0, 4 })]
+    [InlineData(12, new[] { 0, 4, 8 })]
+    [InlineData(13, new[] { 0, 4, 8, 12 })]
+    public void GridLimit_places_grid_points_strictly_below_limit(int limit, int[] expected)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(new string('a', 20));
+        var chunk = new TextChunk(bytes, gridBytes: 4, gridLimit: limit);
+        AssertGrid(chunk, expected);
+    }
+
+    [Fact]
+    public void GridLimit_snapped_point_at_or_beyond_limit_is_not_placed()
+    {
+        // "aaa" + "あ"(3..5) + "b": 名目 4 は「あ」の途中 → 前方スナップで 6
+        byte[] bytes = Encoding.UTF8.GetBytes("aaaあbcdefgh");
+        AssertGrid(new TextChunk(bytes, gridBytes: 4, gridLimit: 6), 0);
+        AssertGrid(new TextChunk(bytes, gridBytes: 4, gridLimit: 7), 0, 6);
+    }
+
+    [Fact]
+    public void GridLimit_does_not_bake_zero_region_into_grid()
+    {
+        // 書込済み 11 バイト + 未書込のゼロ領域。上限を書込済みの長さにすれば、ゼロ領域に格子点を
+        // 置かない。後からゼロ領域へ書いた文字の char↔byte 対応が壊れないこと(AppendBuffer の前提)
+        byte[] block = new byte[64];
+        byte[] head = Encoding.UTF8.GetBytes("あいう\nx"); // 9+1+1 = 11 バイト・5 文字
+        head.CopyTo(block, 0);
+        var chunk = new TextChunk(block, gridBytes: 4, gridLimit: head.Length);
+        byte[] tail = Encoding.UTF8.GetBytes("えお\r\nz"); // 後から書く(11..20)
+        tail.CopyTo(block, head.Length);
+        string all = "あいう\nx" + "えお\r\nz";
+        int totalBytes = head.Length + tail.Length;
+        AssertStatsEqual(block[..totalBytes], chunk.StatsOfRange(0, totalBytes));
+        for (int c = 0; c <= all.Length; c++)
+            Assert.Equal(ByteOff(all, c), chunk.CharToByte(0, totalBytes, c));
+    }
+
+    [Fact]
+    public void GridLimit_negative_throws() =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TextChunk(new byte[8], gridLimit: -1));
+
+    private static void AssertGrid(TextChunk chunk, params int[] expected) =>
+        Assert.Equal(expected, chunk.GridByteOffsets.ToArray());
 }

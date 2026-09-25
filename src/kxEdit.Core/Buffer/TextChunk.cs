@@ -34,23 +34,34 @@ internal sealed class TextChunk
     //   構築   8.5 ms → 8.6 ms(+2%。走査バイト数は幅によらず 4M で不変で、増えるのは
     //                          格子点あたりの List.Add 3 回 ×(1023−63)回だけ=走査に対し
     //                          無視できる。交互サンプリング n=80 で測ること)
-    // 注: AppendBuffer の共有ブロックは gridBytes: BlockBytes を明示して除外している(理由は同所)。
-    public TextChunk(ReadOnlyMemory<byte> bytes, int gridBytes = DefaultGridBytes)
+    // 注: AppendBuffer は共有ブロックを gridLimit=書込済みの長さで包み、書き進めるたびに包み直す
+    //     (2026-09-25 フェーズ 4。理由は AppendBuffer のクラスコメント)。
+    /// <param name="gridLimit">
+    /// 格子点を置く位置の上限。この位置<b>未満</b>にだけ置く(既定は <paramref name="bytes"/> の長さ)。
+    /// <see cref="AppendBuffer"/> は書込済みの長さを渡す。未書込のゼロ領域から累積値を焼き付けないため。
+    /// 格子の構築はこの上限未満のバイトだけを読む。
+    /// </param>
+    public TextChunk(
+        ReadOnlyMemory<byte> bytes,
+        int gridBytes = DefaultGridBytes,
+        int gridLimit = int.MaxValue
+    )
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(gridBytes, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(gridLimit);
         _bytes = bytes;
         var span = bytes.Span;
-        int n = span.Length;
-        int capacity = n / gridBytes + 2;
+        int limit = Math.Min(gridLimit, span.Length);
+        int capacity = limit / gridBytes + 2;
         var gb = new List<int>(capacity) { 0 };
         var gc = new List<int>(capacity) { 0 };
         var gk = new List<int>(capacity) { 0 };
-        for (long nominal = gridBytes; nominal < n; nominal += gridBytes)
+        for (long nominal = gridBytes; nominal < limit; nominal += gridBytes)
         {
             int p = (int)nominal;
-            while (p < n && (span[p] & 0xC0) == 0x80)
-                p++; // コード点境界へ前方スナップ
-            if (p >= n || p == gb[^1])
+            while (p < limit && (span[p] & 0xC0) == 0x80)
+                p++; // コード点境界へ前方スナップ(上限の先は読まない)
+            if (p >= limit || p == gb[^1])
                 continue;
             var (ch, f) = ScanForward(span, gb[^1], gc[^1], gk[^1], p);
             gb.Add(p);
@@ -61,6 +72,9 @@ internal sealed class TextChunk
         _gChar = [.. gc];
         _gBreaks = [.. gk];
     }
+
+    /// <summary>テスト観測用: 格子点のバイト位置(昇順・先頭は 0)。製品コードからは使わない。</summary>
+    internal ReadOnlySpan<int> GridByteOffsets => _gByte;
 
     public ReadOnlySpan<byte> Span => _bytes.Span;
     public int ByteLength => _bytes.Length;
