@@ -39,19 +39,24 @@ namespace kxEdit.Core.Search;
 /// </para>
 /// <para>
 /// <b>スレッドセーフではない</b>=1 インスタンスは単一スレッドからのみ使うこと。
-/// 内部の材質化戦略が材質化した全文をスナップショット単位でキャッシュするミュータブルな
-/// スロットを持つため、同一 <see cref="TextSnapshot"/> に対する並行読みでも安全ではない
+/// 内部の材質化戦略が一致位置表(P-14)を、注入された(または専用の)<see cref="SnapshotTextCache"/> が
+/// 全文を、それぞれスナップショット単位のミュータブルなスロットで持つため、同一 <see cref="TextSnapshot"/> に対する並行読みでも安全ではない
 /// (この性質は材質化戦略の抽出で入った=それ以前は不変フィールドのみだった)。
 /// 現時点の利用者は <c>SearchController</c> だけで、照合条件ごとに 1 インスタンスを
 /// フィールドへ保持し、4 メソッド(件数更新 / 検索 / 置換 / 全置換)がそれを共有する。
 /// いずれも UI スレッドから呼ばれる。
 /// 件数更新などをバックグラウンドへ逃がすなら、スレッドごとに別インスタンスを持つこと。
+/// 全文キャッシュ(<see cref="SnapshotTextCache"/>)を注入した場合は、それを共有するすべての searcher と
+/// 所有者が同じスレッドから使うこと。
 /// </para>
 /// <para>
-/// <b>長寿命に保持するなら参照の寿命は呼び出し側の責任</b>。材質化戦略のキャッシュは
+/// <b>長寿命に保持するなら参照の寿命は呼び出し側の責任</b>。全文キャッシュ(注入した場合は所有者が持つ)は
 /// 最後に照合した <see cref="TextSnapshot"/> とその全文 string を強参照で持つ
-/// (= 背後のピース木・バイト配列ごとピン留めする)。保持側は照合条件の変化・
-/// 文書の切替 / クローズ・検索の終了で参照を捨てること
+/// (= 背後のピース木・バイト配列ごとピン留めする)。材質化戦略の一致位置表(P-14)も、
+/// searcher ごとに最後に構築を試みた <see cref="TextSnapshot"/> を強参照で持つ
+/// (全文キャッシュが新しいスナップショットへ移った後も、次の照合までは古いものを掴むことがある)。
+/// こちらは searcher を捨てれば一緒に離れる。保持側は
+/// 文書の切替・クローズ・検索の終了で参照を捨てること
 /// (<c>SearchController.DropSearcher</c> がその実装)。
 /// </para>
 /// </summary>
@@ -71,16 +76,33 @@ public sealed class SnapshotSearcher
     private readonly LiteralWindowSearchStrategy _literal;
     private readonly RegexPerLineSearchStrategy _regexPerLine;
 
-    /// <summary>照合条件から SnapshotSearcher を構築する。IsValid/Error は内側 <see cref="TextSearcher"/> と同一。</summary>
+    /// <summary>照合条件から SnapshotSearcher を構築する(専用の全文キャッシュを持つ)。IsValid/Error は内側 <see cref="TextSearcher"/> と同一。</summary>
     public SnapshotSearcher(SearchOptions options)
-        : this(options, DefaultThresholdChars, DefaultWindowSize) { }
+        : this(options, new SnapshotTextCache(), DefaultThresholdChars, DefaultWindowSize) { }
+
+    /// <summary>
+    /// 照合条件と、共有する全文キャッシュから構築する。照合条件が変わって searcher を作り直しても、
+    /// 同じ文書なら全文化をやり直さない(2026-09-25 フェーズ 5 P-5(a))。
+    /// キャッシュを共有する searcher 同士は同じスレッドから使うこと。
+    /// </summary>
+    public SnapshotSearcher(SearchOptions options, SnapshotTextCache textCache)
+        : this(options, textCache, DefaultThresholdChars, DefaultWindowSize) { }
 
     /// <summary>
     /// 閾値・窓サイズを指定して SnapshotSearcher を構築する(テスト注入用)。
-    /// 本番コードは既定コンストラクタを使う。閾値・窓サイズは正数でなければならない。
+    /// 本番コードは全文キャッシュを渡すコンストラクタを使う。閾値・窓サイズは正数でなければならない。
     /// </summary>
     public SnapshotSearcher(SearchOptions options, int thresholdChars, int windowSize)
+        : this(options, new SnapshotTextCache(), thresholdChars, windowSize) { }
+
+    private SnapshotSearcher(
+        SearchOptions options,
+        SnapshotTextCache textCache,
+        int thresholdChars,
+        int windowSize
+    )
     {
+        ArgumentNullException.ThrowIfNull(textCache);
         ArgumentOutOfRangeException.ThrowIfNegative(thresholdChars);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(windowSize);
         _opts = options;
@@ -89,7 +111,7 @@ public sealed class SnapshotSearcher
         // (_windowSize フィールドは持たない: 窓サイズはここで戦略へ渡し、以後は戦略側が保持する)
         _literal = new LiteralWindowSearchStrategy(options, windowSize);
         // 材質化戦略・regex 戦略は内側 TextSearcher を共有する(必ず _inner 代入の後で構築すること)。
-        _materialized = new MaterializedSearchStrategy(_inner);
+        _materialized = new MaterializedSearchStrategy(_inner, textCache);
         _regexPerLine = new RegexPerLineSearchStrategy(_inner);
     }
 
@@ -108,7 +130,7 @@ public sealed class SnapshotSearcher
     /// </summary>
     /// <remarks>
     /// 3 戦略とも ctor で 1 個ずつ作って使い回す。閾値超の 2 戦略は snapshot 非依存で、
-    /// 材質化戦略だけが snapshot 依存の状態(材質化キャッシュ)を持つが、
+    /// 材質化戦略だけが snapshot 依存の状態(全文キャッシュの参照と一致位置表)を持つが、
     /// スナップショット参照の同一性で無効化するので同じく使い回せる。
     /// 閾値判定は「ちょうど一致は閾値以下(材質化経路)」。<c>&lt;</c> にすると
     /// 閾値ちょうどの文書の意味論が変わる = 挙動変更になる

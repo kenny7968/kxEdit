@@ -58,7 +58,7 @@ public sealed class FindReplaceDialog : Form, IFindReplaceView
         _replaceOne.Click += (_, _) => _cb.ReplaceOne();
         _replaceAll.Click += (_, _) => _cb.ReplaceAll();
         _close.Click += (_, _) => HideByUser();
-        _pattern.TextChanged += (_, _) => _cb.UpdateCount();
+        _pattern.TextChanged += (_, _) => _cb.PatternChanged(); // 件数更新は Controller 側で間引く(P-5(b))
         _matchCase.CheckedChanged += (_, _) => _cb.UpdateCount();
         _wholeWord.CheckedChanged += (_, _) => _cb.UpdateCount();
         _useRegex.CheckedChanged += (_, _) => _cb.UpdateCount();

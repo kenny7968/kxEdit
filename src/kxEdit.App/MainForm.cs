@@ -15,6 +15,9 @@ public sealed partial class MainForm : Form
     private readonly DocumentManager _docs;
     private readonly FileController _file; // コンストラクタで生成
     private readonly SearchController _search; // コンストラクタで生成
+    private readonly WinFormsDebounceScheduler _searchCountDebounce = new(
+        SearchController.CountDebounceMs
+    ); // 検索語の打鍵の件数更新を間引く(P-5(b))
     private readonly GrepController _grep; // コンストラクタで生成
     private readonly BackupCoordinator _backup; // コンストラクタで生成
     private readonly CsvController _csv; // コンストラクタで生成
@@ -321,7 +324,13 @@ public sealed partial class MainForm : Form
             reachabilityProbe: new FileReachabilityProbe(),
             fileTimestamps: new FileTimestampProvider()
         );
-        _search = new SearchController(_docs, this, _announcer, cb => new FindReplaceDialog(cb));
+        _search = new SearchController(
+            _docs,
+            this,
+            _announcer,
+            cb => new FindReplaceDialog(cb),
+            _searchCountDebounce
+        );
         _grep = new GrepController(
             docs: _docs,
             owner: this,
@@ -992,6 +1001,7 @@ public sealed partial class MainForm : Form
             _backup?.Dispose();
             _csv?.Dispose();
             _docs?.Dispose();
+            _searchCountDebounce.Dispose();
         }
         base.Dispose(disposing);
     }

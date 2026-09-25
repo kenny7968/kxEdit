@@ -55,7 +55,7 @@ public sealed class DocumentManager : IDisposable
     public event EventHandler<Document>? KeyBasedSwitch;
 
     /// <summary>タブを閉じ切った直後に発火(閉じた Document を渡す)。購読側はその文書に
-    /// 紐づく保持(検索の材質化キャッシュ等)を解放する。
+    /// 紐づく保持(検索の全文キャッシュ等)を解放する。
     /// <b><see cref="ActiveDocumentChanged"/> では代用できない</b>: 選択タブ削除時の
     /// <c>TabControl.Selected</c> 発火は WinForms の仕様上保証されず(MainForm.CloseActiveTab の注記)、
     /// 非アクティブタブを閉じる経路ではそもそも切替が起きない。「閉じた」の唯一の通知源。</summary>

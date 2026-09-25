@@ -46,36 +46,50 @@ public sealed class SearchController
     // 弱参照そのものは開き直し・復元・タブクローズに対して有効なので維持する。
     private (WeakReference<TextSnapshot> Snap, int Start, int End)? _selectionScope;
 
-    // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされ
-    // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)、MaterializedSearchStrategy の
-    // 材質化キャッシュも毎回捨てられる(打鍵ごとの UpdateCount で効く)。
+    // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされる
+    // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)。
+    // 全文キャッシュ(_textCache)は searcher の外に持ち、条件が変わって作り直しても渡し直す
+    // (打鍵ごとの UpdateCount で全文化をやり直さない。2026-09-25 フェーズ 5 P-5(a))。
     // 保持する側の責任: キャッシュは TextSnapshot → ピース木 → バイト配列を強参照するため、
-    // 破棄トリガ(条件変化・文書切替・文書クローズ・ユーザーの検索終了)を漏らすと
+    // 破棄トリガ(文書切替・文書クローズ・ユーザーの検索終了・検索語が空)を漏らすと
     // 閉じたタブの文書がまるごと生き残る。DropSearcher を呼ぶ経路を減らさないこと。
     private SearchOptions? _searcherOptions;
     private SnapshotSearcher? _searcher;
+    private SnapshotTextCache? _textCache;
+
+    /// <summary>検索語の打鍵から件数表示の更新までの遅延(設計書 §10.2(b)・§3.5)。</summary>
+    public const int CountDebounceMs = 200;
+
+    private readonly IDebounceScheduler _countDebounce;
 
     public SearchController(
         DocumentManager docs,
         IWin32Window owner,
         IAnnouncer announcer,
-        Func<FindReplaceCallbacks, IFindReplaceView> viewFactory
+        Func<FindReplaceCallbacks, IFindReplaceView> viewFactory,
+        IDebounceScheduler countDebounce
     )
     {
         _docs = docs;
         _owner = owner;
         _announcer = announcer;
         _viewFactory = viewFactory;
+        _countDebounce = countDebounce;
         _docs.ActiveDocumentChanged += (_, _) =>
         {
             _lastHit = null; // 別文書の歩進状態を持ち越さない
             _selectionScope = null; // 別文書へ切替時は捕捉済みスコープも無効化
-            DropSearcher(); // 別文書の材質化キャッシュを持ち越さない(破棄トリガ ii-a)
+            // 非表示(G-2 の一時退避)なら、満了で新しい文書の searcher / キャッシュを作り直さないよう
+            // 取り消す(表示中は直後の UpdateCount でも取り消され、新しい文書で数え直す)。
+            _countDebounce.Cancel();
+            DropSearcher(); // 別文書の全文キャッシュと一致位置表を持ち越さない(破棄トリガ ii-a)
             if (_view?.Visible == true)
                 UpdateCount(); // 表示中なら新アクティブで件数を更新
         };
         // 破棄トリガ ii-b: タブクローズ。ActiveDocumentChanged は選択タブ削除で発火が保証されず、
         // 非アクティブタブのクローズでは切替自体が起きないため、こちらが唯一の通知源。
+        // 保留中の件数更新は取り消さない: 取り消すと最後の打鍵の件数が出ないまま古い件数が残る。
+        // 満了時の UpdateCount はアクティブ文書を数えるので、閉じた文書を掴み直さない。
         _docs.DocumentClosed += (_, _) => DropSearcher();
     }
 
@@ -98,13 +112,20 @@ public sealed class SearchController
                     FindPrev: FindPrev,
                     ReplaceOne: ReplaceOne,
                     ReplaceAll: ReplaceAll,
+                    PatternChanged: OnPatternChanged,
                     UpdateCount: UpdateCount,
                     InSelectionToggled: OnInSelectionToggled
                 )
             );
             // 破棄トリガ iii。購読は生成の直後=この if の中に置くこと(外に出すと Ctrl+F の
             // たびに多重購読してハンドラが単調増加する)。旧ビューごと捨てるので -= は要らない。
-            _view.Dismissed += (_, _) => DropSearcher();
+            _view.Dismissed += (_, _) =>
+            {
+                // 保留中の件数更新を取り消す。満了すると searcher と全文キャッシュを作り直し、
+                // 検索を終えた後も文書を掴み続ける。
+                _countDebounce.Cancel();
+                DropSearcher();
+            };
             // ビューを作り直す=前のダイアログのセッションは終わっている(閉じるボタン経由でない
             // 破棄=owner ごとのクローズでは Dismissed が来ない)。新セッションを持ち越しゼロで始める。
             DropSearcher();
@@ -142,18 +163,20 @@ public sealed class SearchController
         }
         if (_searcher is null || _searcherOptions != opts)
         {
-            _searcher = new SnapshotSearcher(opts);
+            _textCache ??= new SnapshotTextCache();
+            _searcher = new SnapshotSearcher(opts, _textCache);
             _searcherOptions = opts;
         }
         return _searcher;
     }
 
-    /// <summary>保持中の searcher を捨てる(材質化キャッシュごと解放する)。
+    /// <summary>保持中の searcher と全文キャッシュを捨てる。
     /// 冪等でなければならない=Dismissed は連続発火しうる(Escape → 再表示 → また Escape)。</summary>
     private void DropSearcher()
     {
         _searcher = null;
         _searcherOptions = null;
+        _textCache = null;
     }
 
     /// <summary>テスト観測用: 現在保持中の searcher(未解決なら null)。
@@ -161,9 +184,19 @@ public sealed class SearchController
     /// 破棄トリガの網はこの参照同一性でしか書けない。実運用経路では参照しない。</summary>
     internal SnapshotSearcher? SearcherForTest => _searcher;
 
+    /// <summary>テスト観測用: 現在保持中の全文キャッシュ(未解決なら null)。
+    /// 照合条件の変化で使い回されること・破棄トリガで捨てられることを、参照同一性で固定する。</summary>
+    internal SnapshotTextCache? TextCacheForTest => _textCache;
+
+    /// <summary>検索語の打鍵。件数表示の更新を <see cref="CountDebounceMs"/> 後へ間引く(最後の打鍵から数える)。
+    /// 件数は発声しないので、SR の挙動は変わらない(設計書 §10.2(b))。</summary>
+    public void OnPatternChanged() => _countDebounce.Schedule(UpdateCount);
+
     /// <summary>増分カウント（移動しない）。エラー/タイムアウトはステータスのみ更新（通知しない）。</summary>
     public void UpdateCount()
     {
+        // 即時の更新は保留中の打鍵の更新を置き換える(チェックボックス・Open・タブ切替がここを通る)。
+        _countDebounce.Cancel();
         var d = _view;
         if (d is null)
             return;
@@ -209,6 +242,9 @@ public sealed class SearchController
         var opts = CurrentOptions();
         if (ed is null || opts is null)
             return false;
+        // 保留中の件数更新を取り消す(満了すると、この後の通知のステータスを「N 件」で上書きする)。
+        // 空条件の早期 return より後に置く: そちらは何も表示しないので、取り消すと古い件数が残る。
+        _countDebounce.Cancel();
         var searcher = ResolveSearcher();
         if (searcher is null || !searcher.IsValid)
         {
@@ -272,6 +308,11 @@ public sealed class SearchController
         var d = _view;
         if (ed is null || opts is null || d is null)
             return;
+        // 保留中の件数更新を取り消す(満了すると、この後の通知のステータスを「N 件」で上書きする)。
+        // 空条件の早期 return より後に置く: そちらは何も表示しないので、取り消すと古い件数が残る。
+        // 下の ReadOnly の早期 return(無表示)は取り消しの後にあるが、到達経路が実質無い
+        // (そのガードのコメント参照)ので例外として受容する。
+        _countDebounce.Cancel();
         if (IsCsvModeActive)
         {
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);
@@ -502,6 +543,11 @@ public sealed class SearchController
         var d = _view;
         if (ed is null || opts is null || d is null)
             return;
+        // 保留中の件数更新を取り消す(満了すると、この後の通知のステータスを「N 件」で上書きする)。
+        // 空条件の早期 return より後に置く: そちらは何も表示しないので、取り消すと古い件数が残る。
+        // 下の ReadOnly の早期 return(無表示)は取り消しの後にあるが、到達経路が実質無い
+        // (そのガードのコメント参照)ので例外として受容する。
+        _countDebounce.Cancel();
         if (IsCsvModeActive)
         {
             Announce(CsvAnnounceFormatter.BlockedInCsvMode);

@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Layout;
+using kxEdit.Core.Search;
 using kxEdit.Core.Text;
 
 // P1 TextBuffer 性能ゲート(設計書DoD): --mb <サイズ> 既定1024
@@ -15,12 +17,15 @@ using kxEdit.Core.Text;
 // 巨大 1 行調査 Task 2: --largeline 追加。空白・改行を一切含まない単一長大行に対する
 //             ViewportLayout の構造コストを GDI 抜きで測る(GDI 込みは Editor.Smoke --largeline)。
 //             単独で早期 return する。
+// フェーズ 5(perf-search): --search 追加。3MB の日本語文書で全文化・検索語の打鍵・F3 を
+//             UI 抜きで測る(判定なし・EXIT 0)。単独で早期 return する。
 
 int mb = 1024;
 bool layoutMode = false;
 bool typingMode = false;
 bool charAccessMode = false;
 bool largeLineMode = false;
+bool searchMode = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out int m))
@@ -43,6 +48,10 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--largeline")
     {
         largeLineMode = true;
+    }
+    else if (args[i] == "--search")
+    {
+        searchMode = true;
     }
 }
 
@@ -429,6 +438,123 @@ if (largeLineMode)
     Console.WriteLine($"(sink={llSink + f6Sink})");
     Console.WriteLine();
     Console.WriteLine("(調査用ベンチのため判定ゲートなし) EXIT 0");
+    return 0;
+}
+
+// ---- 2026-09-25 フェーズ 5(perf-search): --search ----
+// 設計書 2026-09-24-general-perf-improvements-design.md §10。Smoke --perf には検索のシナリオが
+// ないので、SearchController が UI スレッドで行う処理の中身を、UI も GDI も通さずに測る。
+// 文書は Editor.Smoke --perf の ja10k と同じ行形式で 30,000 行(調査記録 §9.5 の ja30k 相当・約 3MB)。
+// 判定はしない(EXIT 0)。変更前後は同じマシン・同じ NVDA の状態で 3 回ずつ走らせて比べる。
+if (searchMode)
+{
+    Console.WriteLine("--search: 検索の全文化・件数・F3 のベンチ(ja30k 相当・判定なし)");
+    var searchDocSb = new StringBuilder();
+    for (int i = 1; i <= 30_000; i++)
+        searchDocSb
+            .Append(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0:D5}: 吾輩は猫である。名前はまだ無い。kxEdit の性能計測 sample 行です。",
+                    i
+                )
+            )
+            .Append("\r\n");
+    string searchDoc = searchDocSb.ToString();
+    var searchSnap = TextBuffer.FromString(searchDoc).Current;
+    Console.WriteLine(
+        $"文書: {searchSnap.CharLength:N0} 字・{Encoding.UTF8.GetByteCount(searchDoc):N0} バイト・ピース {searchSnap.PieceCount}"
+    );
+    const string term = "名前はまだ無い";
+
+    // 1 回ごとの所要時間を測り、中央値・最小・最大を出す(ウォームアップ 5 回は捨てる)。
+    static void Report(string label, int n, Action op)
+    {
+        for (int w = 0; w < 5; w++)
+            op();
+        var ms = new double[n];
+        for (int k = 0; k < n; k++)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            op();
+            ms[k] = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        }
+        Array.Sort(ms);
+        Console.WriteLine(
+            $"{label}: 中央値 {ms[n / 2]:F3} ms(最小 {ms[0]:F3}・最大 {ms[^1]:F3}・n={n})"
+        );
+    }
+
+    // B1 全文化(P-13 の対象)
+    Report("B1 全文化", 50, () => _ = searchSnap.GetText(0, searchSnap.CharLength));
+
+    // B2 検索語の打鍵 1 回: 条件が変わるので searcher を作り直して数える(UpdateCount の中身)。
+    // 検索語は harness M-5 と同じく「名」「名前」…「名前はまだ無い」を順に回す。
+    int b2 = 0;
+    Report(
+        "B2 打鍵 1 回(searcher ごとに全文化)",
+        70,
+        () =>
+        {
+            string p = term[..(b2++ % term.Length + 1)];
+            _ = new SnapshotSearcher(new SearchOptions(p)).Count(searchSnap);
+        }
+    );
+
+    // B2s 検索語の打鍵 1 回(全文キャッシュを共有): SearchController と同じ形(P-5(a) 以後)。
+    // B2 との差が P-5(a) の効果。
+    var sharedTexts = new SnapshotTextCache();
+    int b2s = 0;
+    Report(
+        "B2s 打鍵 1 回(全文キャッシュを共有)",
+        70,
+        () =>
+        {
+            string p = term[..(b2s++ % term.Length + 1)];
+            _ = new SnapshotSearcher(new SearchOptions(p), sharedTexts).Count(searchSnap);
+        }
+    );
+
+    // B3 F3 1 回: 使い回した searcher で FindNext + Locate(SearchController.Find の中身)。
+    var f3 = new SnapshotSearcher(new SearchOptions(term));
+    int from = 0;
+    Report(
+        "B3 F3 1 回(FindNext + Locate)",
+        200,
+        () =>
+        {
+            var hit = f3.FindNext(searchSnap, from) ?? f3.FindNext(searchSnap, 0)!.Value;
+            _ = f3.Locate(searchSnap, hit);
+            from = hit.End;
+        }
+    );
+
+    // B3' F3 の初回: searcher を作り直して FindNext + Locate(P-14 で初回が悪化しないことの確認)。
+    Report(
+        "B3' F3 初回(searcher を作り直す)",
+        30,
+        () =>
+        {
+            var s = new SnapshotSearcher(new SearchOptions(term));
+            var hit = s.FindNext(searchSnap, 0)!.Value;
+            _ = s.Locate(searchSnap, hit);
+        }
+    );
+
+    // B4 Shift+F3 1 回: FindPrev + Locate。
+    int before = searchSnap.CharLength;
+    Report(
+        "B4 Shift+F3 1 回(FindPrev + Locate)",
+        200,
+        () =>
+        {
+            var hit =
+                f3.FindPrev(searchSnap, before)
+                ?? f3.FindPrev(searchSnap, searchSnap.CharLength)!.Value;
+            _ = f3.Locate(searchSnap, hit);
+            before = hit.Start;
+        }
+    );
     return 0;
 }
 

@@ -131,6 +131,37 @@ public class TextSnapshotTests
     }
 
     [Fact]
+    public void GetText_every_window_matches_substring_across_surrogate_pieces()
+    {
+        // ピース境界の両側にサロゲートペアを置き、全窓(始端・終端がペアの中間を含む)を総当たりする。
+        // 端のピース(DecodeInto)と全体のピース(直接デコード)の両方を、窓の位置で切り替えて通す。
+        const string doc = "😀a😀😀b\r\n😀";
+        foreach (var snap in new[] { Snap(doc), Snap("😀a", "😀", "😀b\r", "\n😀") })
+        {
+            Assert.Equal(doc.Length, snap.CharLength);
+            for (int a = 0; a <= doc.Length; a++)
+            {
+                for (int b = a; b <= doc.Length; b++)
+                    Assert.Equal(doc.Substring(a, b - a), snap.GetText(a, b - a));
+            }
+        }
+    }
+
+    [Fact]
+    public void GetText_throws_instead_of_returning_padding_when_utf8_invariant_is_broken()
+    {
+        // 前提(Utf8Sanitizer 済み)が崩れた内部状態: 0xFF は 4 バイト先頭として 2 単位に数えられるが、
+        // デコードすると U+FFFD の 1 単位になる。旧実装は長さの違う文字列を返し、
+        // 検査のない string.Create は末尾が '\0' の文字列を黙って返す。どちらも起こさず例外にする。
+        byte[] bytes = [0xFF, (byte)'a'];
+        var snap = new TextSnapshot(
+            PieceTree.BuildBalanced([Piece.Of(new TextChunk(bytes), 0, bytes.Length)])
+        );
+        Assert.Equal(3, snap.CharLength); // 前提: 0xFF を 2 単位 + 'a' と数える
+        Assert.Throws<InvalidOperationException>(() => snap.GetText(0, snap.CharLength));
+    }
+
+    [Fact]
     public void GetChar_matches_string_indexer()
     {
         foreach (var snap in DocLayouts())

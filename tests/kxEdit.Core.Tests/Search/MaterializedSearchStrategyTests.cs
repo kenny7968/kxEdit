@@ -5,7 +5,9 @@ using Xunit;
 namespace kxEdit.Core.Tests.Search;
 
 /// <summary>
-/// <see cref="MaterializedSearchStrategy"/> の材質化キャッシュ。
+/// <see cref="MaterializedSearchStrategy"/> の全文キャッシュ。
+/// キャッシュ本体は <see cref="SnapshotTextCache"/> へ移ったため、これらのテストは
+/// 戦略を経由して(<c>MaterializeCountForTest</c> 等で)<see cref="SnapshotTextCache"/> を観測している。
 /// これは<b>新しい不変条件</b>であり、リファクタ前の src では成立しない
 /// (キャッシュ自体が存在しないため)。よって「変更前で緑だったから挙動不変」の
 /// 証明材料には数えない(設計書 §7.2)。
@@ -142,5 +144,48 @@ public class MaterializedSearchStrategyTests
                 $"{api} がキャッシュ経路(TextOf)を通っていない: 材質化回数={fresh.MaterializeCountForTest}"
             );
         }
+    }
+
+    [Fact]
+    public void Shared_cache_materializes_once_across_strategies()
+    {
+        // P-5(a): 照合条件が変わって戦略(searcher)を作り直しても、同じキャッシュを渡せば
+        // 同じスナップショットの全文化は 1 回で済む。
+        var snap = TextBuffer.FromString("ab abc").Current;
+        var cache = new SnapshotTextCache();
+        var first = new MaterializedSearchStrategy(
+            new TextSearcher(new SearchOptions("ab", MatchCase: true)),
+            cache
+        );
+        var second = new MaterializedSearchStrategy(
+            new TextSearcher(new SearchOptions("abc", MatchCase: true)),
+            cache
+        );
+
+        Assert.Equal(2, first.Count(snap));
+        Assert.Equal(1, second.Count(snap));
+        Assert.Equal(1, cache.MaterializeCountForTest);
+    }
+
+    [Fact]
+    public void Shared_cache_rematerializes_after_edit()
+    {
+        // 編集前は s、編集後は条件の違う other で数える=共有していても snapshot が変われば読み直す。
+        var buffer = TextBuffer.FromString("ab");
+        var cache = new SnapshotTextCache();
+        var s = new MaterializedSearchStrategy(
+            new TextSearcher(new SearchOptions("ab", MatchCase: true)),
+            cache
+        );
+        Assert.Equal(1, s.Count(buffer.Current));
+
+        buffer.Insert(2, " ab");
+        var other = new MaterializedSearchStrategy(
+            new TextSearcher(new SearchOptions("b", MatchCase: true)),
+            cache
+        );
+
+        Assert.Equal(2, other.Count(buffer.Current)); // 古い本文を返さない
+        Assert.Equal(2, cache.MaterializeCountForTest);
     }
 }

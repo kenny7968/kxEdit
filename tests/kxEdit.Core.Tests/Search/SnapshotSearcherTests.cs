@@ -631,4 +631,14 @@ public class SnapshotSearcherTests
 
         Assert.Null(s.FindNext(snap, snap.CharLength + 1));
     }
+
+    [Fact]
+    public void SnapshotSearcher_with_shared_cache_materializes_once()
+    {
+        var snap = TextBuffer.FromString("ab abc").Current;
+        var cache = new SnapshotTextCache();
+        Assert.Equal(2, new SnapshotSearcher(new SearchOptions("ab"), cache).Count(snap));
+        Assert.Equal(1, new SnapshotSearcher(new SearchOptions("abc"), cache).Count(snap));
+        Assert.Equal(1, cache.MaterializeCountForTest);
+    }
 }

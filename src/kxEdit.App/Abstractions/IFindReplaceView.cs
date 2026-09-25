@@ -6,12 +6,14 @@ namespace kxEdit.App;
 /// SearchController への型参照(相互参照)を断つ(Phase 2 設計書 §5)。
 /// FindNext/FindPrev の bool は「ヒットして選択を移動できた」— 検索モードの
 /// ダイアログが自身を Hide するか(G-2)の判断に使う。
+/// PatternChanged は検索語の打鍵(件数更新を間引く)、UpdateCount はチェックボックスの変化(即時)。
 /// </summary>
 public sealed record FindReplaceCallbacks(
     Func<bool> FindNext,
     Func<bool> FindPrev,
     Action ReplaceOne,
     Action ReplaceAll,
+    Action PatternChanged,
     Action UpdateCount,
     Action<bool> InSelectionToggled
 );

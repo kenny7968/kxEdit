@@ -310,7 +310,7 @@ public class DocumentManagerTests
             Assert.True(doc.Page.IsDisposed);
         });
 
-    // DocumentClosed は「閉じた文書に紐づく保持(SearchController の材質化キャッシュ=
+    // DocumentClosed は「閉じた文書に紐づく保持(SearchController の全文キャッシュ=
     // 文書 1 本ぶんのバイト列)を解放させる」ための唯一の通知源。ActiveDocumentChanged は
     // 選択タブ削除で発火が保証されず、非アクティブタブのクローズでは切替自体が起きない。
 

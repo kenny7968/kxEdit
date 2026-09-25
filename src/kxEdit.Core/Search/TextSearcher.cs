@@ -26,6 +26,10 @@ public sealed class TextSearcher
 
     /// <summary>照合条件から照合エンジンを構築する。不正でも例外は投げず IsValid/Error で返す。</summary>
     public TextSearcher(SearchOptions options)
+        : this(options, TimeSpan.FromSeconds(1)) { }
+
+    /// <summary>照合のタイムアウトを指定して構築する(テスト用。本番は 1 秒の public ctor を使う)。</summary>
+    internal TextSearcher(SearchOptions options, TimeSpan matchTimeout)
     {
         _expand = options.UseRegex;
         if (string.IsNullOrEmpty(options.Pattern))
@@ -41,7 +45,7 @@ public sealed class TextSearcher
             opts |= RegexOptions.IgnoreCase;
         try
         {
-            _regex = new Regex(body, opts, TimeSpan.FromSeconds(1));
+            _regex = new Regex(body, opts, matchTimeout);
         }
         catch (ArgumentException ex)
         {
@@ -114,6 +118,35 @@ public sealed class TextSearcher
             }
         }
         return found ? (ordinal, total) : null;
+    }
+
+    /// <summary>
+    /// text の全ヒットを列挙順に表へ集める(P-14)。件数が <paramref name="limit"/> を超えたら null
+    /// (表を作らない)。無効なら null。
+    /// 列挙は <c>EnumerateMatches</c>(<see cref="ValueMatch"/>=<see cref="Match"/> を確保しない)で行う。
+    /// <c>Matches</c> の <c>MatchCollection</c> は列挙した全 <see cref="Match"/> を保持するため、
+    /// 上限 1,000,000 件では約 220MB のピークになる(実測)。<c>EnumerateMatches</c> は
+    /// <see cref="Locate"/> / <see cref="FindPrev"/> が使う <c>Matches</c> と同じ (Index, Length) の列を
+    /// 同じ順序で返す=同じ集合・同じ順序。この等価性の網は
+    /// <c>MatchPositionsTests.Strategy_matches_old_implementation_for_random_texts</c>
+    /// (<c>Matches</c> を使う旧経路との照合)と
+    /// <c>MatchPositionsTests.CollectMatches_yields_same_sequence_as_Matches</c>。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る(捕捉しない)。
+    /// </summary>
+    internal MatchPositions? CollectMatches(string text, int limit)
+    {
+        if (_regex is null)
+            return null;
+        var starts = new List<int>();
+        var lengths = new List<int>();
+        foreach (var m in _regex.EnumerateMatches(text))
+        {
+            if (starts.Count == limit)
+                return null;
+            starts.Add(m.Index);
+            lengths.Add(m.Length);
+        }
+        return new MatchPositions(starts.ToArray(), lengths.ToArray());
     }
 
     /// <summary>

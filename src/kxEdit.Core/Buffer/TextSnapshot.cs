@@ -48,9 +48,26 @@ public sealed class TextSnapshot
             );
         if (length == 0)
             return string.Empty;
-        var sb = new StringBuilder(length);
-        AppendRange(_root, start, start + length, sb);
-        return sb.ToString();
+        // 1 コピー(2026-09-25 フェーズ 5 P-13): 旧実装はピースごとの string → StringBuilder → ToString の
+        // 3 コピーだった。書いた数が length と一致しなければ例外にする。Debug.Assert では Release で
+        // 検査が消え、前提(不正な UTF-8 がない・ピース境界がコード点境界)が崩れたときに
+        // 末尾が '\0' の文字列を黙って返してしまう(旧実装は長さが違うだけだった)。
+        // 逆向きに崩れた場合(数えたより多くの文字にデコードされる)は、この検査より先に
+        // Encoding.UTF8.GetChars が ArgumentException(書き込み先が小さい)を投げる。
+        // どちらの向きでも、埋め草入りの文字列を返さずに例外になる。
+        return string.Create(
+            length,
+            (Root: _root, Start: start),
+            static (dest, st) =>
+            {
+                int written = WriteRange(st.Root, st.Start, st.Start + dest.Length, dest);
+                if (written != dest.Length)
+                    throw new InvalidOperationException(
+                        $"GetText のデコード結果が {written} 文字(要求は {dest.Length} 文字)。"
+                            + "本文が不正な UTF-8 を含むか、ピース境界がコード点の途中にある。"
+                    );
+            }
+        );
     }
 
     /// <summary>
@@ -256,14 +273,18 @@ public sealed class TextSnapshot
             stream.Write(p.Chunk.Span.Slice(p.ByteStart, p.ByteLen));
     }
 
-    /// <summary>ノードの文字区間 [from, to) を sb へ追記。ピース全域は直接デコード、端はスナップ切り出し。</summary>
-    private static void AppendRange(PieceTree.Node? t, int from, int to, StringBuilder sb)
+    /// <summary>
+    /// ノードの文字区間 [from, to) を dest の先頭から書き、書いた数を返す。
+    /// ピース全域は宛先へ直接デコード、端は <see cref="TextChunk.DecodeInto"/>。
+    /// </summary>
+    private static int WriteRange(PieceTree.Node? t, int from, int to, Span<char> dest)
     {
         if (t is null || from >= to)
-            return;
+            return 0;
+        int written = 0;
         int leftChars = PieceTree.SumOf(t.Left).CharLen;
         if (from < leftChars)
-            AppendRange(t.Left, from, Math.Min(to, leftChars), sb);
+            written += WriteRange(t.Left, from, Math.Min(to, leftChars), dest);
         int ps = leftChars,
             pe = leftChars + t.Piece.CharLen;
         if (to > ps && from < pe && t.Piece.CharLen > 0)
@@ -271,13 +292,16 @@ public sealed class TextSnapshot
             int f = Math.Max(from, ps) - ps,
                 e = Math.Min(to, pe) - ps;
             var p = t.Piece;
-            sb.Append(
+            written +=
                 f == 0 && e == p.CharLen
-                    ? p.Chunk.GetString(p.ByteStart, p.ByteLen)
-                    : p.Chunk.GetSubstring(p.ByteStart, p.ByteLen, f, e)
-            );
+                    ? Encoding.UTF8.GetChars(
+                        p.Chunk.Span.Slice(p.ByteStart, p.ByteLen),
+                        dest[written..]
+                    )
+                    : p.Chunk.DecodeInto(p.ByteStart, p.ByteLen, f, e, dest[written..]);
         }
         if (to > pe)
-            AppendRange(t.Right, Math.Max(from, pe) - pe, to - pe, sb);
+            written += WriteRange(t.Right, Math.Max(from, pe) - pe, to - pe, dest[written..]);
+        return written;
     }
 }

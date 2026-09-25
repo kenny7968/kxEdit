@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using kxEdit.Core.Buffers;
 
 namespace kxEdit.Core.Search;
@@ -8,18 +9,8 @@ namespace kxEdit.Core.Search;
 /// </summary>
 /// <remarks>
 /// <para>
-/// 材質化した文字列は<b>スナップショット単位で保持</b>する。
-/// <see cref="TextSnapshot"/> は不変(構築時のルート参照を包むだけ)で、
-/// <see cref="TextBuffer.Current"/> は編集・Undo・Redo のときだけ差し替わるフィールド返しなので、
-/// 参照同一性が「文書が変わっていない」の正当な signal になる。
-/// 参照同一性を同種の signal に使う idiom は <see cref="TextBuffer.Modified"/> が既に採用している
-/// (あちらが比べるのはスナップショットではなくピース木のルート参照)。
-/// </para>
-/// <para>
-/// 誤りは<b>安全な側にしか倒れない</b>: 内容が同じでもインスタンスが別なら
-/// (Undo で同じルートへ戻った直後など)材質化をやり直すだけで、古い本文を返すことはない。
-/// 逆向き=「同じインスタンスなのに内容が違う」は <see cref="TextSnapshot"/> が不変である限り起こらない。
-/// 保持するのは常に最大 1 本で、スナップショットが変われば古い文字列は参照が切れる。
+/// 材質化した文字列は注入された <see cref="SnapshotTextCache"/> が保持する
+/// (判定と安全性の議論はそちらの remarks)。同じキャッシュを複数の戦略(照合条件)で共有してよい。
 /// </para>
 /// <para>
 /// <b>選択の前提</b>: この戦略は <c>CharLength &lt;= 閾値</c> のときだけ選ばれる。
@@ -40,39 +31,110 @@ namespace kxEdit.Core.Search;
 /// 材質化長は常に <see cref="TextSnapshot.CharLength"/> に一致するので、
 /// 前段で正規化済みの値に対して後段のクランプは冪等になる。
 /// </para>
+/// <para>
+/// <b>一致位置表(2026-09-25 フェーズ 5 P-14)</b>: 直近に試みた 1 スナップショットぶんの
+/// 全ヒットの位置表(<see cref="MatchPositions"/>)を持ち、<see cref="Locate"/> と <see cref="FindPrev"/>
+/// を表の二分探索で答える(F3 / Shift+F3 のたびの全件列挙をやめる)。
+/// 構築の契機はこの 2 メソッドだけで、<see cref="Count"/> は構築済みの表を使うだけで構築を始めない。
+/// 構築の失敗(件数が上限 <see cref="DefaultMaxCachedMatches"/> 超え・タイムアウト)もスナップショットごとに
+/// 記憶し、同じスナップショットでは作り直さずに従来の経路(全件列挙)で答える。
+/// 表は全文キャッシュと違って searcher(照合条件)ごとに持ち、共有しない(表は正規表現に依存する)。
+/// 表は次の <see cref="Locate"/> / <see cref="FindPrev"/> で作り直すまで、試みたスナップショットを
+/// 強参照し続ける(文書を編集した後も、編集前のスナップショットを掴むことがある)。
+/// 寿命は searcher の寿命の内側に収まる=searcher を捨てれば一緒に離れる。
+/// </para>
 /// </remarks>
 internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
 {
     private readonly TextSearcher _inner;
+    private readonly SnapshotTextCache _texts;
 
-    private TextSnapshot? _cachedSnapshot;
-    private string _cachedText = string.Empty;
+    /// <summary>一致位置表を作る件数の上限(設計書 §10.3)。超えたら表を作らず従来の経路で答える(配列の肥大化を防ぐ)。</summary>
+    internal const int DefaultMaxCachedMatches = 1_000_000;
+
+    private readonly int _maxCachedMatches;
+
+    // 一致位置表(P-14)。_positionsSnapshot は「表を試みたスナップショット」で、_positions が null なら
+    // 未構築ではなく「作れなかった」(上限超え・タイムアウト)。同じスナップショットでは作り直さない。
+    // 持ち方(searcher ごと・共有しない)はクラスの remarks を参照。
+    private TextSnapshot? _positionsSnapshot;
+    private MatchPositions? _positions;
+
+    /// <summary>テスト観測用: 表の構築を試みた回数(失敗も数える)。</summary>
+    internal int BuildCountForTest { get; private set; }
+
+    /// <summary>テスト観測用: 直近に試みたスナップショットの表があるか。</summary>
+    internal bool HasPositionsForTest => _positions is not null;
 
     /// <summary>
-    /// テスト観測用: 実際に材質化した回数。キャッシュが効いていることを assert 化する seam。
-    /// <b>消さないこと</b>: <c>Cache_holds_at_most_one_snapshot</c> が「保持は最大 1 本」を
-    /// 検証する唯一の手段であり、結果値からは辞書実装(多スロット)と区別できない。
+    /// テスト観測用: 注入されたキャッシュの材質化回数(キャッシュを共有していれば、共有先の分も数える)。
+    /// 既存の <c>Cache_holds_at_most_one_snapshot</c> 等はこれを経由する。専用キャッシュの ctor
+    /// (1 引数)で作ったときだけ、戦略単位の材質化回数と一致する。
     /// </summary>
-    internal int MaterializeCountForTest { get; private set; }
+    internal int MaterializeCountForTest => _texts.MaterializeCountForTest;
 
-    internal MaterializedSearchStrategy(TextSearcher inner) => _inner = inner;
+    /// <summary>専用のキャッシュで構築する(テスト用)。</summary>
+    internal MaterializedSearchStrategy(TextSearcher inner)
+        : this(inner, new SnapshotTextCache()) { }
 
-    /// <summary>snap の全文。同一スナップショットの連続呼び出しでは前回の結果を返す。</summary>
-    private string TextOf(TextSnapshot snap)
+    internal MaterializedSearchStrategy(
+        TextSearcher inner,
+        SnapshotTextCache texts,
+        int maxCachedMatches = DefaultMaxCachedMatches
+    )
     {
-        if (ReferenceEquals(_cachedSnapshot, snap))
-            return _cachedText;
-        // 代入順は text が先・snapshot が後(入れ替えないこと)。逆順だと GetText が
-        // 例外を投げたときに _cachedSnapshot だけ新しくなり、次回の参照同一性ヒットで
-        // 古い本文を新しいスナップショットのものとして返す stale の窓が開く。
-        _cachedText = snap.GetText(0, snap.CharLength);
-        _cachedSnapshot = snap;
-        MaterializeCountForTest++;
-        return _cachedText;
+        _inner = inner;
+        _texts = texts;
+        _maxCachedMatches = maxCachedMatches;
     }
 
-    public int Count(TextSnapshot snap) => _inner.Count(TextOf(snap));
+    /// <summary>snap の全文(キャッシュ経由)。</summary>
+    private string TextOf(TextSnapshot snap) => _texts.TextOf(snap);
 
+    /// <summary>
+    /// snap の一致位置表。初めてのスナップショットなら構築を試みる。作れなければ null
+    /// (呼び出し側は従来の経路=全件列挙で答える)。
+    /// </summary>
+    private MatchPositions? PositionsOf(TextSnapshot snap, string text)
+    {
+        if (ReferenceEquals(_positionsSnapshot, snap))
+            return _positions;
+        BuildCountForTest++;
+        MatchPositions? built;
+        try
+        {
+            built = _inner.CollectMatches(text, _maxCachedMatches);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // 表を確定させずに従来の経路へ戻す。従来の経路が同じくタイムアウトすれば、
+            // 例外はそちらから従来どおり伝播する(旧 FindPrev は早く break して成功することもある)。
+            built = null;
+        }
+        // 代入順は表が先・スナップショットが後(SnapshotTextCache.TextOf と同じ理由。入れ替えないこと)。
+        _positions = built;
+        _positionsSnapshot = snap;
+        return built;
+    }
+
+    /// <summary>
+    /// 表が構築済みなら表の件数、未構築なら従来どおり <c>Regex.Count</c>。
+    /// <b>ここから構築を始めない</b>: 検索語の打鍵では searcher が作り直されるので表は再利用されず、
+    /// 構築(EnumerateMatches の全列挙と配列の確保)は Match を作らない Regex.Count より重い(設計書 §10.3)。
+    /// </summary>
+    public int Count(TextSnapshot snap)
+    {
+        string text = TextOf(snap);
+        return ReferenceEquals(_positionsSnapshot, snap) && _positions is { } p
+            ? p.Count
+            : _inner.Count(text);
+    }
+
+    /// <summary>
+    /// <b>表で置き換えない</b>: <c>Regex.Match(text, from)</c> の結果は <c>Matches</c> の集合と一致しない
+    /// (<c>"aaa"</c> を <c>"aa"</c> で探すと <c>Matches</c> は (0,2) だけだが、<c>Match(text, 1)</c> は
+    /// (1,2) を返す)。
+    /// </summary>
     public MatchSpan? FindNext(TextSnapshot snap, int from) => _inner.FindNext(TextOf(snap), from);
 
     /// <summary>
@@ -81,11 +143,19 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
     /// (反例は <see cref="ISnapshotSearchStrategy"/> の契約表)。「3 経路が同じ形だから」で
     /// クランプを足さないこと。
     /// </summary>
-    public MatchSpan? FindPrev(TextSnapshot snap, int before) =>
-        _inner.FindPrev(TextOf(snap), before);
+    public MatchSpan? FindPrev(TextSnapshot snap, int before)
+    {
+        string text = TextOf(snap);
+        return PositionsOf(snap, text) is { } p
+            ? p.FindPrev(before)
+            : _inner.FindPrev(text, before);
+    }
 
-    public (int Ordinal, int Total)? Locate(TextSnapshot snap, MatchSpan span) =>
-        _inner.Locate(TextOf(snap), span);
+    public (int Ordinal, int Total)? Locate(TextSnapshot snap, MatchSpan span)
+    {
+        string text = TextOf(snap);
+        return PositionsOf(snap, text) is { } p ? p.Locate(span) : _inner.Locate(text, span);
+    }
 
     public string? ReplacementAt(TextSnapshot snap, MatchSpan span, string replacement) =>
         _inner.ReplacementAt(TextOf(snap), span, replacement);
