@@ -585,6 +585,40 @@ dotnet-trace と WPR の手順を追記する。
   - 目視: 強調 ON/OFF、選択の開始と解除、IME、スクロール、テーマ変更の直後。
   - NVDA: キャレット移動の読み上げ、ハイライト矩形。
 
+### 8.6 実施記録(2026-09-25・PR #89)
+
+- **成果物**
+  - `FrameInputs` の seam: 描画が読む状態を `CaptureFrameInputs()` の 1 か所で集め、`PaintBody` を static にして生の状態を読めなくした。
+  - キャレット・選択の 4 経路の `InvalidateIfFrameChanged()`。
+  - 記録(`_lastPaintedInputs`)を捨てる 5 経路: `SetSource`・`ReplaceSource`・`ConvertEols`・`UndoEolConversion`・`ApplyAppearance`。
+  - オラクル(ランダムな操作列で、省いた時点の画面の絵と、今の状態から描いた絵を画素で比べる)。
+  - Smoke `--paint-transition`(実画面で、描画を起こさずに撮った絵と、全面を描き直した絵を比べる。陽性対照つき)。
+  - 実装計画・計測値・レビューの経緯は、`docs/plans/2026-09-25-perf-skip-invalidate.md`(以下「計画」)の実施記録にある。
+- **完了条件**
+  - **計測**(NVDA 起動中、3 回の中央値)
+    - S1(ja10k)7.45 → 0.08 ms、S2(ja10k)7.56 → 0.10 ms。`paints_per_op` は 1 → 0。en10k も同様(7.12 → 0.43 ms)。
+    - harness M-2 の →←(ja10k)は、中央値で 17.19 → 10.31 ms。下げ幅が Smoke より小さいのは、IME/TSF など kxEdit の外の費用が残るため。
+    - S3・S7 は悪化なし。
+  - **L5**: windows-mcp と自前のスクリプトで自動確認した。描画を起こさずに撮った絵と全面を描き直した絵の差は、すべての操作で 0 画素だった(既定・現在行強調 ON + 行番号・黒地テーマ)。NVDA の発声も操作どおりだった。実 IME の操作と視覚的ハイライトの実機確認は、ユーザーの判断で省いた。
+  - **レビュー**: 前倒しのコード品質レビュー 2 本(`FrameInputs` の seam と `--paint-transition`)と、最終レビューの 2 パスを実施した。
+- **本節からの精密化・訂正**
+  - **§8.1 の型**: `required init` プロパティの sealed record にし、等値は手書きにした。フォントなどは参照で、`BackColor` は `ToArgb()` で比べる。
+  - **§8.1 の IME**: `ImeController.Draw` は `FrameInputs` ではなく生の状態を読む(同じ同期処理の中なので値は一致する)。値として取り込むのはフェーズ 9 に回した。
+  - **§8.2 の記録を捨てる経路**: 設計の 3 つに `UndoEolConversion`・`ApplyAppearance` を足した。どちらも古い本文やフォントを次の描画まで握るため。
+  - **§8.4 のオラクル**: フレームではなく画素で比べる形にした。`RenderFrame` のシフトと IME の表示の漏れも検出するため。
+  - **§8.4 の検出範囲の訂正**: オラクルが検出するのは、省略されうる 4 経路で変わる状態(キャレット・アンカー)と、そこから派生する入力の漏れに限る。他の状態は変わるたびに無条件に Invalidate されるので、漏れても古い絵は残らない。描画が `FrameInputs` の外を読む故障はコンパイラが、Equals の漏れは網羅性テストが防ぐ。
+  - **2 つ目の不変条件の明文化**: 「描画の入力を変える経路は、必ず自分で Invalidate する(他の経路の Invalidate に便乗しない)」を、`_lastPaintedInputs`・`InvalidateIfFrameChanged`・`FrameInputs.cs` のコメントに書いた(最終レビューの I-1)。
+- **意図的な挙動差**: なし(§3.5 にもフェーズ 3 の行はない)。観測できる差は次の 2 つ。
+  - 4 経路でフレームが変わらなければ、`Control.Invalidated` が発火しない(App 層に購読者はない)。
+  - ClearType など `FrameInputs` が追跡しない OS の設定が変わっても、キャレット移動だけでは描き直されなくなった。編集・スクロール・リサイズで直る(脆弱性パスの Minor-2・受容)。
+- **以後のフェーズへの申し送り**(フェーズ 9。詳細は計画の実施記録)
+  - オラクルは Invalidate が 1 回でもあれば全面を描き直す。部分無効化を入れる前に、`InvalidRect` の範囲だけを画面のビットマップへ合成する形に広げる。
+  - `--paint-transition` に `e.ClipRectangle` の和の記録と `Expect.Partial` を足す。スクロール領域向けの陽性対照も足す。
+  - IME の原点と色を値として `FrameInputs` に取り込む。
+  - 部分クリップの描画で全面の入力を記録してよいのは、無効化した領域が入力の差で変わる全画素を覆うときに限る。
+  - ScrollWindowEx の適否は `old with { TopLine = …, TopSegment = …, ScrollX = … }.Equals(n)` の形で判定できる。
+  - PaintSnapshot と `--paint-transition` の重複は、3 つ目の利用者が出たら共通の型へ切り出す。窓を重ねた状態で撮れることの対照を、一度記録に残す。
+
 ## 9. フェーズ 4: 追記ブロックの格子(`perf-append-grid`)
 
 **目的**: 打鍵や貼り付けで入力したテキストへの文字アクセスが、書込位置に比例して重くなる問題(F-6)を解消する。
