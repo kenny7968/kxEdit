@@ -103,8 +103,10 @@ public class SkipInvalidateOracleTests
                 int skipped = 0;
                 for (int step = 0; step < 200; step++)
                 {
-                    var (name, act) = PickOp(rng, c);
+                    var (name, skippable, act) = PickOp(rng, c);
                     log.Add(name);
+                    int caretBefore = c.CaretCharOffset;
+                    int anchorBefore = c.SelectionAnchor;
                     int invalidated = 0;
                     InvalidateEventHandler h = (_, _) => invalidated++;
                     c.Invalidated += h;
@@ -118,8 +120,11 @@ public class SkipInvalidateOracleTests
                     }
                     if (invalidated > 0)
                         screen = Paint(c, record: true); // WM_PAINT が来た
-                    else
-                        skipped++;
+                    else if (
+                        skippable
+                        && (c.CaretCharOffset != caretBefore || c.SelectionAnchor != anchorBefore)
+                    )
+                        skipped++; // 省略の経路を通った(4 経路で、位置が動いたのに描き直していない)
                     int[] truth = Paint(c, record: false);
                     Assert.True(
                         screen.AsSpan().SequenceEqual(truth),
@@ -127,6 +132,8 @@ public class SkipInvalidateOracleTests
                     );
                 }
                 // 前提: 省略の経路を実際に通っている(通らなければこのテストは何も確かめていない)。
+                // 数えるのは、キャレット・選択の 4 経路の操作で、キャレットかアンカーが実際に動き、
+                // かつ Invalidate が 0 回だったときだけ(早期 return の no-op は数えない)。
                 Assert.True(skipped >= 20, $"seed={seed}: 省略が {skipped} 回しか起きていない");
             }
         });
@@ -134,8 +141,10 @@ public class SkipInvalidateOracleTests
     /// <summary>
     /// 操作の抽選。キャレット移動(省略されうる)を厚めに、描画の入力を変える操作を一通り混ぜる。
     /// 描画の入力を足したら、それを変える操作もここに足すこと。
+    /// <c>Skippable</c> は、Invalidate を省きうるキャレット・選択の 4 経路
+    /// (SetCaretCharOffset / SetSelectionCharRange / MoveCaretWithSelection / SetSelectionAnchored)の操作なら true。
     /// </summary>
-    private static (string Name, Action Act) PickOp(Random rng, EditorControl c)
+    private static (string Name, bool Skippable, Action Act) PickOp(Random rng, EditorControl c)
     {
         var snap = c.CurrentBuffer.Current;
         int len = snap.CharLength;
@@ -146,63 +155,76 @@ public class SkipInvalidateOracleTests
             case 0:
             case 1:
             case 2:
-                return ("→", () => c.SetCaretCharOffset(Math.Min(len, caret + 1)));
+                return ("→", true, () => c.SetCaretCharOffset(Math.Min(len, caret + 1)));
             case 3:
             case 4:
-                return ("←", () => c.SetCaretCharOffset(Math.Max(0, caret - 1)));
+                return ("←", true, () => c.SetCaretCharOffset(Math.Max(0, caret - 1)));
             case 5:
             case 6:
             {
                 int line = snap.GetLineIndexOfChar(caret);
                 int to = snap.GetLineStart(Math.Min(snap.LineCount - 1, line + 1));
-                return ("↓", () => c.SetCaretCharOffset(to));
+                return ("↓", true, () => c.SetCaretCharOffset(to));
             }
             case 7:
-                return ("任意の位置", () => c.SetCaretCharOffset(Rand()));
+                return ("任意の位置", true, () => c.SetCaretCharOffset(Rand()));
             case 8:
-                return (
-                    "Shift+移動",
-                    () => c.MoveCaretWithSelection(Math.Min(len, caret + rng.Next(1, 8)))
-                );
+            {
+                // 前後両方向(後方の選択と、アンカーまで戻って空の選択になる遷移も踏む)。差 0 は避ける。
+                int d = rng.Next(1, 8) * (rng.Next(2) == 0 ? -1 : 1);
+                int to = Math.Clamp(caret + d, 0, len);
+                return ("Shift+移動", true, () => c.MoveCaretWithSelection(to));
+            }
             case 9:
             {
                 int a = Rand(),
                     b = Rand();
-                return ("範囲選択", () => c.SetSelectionCharRange(a, b));
+                return ("範囲選択", true, () => c.SetSelectionCharRange(a, b));
             }
             case 10:
             {
-                int p = Rand();
-                return ("空の選択(anchored)", () => c.SetSelectionAnchored(p, p));
+                int a = Rand(),
+                    b = Rand();
+                if (rng.Next(2) == 0)
+                    return ("空の選択(anchored)", true, () => c.SetSelectionAnchored(a, a));
+                // 空でない非対称の選択(アンカーが後ろ = キャレットが選択先頭)。
+                int lo = Math.Min(a, b);
+                int hi = Math.Max(a, b) == lo ? Math.Min(len, lo + 1) : Math.Max(a, b);
+                return ("後方の選択(anchored)", true, () => c.SetSelectionAnchored(hi, lo));
             }
             case 11:
-                return ("TopLine", () => c.TopLine = rng.Next(0, snap.LineCount));
+                return ("TopLine", false, () => c.TopLine = rng.Next(0, snap.LineCount));
             case 12:
-                return ("ScrollX", () => c.ScrollX = rng.Next(0, 400));
+                return ("ScrollX", false, () => c.ScrollX = rng.Next(0, 400));
             case 13:
-                return ("現在行強調", () => c.HighlightCurrentLine = !c.HighlightCurrentLine);
+                return (
+                    "現在行強調",
+                    false,
+                    () => c.HighlightCurrentLine = !c.HighlightCurrentLine
+                );
             case 14:
-                return ("行番号", () => c.ShowLineNumbers = !c.ShowLineNumbers);
+                return ("行番号", false, () => c.ShowLineNumbers = !c.ShowLineNumbers);
             case 15:
-                return ("空白表示", () => c.ShowWhitespace = !c.ShowWhitespace);
+                return ("空白表示", false, () => c.ShowWhitespace = !c.ShowWhitespace);
             case 16:
-                return ("折り返し", () => c.WrapColumns = c.WrapColumns == 0 ? 24 : 0);
+                return ("折り返し", false, () => c.WrapColumns = c.WrapColumns == 0 ? 24 : 0);
             case 17:
             {
                 int s = Rand();
                 return rng.Next(2) == 0
-                    ? ("セル強調", () => c.HighlightCharRange(s, rng.Next(0, 6)))
-                    : ("セル強調を消す", c.ClearHighlight);
+                    ? ("セル強調", false, () => c.HighlightCharRange(s, rng.Next(0, 6)))
+                    : ("セル強調を消す", false, c.ClearHighlight);
             }
             case 18:
-                return ("1 文字挿入", () => c.ReplaceCharRange(caret, 0, "x"));
+                return ("1 文字挿入", false, () => c.ReplaceCharRange(caret, 0, "x"));
             case 19:
-                return ("Undo", c.Undo);
+                return ("Undo", false, c.Undo);
             case 20:
                 return c.__TestIsComposing()
-                    ? ("IME 確定", () => c.__TestApplyResult("漢字"))
+                    ? ("IME 確定", false, () => c.__TestApplyResult("漢字"))
                     : (
                         "IME 未確定",
+                        false,
                         () =>
                             c.__TestApplyComposition(
                                 "かな",
@@ -217,6 +239,7 @@ public class SkipInvalidateOracleTests
                 bool hl = rng.Next(2) == 0;
                 return (
                     "外観",
+                    false,
                     () =>
                         c.ApplyAppearance(
                             new AppSettings
