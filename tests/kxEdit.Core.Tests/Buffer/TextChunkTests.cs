@@ -273,6 +273,30 @@ public class TextChunkTests
     public void GridLimit_negative_throws() =>
         Assert.Throws<ArgumentOutOfRangeException>(() => new TextChunk(new byte[8], gridLimit: -1));
 
+    [Fact]
+    public void DecodeInto_matches_substring_for_every_window_including_surrogate_middles()
+    {
+        // 範囲の外側に別の文字を置き、ピースがチャンクの途中から始まる形にする(byteStart > 0)。
+        // 格子を細かくして(gridBytes: 4)、CharToByte の格子点からの走査も通す。
+        const string content = "aあ😀\r\n😀b😀";
+        byte[] prefix = Encoding.UTF8.GetBytes("xyz");
+        byte[] body = Encoding.UTF8.GetBytes(content);
+        byte[] bytes = [.. prefix, .. body, .. Encoding.UTF8.GetBytes("Q")];
+        var chunk = new TextChunk(bytes, gridBytes: 4);
+        var dest = new char[content.Length + 4];
+        for (int from = 0; from <= content.Length; from++)
+        {
+            for (int to = from; to <= content.Length; to++)
+            {
+                Array.Fill(dest, '#');
+                int n = chunk.DecodeInto(prefix.Length, body.Length, from, to, dest);
+                Assert.Equal(to - from, n);
+                Assert.Equal(content.Substring(from, to - from), new string(dest, 0, n));
+                Assert.Equal('#', dest[n]); // 数えた数より先に書いていない
+            }
+        }
+    }
+
     private static void AssertGrid(TextChunk chunk, params int[] expected) =>
         Assert.Equal(expected, chunk.GridByteOffsets.ToArray());
 }

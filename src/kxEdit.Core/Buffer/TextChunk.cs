@@ -221,22 +221,35 @@ internal sealed class TextChunk
     }
 
     /// <summary>
-    /// 範囲内の文字区間 [charFrom, charTo) を string 化。両端がサロゲート中間でもよい
-    /// (コード点境界へ広げて切り出し→部分stringスライス)。
+    /// 範囲内の文字区間 [charFrom, charTo) を <paramref name="dest"/> の先頭へ直接デコードし、書いた数を返す
+    /// (中間の string を作らない。<see cref="TextSnapshot.GetText"/> の全文化を 1 コピーにするため・
+    /// 2026-09-25 フェーズ 5 P-13。旧 <c>GetSubstring</c> の後継)。
+    /// 両端はサロゲート中間でもよい: 始端が中間なら low サロゲートだけ、終端が中間なら high サロゲートだけを書く
+    /// (旧 <c>GetSubstring</c> の「コード点境界へ広げて切り出し → Substring」と同じ結果)。
     /// </summary>
-    public string GetSubstring(int byteStart, int byteLen, int charFrom, int charTo)
+    /// <remarks>前提は <see cref="GetString"/> と同じ(範囲の両端がコード点境界で、不正な UTF-8 を含まない)。</remarks>
+    public int DecodeInto(int byteStart, int byteLen, int charFrom, int charTo, Span<char> dest)
     {
         if (charFrom >= charTo)
-            return string.Empty;
+            return 0;
+        var s = _bytes.Span;
+        Span<char> pair = stackalloc char[2];
+        int written = 0;
         int bF = CharToByte(byteStart, byteLen, charFrom, out int cF); // 中間なら低い方へ
-        int bT = CharToByte(byteStart, byteLen, charTo, out int cT);
-        if (cT < charTo)
-        { // 終端が中間: そのコード点(必ず4バイト=2単位)を丸ごと含める
-            bT += 4;
-            cT += 2;
+        if (cF < charFrom)
+        { // 始端が中間: そのコード点(必ず 4 バイト = 2 単位)の low サロゲートだけ
+            Encoding.UTF8.GetChars(s.Slice(bF, 4), pair);
+            dest[written++] = pair[1];
+            bF += 4;
         }
-        string s = GetString(bF, bT - bF);
-        return charFrom == cF && charTo == cT ? s : s.Substring(charFrom - cF, charTo - charFrom);
+        int bT = CharToByte(byteStart, byteLen, charTo, out int cT);
+        written += Encoding.UTF8.GetChars(s.Slice(bF, bT - bF), dest[written..]);
+        if (cT < charTo)
+        { // 終端が中間: そのコード点の high サロゲートだけ
+            Encoding.UTF8.GetChars(s.Slice(bT, 4), pair);
+            dest[written++] = pair[0];
+        }
+        return written;
     }
 
     /// <summary>
