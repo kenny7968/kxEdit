@@ -115,9 +115,12 @@ public sealed partial class EditorControl
     /// </summary>
     private void PaintAndRecord(Graphics g)
     {
-        var inputs = CaptureFrameInputs();
         _lastPaintedInputs = null;
-        PaintBody(g, inputs);
+        var inputs = CaptureFrameInputs();
+        var frame = PaintBody(g, inputs, BackColor, _imeCtrl);
+        // テスト観測用(TestHook_GetLastFrame)。SetSource 前(frame が null)は従来どおり更新しない。
+        if (frame is not null)
+            _lastFrame = frame;
         _lastPaintedInputs = inputs;
     }
 
@@ -179,20 +182,31 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
-    /// <paramref name="inputs"/> <b>だけ</b>からフレームを組み立てて描く(IME の未確定表示を除く)。
-    /// <paramref name="inputs"/> が null(SetSource 前)なら BackColor で塗るだけ。
+    /// <paramref name="inputs"/> <b>だけ</b>からフレームを組み立てて描き、描いたフレームを返す。
+    /// <paramref name="inputs"/> が null(SetSource 前)なら <paramref name="emptyBackColor"/> で塗るだけで null を返す。
     /// </summary>
-    private void PaintBody(Graphics g, FrameInputs? inputs)
+    /// <remarks>
+    /// static にして、生の状態への出口を引数だけに限る(描画が FrameInputs の外の状態を読めないことを
+    /// コンパイラで保証する)。<paramref name="ime"/> が唯一の例外で、<see cref="ImeController.Draw"/> は
+    /// host 経由で生の状態を読む(<see cref="FrameInputs"/> の remarks)。
+    /// <paramref name="emptyBackColor"/> は inputs が null のときだけ使う。
+    /// </remarks>
+    private static Frame? PaintBody(
+        Graphics g,
+        FrameInputs? inputs,
+        Color emptyBackColor,
+        ImeController ime
+    )
     {
         // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
         // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
         // (背景全域 FillRect)があっても消さない: RenderFrame の scrollX シフトで右端に生じる隙間は、
         // この塗りしか覆わない。_buffer が null(ソース未設定 = inputs が null)の間も、この行が空の
-        // コントロールを BackColor で塗る。なお右下の角は VScrollBar(高さいっぱいに dock する子)が
-        // 覆っており、この行の役目ではない(ctor の Dock 順の注意を参照)。
-        g.Clear(inputs?.BackColor ?? BackColor);
+        // コントロールを BackColor(emptyBackColor)で塗る。なお右下の角は VScrollBar(高さいっぱいに
+        // dock する子)が覆っており、この行の役目ではない(ctor の Dock 順の注意を参照)。
+        g.Clear(inputs?.BackColor ?? emptyBackColor);
         if (inputs is null)
-            return;
+            return null;
 
         // 起点 (TopLine, TopSegment)・折り返し設定・可視高さは BuildVisibleRows に集約する
         // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
@@ -220,19 +234,18 @@ public sealed partial class EditorControl
         // Font/Color/Metrics/ComputeCaretPoint を取得)。
         // 2026-09-25 フェーズ 3: ImeController.Draw は host 経由で生の状態を読む(FrameInputs の remarks)。
         if (inputs.Ime.IsActive)
-            _imeCtrl.Draw(g);
+            ime.Draw(g);
 
-        // テスト観測用(TestHook_GetLastFrame)。
-        _lastFrame = frame;
+        return frame;
     }
 
     /// <summary>
     /// Frame の Ops を GDI 呼び出しに変換する。折り返し OFF 時の水平スクロール(<paramref name="scrollX"/>)は
-    /// <b>全 op の X から一様に差し引く</b>形で反映する(_wrapColumns&gt;0 時は scrollX=0 で実質シフトなし)。
+    /// <b>全 op の X から一様に差し引く</b>形で反映する(<c>WrapColumns</c>&gt;0 時は scrollX=0 で実質シフトなし)。
     /// 先頭 op(背景全域 FillRect)も一緒にシフトされるが、PaintBody 冒頭で
-    /// <c>g.Clear(BackColor)</c> が全 client 領域を BackColor で塗っており、DefaultStyle.Background
-    /// と BackColor が一致している(共に White)ため、シフトで生じる右側の隙間は視覚的にクリアの
-    /// BackColor と同色になり結果は同じ。行番号マージンも一緒にシフトされる(仕様=YAGNI)。
+    /// <c>g.Clear(inputs.BackColor)</c> が全 client 領域を塗っており、<c>Style.Background</c>
+    /// と <c>inputs.BackColor</c> が一致している(ctor は共に White、ApplyAppearance は同じテーマ色から両方を設定する)ため、
+    /// シフトで生じる右側の隙間は視覚的にクリアの色と同色になり結果は同じ。行番号マージンも一緒にシフトされる(仕様=YAGNI)。
     /// </summary>
     private static void RenderFrame(Graphics g, Frame frame, int scrollX, Font font)
     {
@@ -297,7 +310,8 @@ public sealed partial class EditorControl
     /// <summary>
     /// テスト専用: クライアント領域の大きさのビットマップに、OnPaint と同じ経路で描く。
     /// <paramref name="record"/> が true なら「WM_PAINT で描いた」扱いで <see cref="_lastPaintedInputs"/> を
-    /// 記録する(<see cref="PaintAndRecord"/>)。false なら記録せずに今の状態を描く(オラクルの正解)。
+    /// 記録する(<see cref="PaintAndRecord"/>)。false なら記録せずに今の状態を描く(オラクルの正解。
+    /// <see cref="_lastPaintedInputs"/> も <see cref="_lastFrame"/> も書き換えない)。
     /// 画面外の HostForm には WM_PAINT が来ないので、描画とその記録はこれで同期的に起こす。
     /// </summary>
     internal static Bitmap TestHook_PaintToBitmap(EditorControl c, bool record)
@@ -312,7 +326,7 @@ public sealed partial class EditorControl
         if (record)
             c.PaintAndRecord(g);
         else
-            c.PaintBody(g, c.CaptureFrameInputs());
+            PaintBody(g, c.CaptureFrameInputs(), c.BackColor, c._imeCtrl);
         return bmp;
     }
 

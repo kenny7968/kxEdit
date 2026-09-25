@@ -129,8 +129,17 @@ public class FrameInputsTests
             var a = Base(metrics);
             var prop = typeof(FrameInputs).GetProperty(member)!;
             var b = a with { };
-            prop.SetValue(b, Different(prop.GetValue(a))); // init アクセサはリフレクションから呼べる
-            Assert.NotEqual(a, b);
+            var different = Different(prop.GetValue(a));
+            try
+            {
+                prop.SetValue(b, different); // init アクセサはリフレクションから呼べる
+                Assert.NotEqual(a, b);
+            }
+            finally
+            {
+                // Different が作った Font(GDI 資源)を破棄する。GdiCharMetrics は IDisposable ではない。
+                (different as IDisposable)?.Dispose();
+            }
         });
 
     /// <summary>ViewportStyle は record の値比較(ApplyAppearance で同じテーマを作り直しても「変化なし」)。</summary>

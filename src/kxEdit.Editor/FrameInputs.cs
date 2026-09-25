@@ -21,6 +21,8 @@ namespace kxEdit.Editor;
 /// (<c>Color.Equals</c> は名前の有無まで見るが、<c>g.Clear</c> の画素は同じ)。それ以外は値で比べる。
 /// <see cref="Ime"/> は record struct の既定の等値で、配列(Attrs / Clauses)は参照比較になる
 /// =打鍵ごとに「変化あり」(安全側)。
+/// 比較は <c>Equals</c> を使う。null(記録なし)は常に「変化あり」として扱う
+/// (record の <c>==</c> は null 同士を true にするので使わない)。
 /// </para>
 /// <para>
 /// <b>IME の未確定表示だけは例外</b>: <see cref="ImeController.Draw"/> は host 経由で生の状態を読む。
@@ -37,7 +39,11 @@ internal sealed record FrameInputs
     public required int ScrollX { get; init; }
     public required int WrapColumns { get; init; }
 
-    /// <summary><c>g.Clear</c> の範囲と RenderFrame の右端(スクロールバーを引く前)。</summary>
+    /// <summary>
+    /// 描画は直接読まない。描画先(バックバッファ = ClientRectangle = <c>g.Clear</c> の範囲)の大きさ。
+    /// ResizeRedraw があるので比較上は冗長だが、<see cref="PaintWidth"/> / <see cref="PaintHeight"/> に
+    /// 現れない変化も「変化あり」にするため、安全側で残す。
+    /// </summary>
     public required Size ClientSize { get; init; }
 
     public required int PaintWidth { get; init; }
