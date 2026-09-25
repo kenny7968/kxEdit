@@ -1,7 +1,7 @@
 namespace kxEdit.App.Tests.Fakes;
 
 /// <summary><see cref="IDebounceScheduler"/> のテスト用フェイク。時間は進めず、<see cref="Fire"/> で満了させる。</summary>
-public sealed class ManualDebounceScheduler : IDebounceScheduler
+public sealed class FakeDebounceScheduler : IDebounceScheduler
 {
     private Action? _pending;
 

@@ -20,7 +20,7 @@ public class SearchControllerTests
         public SearchController Search { get; }
         public FakeAnnouncer Announcer { get; } = new();
         public FakeFindReplaceView View { get; } = new();
-        public ManualDebounceScheduler CountDebounce { get; } = new();
+        public FakeDebounceScheduler CountDebounce { get; } = new();
         public FindReplaceCallbacks? Callbacks; // 直近のファクトリ呼び出しで渡されたコールバック束
         public int FactoryCalls;
 
@@ -1624,7 +1624,7 @@ public class SearchControllerTests
     // 保持/破棄は結果値からは観測できない(作り直しても同じ答えを返す)ため、
     // SearchController.SearcherForTest の参照同一性で観測する。
     // 保持が壊れると打鍵のたびに Regex 再コンパイル+材質化のやり直しになり、
-    // 破棄が漏れると材質化キャッシュ(TextSnapshot → ピース木 → バイト配列の強参照)が
+    // 破棄が漏れると全文キャッシュと一致位置表(TextSnapshot → ピース木 → バイト配列の強参照)が
     // 閉じた文書をピン留めし続ける。両方向を固定する。
 
     [Fact]

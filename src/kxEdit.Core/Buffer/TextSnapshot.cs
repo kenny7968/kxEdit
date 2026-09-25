@@ -52,6 +52,9 @@ public sealed class TextSnapshot
         // 3 コピーだった。書いた数が length と一致しなければ例外にする。Debug.Assert では Release で
         // 検査が消え、前提(不正な UTF-8 がない・ピース境界がコード点境界)が崩れたときに
         // 末尾が '\0' の文字列を黙って返してしまう(旧実装は長さが違うだけだった)。
+        // 逆向きに崩れた場合(数えたより多くの文字にデコードされる)は、この検査より先に
+        // Encoding.UTF8.GetChars が ArgumentException(書き込み先が小さい)を投げる。
+        // どちらの向きでも、埋め草入りの文字列を返さずに例外になる。
         return string.Create(
             length,
             (Root: _root, Start: start),

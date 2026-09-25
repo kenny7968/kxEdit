@@ -39,8 +39,8 @@ namespace kxEdit.Core.Search;
 /// </para>
 /// <para>
 /// <b>スレッドセーフではない</b>=1 インスタンスは単一スレッドからのみ使うこと。
-/// 内部の材質化戦略が材質化した全文をスナップショット単位でキャッシュするミュータブルな
-/// スロットを持つため、同一 <see cref="TextSnapshot"/> に対する並行読みでも安全ではない
+/// 内部の材質化戦略が一致位置表(P-14)を、注入された(または専用の)<see cref="SnapshotTextCache"/> が
+/// 全文を、それぞれスナップショット単位のミュータブルなスロットで持つため、同一 <see cref="TextSnapshot"/> に対する並行読みでも安全ではない
 /// (この性質は材質化戦略の抽出で入った=それ以前は不変フィールドのみだった)。
 /// 現時点の利用者は <c>SearchController</c> だけで、照合条件ごとに 1 インスタンスを
 /// フィールドへ保持し、4 メソッド(件数更新 / 検索 / 置換 / 全置換)がそれを共有する。
@@ -90,7 +90,7 @@ public sealed class SnapshotSearcher
 
     /// <summary>
     /// 閾値・窓サイズを指定して SnapshotSearcher を構築する(テスト注入用)。
-    /// 本番コードは既定コンストラクタを使う。閾値・窓サイズは正数でなければならない。
+    /// 本番コードは全文キャッシュを渡すコンストラクタを使う。閾値・窓サイズは正数でなければならない。
     /// </summary>
     public SnapshotSearcher(SearchOptions options, int thresholdChars, int windowSize)
         : this(options, new SnapshotTextCache(), thresholdChars, windowSize) { }
@@ -130,7 +130,7 @@ public sealed class SnapshotSearcher
     /// </summary>
     /// <remarks>
     /// 3 戦略とも ctor で 1 個ずつ作って使い回す。閾値超の 2 戦略は snapshot 非依存で、
-    /// 材質化戦略だけが snapshot 依存の状態(材質化キャッシュ)を持つが、
+    /// 材質化戦略だけが snapshot 依存の状態(全文キャッシュの参照と一致位置表)を持つが、
     /// スナップショット参照の同一性で無効化するので同じく使い回せる。
     /// 閾値判定は「ちょうど一致は閾値以下(材質化経路)」。<c>&lt;</c> にすると
     /// 閾値ちょうどの文書の意味論が変わる = 挙動変更になる

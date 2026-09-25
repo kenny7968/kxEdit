@@ -6,7 +6,7 @@ namespace kxEdit.App.Tests;
 /// FindReplaceDialog の 6 箇所ある <c>Hide</c> のうち、どれが「ユーザーが検索を終えた」
 /// (<see cref="IFindReplaceView.Dismissed"/> 発火)でどれが G-2 の一時退避かを機械固定する。
 /// <para>
-/// この非対称は SearchController が保持する searcher(材質化キャッシュ=文書 1 本ぶんの保持)の
+/// この非対称は SearchController が保持する searcher(全文キャッシュと一致位置表=文書 1 本ぶんの保持)の
 /// 寿命そのものであり、「6 箇所を <c>HideByUser()</c> に揃えよう」という善意の統一で
 /// 黙って壊れる(F3 のたびにキャッシュが落ちるだけで、他のテストは何も言わない)。
 /// </para>

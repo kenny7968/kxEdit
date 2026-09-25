@@ -5,7 +5,9 @@ using Xunit;
 namespace kxEdit.Core.Tests.Search;
 
 /// <summary>
-/// <see cref="MaterializedSearchStrategy"/> の材質化キャッシュ。
+/// <see cref="MaterializedSearchStrategy"/> の全文キャッシュ。
+/// キャッシュ本体は <see cref="SnapshotTextCache"/> へ移ったため、これらのテストは
+/// 戦略を経由して(<c>MaterializeCountForTest</c> 等で)<see cref="SnapshotTextCache"/> を観測している。
 /// これは<b>新しい不変条件</b>であり、リファクタ前の src では成立しない
 /// (キャッシュ自体が存在しないため)。よって「変更前で緑だったから挙動不変」の
 /// 証明材料には数えない(設計書 §7.2)。

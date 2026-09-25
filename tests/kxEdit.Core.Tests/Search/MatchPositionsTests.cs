@@ -164,6 +164,64 @@ public class MatchPositionsTests
         }
     }
 
+    /// <summary>
+    /// 正規表現モード・単語単位なしの照合条件に限り、<see cref="TextSearcher"/> と同じ Regex を作る
+    /// (<c>CultureInvariant</c>+大小無視なら <c>IgnoreCase</c>。それ以外の条件は対象外)。
+    /// </summary>
+    private static Regex ReferenceRegex(SearchOptions o)
+    {
+        Assert.True(o.UseRegex && !o.WholeWord); // 前提: パターンがそのまま Regex 本体になる条件だけ
+        var ro = RegexOptions.CultureInvariant;
+        if (!o.MatchCase)
+        {
+            ro |= RegexOptions.IgnoreCase;
+        }
+        return new Regex(o.Pattern, ro, TimeSpan.FromSeconds(1));
+    }
+
+    private static void AssertCollectMatchesEqualsMatches(SearchOptions o, string text)
+    {
+        var expected = ReferenceRegex(o).Matches(text).Select(m => (m.Index, m.Length)).ToArray();
+        var positions = new TextSearcher(o).CollectMatches(text, int.MaxValue);
+        Assert.NotNull(positions);
+        var starts = positions.StartsForTest.ToArray();
+        var lengths = positions.LengthsForTest.ToArray();
+        var actual = starts.Zip(lengths).ToArray();
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>
+    /// 表の構築(<c>EnumerateMatches</c>)が <c>Matches</c> と同じ (Index, Length) の列を同じ順序で返す
+    /// (I-1: MatchCollection の Match 保持によるメモリのピークを避けるため列挙を差し替えた)。
+    /// startat より前のマッチを返す病的パターンとゼロ幅パターンを含む。
+    /// </summary>
+    [Fact]
+    public void CollectMatches_yields_same_sequence_as_Matches()
+    {
+        var pathological = new SearchOptions("(?:b(?!a)+?)*", UseRegex: true); // IgnoreCase
+        foreach (var text in new[] { "abbbb", "bab", "", "babbab", "BBaB" })
+        {
+            AssertCollectMatchesEqualsMatches(pathological, text);
+        }
+
+        SearchOptions[] conditions =
+        [
+            pathological,
+            new("a*", UseRegex: true),
+            new(@"\b", UseRegex: true),
+            new("(?=a)", UseRegex: true),
+            new("a|ab", MatchCase: true, UseRegex: true),
+        ];
+        var rnd = new Random(20260925);
+        foreach (var o in conditions)
+        {
+            for (int t = 0; t < 100; t++)
+            {
+                AssertCollectMatchesEqualsMatches(o, RandomText(rnd));
+            }
+        }
+    }
+
     [Fact]
     public void Overlapping_candidates_follow_matches_not_match_at()
     {

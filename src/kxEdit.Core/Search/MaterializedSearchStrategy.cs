@@ -56,7 +56,7 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
 
     // 一致位置表(P-14)。_positionsSnapshot は「表を試みたスナップショット」で、_positions が null なら
     // 未構築ではなく「作れなかった」(上限超え・タイムアウト)。同じスナップショットでは作り直さない。
-    // 全文キャッシュと違って searcher(照合条件)ごとに持つ(表は正規表現に依存する)。
+    // 持ち方(searcher ごと・共有しない)はクラスの remarks を参照。
     private TextSnapshot? _positionsSnapshot;
     private MatchPositions? _positions;
 
@@ -120,7 +120,7 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
     /// <summary>
     /// 表が構築済みなら表の件数、未構築なら従来どおり <c>Regex.Count</c>。
     /// <b>ここから構築を始めない</b>: 検索語の打鍵では searcher が作り直されるので表は再利用されず、
-    /// 構築(Matches の全列挙と配列の確保)は Match を作らない Regex.Count より重い(設計書 §10.3)。
+    /// 構築(EnumerateMatches の全列挙と配列の確保)は Match を作らない Regex.Count より重い(設計書 §10.3)。
     /// </summary>
     public int Count(TextSnapshot snap)
     {

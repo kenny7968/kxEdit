@@ -82,7 +82,7 @@ public sealed class SearchController
             // 非表示(G-2 の一時退避)なら、満了で新しい文書の searcher / キャッシュを作り直さないよう
             // 取り消す(表示中は直後の UpdateCount でも取り消され、新しい文書で数え直す)。
             _countDebounce.Cancel();
-            DropSearcher(); // 別文書の材質化キャッシュを持ち越さない(破棄トリガ ii-a)
+            DropSearcher(); // 別文書の全文キャッシュと一致位置表を持ち越さない(破棄トリガ ii-a)
             if (_view?.Visible == true)
                 UpdateCount(); // 表示中なら新アクティブで件数を更新
         };

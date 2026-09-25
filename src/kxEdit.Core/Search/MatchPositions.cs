@@ -35,6 +35,12 @@ internal sealed class MatchPositions
 
     internal bool IsStrictlyIncreasingForTest => _strictlyIncreasing;
 
+    /// <summary>テスト観測用: 開始位置の列(列挙順)。</summary>
+    internal ReadOnlySpan<int> StartsForTest => _starts;
+
+    /// <summary>テスト観測用: 長さの列(列挙順)。</summary>
+    internal ReadOnlySpan<int> LengthsForTest => _lengths;
+
     /// <summary><see cref="TextSearcher.Locate"/> と同じ(span が何件目か。同じヒットが複数なら最後)。</summary>
     public (int Ordinal, int Total)? Locate(MatchSpan span)
     {
