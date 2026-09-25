@@ -112,6 +112,21 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S
 
 - キーは WndProc へ直接入れるので、IME/TSF の費用(調査記録 §9 の S-2)は乗らない。体感値は perf-harness で見る。
 
+### Smoke `--paint-transition`(画面に古い絵が残らないことの確認)
+
+```powershell
+dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --paint-transition                  # 再描画を省く前のコード
+dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --paint-transition --expect-skip    # 省いた後のコード
+dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --paint-transition --out <dir>      # 失敗した遷移の絵を PNG で残す
+```
+
+- 再描画の省略(フェーズ 3)や部分再描画(フェーズ 9)で、**画面に古い絵が残る**不具合を見る。遷移(キャレット移動・選択・スクロール・IME・テーマ変更など)ごとに、操作してメッセージを流しただけの画面の絵と、全面を描き直した正解の絵を、同じ実行の中で画素で比べる。基準画像は要らない。
+- `--paint-snapshot` との違いは**撮影で描き直すかどうか**。`--paint-snapshot` は `PrintWindow` で撮るので撮影の中で全面が描き直され、古い絵が残る不具合は写らない(描画処理そのもののピクセル不変を見る道具)。`--paint-transition` は窓の DC から `BitBlt` で読むだけで、撮影の前後で描画回数が変わらないことを毎回確かめる。
+- 出力は遷移ごとに `名前: 描画 N 回・一致/差 K 画素 [期待]`。期待が `Paint` の遷移で描画 0 回なら失敗。`Skip` の遷移で描画 1 回以上なら、**`--expect-skip` を付けたときだけ**失敗(省く前のコードは描き直すので付けない。省いた後のコードで付けると、省略が効いていることも確かめられる)。
+- **陽性対照** `control-stale`: 空白の表示を ON にした直後に無効領域を取り消し、差が**出る**ことを要求する。差が出なければ撮り方が画面の絵を読めていないので EXIT 1。
+- EXIT 0 = 全遷移が期待どおり、1 = 失敗または自己チェックの失敗(準備が効かない・描画が起きない・撮影で描画が起きた・撮影が決定的でない・例外)、2 = 引数の誤り。窓は画面内に出るので、画面がロック中だと EXIT 1 になる。計測中は触らない。
+- 遷移を足すときは `PaintTransition.Transitions` に 1 要素足す。
+
 ### `perf-harness.ps1`
 
 ```powershell

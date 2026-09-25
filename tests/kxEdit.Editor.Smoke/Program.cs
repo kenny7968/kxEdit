@@ -32,6 +32,15 @@ if (args.Length > 0 && args[0] == "--paint-snapshot")
     return PaintSnapshot.Run(args[1..]);
 }
 
+// 2026-09-25 性能改善フェーズ 3: --paint-transition。Invalidate の省略・部分再描画で画面に
+// 古い絵が残らないことを、描画を起こさずに撮った絵と全面を描き直した絵の比較で確かめる
+// (docs/plans/2026-09-25-perf-skip-invalidate.md Task 5)。遷移の表と EXIT の意味は
+// PaintTransition のクラス doc が正本。
+if (args.Length > 0 && args[0] == "--paint-transition")
+{
+    return PaintTransition.Run(args[1..]);
+}
+
 // 2026-08-02 巨大 1 行調査 Task 3: --largeline。空白・改行を一切含まない単一長大行を
 // 実 EditorControl へ載せ、バッファ差し込みと初回描画を GDI 込みで測る
 // (GDI 抜きの構造コストは kxEdit.Core.Bench --largeline が対)。
