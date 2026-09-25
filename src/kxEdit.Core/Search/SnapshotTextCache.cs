@@ -39,7 +39,7 @@ public sealed class SnapshotTextCache
 
     /// <summary>
     /// テスト観測用: 実際に材質化した回数。キャッシュが効いていることを assert 化する seam。
-    /// <b>消さないこと</b>: <c>Cache_holds_at_most_one_snapshot</c> が「保持は最大 1 本」を
+    /// <b>消さないこと</b>: <c>SnapshotTextCacheTests.Holds_at_most_one_snapshot</c> が「保持は最大 1 本」を
     /// 検証する唯一の手段であり、結果値からは辞書実装(多スロット)と区別できない。
     /// </summary>
     internal int MaterializeCountForTest { get; private set; }

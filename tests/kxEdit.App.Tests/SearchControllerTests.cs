@@ -1666,6 +1666,7 @@ public class SearchControllerTests
             host.View.Pattern = "abc";
             host.Search.OpenFind();
             Assert.NotNull(host.Search.SearcherForTest);
+            Assert.NotNull(host.Search.TextCacheForTest);
 
             host.View.Pattern = ""; // 検索語を消す打鍵(条件が無効になる)
             host.Search.UpdateCount();
@@ -1685,6 +1686,7 @@ public class SearchControllerTests
             var first = host.Search.SearcherForTest;
             var firstCache = host.Search.TextCacheForTest;
             Assert.NotNull(first);
+            Assert.NotNull(firstCache);
 
             _ = host.NewDoc("abc"); // 文書切替(表示中なので直後の UpdateCount で新しい 1 本が立つ)
 
@@ -1704,6 +1706,7 @@ public class SearchControllerTests
             host.Search.OpenFind();
             var first = host.Search.SearcherForTest;
             Assert.NotNull(first);
+            Assert.NotNull(host.Search.TextCacheForTest);
             int activeChanged = 0;
             host.Docs.ActiveDocumentChanged += (_, _) => activeChanged++;
 
@@ -1725,6 +1728,7 @@ public class SearchControllerTests
             host.View.Pattern = "abc";
             host.Search.OpenFind();
             Assert.NotNull(host.Search.SearcherForTest);
+            Assert.NotNull(host.Search.TextCacheForTest);
 
             host.View.RaiseDismissed(); // ユーザーが検索を終えた(閉じる/Escape/×)
             Assert.Null(host.Search.SearcherForTest);
@@ -1732,6 +1736,7 @@ public class SearchControllerTests
 
             host.View.RaiseDismissed(); // 冪等(Escape → 再表示 → また Escape)
             Assert.Null(host.Search.SearcherForTest);
+            Assert.Null(host.Search.TextCacheForTest);
 
             Assert.True(host.Search.FindNext()); // 破棄しても検索は壊れない(次の操作で作り直す)
             Assert.NotNull(host.Search.SearcherForTest);
@@ -1748,6 +1753,7 @@ public class SearchControllerTests
             var first = host.Search.SearcherForTest;
             var firstCache = host.Search.TextCacheForTest;
             Assert.NotNull(first);
+            Assert.NotNull(firstCache);
 
             host.View.IsDisposed = true; // owner ごと破棄された等(この経路では Dismissed が来ない)
             host.Search.OpenFind(); // ビュー再生成=新しいダイアログセッション
@@ -1771,6 +1777,7 @@ public class SearchControllerTests
             var searcher = host.Search.SearcherForTest;
             var cache = host.Search.TextCacheForTest;
             Assert.NotNull(searcher);
+            Assert.NotNull(cache);
 
             host.View.Visible = false; // G-2 の自動 Hide(RaiseDismissed ではない)
             Assert.True(host.Search.FindNext()); // 非表示のまま F3 連打

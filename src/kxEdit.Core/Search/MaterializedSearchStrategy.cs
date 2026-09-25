@@ -39,6 +39,8 @@ internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
     /// <summary>
     /// テスト観測用: 注入されたキャッシュの材質化回数(キャッシュを共有していれば、共有先の分も数える)。
     /// 既存のテストはこの戦略だけがキャッシュを使う形で観測している。
+    /// 既存の <c>Cache_holds_at_most_one_snapshot</c> 等はこれを経由する。専用キャッシュの ctor
+    /// (1 引数)で作ったときだけ、戦略単位の材質化回数と一致する。
     /// </summary>
     internal int MaterializeCountForTest => _texts.MaterializeCountForTest;
 

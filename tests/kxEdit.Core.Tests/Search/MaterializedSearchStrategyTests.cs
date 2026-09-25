@@ -168,6 +168,7 @@ public class MaterializedSearchStrategyTests
     [Fact]
     public void Shared_cache_rematerializes_after_edit()
     {
+        // 編集前は s、編集後は条件の違う other で数える=共有していても snapshot が変われば読み直す。
         var buffer = TextBuffer.FromString("ab");
         var cache = new SnapshotTextCache();
         var s = new MaterializedSearchStrategy(
