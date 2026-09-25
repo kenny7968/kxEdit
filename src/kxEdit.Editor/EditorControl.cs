@@ -249,7 +249,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             PositionCaret();
             NativeMethods.ShowCaret(Handle);
         }
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 12: 初期化時に未確定文字列用フォントを IME に通知(候補窓/未確定描画のメトリクス整合)。
         _imeCtrl.NotifyCompositionFont();
         // P5 Task 5 / Task 3d: RPC スレッド用スナップショットキャッシュを初期化 (Adapter 経由=
@@ -318,7 +318,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         {
             PositionCaret();
         }
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 3d: RPC スレッド用スナップショット更新 + _lastLineSegs 破棄を Adapter 経由に集約
         // (元 CacheSnapshot() + `_lastLineSegs = null;`)。
         _uia.OnSnapshotChanged(_buffer.Current);
@@ -669,7 +669,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // になるので、この再配置は「保険」ではなく system caret 更新の唯一の経路になった。
         if (_hasFocus)
             PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // A-11: 以下は ReplaceSource が担っていた通知契約の再現
         // (スナップショット差し替えは上の caret 復元直後で済ませてある)。
         // 設計書 §10.12 (1): _wasModified は ReplaceSource:301 と同じく「代入で揃える」。
@@ -1804,7 +1804,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _uia.OnSnapshotChanged(snap);
         if (_hasFocus)
             PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // ConvertEols と同じ扱い: 遷移検出(AfterEdit)に載せず代入で揃える。ここで
         // SavePointReached を焚くと「保存に失敗しただけ」なのに保存点到達イベントが飛ぶ。
         _wasModified = _buffer.Modified;
@@ -2826,7 +2826,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             NativeMethods.ShowCaret(Handle);
         }
         PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 12: フォント変更後に IME へ未確定文字列用フォントを再通知(本文と候補窓のメトリクス整合)。
         _imeCtrl.NotifyCompositionFont();
         // P8 Minor-5 / Task 3d: metrics/wrap 変化で Adapter の _lastLineSegs キャッシュ破棄。

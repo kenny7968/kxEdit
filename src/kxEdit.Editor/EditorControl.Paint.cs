@@ -125,6 +125,35 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
+    /// 今の描画の入力が、最後に描いたフレームの入力と異なるときだけ Invalidate する(設計書 §8.2)。
+    /// キャレット・選択の 4 経路(EditorControl.Caret.cs)専用。
+    /// </summary>
+    /// <remarks>
+    /// 正しさの根拠: 画面に出ているのは <see cref="_lastPaintedInputs"/> から決定的に描いた絵である。
+    /// 今の入力が同じなら、描き直しても同じ絵になる。未処理の無効領域がある場合でも、その描画は
+    /// 今の入力で描かれる。スクロールのセッターは自前で無条件に Invalidate するので、この比較の外にある。
+    /// 他の Invalidate(編集・IME・外観・CSV 強調・スクロール・リサイズ)は無条件のまま(変更範囲を最小にする)。
+    /// </remarks>
+    private void InvalidateIfFrameChanged()
+    {
+        var current = CaptureFrameInputs();
+        if (current is not null && current.Equals(_lastPaintedInputs))
+            return;
+        Invalidate();
+    }
+
+    /// <summary>
+    /// 本文・フォント・テーマを丸ごと差し替える経路の Invalidate。記録を捨てて、古いスナップショットや
+    /// フォント・幅メモを次の描画まで握らない(描画されないタブで起きても解放される)。
+    /// 捨てた後の比較は必ず「変化あり」になる(安全側)。
+    /// </summary>
+    private void InvalidateAndForgetPaintedFrame()
+    {
+        _lastPaintedInputs = null;
+        Invalidate();
+    }
+
+    /// <summary>
     /// 描画が読む状態を集める唯一の場所(設計書 §8.1)。SetSource 前は null。
     /// 描画(<see cref="PaintBody"/>)は、ここで集めた値<b>だけ</b>を使う
     /// (例外は IME の未確定表示。<see cref="FrameInputs"/> の remarks を参照)。

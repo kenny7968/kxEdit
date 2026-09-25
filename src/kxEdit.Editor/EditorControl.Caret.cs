@@ -152,7 +152,7 @@ public sealed partial class EditorControl
     /// 無変化呼び出しの早期 return を設けたのと同じ理由)。代償として「キャレットは既にその位置
     /// にあるが画面だけスクロールで離れている」ケースでは追従しない=受容する。
     ///
-    /// 順序は <c>PositionCaret</c> → <c>BringCaretIntoView</c> → <c>Invalidate</c> で
+    /// 順序は <c>PositionCaret</c> → <c>BringCaretIntoView</c> → <c>InvalidateIfFrameChanged</c> で
     /// <c>AfterEdit</c> と揃える(先出しの PositionCaret が要る理由も同メソッドの remarks 参照)。
     /// </remarks>
     public void SetCaretCharOffset(int offset)
@@ -167,7 +167,7 @@ public sealed partial class EditorControl
         _caretCtrl.SetTo(snapped, _buffer.Current); // 単純キャレット移動は選択解除
         PositionCaret();
         BringCaretIntoView();
-        Invalidate();
+        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -211,7 +211,7 @@ public sealed partial class EditorControl
         _caretCtrl.SetSelection(s, e, _buffer.Current);
         PositionCaret();
         BringCaretIntoView();
-        Invalidate();
+        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -243,7 +243,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.MoveTo(snapped, extend: true, _buffer.Current);
         PositionCaret();
-        Invalidate();
+        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -278,7 +278,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.SetSelection(a, c, _buffer.Current);
         PositionCaret();
-        Invalidate();
+        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
