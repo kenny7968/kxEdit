@@ -1671,6 +1671,7 @@ public class SearchControllerTests
             host.Search.UpdateCount();
 
             Assert.Null(host.Search.SearcherForTest); // 素の early return だと保持が続いてしまう
+            Assert.Null(host.Search.TextCacheForTest);
         });
 
     [Fact]
@@ -1682,12 +1683,14 @@ public class SearchControllerTests
             host.View.Pattern = "abc";
             host.Search.OpenFind();
             var first = host.Search.SearcherForTest;
+            var firstCache = host.Search.TextCacheForTest;
             Assert.NotNull(first);
 
             _ = host.NewDoc("abc"); // 文書切替(表示中なので直後の UpdateCount で新しい 1 本が立つ)
 
             Assert.NotNull(host.Search.SearcherForTest);
             Assert.NotSame(first, host.Search.SearcherForTest); // 旧文書のキャッシュごと捨てる
+            Assert.NotSame(firstCache, host.Search.TextCacheForTest);
         });
 
     [Fact]
@@ -1710,6 +1713,7 @@ public class SearchControllerTests
             // ActiveDocumentChanged か区別できず、DocumentClosed 削除の変異を殺せない)。
             Assert.Equal(0, activeChanged);
             Assert.Null(host.Search.SearcherForTest); // 閉じた文書をピン留めしない
+            Assert.Null(host.Search.TextCacheForTest);
         });
 
     [Fact]
@@ -1724,6 +1728,7 @@ public class SearchControllerTests
 
             host.View.RaiseDismissed(); // ユーザーが検索を終えた(閉じる/Escape/×)
             Assert.Null(host.Search.SearcherForTest);
+            Assert.Null(host.Search.TextCacheForTest);
 
             host.View.RaiseDismissed(); // 冪等(Escape → 再表示 → また Escape)
             Assert.Null(host.Search.SearcherForTest);
@@ -1741,6 +1746,7 @@ public class SearchControllerTests
             host.View.Pattern = "abc";
             host.Search.OpenFind();
             var first = host.Search.SearcherForTest;
+            var firstCache = host.Search.TextCacheForTest;
             Assert.NotNull(first);
 
             host.View.IsDisposed = true; // owner ごと破棄された等(この経路では Dismissed が来ない)
@@ -1748,6 +1754,7 @@ public class SearchControllerTests
 
             Assert.Equal(2, host.FactoryCalls);
             Assert.NotSame(first, host.Search.SearcherForTest); // 前セッションの保持を持ち越さない
+            Assert.NotSame(firstCache, host.Search.TextCacheForTest);
         });
 
     [Fact]
@@ -1762,6 +1769,7 @@ public class SearchControllerTests
             host.Search.OpenFind();
             Assert.True(host.Search.FindNext());
             var searcher = host.Search.SearcherForTest;
+            var cache = host.Search.TextCacheForTest;
             Assert.NotNull(searcher);
 
             host.View.Visible = false; // G-2 の自動 Hide(RaiseDismissed ではない)
@@ -1769,6 +1777,29 @@ public class SearchControllerTests
             Assert.True(host.Search.FindNext());
 
             Assert.Same(searcher, host.Search.SearcherForTest); // キャッシュは生きたまま
+            Assert.Same(cache, host.Search.TextCacheForTest);
+        });
+
+    [Fact]
+    public void TextCache_IsShared_WhenMatchConditionChanges() =>
+        Sta.Run(() =>
+        {
+            // P-5(a): 検索語の打鍵で searcher は作り直すが、全文キャッシュは使い回す。
+            using var host = new Host();
+            host.NewDoc("abc abd");
+            host.View.Pattern = "ab";
+            host.Search.OpenFind();
+            var searcher = host.Search.SearcherForTest;
+            var cache = host.Search.TextCacheForTest;
+            Assert.NotNull(cache);
+
+            host.View.Pattern = "abc";
+            host.Search.UpdateCount();
+
+            Assert.NotSame(searcher, host.Search.SearcherForTest);
+            Assert.Same(cache, host.Search.TextCacheForTest);
+            Assert.Equal(1, cache!.MaterializeCountForTest);
+            Assert.Equal("1 件", host.View.Status);
         });
 
     // ===== A-3(2026-08-22): 検索ジャンプの追従スクロール =====

@@ -8,18 +8,8 @@ namespace kxEdit.Core.Search;
 /// </summary>
 /// <remarks>
 /// <para>
-/// 材質化した文字列は<b>スナップショット単位で保持</b>する。
-/// <see cref="TextSnapshot"/> は不変(構築時のルート参照を包むだけ)で、
-/// <see cref="TextBuffer.Current"/> は編集・Undo・Redo のときだけ差し替わるフィールド返しなので、
-/// 参照同一性が「文書が変わっていない」の正当な signal になる。
-/// 参照同一性を同種の signal に使う idiom は <see cref="TextBuffer.Modified"/> が既に採用している
-/// (あちらが比べるのはスナップショットではなくピース木のルート参照)。
-/// </para>
-/// <para>
-/// 誤りは<b>安全な側にしか倒れない</b>: 内容が同じでもインスタンスが別なら
-/// (Undo で同じルートへ戻った直後など)材質化をやり直すだけで、古い本文を返すことはない。
-/// 逆向き=「同じインスタンスなのに内容が違う」は <see cref="TextSnapshot"/> が不変である限り起こらない。
-/// 保持するのは常に最大 1 本で、スナップショットが変われば古い文字列は参照が切れる。
+/// 材質化した文字列は注入された <see cref="SnapshotTextCache"/> が保持する
+/// (判定と安全性の議論はそちらの remarks)。同じキャッシュを複数の戦略(照合条件)で共有してよい。
 /// </para>
 /// <para>
 /// <b>選択の前提</b>: この戦略は <c>CharLength &lt;= 閾値</c> のときだけ選ばれる。
@@ -44,32 +34,26 @@ namespace kxEdit.Core.Search;
 internal sealed class MaterializedSearchStrategy : ISnapshotSearchStrategy
 {
     private readonly TextSearcher _inner;
-
-    private TextSnapshot? _cachedSnapshot;
-    private string _cachedText = string.Empty;
+    private readonly SnapshotTextCache _texts;
 
     /// <summary>
-    /// テスト観測用: 実際に材質化した回数。キャッシュが効いていることを assert 化する seam。
-    /// <b>消さないこと</b>: <c>Cache_holds_at_most_one_snapshot</c> が「保持は最大 1 本」を
-    /// 検証する唯一の手段であり、結果値からは辞書実装(多スロット)と区別できない。
+    /// テスト観測用: 注入されたキャッシュの材質化回数(キャッシュを共有していれば、共有先の分も数える)。
+    /// 既存のテストはこの戦略だけがキャッシュを使う形で観測している。
     /// </summary>
-    internal int MaterializeCountForTest { get; private set; }
+    internal int MaterializeCountForTest => _texts.MaterializeCountForTest;
 
-    internal MaterializedSearchStrategy(TextSearcher inner) => _inner = inner;
+    /// <summary>専用のキャッシュで構築する(テスト用)。</summary>
+    internal MaterializedSearchStrategy(TextSearcher inner)
+        : this(inner, new SnapshotTextCache()) { }
 
-    /// <summary>snap の全文。同一スナップショットの連続呼び出しでは前回の結果を返す。</summary>
-    private string TextOf(TextSnapshot snap)
+    internal MaterializedSearchStrategy(TextSearcher inner, SnapshotTextCache texts)
     {
-        if (ReferenceEquals(_cachedSnapshot, snap))
-            return _cachedText;
-        // 代入順は text が先・snapshot が後(入れ替えないこと)。逆順だと GetText が
-        // 例外を投げたときに _cachedSnapshot だけ新しくなり、次回の参照同一性ヒットで
-        // 古い本文を新しいスナップショットのものとして返す stale の窓が開く。
-        _cachedText = snap.GetText(0, snap.CharLength);
-        _cachedSnapshot = snap;
-        MaterializeCountForTest++;
-        return _cachedText;
+        _inner = inner;
+        _texts = texts;
     }
+
+    /// <summary>snap の全文(キャッシュ経由)。</summary>
+    private string TextOf(TextSnapshot snap) => _texts.TextOf(snap);
 
     public int Count(TextSnapshot snap) => _inner.Count(TextOf(snap));
 

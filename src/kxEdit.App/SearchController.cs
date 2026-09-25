@@ -46,14 +46,16 @@ public sealed class SearchController
     // 弱参照そのものは開き直し・復元・タブクローズに対して有効なので維持する。
     private (WeakReference<TextSnapshot> Snap, int Start, int End)? _selectionScope;
 
-    // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされ
-    // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)、MaterializedSearchStrategy の
-    // 材質化キャッシュも毎回捨てられる(打鍵ごとの UpdateCount で効く)。
+    // 照合条件が変わるまで searcher を使い回す。作り直すと内部の Regex が再コンパイルされる
+    // (インスタンス生成の Regex は .NET の静的キャッシュに乗らない)。
+    // 全文キャッシュ(_textCache)は searcher の外に持ち、条件が変わって作り直しても渡し直す
+    // (打鍵ごとの UpdateCount で全文化をやり直さない。2026-09-25 フェーズ 5 P-5(a))。
     // 保持する側の責任: キャッシュは TextSnapshot → ピース木 → バイト配列を強参照するため、
-    // 破棄トリガ(条件変化・文書切替・文書クローズ・ユーザーの検索終了)を漏らすと
+    // 破棄トリガ(文書切替・文書クローズ・ユーザーの検索終了・検索語が空)を漏らすと
     // 閉じたタブの文書がまるごと生き残る。DropSearcher を呼ぶ経路を減らさないこと。
     private SearchOptions? _searcherOptions;
     private SnapshotSearcher? _searcher;
+    private SnapshotTextCache? _textCache;
 
     public SearchController(
         DocumentManager docs,
@@ -142,24 +144,30 @@ public sealed class SearchController
         }
         if (_searcher is null || _searcherOptions != opts)
         {
-            _searcher = new SnapshotSearcher(opts);
+            _textCache ??= new SnapshotTextCache();
+            _searcher = new SnapshotSearcher(opts, _textCache);
             _searcherOptions = opts;
         }
         return _searcher;
     }
 
-    /// <summary>保持中の searcher を捨てる(材質化キャッシュごと解放する)。
+    /// <summary>保持中の searcher と全文キャッシュを捨てる。
     /// 冪等でなければならない=Dismissed は連続発火しうる(Escape → 再表示 → また Escape)。</summary>
     private void DropSearcher()
     {
         _searcher = null;
         _searcherOptions = null;
+        _textCache = null;
     }
 
     /// <summary>テスト観測用: 現在保持中の searcher(未解決なら null)。
     /// 保持と破棄は<b>結果値からは観測できない</b>(作り直しても同じ答えを返す)ため、
     /// 破棄トリガの網はこの参照同一性でしか書けない。実運用経路では参照しない。</summary>
     internal SnapshotSearcher? SearcherForTest => _searcher;
+
+    /// <summary>テスト観測用: 現在保持中の全文キャッシュ(未解決なら null)。
+    /// 照合条件の変化で使い回されること・破棄トリガで捨てられることを、参照同一性で固定する。</summary>
+    internal SnapshotTextCache? TextCacheForTest => _textCache;
 
     /// <summary>増分カウント（移動しない）。エラー/タイムアウトはステータスのみ更新（通知しない）。</summary>
     public void UpdateCount()

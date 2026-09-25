@@ -501,6 +501,20 @@ if (searchMode)
         }
     );
 
+    // B2s 検索語の打鍵 1 回(全文キャッシュを共有): SearchController と同じ形(P-5(a) 以後)。
+    // B2 との差が P-5(a) の効果。
+    var sharedTexts = new SnapshotTextCache();
+    int b2s = 0;
+    Report(
+        "B2s 打鍵 1 回(全文キャッシュを共有)",
+        70,
+        () =>
+        {
+            string p = term[..(b2s++ % term.Length + 1)];
+            _ = new SnapshotSearcher(new SearchOptions(p), sharedTexts).Count(searchSnap);
+        }
+    );
+
     // B3 F3 1 回: 使い回した searcher で FindNext + Locate(SearchController.Find の中身)。
     var f3 = new SnapshotSearcher(new SearchOptions(term));
     int from = 0;
