@@ -837,3 +837,29 @@ CLAUDE.md §3 の 5・§6 に従う。
   - Minor-2(ファズの自己チェックが「最終本文 > 8KB」だけで、ブロックをまたいだことを保証しない): ① fixup で総追記バイト数を数えて assert する。
   - **fixup 7381283 の再レビュー**: 新テスト 2 本が 2 変異をそれぞれ殺すことを、実装者とレビューの双方がコピーで確認した。appendedBytes の数え方も妥当。Minor 1 件(`AppendProbeBlock` の「1 ブロックあたり 3 ピース」は誤りで、実測は 2 ピース): ① 本記録と同じ commit で直した。Core.Tests 1570 件 PASS。
   - Minor-3(設計書 §9.2 の「格子点の直後に LF が後から書かれても補正が効く」は、厳密に内側に置く規則のもとでは起きない): ② 精密化として記録する。格子点 x を置く時点で s[x] は必ず書込済みで、後から LF が来るのはフロンティア(格子点がない)だけである。クエリ時の補正が読む s[x-1]・s[x] は書き換わらない。安全性の結論は変わらない。
+
+### Task 4: ミューテーション検証(HEAD 3c61df1・ユーザー承認 2026-09-25)
+
+13 変異を 1 つずつ当てた。13 件ともビルド成功を確かめてから `--no-build` なしでテストを走らせた。**殺された 10 件・生存 3 件(すべて等価)**。正しさに影響して生存したものはない。最後に `git diff --exit-code src/` が 0、Core.Tests 1570 件 PASS。
+
+| # | 変異 | 結果 | 殺したテスト(抜粋) |
+|---|---|---|---|
+| M1 | `limit = span.Length`(上限を無視) | 殺された(14 件) | `GridLimit_…` 群・`Old_snapshots_…`・`Piece_of_a_large_write…` ほか |
+| M2 | `p >= limit` → `p > limit` | 殺された(2) | `GridLimit_snapped_point_…`・`Snapped_point_equal_to_pos_…` |
+| M3 | スナップの `p < limit` → `p < span.Length` | **生存(等価)** | — |
+| M4 | `nominal < limit` → `<=` | **生存(等価)** | — |
+| M5 | 包み直しの先頭 `_nextNominal >= _pos` → `>` | **生存(等価)** | — |
+| M6 | 包み直しの先頭のスナップ判定を削除 | 殺された(1) | `Nominal_inside_multibyte_char_…` |
+| M7 | `gridLimit: _pos` → `BlockBytes` | 殺された(6) | `New_block_…`・`No_rewrap_…` ほか |
+| M8 | 順序を「ピース → 包み直し」に戻す | 殺された(7) | `Typing_up_to_nominal…`・`No_rewrap_…` ほか |
+| M9 | while のスナップ判定を削除 | 殺された(1) | `Snapped_point_equal_to_pos_…` |
+| M10 | 繰上げの `_nextNominal = GridBytes` を削除 | 殺された(1) | `New_block_…` |
+| M11 | while → if(1 回だけ進める) | 殺された(1) | `No_extra_rewrap_…` |
+| M12 | while の `< _pos` → `<= _pos` | 殺された(1) | `Snapped_point_equal_to_pos_…` |
+| M13 | `== 0x80` → `== 0xC0`(継続バイトの判定) | 殺された(2) | `Snapped_point_equal_…`・`Nominal_inside_…` |
+
+**生存の論証**
+- M3: 差が出るのはスナップ中に p が上限に達したときだけで、直後の `p >= limit` で置かないので格子表は同一。差は「上限の先を数バイト読みうる」ことだけで出力に現れない(AppendBuffer では上限の先はゼロなので、実際には上限で止まる)。
+- M4: 追加で回るのは `nominal == limit` の 1 回だけで、`p >= limit` で置かない。
+- M5(計画の見込み「殺される」は誤り): `SnapToCodePoint(p)` は `p >= _pos` なら p をそのまま返すので、先頭の `_nextNominal >= _pos` は全体として冗長な早期脱出(スナップの走査を省くだけ)。while 側の `_nextNominal < _pos &&` も同じ。判定の本体であるスナップ項は M6 で守られている。
+- M9(計画の見込み「生存しうる」に反して殺された): 飛ばした点も次の包み直しで ctor が置くので正しさは壊れず、性能だけの差。`Snapped_point_equal_to_pos_…` が包み直しの回数を観測しているので殺された。
