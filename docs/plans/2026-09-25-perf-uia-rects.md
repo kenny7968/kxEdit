@@ -1110,6 +1110,29 @@ description に、変更前後の計測値(min / 中央 / max)・意図的な挙
 - Minor-1(ワーカーが例外を投げると「戻らない」で失敗し、本当の原因が隠れる): ① fixup。終了フラグを finally で立てるようにした。
 - 参考(対象外): RecreateHandle の途中で `_hwnd` に新しい値が入った直後に RPC スレッドが `InvokeRequired == false` を見ると、`TryGetClientOrigin` が成功して後続の UI 専有状態を読む。下の「既存の競合」と同じ種類の窓なので、そちらに含める。根本的に塞ぐ案: Compute の先頭で `GetWindowThreadProcessId(_hwnd) == GetCurrentThreadId()` を確かめる。
 
+### L5(2026-09-25・windows-mcp による自動確認・publish fa310cb)
+
+**環境**: NVDA 2026.2jp 起動中(High 整合性)。スピーチビューアーは WM_GETTEXT で読めない(UIPI)ので、画面から実解像度で切り出して発声を読んだ。NVDA の視覚的ハイライトは、利用者の設定で OFF(`nvda.ini` の `highlightFocus = False`)。
+**方法**:
+- kxEdit をスピーチビューアーと重ならない位置に置き、300 行の検証用ファイルを開いた。
+- 外部プロセスから、NVDA と同じ UIA の問い合わせ(`BoundingRectangle`・行の `GetBoundingRectangles`・`RangeFromPoint`)を行った。
+- 返った矩形の位置は、画面を実解像度で切り出して、その位置に描かれている文字と突き合わせた。
+- 変更前の publish(pub-before)でも同じことを行い、対比した。
+
+| 確認 | 変更前(pub-before) | 変更後(fa310cb) |
+|---|---|---|
+| ウィンドウを描画なしで 40px 下へ動かした直後の `BoundingRectangle` | 移動前の (597,79) のまま(実際の原点は (597,119)) | (597,119)。実際の原点と一致 |
+| 同じく line 3 の矩形 | y=111(原点から -8)。その位置に描かれているのはタブと line 1 | y=151(原点から +32)。その位置に「L003 あいうえお line 3」 |
+| 実画面の line 5 の位置への `RangeFromPoint`(マウス追従の元になる問い合わせ) | **line 8** を返した(40px = 2.5 行のずれ) | line 5 |
+| キャレット移動の発声(↓↓→→・PageDown×3) | — | 「L002…」「L003…」「ゼロ」「ゼロ」「L038…」「L073…」「L108…」。正常 |
+| TopLine > 0(L074)での全選択 | — | 発声「6190 文字 選択」。矩形 36 個・4.9 ms。先頭は最上段の L074、末尾は下端で一部だけ見えている行を指し、画面の描画と一致 |
+
+**自動では確かめられなかったこと(ユーザーの実機確認に回す)**
+- **NVDA の視覚的ハイライトの実際の表示位置**: 利用者の設定で OFF のため。UIA が返す矩形は上の表のとおり正しい。
+- **マウス追従の実発声**: 注入したマウス移動(`SetCursorPos`・windows-mcp の Move)では、変更前後どちらのビルドでも、ウィンドウを動かしていない状態でも NVDA が何も読み上げなかった。今回の変更とは無関係に、自動では発声を起こせない。`RangeFromPoint` の応答が正しいことは上の表で確かめた。
+
+検証後、`%APPDATA%\kxEdit\settings.json` を退避したコピーから戻した(ウィンドウの大きさと、最近使ったファイルに検証用ファイルが入っていたため。ハッシュの一致を確認)。
+
 ### 申し送り(以後のフェーズへ)
 - **フェーズ 3**: `_lastFrame` のコメント(`EditorControl.cs:121-123`・`EditorControl.Paint.cs:176`)を「テスト観測用」に直す。OnPaint を省いても UIA には影響しない(座標は問い合わせのたびに求める。`UiaTextHostAdapter_HasNoScreenCoordinateCache` で固定)。
 - **既存の食い違い(割り当てなし)**: 折り返し OFF でも `SetTopPosition` で古い `_topSegment`(> 0)が残ると、`ComputeCaretPoint` は TopLine を不可視にして下の行を y = 行高から置く。一方、描画(`ViewportLayout.Build`)はセグメントをクランプして TopLine を y = 0 に描く。本フェーズは従来の挙動を保った(M6・M8 で固定)。実運用でこの状態に入れるかは未確認。
