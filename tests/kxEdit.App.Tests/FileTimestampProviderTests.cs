@@ -78,6 +78,7 @@ public class FileTimestampProviderTests
 
             Assert.Equal(0, probe.CallCount);
             Assert.Equal(0, probe.SaveTargetCallCount);
+            Assert.Equal(0, probe.TimestampCallCount);
         }
         finally
         {
@@ -93,7 +94,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
 
         var actual = new FileTimestampProvider(probe).GetLastWriteTimeUtc(
@@ -101,8 +107,9 @@ public class FileTimestampProviderTests
         );
 
         Assert.Null(actual); // 到達不能 = 判定しない(復元は従来どおり・M-18 は聞かない)
-        Assert.Equal(1, probe.SaveTargetCallCount);
-        Assert.Equal(TimeSpan.FromSeconds(5), probe.SaveTargetLastTimeout);
+        Assert.Equal(1, probe.TimestampCallCount);
+        Assert.Equal(TimeSpan.FromSeconds(5), probe.TimestampLastTimeout);
+        Assert.Equal(0, probe.SaveTargetCallCount); // 更新時刻は専用のプローブ 1 回で取る(P-11)
     }
 
     /// <summary>同じ共有上の 2 件目以降はプローブし直さない。起動時復元は同一共有の文書を
@@ -112,7 +119,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var sut = new FileTimestampProvider(probe);
 
@@ -120,7 +132,7 @@ public class FileTimestampProviderTests
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\unreachable-host\share\b.txt"));
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\unreachable-host\share\sub\c.txt"));
 
-        Assert.Equal(1, probe.SaveTargetCallCount);
+        Assert.Equal(1, probe.TimestampCallCount);
     }
 
     /// <summary>別の共有は記録を共有しない(1 つが落ちていても他は判定する)。</summary>
@@ -129,14 +141,19 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var sut = new FileTimestampProvider(probe);
 
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\host-a\share\a.txt"));
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\host-b\share\b.txt"));
 
-        Assert.Equal(2, probe.SaveTargetCallCount);
+        Assert.Equal(2, probe.TimestampCallCount);
     }
 
     // ===== M-18(設計 2026-09-03 §3.8): 到達不能の記憶は 60 秒で切れる =====
@@ -149,7 +166,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
@@ -158,15 +180,15 @@ public class FileTimestampProviderTests
         Assert.Null(sut.GetLastWriteTimeUtc(path));
         clock.Advance(TimeSpan.FromSeconds(59));
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(1, probe.SaveTargetCallCount); // TTL 内は記憶が効く(既存テストの意味は保たれる)
+        Assert.Equal(1, probe.TimestampCallCount); // TTL 内は記憶が効く(既存テストの意味は保たれる)
 
         clock.Advance(TimeSpan.FromSeconds(1)); // 計 60 秒 = 期限ちょうど → 再プローブ
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(2, probe.SaveTargetCallCount); // 期限切れ → 再プローブ(まだ到達不能なので再記憶)
+        Assert.Equal(2, probe.TimestampCallCount); // 期限切れ → 再プローブ(まだ到達不能なので再記憶)
 
         clock.Advance(TimeSpan.FromSeconds(1)); // 計 61 秒: 60 秒時点で再記憶されたので抑止
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(2, probe.SaveTargetCallCount);
+        Assert.Equal(2, probe.TimestampCallCount);
     }
 
     /// <summary>TTL は ctor で差し替えられる(既定 60 秒が唯一の値ではないことの配線確認)。</summary>
@@ -175,7 +197,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock, unreachableTtl: TimeSpan.FromSeconds(5));
@@ -185,7 +212,7 @@ public class FileTimestampProviderTests
         clock.Advance(TimeSpan.FromSeconds(6));
         Assert.Null(sut.GetLastWriteTimeUtc(path));
 
-        Assert.Equal(2, probe.SaveTargetCallCount);
+        Assert.Equal(2, probe.TimestampCallCount);
     }
 
     /// <summary>期限切れ後に到達できれば、記憶が到達可能を塞がないことを固定する
@@ -199,7 +226,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
@@ -207,11 +239,16 @@ public class FileTimestampProviderTests
 
         Assert.Null(sut.GetLastWriteTimeUtc(path));
         clock.Advance(TimeSpan.FromSeconds(61));
-        probe.SaveTargetResult = new(Reachable: true, FileExists: false);
+        probe.TimestampResult = new(
+            Reachable: true,
+            Exists: false,
+            LastWriteUtc: null,
+            Error: false
+        );
 
         // 到達できても不在なので null。プローブが走ったこと(=記憶に塞がれなかったこと)だけを見る。
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(2, probe.SaveTargetCallCount);
+        Assert.Equal(2, probe.TimestampCallCount);
     }
 
     /// <summary>復旧を確認した根の記憶は明示的に捨てる(<c>Remove</c>)。捨てないと、期限切れ後に復旧を
@@ -223,7 +260,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
@@ -231,14 +273,19 @@ public class FileTimestampProviderTests
 
         Assert.Null(sut.GetLastWriteTimeUtc(path)); // 到達不能 → 記憶(期限 = +60 秒)
         clock.Advance(TimeSpan.FromSeconds(61));
-        probe.SaveTargetResult = new(Reachable: true, FileExists: false);
+        probe.TimestampResult = new(
+            Reachable: true,
+            Exists: false,
+            LastWriteUtc: null,
+            Error: false
+        );
         Assert.Null(sut.GetLastWriteTimeUtc(path)); // 期限切れ → 再プローブ → 復旧 → 記憶を捨てる(不在なので null)
-        Assert.Equal(2, probe.SaveTargetCallCount);
+        Assert.Equal(2, probe.TimestampCallCount);
 
         clock.Advance(TimeSpan.FromSeconds(-40)); // 壁時計の逆行: 計 21 秒 = 捨てていなければ期限(60 秒)内に戻る
 
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(3, probe.SaveTargetCallCount); // Remove が無ければ 2 のまま(復活した記録に抑止される)
+        Assert.Equal(3, probe.TimestampCallCount); // Remove が無ければ 2 のまま(復活した記録に抑止される)
     }
 
     /// <summary>脆弱性レビュー L-1: 到達できる共有上でファイルが無いだけならルートを記憶しない。
@@ -249,7 +296,7 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: true, FileExists: false),
+            TimestampResult = new(Reachable: true, Exists: false, LastWriteUtc: null, Error: false),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
@@ -257,7 +304,7 @@ public class FileTimestampProviderTests
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\reachable-host\share\gone.txt"));
         Assert.Null(sut.GetLastWriteTimeUtc(@"\\reachable-host\share\other.txt"));
 
-        Assert.Equal(2, probe.SaveTargetCallCount); // 2 件目も記憶に阻まれずプローブされる
+        Assert.Equal(2, probe.TimestampCallCount); // 2 件目も記憶に阻まれずプローブされる
     }
 
     // ===== 最終脆弱性レビュー V-1: 基準を捕捉する経路は到達不能記憶を素通りする =====
@@ -270,7 +317,12 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
@@ -278,14 +330,19 @@ public class FileTimestampProviderTests
 
         Assert.Null(sut.GetLastWriteTimeUtc(path)); // 到達不能 → 記憶
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(1, probe.SaveTargetCallCount); // 前提: 記憶が効いている
-        probe.SaveTargetResult = new(Reachable: true, FileExists: false); // 復旧(不在なので実 I/O へは進まない)
+        Assert.Equal(1, probe.TimestampCallCount); // 前提: 記憶が効いている
+        probe.TimestampResult = new(
+            Reachable: true,
+            Exists: false,
+            LastWriteUtc: null,
+            Error: false
+        ); // 復旧(不在なので実 I/O へは進まない)
 
         Assert.Null(sut.ProbeLastWriteTimeUtc(path));
 
-        Assert.Equal(2, probe.SaveTargetCallCount); // 記憶を無視してプローブした
+        Assert.Equal(2, probe.TimestampCallCount); // 記憶を無視してプローブした
         Assert.Null(sut.GetLastWriteTimeUtc(path));
-        Assert.Equal(3, probe.SaveTargetCallCount); // 記憶は捨てられている(TTL 内でも抑止されない)
+        Assert.Equal(3, probe.TimestampCallCount); // 記憶は捨てられている(TTL 内でも抑止されない)
     }
 
     /// <summary><c>ProbeLastWriteTimeUtc</c> で到達不能と判れば記憶は書く(到達不能の事実は経路によらない)。
@@ -296,17 +353,103 @@ public class FileTimestampProviderTests
     {
         var probe = new FakeReachabilityProbe
         {
-            SaveTargetResult = new(Reachable: false, FileExists: false),
+            TimestampResult = new(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
         };
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 3, 10, 0, 0, TimeSpan.Zero));
         var sut = new FileTimestampProvider(probe, clock);
         const string path = @"\\unreachable-host\share\a.txt";
 
         Assert.Null(sut.ProbeLastWriteTimeUtc(path));
-        Assert.Equal(1, probe.SaveTargetCallCount);
+        Assert.Equal(1, probe.TimestampCallCount);
 
         Assert.Null(sut.GetLastWriteTimeUtc(path));
 
-        Assert.Equal(1, probe.SaveTargetCallCount); // 記憶に抑止された
+        Assert.Equal(1, probe.TimestampCallCount); // 記憶に抑止された
+    }
+
+    // ===== 性能改善フェーズ 7(P-11): 更新時刻はプローブの結果だけで答える =====
+
+    /// <summary>リモートで存在するファイルは、プローブが返した更新時刻をそのまま返す。
+    /// UI スレッドで <c>File.Exists</c> + <c>GetLastWriteTimeUtc</c> を呼び直さない(従来はリモートで往復 4 回)。
+    /// パスは即答する存在しない共有なので、実 I/O に進めば null になり、固定の時刻は返らない
+    /// (=呼び直していないことの証人)。保存先プローブと読み取り側プローブも呼ばない。</summary>
+    [Fact]
+    public void RemoteExistingFile_ReturnsProbedTimestamp_WithoutUiThreadIo()
+    {
+        var stamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var probe = new FakeReachabilityProbe
+        {
+            TimestampResult = new(Reachable: true, Exists: true, LastWriteUtc: stamp, Error: false),
+        };
+        var sut = new FileTimestampProvider(probe);
+        const string path = @"\\localhost\kxedit-no-such-share\a.txt";
+
+        Assert.Equal(stamp, sut.GetLastWriteTimeUtc(path));
+        Assert.Equal(stamp, sut.ProbeLastWriteTimeUtc(path));
+
+        Assert.Equal(2, probe.TimestampCallCount);
+        Assert.Equal(0, probe.SaveTargetCallCount);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    /// <summary>存在は確認できたが更新時刻の取得に失敗した(Error)ときは null を返し、
+    /// その共有を到達不能として記憶しない(従来の UI スレッド側の例外の扱いと同じ)。</summary>
+    [Fact]
+    public void RemoteTimestampError_ReturnsNull_WithoutRememberingRoot()
+    {
+        var probe = new FakeReachabilityProbe
+        {
+            TimestampResult = new(Reachable: true, Exists: true, LastWriteUtc: null, Error: true),
+        };
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 26, 10, 0, 0, TimeSpan.Zero));
+        var sut = new FileTimestampProvider(probe, clock);
+        const string path = @"\\reachable-host\share\a.txt";
+
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+        Assert.Null(sut.GetLastWriteTimeUtc(path));
+
+        Assert.Equal(2, probe.TimestampCallCount); // 2 回目も記憶に阻まれずプローブされる
+    }
+
+    /// <summary>ローカルで存在するファイルは、更新時刻を実際の値で返す(<c>FileInfo</c> 1 回に変えた後も、
+    /// 既定値ではない固定の時刻がそのまま返ること)。</summary>
+    [Fact]
+    public void LocalExistingFile_ReturnsExactLastWriteTime()
+    {
+        var dir = Directory.CreateTempSubdirectory("kxEditTs_").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "a.txt");
+            File.WriteAllText(path, "x");
+            var stamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(path, stamp);
+
+            Assert.Equal(stamp, new FileTimestampProvider().GetLastWriteTimeUtc(path));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>ローカルでフォルダーを渡したときは null(<c>File.Exists</c> の意味論: フォルダーは false)。
+    /// <c>FileInfo</c> に変えても、フォルダーの更新時刻を返さないこと。</summary>
+    [Fact]
+    public void LocalDirectory_ReturnsNull()
+    {
+        var dir = Directory.CreateTempSubdirectory("kxEditTs_").FullName;
+        try
+        {
+            Assert.Null(new FileTimestampProvider().GetLastWriteTimeUtc(dir));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 }

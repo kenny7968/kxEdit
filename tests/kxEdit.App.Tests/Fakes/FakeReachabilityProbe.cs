@@ -9,6 +9,7 @@ namespace kxEdit.App.Tests.Fakes;
 /// <item><c>ProbeDirectoryExistsWithTimeout</c> — 既定 <see cref="DirectoryResult"/>=true
 /// (到達できるフォルダー = grep が本体へ進む形)。A-17 のフォルダープローブ経路の pin。</item>
 /// <item><c>ProbeSaveTargetWithTimeout</c> — 既定は「到達可能・未存在」= 新規保存が通る形(A-4)。</item>
+/// <item><c>ProbeTimestampWithTimeout</c> — 既定は「到達可能・不在」(P-11。外部変更チェックの更新時刻)。</item>
 /// <item><c>NormalizePathWithTimeout</c> — 既定は<b>実装への委譲</b>(素通しではない)。
 /// 理由は <see cref="NormalizeResult"/> のコメント(Issue #48)。</item>
 /// </list>
@@ -76,6 +77,25 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
         SaveTargetCallCount++;
         SaveTargetLastTimeout = timeout;
         return SaveTargetResult;
+    }
+
+    /// <summary>
+    /// <c>ProbeTimestampWithTimeout</c> の応答。既定は「到達可能・不在」
+    /// (<see cref="SaveTargetResult"/> の既定と同じ形。FileExists ゲートで止まり、実 I/O へ進まない)。
+    /// </summary>
+    public TimestampProbeResult TimestampResult { get; set; } =
+        new(Reachable: true, Exists: false, LastWriteUtc: null, Error: false);
+
+    public int TimestampCallCount { get; private set; }
+
+    /// <summary>直近の <c>ProbeTimestampWithTimeout</c> 呼出で渡された timeout(5s 契約の pin)。</summary>
+    public TimeSpan TimestampLastTimeout { get; private set; }
+
+    public TimestampProbeResult ProbeTimestampWithTimeout(string path, TimeSpan timeout)
+    {
+        TimestampCallCount++;
+        TimestampLastTimeout = timeout;
+        return TimestampResult;
     }
 
     /// <summary>

@@ -237,6 +237,133 @@ public class FileReachabilityProbeTests
         Assert.True(result.FileExists);
     }
 
+    // ===== 更新時刻のプローブ(性能改善フェーズ 7・P-11)=====
+
+    [Fact]
+    public void ProbeTimestamp_ExistingFile_ReturnsExactLastWriteTime()
+    {
+        using var tmp = new TempDir();
+        string path = tmp.File("a.txt");
+        File2.WriteAllText(path, "x");
+        var stamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File2.SetLastWriteTimeUtc(path, stamp);
+
+        var result = new FileReachabilityProbe().ProbeTimestampWithTimeout(path, Timeout);
+
+        Assert.Equal(
+            new TimestampProbeResult(
+                Reachable: true,
+                Exists: true,
+                LastWriteUtc: stamp,
+                Error: false
+            ),
+            result
+        );
+    }
+
+    [Fact]
+    public void ProbeTimestamp_MissingFileInExistingDir_ReachableNotExists()
+    {
+        // 不在なら更新時刻を持たない(1601-01-01 を返さない)。
+        using var tmp = new TempDir();
+
+        var result = new FileReachabilityProbe().ProbeTimestampWithTimeout(
+            tmp.File("missing.txt"),
+            Timeout
+        );
+
+        Assert.Equal(
+            new TimestampProbeResult(
+                Reachable: true,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            ),
+            result
+        );
+    }
+
+    /// <summary>
+    /// 等価性の網(設計書 §12.1「Reachable の定義」): 更新時刻のプローブの (Reachable, Exists) は、
+    /// 従来 <c>FileTimestampProvider</c> が使っていた保存先プローブの (Reachable, FileExists) と一致する。
+    /// ずれると到達不能の記憶の判定が変わる(共有全体を 60 秒黙らせる/黙らせない)。
+    /// NUL 入りの名前は <c>FileInfo</c> の生成が例外を投げる入力で、これを到達不能に倒すと
+    /// ここで落ちる(<c>File.Exists</c> は例外を投げずに false を返すので、従来は「親あり・不在」)。
+    /// </summary>
+    [Theory]
+    [InlineData("existing")]
+    [InlineData("missing")]
+    [InlineData("missing-dir")]
+    [InlineData("directory")]
+    [InlineData("drive-root")]
+    [InlineData("nul-in-name")]
+    [InlineData("trailing-separator")]
+    public void ProbeTimestamp_MatchesSaveTargetProbe_OnReachableAndExists(string kind)
+    {
+        using var tmp = new TempDir();
+        string existing = tmp.File("a.txt");
+        File2.WriteAllText(existing, "x");
+        string path = kind switch
+        {
+            "existing" => existing,
+            "missing" => tmp.File("missing.txt"),
+            "missing-dir" => System.IO.Path.Combine(tmp.Root, "no-such-dir", "a.txt"),
+            "directory" => tmp.Root,
+            "drive-root" => System.IO.Path.GetPathRoot(tmp.Root)!,
+            "nul-in-name" => tmp.File("a\0b.txt"),
+            "trailing-separator" => tmp.Root + System.IO.Path.DirectorySeparatorChar,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        var probe = new FileReachabilityProbe();
+
+        var save = probe.ProbeSaveTargetWithTimeout(path, Timeout);
+        var ts = probe.ProbeTimestampWithTimeout(path, Timeout);
+
+        Assert.Equal(save.Reachable, ts.Reachable);
+        Assert.Equal(save.FileExists, ts.Exists);
+        Assert.False(ts.Error);
+        Assert.Equal(ts.Exists, ts.LastWriteUtc.HasValue); // 在るときだけ時刻を持つ
+    }
+
+    [Fact]
+    public void RunTimestampProbe_WorkExceedsTimeout_FailsSafeToUnreachable()
+    {
+        // フェイルセーフ値は「到達不能」。work は (true,true,時刻) を返すので、
+        // (false,false,null,false) が返ったならフェイルセーフ由来と確定する(既存の Run*Probe と対称)。
+        var gate = new TaskCompletionSource();
+        try
+        {
+            var result = FileReachabilityProbe.RunTimestampProbe(
+                () =>
+                {
+                    gate.Task.Wait();
+                    return new TimestampProbeResult(true, true, DateTime.UtcNow, false);
+                },
+                TimeSpan.FromMilliseconds(50)
+            );
+
+            Assert.Equal(new TimestampProbeResult(false, false, null, false), result);
+            Assert.Equal(default, result); // ゼロ値がフェイルセーフ側にある(型の doc の契約)
+        }
+        finally
+        {
+            gate.SetResult(); // 退避スレッドを解放する(テスト後に leak させない)
+        }
+    }
+
+    [Fact]
+    public void RunTimestampProbe_WorkCompletes_ReturnsWorkResult()
+    {
+        // 対照群。常にフェイルセーフ値を返す実装を kill する。
+        var stamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var result = FileReachabilityProbe.RunTimestampProbe(
+            () => new TimestampProbeResult(true, true, stamp, false),
+            Timeout
+        );
+
+        Assert.Equal(new TimestampProbeResult(true, true, stamp, false), result);
+    }
+
     [Fact]
     public void RunDirectoryExistsProbe_WorkExceedsTimeout_FailsSafeToNotFound()
     {

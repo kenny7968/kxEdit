@@ -11,10 +11,12 @@ namespace kxEdit.App;
 /// <see cref="NormalizePathWithTimeout"/> は <see cref="System.IO.Path.GetFullPath(string)"/> を、
 /// フォルダー版の <see cref="ProbeDirectoryExistsWithTimeout"/>(A-17)は
 /// <see cref="System.IO.Directory.Exists"/> を、
+/// 更新時刻版の <see cref="ProbeTimestampWithTimeout"/>(性能改善フェーズ 7・P-11)は
+/// <see cref="System.IO.FileInfo"/> 1 回(不在なら親フォルダーの <see cref="System.IO.Directory.Exists"/>)を、
 /// それぞれ <see cref="Task.Run{TResult}(Func{TResult})"/> で
 /// バックグラウンドスレッドに退避し、<see cref="Task.Wait(TimeSpan)"/> の短タイムアウトで
-/// UI スレッドをブロックしない。4 本ともタイムアウト時のフェイルセーフは
-/// <see cref="WaitBounded{T}"/> に集約する(= 「確定しなかった」側に倒す。プローブ 3 本は到達不能、
+/// UI スレッドをブロックしない。5 本ともタイムアウト時のフェイルセーフは
+/// <see cref="WaitBounded{T}"/> に集約する(= 「確定しなかった」側に倒す。プローブ 4 本は到達不能、
 /// 正規化は <see cref="PathNormalizeStatus.TimedOut"/>)。
 /// <see cref="System.IO.Path.GetFullPath(string)"/> は名前解決のみで実 I/O を行わない —
 /// **ただし正規化後のパスに <c>~</c> が含まれる場合だけは例外**で <c>GetLongPathName</c> を
@@ -139,6 +141,85 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
             timeout,
             new PathNormalizeResult(PathNormalizeStatus.TimedOut, string.Empty)
         );
+
+    /// <summary>
+    /// 更新時刻プローブの骨格(性能改善フェーズ 7・P-11)。<paramref name="work"/> をバックグラウンドへ退避し、
+    /// 期限内に終わらなければ「到達不能」へ倒す。フェイルセーフ値をここに置く理由は
+    /// <see cref="RunSaveTargetProbe"/> と同じ(work を差し替えてタイムアウト経路を決定的にテストするため)。
+    /// </summary>
+    internal static TimestampProbeResult RunTimestampProbe(
+        Func<TimestampProbeResult> work,
+        TimeSpan timeout
+    ) =>
+        WaitBounded(
+            Task.Run(work),
+            timeout,
+            new TimestampProbeResult(
+                Reachable: false,
+                Exists: false,
+                LastWriteUtc: null,
+                Error: false
+            )
+        );
+
+    /// <summary>
+    /// 更新時刻プローブの work(P-11)。<see cref="FileInfo"/> を 1 回だけ作り、
+    /// <see cref="FileSystemInfo.Exists"/> が取り込んだ属性から更新時刻も読む(往復 1 回)。
+    /// (Reachable, Exists) は <see cref="ProbeSaveTargetWithTimeout"/> と同じ結果になるよう組む
+    /// (<c>FileReachabilityProbeTests.ProbeTimestamp_MatchesSaveTargetProbe_OnReachableAndExists</c>):
+    /// <list type="bullet">
+    /// <item>存在の確認は <c>File.Exists</c> の意味論に揃える。<c>File.Exists</c> は例外を投げずに false を返すので、
+    /// <see cref="FileInfo"/> の生成(名前に NUL があると <see cref="ArgumentException"/>)や
+    /// <c>Exists</c> の例外も「不在」として親フォルダーの確認へ進む。到達不能に倒すと、
+    /// 共有全体を到達不能として記憶する挙動差になる。</item>
+    /// <item>親フォルダーの確認と、それ以外の予期しない例外は、従来の保存先プローブと同じく到達不能へ倒す。</item>
+    /// <item>更新時刻の取得の例外は <c>Error</c> で返す(呼出側は null にし、記憶しない)。</item>
+    /// </list>
+    /// </summary>
+    internal static TimestampProbeResult ReadTimestamp(string path)
+    {
+        try
+        {
+            FileInfo? info;
+            try
+            {
+                info = new FileInfo(path);
+                if (!info.Exists)
+                    info = null;
+            }
+            catch
+            {
+                info = null; // File.Exists と同じく「不在」
+            }
+
+            if (info is null)
+            {
+                string? dir = Path.GetDirectoryName(path);
+                // dir が null / 空は親が無い(ProbeSaveTargetWithTimeout と同じ扱い)。
+                bool dirExists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
+                return new TimestampProbeResult(dirExists, false, null, false);
+            }
+
+            try
+            {
+                return new TimestampProbeResult(true, true, info.LastWriteTimeUtc, false);
+            }
+            catch
+            {
+                return new TimestampProbeResult(true, true, null, true);
+            }
+        }
+        catch
+        {
+            // Directory.Exists 等は通常投げないが、UNC 未到達などで稀に出る例外を吸って
+            // 「到達不能」に倒す(ProbeSaveTargetWithTimeout と同方針)。
+            return new TimestampProbeResult(false, false, null, false);
+        }
+    }
+
+    /// <inheritdoc />
+    public TimestampProbeResult ProbeTimestampWithTimeout(string path, TimeSpan timeout) =>
+        RunTimestampProbe(() => ReadTimestamp(path), timeout);
 
     /// <inheritdoc />
     public bool ProbeFileExistsWithTimeout(string path, TimeSpan timeout) =>
