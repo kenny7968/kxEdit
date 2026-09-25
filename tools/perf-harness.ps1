@@ -28,6 +28,11 @@
 .PARAMETER WorkDir
     計測用の文書を生成するフォルダー。既定は $env:TEMP\kxEdit-perf-harness。生成するファイルを書くだけで、削除はしない。
 
+.PARAMETER SessionRestore
+    計測用の空のプロフィールに settings.json({"RestoreOpenFilesOnStartup":true})を置いてから起動する
+    (「起動時に前回開いていたファイルを開く」= ON。性能改善フェーズ 6 の条件)。既定は OFF(既定設定のまま)。
+    書くのは計測中の空のプロフィールだけで、利用者の退避には触れない。
+
 .PARAMETER SelfTest
     一時フォルダーの偽プロフィールで、退避・復元と中止条件を検証する。実プロフィールには触れない。
 
@@ -44,6 +49,8 @@ param(
     [string]$OutCsv,
     [Parameter(ParameterSetName = 'Run')]
     [string]$WorkDir = (Join-Path $env:TEMP 'kxEdit-perf-harness'),
+    [Parameter(ParameterSetName = 'Run')]
+    [switch]$SessionRestore,
     [Parameter(ParameterSetName = 'SelfTest', Mandatory = $true)]
     [switch]$SelfTest,
     [Parameter(ParameterSetName = 'Recover', Mandatory = $true)]
@@ -326,6 +333,19 @@ function Clear-ProfileForRun([string]$ProfileDir, [string]$Root) {
     }
 }
 
+# 空にした直後のプロフィールに、計測条件の settings.json を置く(-SessionRestore)。
+# Clear-ProfileForRun の後にだけ呼ぶ(目印が cleared であること=利用者のデータは退避済みで、今の中身は計測の産物だけ)。
+function Write-RunSettings([string]$ProfileDir, [string]$Root, [bool]$SessionRestore) {
+    if (-not $SessionRestore) { return }
+    $marker = Read-Marker $Root
+    if ($null -eq $marker -or $marker.State -ne 'cleared') {
+        throw '計測用の設定を書けません(プロフィールを空にしていない)。利用者のプロフィールに触れずに中止します。'
+    }
+    if (-not (Test-Path -LiteralPath $ProfileDir)) { [void](New-Item -ItemType Directory -Path $ProfileDir) }
+    Assert-NoReparsePoints $ProfileDir
+    Set-Content -LiteralPath (Join-Path $ProfileDir 'settings.json') -Value '{"RestoreOpenFilesOnStartup":true}' -Encoding utf8
+}
+
 # 退避から元へ戻し、照合できたら退避と目印を消す。照合できなければ退避を残して例外。
 # -Displace: 今のプロフィールを消さずに $Root\displaced-<日時>\kxEdit へ退かせる(-Recover 用)。
 #   異常終了の後に利用者が kxEdit を使っていれば、その本文や設定がここに入っているため。
@@ -433,8 +453,14 @@ function Invoke-SelfTest {
         Save-ProfileStash $prof $root
         Check ((Read-Marker $root).State -eq 'stashed') '退避後の目印は stashed'
         Check (Throws { Save-ProfileStash $prof $root }) '退避が残っている間の再退避は拒否する(目印を上書きしない)'
+        # Write-RunSettings(-SessionRestore): cleared の後だけ書く。stashed(まだ空にしていない)では投げて、何も書かない。
+        Check ((Throws { Write-RunSettings $prof $root $true }) -and -not ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw) -match 'RestoreOpenFilesOnStartup')) '空にする前は計測用の設定を書かない'
         Clear-ProfileForRun $prof $root
         Check (@(Get-ChildItem -LiteralPath $prof -Force).Count -eq 0) '計測用にプロフィールが空になる'
+        Write-RunSettings $prof $root $false
+        Check (@(Get-ChildItem -LiteralPath $prof -Force).Count -eq 0) 'OFF のときは計測用の設定を書かない'
+        Write-RunSettings $prof $root $true
+        Check ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw).Trim() -eq '{"RestoreOpenFilesOnStartup":true}') '空にした後は計測用の設定を書く'
         Check (HasReason (Pre) '退避が残っています') '退避が残っている間は中止条件に当たる'
         Set-Content -LiteralPath (Join-Path $prof 'settings.json') -Value 'changed' -Encoding utf8
         New-Item -ItemType Directory -Force -Path (Join-Path $prof 'backups') | Out-Null
@@ -1007,6 +1033,7 @@ function Assert-NoKxEditRunning {
 function Start-KxEdit([string]$Exe) {
     Assert-NoKxEditRunning
     Clear-ProfileForRun $script:ProfileDir $script:HarnessRoot
+    Write-RunSettings $script:ProfileDir $script:HarnessRoot $SessionRestore.IsPresent
     $p = Start-Process -FilePath $Exe -PassThru
     $script:Launched.Add($p)
     [KxPerfNative]::KillOnHarnessExit($p.Handle)
@@ -1423,6 +1450,7 @@ $docs = Initialize-Docs $WorkDir
 $nvda = [bool](Get-Process -Name nvda -ErrorAction SilentlyContinue)
 if ($nvda) { Write-Host '[注意] NVDA が起動しています。調査記録 §9 の値(NVDA なし)とは条件が違います。' -ForegroundColor Yellow }
 Add-Result 'env' 'NVDA起動中' '-' 1 ([int]$nvda) 'bool'
+Add-Result 'env' 'session_restore' '-' 1 ([int]$SessionRestore.IsPresent) 'bool'
 # 前後比較で条件を取り違えないための記録(値は value 列ではなく condition 列に入れる)。
 $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.Substring(0, 12)
 $dllPath = Join-Path (Split-Path -Parent $exe) 'kxEdit.dll'
