@@ -178,7 +178,11 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// 末尾区切りを落として true を返すが、<c>File.Exists</c> は正規化後の末尾区切りを見て
     /// false を返す。ここで揃えないと (Reachable, Exists) がずれる(共有全体を誤って
     /// 到達可能・既存として扱う)ので、<see cref="Path.EndsInDirectorySeparator(string)"/> の
-    /// ときも File.Exists と同じく「不在」として親フォルダーの確認へ進む。</item>
+    /// ときも File.Exists と同じく「不在」として親フォルダーの確認へ進む。
+    /// 最終レビュー指摘: この判定は <c>info.FullName</c>(<see cref="Path.GetFullPath(string)"/> 済み)
+    /// で行う。<c>File.Exists</c> 自身も正規化後の末尾区切りを見て判定するのと同じ順序にしないと、
+    /// 正規化で初めて末尾区切りが現れる入力(末尾に空白 1 文字・<c>.</c> + 空白等)を素通ししてしまう
+    /// (実測: net9 で <c>File.Exists</c>=false / <c>FileInfo.Exists</c>=true のまま残る)。</item>
     /// <item>親フォルダーの確認と、それ以外の予期しない例外は、従来の保存先プローブと同じく到達不能へ倒す。</item>
     /// <item>更新時刻の取得の例外は <c>Error</c> で返す(呼出側は null にし、記憶しない)。
     /// <c>Exists</c> が true なら属性は <see cref="FileInfo"/> の生成時に取り込み済みで
@@ -195,7 +199,12 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                 info = new FileInfo(path);
                 // 脆弱性レビュー I-1: 末尾区切り付きの既存ファイルは FileInfo.Exists が true を返すが
                 // File.Exists は false を返す(意味論のずれ)。File.Exists 側に揃える。
-                if (!info.Exists || Path.EndsInDirectorySeparator(path))
+                // 最終レビュー指摘: 末尾区切りの判定は正規化後のパス(info.FullName = GetFullPath の結果)で
+                // 行う。File.Exists 自身も GetFullPath 後の末尾区切りを見て判定するのと同じ順序にする —
+                // raw な path で見ると、"a.txt\ " や "a.txt\. " のように正規化で初めて "a.txt\" に
+                // 変わる(=区切りが現れる)入力を素通ししてしまい、File.Exists=false / FileInfo.Exists=true
+                // のずれが再現する(実測: net9)。
+                if (!info.Exists || Path.EndsInDirectorySeparator(info.FullName))
                     info = null;
             }
             catch

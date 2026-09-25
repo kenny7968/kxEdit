@@ -88,8 +88,12 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
                 // FileInfo.Exists が FillAttributeInfo で区切りを落として true を返すが、
                 // File.Exists は正規化後の区切りを見て false を返す(意味論のずれ)。
                 // 揃えないと、従来 null だった入力が固定の時刻を返す挙動変更になる。
+                // 最終レビュー指摘: 末尾区切りの判定は info.FullName(GetFullPath 済み)で行う。
+                // File.Exists と同じ順序(正規化後に判定)にしないと、正規化で初めて末尾区切りが
+                // 現れる入力(末尾に空白 1 文字・"." + 空白等)を素通ししてしまう
+                // (実測: net9 で File.Exists=false / FileInfo.Exists=true のまま残る)。
                 var info = new FileInfo(path);
-                return info.Exists && !Path.EndsInDirectorySeparator(path)
+                return info.Exists && !Path.EndsInDirectorySeparator(info.FullName)
                     ? info.LastWriteTimeUtc
                     : null;
             }

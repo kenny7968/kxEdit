@@ -18,8 +18,9 @@ namespace kxEdit.App.Tests;
 public class PreviewUserDataFolderTests
 {
     // xUnit1031(Fact 直下での Task.Wait/.Result 直呼び禁止)・S2925(Thread.Sleep 直呼び禁止)は
-    // 「Fact 本体に直接書かれているか」だけを見るため、本ファイル既存の PumpUntil 系ヘルパーと同じく
-    // private ヘルパー経由にして回避する。待つこと自体・値はテストの主目的なので変えない。
+    // 「Fact 本体に直接書かれているか」だけを見るため、他ファイル(WinFormsDebounceSchedulerTests /
+    // PendingActivationTests 等)の PumpUntil 系ヘルパーと同じ考え方で、private ヘルパー経由にして
+    // 回避する。待つこと自体・値はテストの主目的なので変えない。
     private static bool WaitOrTimeout(Task task, TimeSpan timeout) => task.Wait(timeout);
 
     private static int ResultOf(Task<int> task) => task.Result;

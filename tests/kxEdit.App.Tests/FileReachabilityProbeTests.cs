@@ -302,6 +302,8 @@ public class FileReachabilityProbeTests
     [InlineData("nul-in-name")]
     [InlineData("trailing-separator")]
     [InlineData("file-trailing-separator")]
+    [InlineData("file-trailing-space")]
+    [InlineData("file-trailing-dot-space")]
     public void ProbeTimestamp_MatchesSaveTargetProbe_OnReachableAndExists(string kind)
     {
         using var tmp = new TempDir();
@@ -317,6 +319,12 @@ public class FileReachabilityProbeTests
             "nul-in-name" => tmp.File("a\0b.txt"),
             "trailing-separator" => tmp.Root + System.IO.Path.DirectorySeparatorChar,
             "file-trailing-separator" => existing + System.IO.Path.DirectorySeparatorChar,
+            // 最終レビュー指摘: 正規化前(raw)は区切りで終わらないが、GetFullPath 後は
+            // "...\a.txt\" に正規化される(実測)。判定を raw のまま行うと File.Exists は
+            // 正規化後の区切りを見て false、FileInfo.Exists は区切りを落として true になり、
+            // (Reachable, Exists) がずれる。
+            "file-trailing-space" => existing + "\\ ",
+            "file-trailing-dot-space" => existing + "\\. ",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
         var probe = new FileReachabilityProbe();

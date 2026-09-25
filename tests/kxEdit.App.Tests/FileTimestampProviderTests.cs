@@ -461,6 +461,29 @@ public class FileTimestampProviderTests
         }
     }
 
+    /// <summary>最終レビュー指摘: 既存ファイル名の直後に区切り+空白を付けたパス(正規化前は区切りで
+    /// 終わらないが、<c>GetFullPath</c> 後は <c>...\a.txt\</c> に正規化される)も null。
+    /// 判定を正規化前の raw パスで行うと、raw は区切りで終わらないため
+    /// <see cref="FileTimestampProviderTests.LocalExistingFile_WithTrailingSeparator_ReturnsNull"/> の
+    /// 網をすり抜け、<c>FileInfo.Exists</c>(区切りを落として true)がそのまま採用されて
+    /// 固定の時刻を返してしまう(実測: net9 で <c>File.Exists</c>=false / <c>FileInfo.Exists</c>=true)。</summary>
+    [Fact]
+    public void LocalExistingFile_WithTrailingSeparatorAfterNormalization_ReturnsNull()
+    {
+        var dir = Directory.CreateTempSubdirectory("kxEditTs_").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "a.txt");
+            File.WriteAllText(path, "x");
+
+            Assert.Null(new FileTimestampProvider().GetLastWriteTimeUtc(path + "\\ "));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     /// <summary>ローカルでフォルダーを渡したときは null(<c>File.Exists</c> の意味論: フォルダーは false)。
     /// <c>FileInfo</c> に変えても、フォルダーの更新時刻を返さないこと。</summary>
     [Fact]
