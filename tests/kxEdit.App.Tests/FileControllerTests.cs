@@ -2328,6 +2328,94 @@ public class FileControllerTests
             Assert.Equal(path, host.Settings.RecentFiles[0]);
         });
 
+    // ===== 性能改善フェーズ 7(P-22): 最近使ったファイルが変わらなければ settings.json を保存しない =====
+
+    /// <summary>
+    /// 先頭が既に同じパスなら、一覧は変わらないので保存もメニュー再構築もしない。
+    /// 既定(空の一覧)と区別するため、2 件入った非既定の一覧から始める(CLAUDE.md §4-B)。
+    /// </summary>
+    [Fact]
+    public void TryOpenOrActivate_PathAlreadyFirstInRecent_DoesNotSaveSettings() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            string other = tmp.File("b.txt");
+            File2.WriteAllText(path, "x");
+            host.Settings.RecentFiles = new List<string> { path, other };
+
+            Assert.NotNull(host.File.TryOpenOrActivate(path));
+
+            Assert.Equal(new[] { path, other }, host.Settings.RecentFiles);
+            Assert.Equal(0, host.SaveSettingsCount);
+            Assert.Equal(0, host.RecentChangedCount);
+        });
+
+    /// <summary>既に開いているタブへ切り替えるだけの経路(grep の結果から飛ぶ等)でも、2 回目は保存しない。
+    /// 1 回目は一覧が変わるので保存する(対照)。</summary>
+    [Fact]
+    public void TryOpenOrActivate_ActivatingAlreadyOpenTab_SavesOnlyOnFirstOpen() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "x");
+
+            var first = host.File.TryOpenOrActivate(path);
+            Assert.Equal(1, host.SaveSettingsCount);
+            Assert.Equal(1, host.RecentChangedCount);
+
+            Assert.Same(first, host.File.TryOpenOrActivate(path));
+
+            Assert.Equal(1, host.SaveSettingsCount);
+            Assert.Equal(1, host.RecentChangedCount);
+        });
+
+    /// <summary>
+    /// 先頭が大文字小文字だけ違う同じファイルなら、先頭の表記が置き換わる=一覧は変わるので保存する。
+    /// 比較を <c>PathKey</c>(大文字小文字を無視)にすると、この変化を取りこぼす(設計書 §12.2)。
+    /// </summary>
+    [Fact]
+    public void TryOpenOrActivate_FirstEntryDiffersOnlyInCase_SavesSettings() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "x");
+            string upper = path.ToUpperInvariant();
+            Assert.NotEqual(path, upper); // 前提の自己検証(大文字小文字の差がある)
+            host.Settings.RecentFiles = new List<string> { upper };
+
+            Assert.NotNull(host.File.TryOpenOrActivate(path));
+
+            Assert.Equal(new[] { path }, host.Settings.RecentFiles);
+            Assert.Equal(1, host.SaveSettingsCount);
+            Assert.Equal(1, host.RecentChangedCount);
+        });
+
+    /// <summary>既にある項目が先頭へ移るだけ(件数も集合も同じ)でも、順序が変わるので保存する。
+    /// 集合として比べる実装を殺す。</summary>
+    [Fact]
+    public void TryOpenOrActivate_ExistingEntryMovesToFront_SavesSettings() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            using var tmp = new TempDir();
+            string path = tmp.File("a.txt");
+            string other = tmp.File("b.txt");
+            File2.WriteAllText(path, "x");
+            host.Settings.RecentFiles = new List<string> { other, path };
+
+            Assert.NotNull(host.File.TryOpenOrActivate(path));
+
+            Assert.Equal(new[] { path, other }, host.Settings.RecentFiles);
+            Assert.Equal(1, host.SaveSettingsCount);
+            Assert.Equal(1, host.RecentChangedCount);
+        });
+
     [Fact]
     public void TryOpenOrActivate_AlreadyOpen_ActivatesExistingTab_WithoutReload() =>
         Sta.Run(() =>
