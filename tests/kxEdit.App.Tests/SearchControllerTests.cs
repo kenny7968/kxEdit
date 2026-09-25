@@ -1886,6 +1886,7 @@ public class SearchControllerTests
             host.Callbacks!.PatternChanged();
             host.CountDebounce.Fire();
 
+            Assert.Equal(2, host.CountDebounce.ScheduleCount); // 打鍵ごとに予約し直す(OpenFind は予約しない)
             Assert.Equal(statusCalls + 1, host.View.StatusLog.Count); // 1 回だけ数える
             Assert.Equal("2 件", host.View.Status); // 最後の検索語で数える
         });
@@ -1926,6 +1927,7 @@ public class SearchControllerTests
             host.View.Replacement = "X";
             doc.Editor.SelectCharRange(doc.Editor.Text.Length, 0); // FindPrev が末尾から探せるように
             host.Callbacks!.PatternChanged();
+            Assert.True(host.CountDebounce.IsPending); // 前提: 取り消す対象がある
 
             switch (op)
             {
@@ -1980,8 +1982,31 @@ public class SearchControllerTests
             host.View.RaiseDismissed();
 
             Assert.False(host.CountDebounce.IsPending);
-            Assert.Null(host.Search.SearcherForTest); // 満了で searcher とキャッシュを作り直さない
+            // 以下の Null は Dismissed 自体の DropSearcher で満たされる。満了で searcher とキャッシュを
+            // 作り直さないことを担保しているのは上の IsPending の検査。
+            Assert.Null(host.Search.SearcherForTest);
             Assert.Null(host.Search.TextCacheForTest);
+        });
+
+    [Fact]
+    public void ActiveDocumentChanged_WhileHidden_CancelsPendingDebounce() =>
+        Sta.Run(() =>
+        {
+            // 非表示(G-2 の一時退避)では切替の直後に UpdateCount が走らないので、ハンドラ自身の
+            // 取り消しだけが、満了で新しい文書の searcher / キャッシュを作り直すことを防ぐ。
+            using var host = new Host();
+            host.NewDoc("abc abc");
+            host.NewDoc("abc"); // アクティブ
+            host.Search.OpenFind();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+            host.View.Visible = false; // G-2 相当(Dismissed ではない)
+            Assert.True(host.CountDebounce.IsPending); // 前提: 取り消す対象がある
+
+            host.Docs.SelectAt(0); // 既存タブへ切り替える
+
+            Assert.False(host.CountDebounce.IsPending);
+            Assert.Null(host.Search.SearcherForTest);
         });
 
     [Fact]

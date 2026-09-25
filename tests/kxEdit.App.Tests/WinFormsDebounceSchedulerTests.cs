@@ -44,4 +44,20 @@ public class WinFormsDebounceSchedulerTests
 
             Assert.False(ran);
         });
+
+    [Fact]
+    public void Schedule_AfterDispose_DoesNotRun() =>
+        Sta.Run(() =>
+        {
+            // WinForms の Timer は Dispose 後でも Start すると動き出す。解放後の予約は無視する。
+            var s = new WinFormsDebounceScheduler(30);
+            s.Dispose();
+            bool ran = false;
+            s.Schedule(() => ran = true);
+
+            PumpUntil(() => ran, 300);
+
+            Assert.False(ran);
+            s.Dispose(); // 2 回目も安全
+        });
 }

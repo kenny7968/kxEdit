@@ -79,7 +79,9 @@ public sealed class SearchController
         {
             _lastHit = null; // 別文書の歩進状態を持ち越さない
             _selectionScope = null; // 別文書へ切替時は捕捉済みスコープも無効化
-            _countDebounce.Cancel(); // 表示中なら直後の UpdateCount が新しい文書で数える
+            // 非表示(G-2 の一時退避)なら、満了で新しい文書の searcher / キャッシュを作り直さないよう
+            // 取り消す(表示中は直後の UpdateCount でも取り消され、新しい文書で数え直す)。
+            _countDebounce.Cancel();
             DropSearcher(); // 別文書の材質化キャッシュを持ち越さない(破棄トリガ ii-a)
             if (_view?.Visible == true)
                 UpdateCount(); // 表示中なら新アクティブで件数を更新
@@ -308,6 +310,8 @@ public sealed class SearchController
             return;
         // 保留中の件数更新を取り消す(満了すると、この後の通知のステータスを「N 件」で上書きする)。
         // 空条件の早期 return より後に置く: そちらは何も表示しないので、取り消すと古い件数が残る。
+        // 下の ReadOnly の早期 return(無表示)は取り消しの後にあるが、到達経路が実質無い
+        // (そのガードのコメント参照)ので例外として受容する。
         _countDebounce.Cancel();
         if (IsCsvModeActive)
         {
@@ -541,6 +545,8 @@ public sealed class SearchController
             return;
         // 保留中の件数更新を取り消す(満了すると、この後の通知のステータスを「N 件」で上書きする)。
         // 空条件の早期 return より後に置く: そちらは何も表示しないので、取り消すと古い件数が残る。
+        // 下の ReadOnly の早期 return(無表示)は取り消しの後にあるが、到達経路が実質無い
+        // (そのガードのコメント参照)ので例外として受容する。
         _countDebounce.Cancel();
         if (IsCsvModeActive)
         {

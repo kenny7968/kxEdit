@@ -6,6 +6,8 @@ namespace kxEdit.App;
 /// 検索語の打鍵で件数表示の更新を間引くために使う(2026-09-25 フェーズ 5 P-5(b))。
 /// テストでは手動で発火させる実装に差し替える。
 /// UI スレッドから使い、action も UI スレッドで実行されること。
+/// 保留は 1 枠だけなので、1 インスタンスは 1 利用者で使う(共有すると互いの予約を取り消す)。
+/// action の中から <see cref="Schedule"/> / <see cref="Cancel"/> を呼んでよい。
 /// </summary>
 public interface IDebounceScheduler
 {
