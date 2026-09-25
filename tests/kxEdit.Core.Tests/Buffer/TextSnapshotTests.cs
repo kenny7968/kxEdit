@@ -140,8 +140,10 @@ public class TextSnapshotTests
         {
             Assert.Equal(doc.Length, snap.CharLength);
             for (int a = 0; a <= doc.Length; a++)
-            for (int b = a; b <= doc.Length; b++)
-                Assert.Equal(doc.Substring(a, b - a), snap.GetText(a, b - a));
+            {
+                for (int b = a; b <= doc.Length; b++)
+                    Assert.Equal(doc.Substring(a, b - a), snap.GetText(a, b - a));
+            }
         }
     }
 
