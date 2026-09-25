@@ -11,6 +11,11 @@ namespace kxEdit.Core.Buffers;
 /// (ゼロ領域で累積 (CharOff, BreaksTo) を焼き付けると、後から書いた文字の char↔byte 対応が
 ///  静かに壊れる。2026-07-31 の格子細分化で顕在化した)。古い包みは、書込済み範囲が不変なので
 /// そのまま有効(古いスナップショット・Undo・RPC スレッドの読み)。
+/// RPC スレッドが古い包みを読む間に UI スレッドが同じブロックへ書いても安全な理由:
+/// (a) 格子の値は [0, gridLimit) のバイトだけから決まり、gridLimit は構築時点の書込済み長(以後不変)。
+///     格子点 x の BreaksTo は s[x] に依存せず、クエリ時の補正が読む s[x-1]・s[x] も書込済み。
+/// (b) ピースの外(書込中のフロンティア)を読みうるのはピース末尾の CR/LF の先読みだけで、
+///     結果は先読みした値に依存しない(ScanForward の <c>i + 1 &gt;= to</c> の打ち切りなど)。
 /// </summary>
 internal sealed class AppendBuffer
 {
@@ -26,7 +31,9 @@ internal sealed class AppendBuffer
     // 今の _chunk にまだ入っていない最初の名目格子点(GridBytes の倍数)
     private int _nextNominal = GridBytes;
 
-    public AppendBuffer() => _chunk = new TextChunk(_block, gridLimit: 0);
+    // TextChunk には常に gridBytes: GridBytes を明示する。_nextNominal は GridBytes 刻みで進むので、
+    // TextChunk の格子幅とずれると包み直しが空振り・漏れになる。
+    public AppendBuffer() => _chunk = new TextChunk(_block, gridBytes: GridBytes, gridLimit: 0);
 
     /// <summary>text をUTF-8で追記し、参照ピース列(通常1〜2個)を返す。孤立サロゲートは既定でU+FFFD置換。</summary>
     public List<Piece> Append(string text)
@@ -56,7 +63,7 @@ internal sealed class AppendBuffer
                 off = cut;
             }
             _block = new byte[BlockBytes];
-            _chunk = new TextChunk(_block, gridLimit: 0);
+            _chunk = new TextChunk(_block, gridBytes: GridBytes, gridLimit: 0);
             _pos = 0;
             _nextNominal = GridBytes;
         }
@@ -85,7 +92,7 @@ internal sealed class AppendBuffer
     {
         if (_nextNominal >= _pos || SnapToCodePoint(_nextNominal) >= _pos)
             return;
-        _chunk = new TextChunk(_block, gridLimit: _pos);
+        _chunk = new TextChunk(_block, gridBytes: GridBytes, gridLimit: _pos);
         // TextChunk の規則(スナップ後が gridLimit 未満の点だけを置く)に合わせて進める
         while (_nextNominal < _pos && SnapToCodePoint(_nextNominal) < _pos)
             _nextNominal += GridBytes;

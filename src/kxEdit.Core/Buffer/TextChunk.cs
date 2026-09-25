@@ -39,6 +39,7 @@ internal sealed class TextChunk
     /// <param name="gridLimit">
     /// 格子点を置く位置の上限。この位置<b>未満</b>にだけ置く(既定は <paramref name="bytes"/> の長さ)。
     /// <see cref="AppendBuffer"/> は書込済みの長さを渡す。未書込のゼロ領域から累積値を焼き付けないため。
+    /// 格子の構築はこの上限未満のバイトだけを読む。
     /// </param>
     public TextChunk(
         ReadOnlyMemory<byte> bytes,

@@ -97,7 +97,7 @@ public class AppendBufferGridTests
     // ---- TextBuffer 経由: 元の文字列との一致 ----
 
     [Fact]
-    public void Typing_up_to_nominal_does_not_add_piece()
+    public void Typing_adds_piece_only_after_grid_point_is_inside()
     {
         var b = TextBuffer.FromString("");
         for (int i = 0; i < G; i++)
@@ -126,7 +126,9 @@ public class AppendBufferGridTests
     [Fact]
     public void Multibyte_text_typed_by_code_point_matches_source()
     {
-        // 名目 4KB 点が 2・3・4 バイト文字の途中に当たる形を網羅する(周期 13 バイトは 4096 と互いに素)
+        // 多バイト文字・CR/LF 混在の打鍵で、元の文字列と一致すること(一般的な回帰網)。
+        // 周期 16 バイトは 4096 を割り切るので名目点はいつも模様の先頭に当たる。名目点が文字の
+        // 途中に来る形は Nominal_inside_… と Snapped_point_equal_…、TextChunk の単体テスト・ファズが担う
         var sb = new StringBuilder();
         while (Encoding.UTF8.GetByteCount(sb.ToString()) < 5 * G)
             sb.Append("éあ😀a\r\nx\ry\n");
