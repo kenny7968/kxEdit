@@ -102,6 +102,83 @@ public class PreviewUserDataSweeperTests
         }
     }
 
+    // ===== 性能改善フェーズ 7(P-15): 掃除対象があるときだけプロセスを列挙する =====
+
+    [Fact]
+    public void SweepIfAnyAndSole_NoPreviewDirs_DoesNotAskForProcesses()
+    {
+        // 空ではない(紛らわしい名前のフォルダーがある)ルートから始める。
+        using var tmp = new TempRoot();
+        string keep = tmp.Dir("EBWebView");
+        int asked = 0;
+
+        int deleted = PreviewUserDataSweeper.SweepIfAnyAndSole(
+            tmp.Path,
+            () =>
+            {
+                asked++;
+                return true;
+            }
+        );
+
+        Assert.Equal(0, deleted);
+        Assert.Equal(0, asked); // 全プロセスの列挙を省く(P-15 の本体)
+        Assert.True(Directory.Exists(keep));
+    }
+
+    [Fact]
+    public void SweepIfAnyAndSole_MissingRoot_DoesNotAskForProcesses()
+    {
+        using var tmp = new TempRoot();
+        int asked = 0;
+
+        int deleted = PreviewUserDataSweeper.SweepIfAnyAndSole(
+            Path.Combine(tmp.Path, "does-not-exist"),
+            () =>
+            {
+                asked++;
+                return true;
+            }
+        );
+
+        Assert.Equal(0, deleted);
+        Assert.Equal(0, asked);
+    }
+
+    [Fact]
+    public void SweepIfAnyAndSole_WithPreviewDir_AndSoleInstance_Sweeps()
+    {
+        using var tmp = new TempRoot();
+        string a = tmp.Dir("preview-aaaaaaaa");
+        int asked = 0;
+
+        int deleted = PreviewUserDataSweeper.SweepIfAnyAndSole(
+            tmp.Path,
+            () =>
+            {
+                asked++;
+                return true;
+            }
+        );
+
+        Assert.Equal(1, deleted);
+        Assert.Equal(1, asked);
+        Assert.False(Directory.Exists(a));
+    }
+
+    [Fact]
+    public void SweepIfAnyAndSole_WithPreviewDir_AndOtherInstance_KeepsEverything()
+    {
+        // 並行インスタンスが居るときは消さない(従来の不変条件)。
+        using var tmp = new TempRoot();
+        string a = tmp.Dir("preview-aaaaaaaa");
+
+        int deleted = PreviewUserDataSweeper.SweepIfAnyAndSole(tmp.Path, () => false);
+
+        Assert.Equal(0, deleted);
+        Assert.True(Directory.Exists(a));
+    }
+
     [Fact]
     public void DefaultRoot_PointsAtPreviewParentUnderLocalAppData()
     {
