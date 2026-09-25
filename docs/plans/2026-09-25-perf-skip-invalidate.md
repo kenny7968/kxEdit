@@ -1511,3 +1511,37 @@ description(日本語)に次を書く: 目的、変更前後の計測値(min / �
   - 部分クリップの描画で `PaintAndRecord` が「全面の入力」を記録しても正しいのは、「無効化した領域が、入力の差で変わる全画素を覆う」ときに限る。
   - IME の原点の値化(I-2)。
   - ScrollWindowEx の適否は `old with { TopLine = n.TopLine, TopSegment = n.TopSegment, ScrollX = n.ScrollX }.Equals(n)` の形で判定できる。
+
+### Task 3: 条件付き Invalidate(066d572)
+
+- **Step 1 の grep**
+  - `Invalidated +=` は src に 0 件で、App 層に購読者はない。
+  - `_caretCtrl` / `ctx.Caret` への書き込みは 24 件あり、すべての後に次のどれかが続く: AfterEdit、丸ごと差し替え、4 経路、`EnsureVisibleCharRange` の finally での復元。
+  - 仕様レビューが独立に検証した範囲: FrameInputs の各メンバーの元になるフィールドへの書き込み全件、IME の `_ime =` の 6 か所、UIA が呼ぶ host の API。いずれも Invalidate を通らない経路はなかった。
+  - 4 経路の中で、比較より後に描画の入力を変えるコードもない。`BringCaretIntoView` はセッター経由で、比較より前に走る。`UpdateUI` の購読者はステータスバーを読むだけ。
+- **Step 3**: 実装前は 13 件中 7 件が FAIL した(「0 回」の 3 本と、記録を捨てる Theory の 4 件)。6 件は PASS。計画の予想どおり。
+- **Step 5**: Editor.Tests 630・App.Tests 1011・Core.Tests 1544 件がすべて PASS。Release は 0 warning。
+- **仕様レビュー**: ✅。Minor 1 件(記録を捨てる Theory に `SetSource` がない)は ③ 却下。`SetSource` は `_buffer` が null のときに 1 度しか呼べず、その時点の記録は必ず null である(null のバッファで描いた入力は null)。2 回目以降の `Text` セッターは `ReplaceSource` を通り、Theory に入っている。
+
+### Task 4: オラクル(2970540・fixup 538ab8e)
+
+- オラクル 9 件(陽性対照 1 件と 8 seed × 200 step)が PASS。1 seed は約 0.6〜0.9 秒。省略の回数(4 経路の操作で、キャレットかアンカーが変わり、Invalidate が 0 回だったもの)は、seed ごとに 27〜41 回。
+- **Step 3(オラクルが漏れを検出できるかの確認)の結果と、計画の前提の訂正**
+  - **計画の 2 つの改変は FAIL しなかった。これは計画の前提の誤りである。**
+    - 1 つ目は「ShowWhitespace を FrameInputs の外で読む」改変(`PaintBody` が static になったので、引数を 1 つ足して生の値を渡す形で模擬した)。2 つ目は「Equals から Ime を外す」改変。
+    - どちらの状態も、変わるたびに必ず無条件に Invalidate される。ShowWhitespace はセッター、IME は `ImeController` の全経路が Invalidate し、4 経路も冒頭で未確定を取り消す。そのため、漏れても古い絵は残らず、不具合にならない。
+    - §0.2 の「漏れはオラクルが IME の操作を含めて検出する」は過大な記述だった。正確には、**オラクルが検出するのは、省略されうる 4 経路で変わる状態(キャレット・アンカー)と、そこから派生する入力(`CurrentLineLogical`・`Selection`)の漏れと誤り**である。スクロール系も、セッターが無条件に Invalidate するので対象外。
+  - **代わりに次の 2 つを当て、どちらも 8 seed すべてで FAIL した**(fixup 後に当て直しても同じ)。どちらの改変も戻した。
+    - `CurrentLineLogical` を FrameInputs の外で読む改変。
+    - Equals から `Selection` を外す改変。
+  - **他の故障の型を守る層**
+    - 描画が FrameInputs の外を読む故障: `PaintBody` が static なので、コンパイラが防ぐ。
+    - Equals の漏れ: `FrameInputsTests` の網羅性テストが捕まえる。
+- **仕様レビュー**: ✅ → fixup 538ab8e の再レビューも ✅。
+  - m-1(省略の数え方に早期 return の no-op が混ざり、guard が緩い): ① 4 経路の操作で、キャレットかアンカーが実際に変わり、Invalidate が 0 回のときだけ数える形にした。
+  - m-2(後方の選択・非対称の選択・Shift でアンカーに戻る遷移を踏まない): ① Shift+移動を前後両方向にし、anchored の半分を後方の選択にした。
+  - m-3: ② フェーズ 9 への申し送り(下記)。
+- **フェーズ 9 への申し送り**(レビューから)
+  - **オラクルは、Invalidate が 1 回でもあれば全面を描き直す。** 部分無効化(`Invalidate(Rectangle)`)を入れる前に、`InvalidateEventArgs.InvalidRect` の範囲だけを「画面」のビットマップへ合成する形に広げること。今のままでは、無効化した矩形の不足を検出できない。
+  - 条件付き Invalidate を 4 経路の外へ広げるときは、その経路の操作がオラクルの `PickOp` に入っていることを確かめる。
+  - 状態を変えても Invalidate せず、4 経路の Invalidate に便乗しているコードがあると、今後は古い絵になる。現時点では grep で該当なし。
