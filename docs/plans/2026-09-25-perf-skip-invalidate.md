@@ -1545,3 +1545,40 @@ description(日本語)に次を書く: 目的、変更前後の計測値(min / �
   - **オラクルは、Invalidate が 1 回でもあれば全面を描き直す。** 部分無効化(`Invalidate(Rectangle)`)を入れる前に、`InvalidateEventArgs.InvalidRect` の範囲だけを「画面」のビットマップへ合成する形に広げること。今のままでは、無効化した矩形の不足を検出できない。
   - 条件付き Invalidate を 4 経路の外へ広げるときは、その経路の操作がオラクルの `PickOp` に入っていることを確かめる。
   - 状態を変えても Invalidate せず、4 経路の Invalidate に便乗しているコードがあると、今後は古い絵になる。現時点では grep で該当なし。
+
+### Task 5: Smoke `--paint-transition`(10a74b7・fixup 12e38d1)
+
+- **撮り方**: `GetDC(editor.Handle)` + `BitBlt(SRCCOPY)` で窓の描画面を読む方式を採った。画面の DC と `TopMost` への切り替えは要らなかった。
+  - 陽性対照(`control-stale`)で 319 画素の差が出た。操作後の画面 X が状態 A と一致し、正解 Y とは異なることも自己チェックする。
+  - 全遷移で、全面を描き直した 2 枚(Y と Y')が一致した(決定性)。
+- **結果**
+  - 変更前のコード(47e8238)に最終版の道具を当てた(仕様レビューが実施)。
+    - `--expect-skip` なし: EXIT 0。14 遷移すべて一致し、Skip の 6 遷移も描画 1 回。
+    - `--expect-skip` あり: Skip の 6 遷移が「描画の省略を期待したが描いた」で EXIT 1。
+  - HEAD(`--expect-skip` あり): EXIT 0。Skip の 6 遷移(caret-right・caret-down・linenum-caret-down・curline-same-line・collapse-anchored・theme-then-move)は描画 0 回で一致。Paint の 7 遷移は描画 1 回で一致。
+  - **偽陰性の確認**(仕様レビューが実施): 変更前の worktree で 4 経路の `Invalidate()` を消すと、curline-next-line(差 17,718 画素)・select-extend(666)・select-clear(10,607)が「古い絵が残る」で失敗し、EXIT 1 になった。
+- **計画からの逸脱**
+  - `collapse-anchored` の位置を (5,1) にした。行 4 は空行で、(4,1) は CR と LF の間にあり (4,0) にスナップされるため。
+  - 自己チェックを足した。
+    - 操作の後に `GetUpdateRect` で、保留中の無効領域がないこと。
+    - 陽性対照で X = A であること。
+    - Y = Y' であること。
+    - 遷移の表との整合(Paint の遷移は Y ≠ A、Skip の遷移は Y = A)。
+  - `PaintSnapshot` の `CloseQuietly` も internal にして共有した。
+- **仕様レビュー**: ✅(上の 2 つの確認を含む)。
+- **前倒しのコード品質レビュー**: 承認。fixup 12e38d1 の再レビューでも承認。
+  - Important-1(準備の後のスクロール位置が 0 に固定されていて、フェーズ 9 のスクロールから始まる遷移を書けない): ① `Transition.ArrangedScroll` を足した(既定 (0,0))。TopLine=5 から始める一時的な遷移で、正常時と失敗時の両方を確かめた。
+  - Minor-2(陽性対照が表の最後にある): ① 先頭に移し、失敗したらそこで止める。
+  - Minor-3(「撮影で WM_PAINT が起きない」の回数チェックは構造上失敗しない): ① コードは残し、doc と README で「撮り方の前提は陽性対照で確かめる。回数のチェックは撮り方を変えたときの回帰を防ぐもの」と書き分けた。
+  - Minor-5(一部の例外が EXIT 1 にならない): ① catch に `ArgumentException` と `InvalidOperationException` を足した。
+  - Minor-6(README の出力例): ① 実際の出力に合わせた。
+  - Minor-1・4・7・8: ② フェーズ 9 への申し送り(下記)。
+- **フェーズ 9 への申し送り**(レビューから)
+  - **Paint の遷移は「描画が 1 回以上」しか見ていない。** 部分再描画になっているか(性能の目的)を確かめるには、次を足す。
+    - `Paint` の `e.ClipRectangle` の和を記録する。
+    - 期待に `Expect.Partial(Rectangle maxClip)` のようなものを足す。
+    - スクロール領域向けの陽性対照(TopLine を変えてから `ValidateRect`)を足す。
+    - 表示の不具合(古い絵)は、今の X と Y の比較で検出できる。
+  - 保留中の無効領域はエディタ本体でしか見ていない。スクロールバー(子)に触るなら、子にも `GetUpdateRect` をかける。
+  - PaintSnapshot との重複(窓の組み立て・`Check`・`RedrawWindow` の P/Invoke)は、3 つ目の利用者が出たら共通の型へ切り出す。例外型 `PaintSnapshotException` も、あわせて改名する。
+  - 窓を重ねた状態(スピーチビューアーなど)で撮れることは前提としているが、確かめる対照がない。L5 などで一度、重ねた状態で実行して記録を残す。
