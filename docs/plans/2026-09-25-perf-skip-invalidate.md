@@ -1490,3 +1490,24 @@ description(日本語)に次を書く: 目的、変更前後の計測値(min / �
 | 基準:Shiftの単押し | 1.56 / 1.88 / 1.88 | 1.88 / 2.34 / 3.12 |
 
 `backups` には空のフォルダーが 1 つあった(ファイルはない)ので、harness の中止条件には当たらなかった。
+
+### Task 2: FrameInputs の seam(3d6c722・fixup 47e8238)
+
+- テスト 617 件 PASS・Release 0 warning。`--paint-snapshot` は変更前(11707de)の基準と 16 枚すべて一致(fixup 後も同じ)。
+- **計画からの逸脱**
+  - `RenderFrame` を static にした(生の状態を読み戻すとコンパイルで止まる)。
+  - `SelectionRange` は `System.Windows.Forms.SelectionRange` と衝突するので、既存の Paint.cs と同じく別名の using にした。`System.Drawing` は暗黙の using にあるので外し、doc の cref は `System.Drawing.Font` と書いた(`FrameInputs.Font` プロパティと紛れるため)。
+- **仕様レビュー**: ✅。逸脱 4 件はいずれも妥当と判断された。Minor 2 件(`ClientSize` の doc が不正確・テストの using が計画と違う)は、前者をコード品質レビューの M-1 で直し、後者は実害なし(global using にある)で受容した。
+- **前倒しのコード品質レビュー**: 条件付き承認 → fixup 47e8238 の再レビューで承認。
+  - I-1(`PaintBody` がインスタンスメソッドのままで、生の状態を 1 語で読み戻せる): ① `PaintBody` を static にし、生の状態への出口を引数(`emptyBackColor`・`ime`)に限った。`_lastFrame` の更新は `PaintAndRecord` に移した(記録しない正解描画は `_lastFrame` を書き換えない)。
+  - I-2(IME の例外の約束が `ImeController` 側に書かれていない): ① `ImeController.Draw` と `IImeOverlayHost` に相互参照を書いた。より良い形(IME の原点と色を値として `FrameInputs` に取り込み、`Draw` が host を読まない形)は、フェーズ 9 への申し送りにする(部分再描画で IME の領域を無効化矩形に含めるときに必須になる)。
+  - M-1(`ClientSize` の doc): ① 「描画は直接読まない。ResizeRedraw があるので比較上は冗長だが、安全側で残す」に直した。**§0.2 の表の「読む箇所」の記述(`g.Clear` の範囲・RenderFrame の右端)は不正確だった**(RenderFrame の右端は `PaintWidth` から来る)。
+  - M-2(`PaintAndRecord` が記録を捨てる前に Capture していた): ① 順序を入れ替えた。
+  - M-3(`RenderFrame` の summary に古いフィールド名): ① 直した。
+  - M-4(record の `==` は null 同士を true にする): ① remarks に「比較は Equals を使い、null は常に変化あり」と書いた。
+  - M-5(21 項の `&&`): ③ 現状維持。漏れは網羅性テストが捕まえる。フェーズ 9 で差分関数に作り直すときに書き直す。
+  - M-6(テストの Font のリーク): ① finally で破棄する。`GdiCharMetrics` は IDisposable ではない。
+- **フェーズ 9 への申し送り**(レビューから)
+  - 部分クリップの描画で `PaintAndRecord` が「全面の入力」を記録しても正しいのは、「無効化した領域が、入力の差で変わる全画素を覆う」ときに限る。
+  - IME の原点の値化(I-2)。
+  - ScrollWindowEx の適否は `old with { TopLine = n.TopLine, TopSegment = n.TopSegment, ScrollX = n.ScrollX }.Equals(n)` の形で判定できる。
