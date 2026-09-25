@@ -1982,3 +1982,33 @@ CLAUDE.md §3 の 5・§6 に従う。
   5. テストの前提 assert とコメントを直した。
   6. `IDebounceScheduler` の doc(1 インスタンスは 1 利用者、action の中から呼んでよい)を足した。
   - 再レビューで承認。任意の指摘 1 件(非表示のテストの `SearcherForTest` の Null 検査は、ハンドラ自身の DropSearcher で満たされる)は ③ 却下した。事後条件を明示する検査として害がないため。
+
+### Task 5: P-14 一致位置の表(特性テスト f55b1bd・本体 c381f0b)
+
+- 発声の特性テスト 2 件を先に commit した(f55b1bd)。旧実装に対して、期待値を直さずに PASS した。仕様レビュアーも、別の worktree で f55b1bd を checkout して 2/2 PASS を確かめた。P-14 の後も PASS する。
+- タイムアウトのテストは、計画どおりのパターン `x|y|(a|aa)+$` で前提が成り立った(.NET 9 で全件の列挙がタイムアウトする)。
+- Task 3 のレビューから持ち越した 2 件もここで直した。
+  - M-3: `SnapshotSearcher` の寿命の段落に、表もスナップショットを掴むことを書いた。
+  - N-1: `MaterializeCountForTest` の doc の重複文を削った。
+- 計画からの小さな逸脱
+  - `PositionsOf` の代入順コメントは「`SnapshotTextCache.TextOf` と同じ理由」にした(Task 3 で理由の記述がそちらへ移ったため)。
+  - ループには波括弧を付けた(S3973 対策。書式だけの変更)。
+- **仕様レビュー**: ✅ 指摘なし。
+- commit 後: 0 warning、Core 1591 件・App 1030 件が PASS。
+
+### Task 6: ミューテーション検証(HEAD c381f0b・ユーザー承認 2026-09-25)
+
+10 変異すべてが殺された。1 変異ずつ、ビルドの成功を確かめてからテストを走らせ、`git checkout -- src/` で戻した。不成立の変異(ビルドできないもの)はない。最後に `git diff --exit-code src/` が clean で、再ビルド後の DLL の時刻が最後の復元より後であることも確かめた。
+
+| # | 変異 | 結果 | 殺したテスト(抜粋) |
+|---|---|---|---|
+| M1 | `Locate` の `i >= 0` → `i > 0` | 殺された | `Overlapping_candidates_…`・`Strictly_increasing_tables_…` ほか 4 件 |
+| M2 | `Locate` の長さの一致判定を削除 | 殺された | `Strictly_increasing_tables_…`・`Strategy_matches_old_…` |
+| M3 | `FindPrev` の `i` → `i + 1` | 殺された | 7 件(`FindPrev_BeforePastEnd_…` ほか) |
+| M4 | `FindPrev` の `~i` → `~i - 1` | 殺された | 5 件 |
+| M5 | 線形の `<` → `<=` | 殺された | `Non_monotone_tables_…` の 4 ケース・`Strategy_matches_old_…` |
+| M6 | 狭義単調判定の `<=` → `<` | 殺された | `Non_monotone_tables_…`(同じ開始位置の 2 ケース)・`Strategy_matches_old_…` |
+| M7 | 上限の `==` → `>` | 殺された | `Table_is_not_built_beyond_limit(2, false)` |
+| M8 | `Count` のスナップショット同一性判定を削除 | 殺された | `Count_does_not_build_table_but_uses_it_once_built` |
+| M9 | `Count` から構築する | 殺された | `Count_does_not_build_table_but_uses_it_once_built` |
+| M10 | タイムアウトの catch を削除(try/catch ごと外した。catch 単体ではコンパイルできないため) | 殺された | `Timeout_while_building_falls_back_to_old_path` |
