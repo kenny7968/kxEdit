@@ -123,6 +123,79 @@ public class FuzzTests
         Assert.Equal(initial, initialSnap.GetText(0, initialSnap.CharLength));
     }
 
+    /// <summary>
+    /// 2026-09-25 フェーズ 4: 末尾付近への挿入に偏らせ、追記ブロックの格子点(4KB)と
+    /// ブロック(64KB)の境界を何度もまたがせる。包み直しをまたいだ Undo / Redo も踏む。
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Seeds))]
+    public void Append_heavy_edits_match_naive_model(int seed)
+    {
+        var rnd = new Random(seed);
+        var buffer = TextBuffer.FromString("");
+        string text = "";
+        var undoStack = new List<string>();
+        var redoStack = new List<string>();
+        for (int op = 1; op <= 1500; op++)
+        {
+            int roll = rnd.Next(100);
+            if (roll < 70)
+            { // 末尾から 0〜40 文字手前への挿入。1 割は 1〜3KB の塊(貼り付け相当)
+                int pos = Math.Max(0, text.Length - rnd.Next(41));
+                string ins = rnd.Next(10) == 0 ? BigMaterial(rnd) : Material(rnd);
+                buffer.Insert(pos, ins);
+                text = ModelSplice(text, pos, 0, ins, undoStack, redoStack);
+            }
+            else if (roll < 82)
+            {
+                int pos = Math.Max(0, text.Length - rnd.Next(61));
+                int len = Math.Min(rnd.Next(1, 31), text.Length - pos);
+                buffer.Delete(pos, len);
+                text = ModelSplice(text, pos, len, "", undoStack, redoStack);
+            }
+            else if (roll < 94)
+            {
+                if (undoStack.Count > 0)
+                {
+                    Assert.NotNull(buffer.Undo());
+                    redoStack.Add(text);
+                    text = undoStack[^1];
+                    undoStack.RemoveAt(undoStack.Count - 1);
+                }
+            }
+            else if (redoStack.Count > 0)
+            {
+                Assert.NotNull(buffer.Redo());
+                undoStack.Add(text);
+                text = redoStack[^1];
+                redoStack.RemoveAt(redoStack.Count - 1);
+            }
+            buffer.BreakUndoCoalescing();
+            Assert.Equal(text.Length, buffer.Current.CharLength);
+            if (op % 25 == 0)
+            {
+                DeepVerify(text, buffer.Current, rnd);
+                // 末尾 64 文字を GetChar でも照合する(GetText と同じ格子を通らない正解との比較)
+                for (int p = Math.Max(0, text.Length - 64); p < text.Length; p++)
+                    Assert.Equal(text[p], buffer.Current.GetChar(p));
+            }
+        }
+        // 規模の自己チェック: 格子点とブロックを実際にまたいだこと
+        Assert.True(
+            Encoding.UTF8.GetByteCount(text) > 2 * TextChunk.DefaultGridBytes,
+            "追記量が足りない"
+        );
+    }
+
+    private static string BigMaterial(Random rnd)
+    {
+        int target = rnd.Next(1000, 3001);
+        var sb = new StringBuilder();
+        while (sb.Length < target)
+            sb.Append(Pool[rnd.Next(Pool.Length)]);
+        return sb.ToString();
+    }
+
     /// <summary>モデル側splice(バッファとは独立のスナップ規則実装)。</summary>
     private static string ModelSplice(
         string text,

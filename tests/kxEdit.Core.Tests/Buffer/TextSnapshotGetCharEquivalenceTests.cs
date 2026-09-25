@@ -90,7 +90,7 @@ public class TextSnapshotGetCharEquivalenceTests
     public void GetChar_MatchesGetText_AfterEdits()
     {
         // ピース分割 + AppendBuffer 経由のタイピングを経た木でも一致すること
-        // (AppendBuffer の格子表が空である前提の網は
+        // (AppendBuffer の格子がゼロ領域を焼き付けない前提の網は
         //  GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock が担う。
         //  本テストは GetChar と GetText が同じ木で一致することだけを見る)。
         var buf = TextBuffer.FromString(MixedFixture);
@@ -156,8 +156,9 @@ public class TextSnapshotGetCharEquivalenceTests
     [Fact]
     public void GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock()
     {
-        // AppendBuffer が共有ブロックを gridBytes: BlockBytes で包んでいること
-        // (= 格子表が先頭 1 エントリだけ)を固定する。ctor 側の指定を守る。
+        // AppendBuffer が共有ブロックの格子点を書込済みの範囲にだけ置いていること
+        // (ゼロ領域を焼き付けないこと)を固定する。2026-09-25 以後は包み直しで格子点を
+        // 持つので、格子を実際に通って照合する。ctor 側の指定を守る。
         var buf = TextBuffer.FromString("");
         string src = AppendProbeBlock(buf);
         AssertProbeTailMatchesSource(buf.Current, src);
@@ -167,7 +168,7 @@ public class TextSnapshotGetCharEquivalenceTests
     public void GetChar_MatchesSourceText_AcrossSecondAppendBufferBlock()
     {
         // 姉妹テスト。AppendBuffer は 1 ブロックを使い切ると _block を再確保して
-        // TextChunk を作り直すので、明示指定は ctor と繰上げの 2 箇所に必要になる。
+        // TextChunk を作り直すので、gridLimit の指定は ctor・繰上げ・包み直しの 3 箇所にある。
         // 照合対象は 2 ブロック目の末尾だけなので、落ちたら繰上げ側の指定が原因と分かる
         // (1 ブロック = 64KB なので連続タイピングで現実に到達する経路)。
         var buf = TextBuffer.FromString("");
@@ -210,8 +211,8 @@ public class TextSnapshotGetCharEquivalenceTests
     ///
     /// 末尾を見るのは、問い合わせ文字位置が最大になる点だから: 格子幅がいくつでも
     /// 「その位置以下の格子点」が必ず存在するので、1 箇所で全格子幅を捕まえられる。
-    /// 全位置照合にしないのは、正しい実装(格子 1 エントリ)だと 1 回の GetChar が
-    /// O(pos) 走査になり全位置で O(n²) になるため。
+    /// 全位置照合にしないのは、照合の費用を抑えるため(末尾 1 点で全格子幅を
+    /// 捕まえられるので、全位置は要らない)。
     ///
     /// 参照が GetText ではなく元文字列であることも要。GetText は同じ
     /// TextChunk.CharToByte を通るので、格子が壊れれば同じだけ壊れて一致してしまう
