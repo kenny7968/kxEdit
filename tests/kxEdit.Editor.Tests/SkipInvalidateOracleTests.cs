@@ -13,6 +13,10 @@ namespace kxEdit.Editor.Tests;
 /// 各操作の後に、今の状態から描いた絵(正解)と画素で比べる。Invalidate を省いた時点で差があれば、
 /// 実画面に古い絵が残る不具合である。フレームではなく画素で比べるのは、RenderFrame のシフトと
 /// IME の未確定表示(Frame の外で描く)も含めるため(実装計画 §0.2)。
+/// 検出範囲は、Invalidate が省かれうる 4 経路で変わる状態(キャレット・アンカー)と、そこから派生する
+/// 入力(CurrentLineLogical・Selection)の漏れや誤りに限る。無条件に Invalidate するセッターの裏にある
+/// 状態(ShowWhitespace・IME・スクロールなど)は、漏れても古い絵にならないので対象外。
+/// 描画が生の状態を読む故障は PaintBody が static であることで、比較の漏れは FrameInputsTests で防ぐ。
 /// </summary>
 public class SkipInvalidateOracleTests
 {

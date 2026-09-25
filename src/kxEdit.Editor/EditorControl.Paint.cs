@@ -38,7 +38,7 @@ public sealed partial class EditorControl
         // 更新矩形が空なら何もしない(Paint イベントも発火しない)。旧 WmPaint(OptimizedDoubleBuffer)は
         // 更新矩形が空なら OnPaint 自体を呼ばずに return していたので、それに揃える
         // (クライアントに面積があって更新領域だけが空の WM_PAINT = RDW_INTERNALPAINT 等で、
-        // PaintBody・_lastFrame の更新・Paint イベントを走らせない)。OnPrint 経路のクリップは
+        // PaintAndRecord(描画と、_lastFrame・_lastPaintedInputs の記録)と Paint イベントを走らせない)。OnPrint 経路のクリップは
         // ClientRectangle なので、クライアント面積 0 もここで返る = 面積 0 の DIB は作らない。
         var clip = e.ClipRectangle;
         if (clip.Width <= 0 || clip.Height <= 0)
@@ -132,6 +132,9 @@ public sealed partial class EditorControl
     /// 正しさの根拠: 画面に出ているのは <see cref="_lastPaintedInputs"/> から決定的に描いた絵である。
     /// 今の入力が同じなら、描き直しても同じ絵になる。未処理の無効領域がある場合でも、その描画は
     /// 今の入力で描かれる。スクロールのセッターは自前で無条件に Invalidate するので、この比較の外にある。
+    /// この根拠は「描画の入力を変える経路は、必ず自分で Invalidate する(他の経路の Invalidate に
+    /// 便乗しない)」という前提の上にだけ成り立つ。前提の詳細は <see cref="_lastPaintedInputs"/> の
+    /// フィールドコメント(EditorControl.cs)を参照。
     /// 他の Invalidate(編集・IME・外観・CSV 強調・スクロール・リサイズ)は無条件のまま(変更範囲を最小にする)。
     /// </remarks>
     private void InvalidateIfFrameChanged()

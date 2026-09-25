@@ -1,8 +1,9 @@
 // FrameInputs.cs
 // 2026-09-25 性能改善フェーズ 3(設計書 §8.1): 描画が読む状態の全部を 1 つの不変値に集めたもの。
-// EditorControl.CaptureFrameInputs() だけが作り、OnPaint はこの値だけからフレームを組み立てて描く。
+// 製品コードでは EditorControl.CaptureFrameInputs() だけが作り、OnPaint はこの値だけからフレームを組み立てて描く。
 // 描画に新しい入力を足すときは、必ずここにメンバーを足し、Equals と FrameInputsTests も直すこと
 // (足さずに描画から生の状態を読むと、キャレット移動で再描画を省いたときに古い絵が画面に残る)。
+// ここに入る状態を書き換える経路は必ず自分で Invalidate する規則は EditorControl._lastPaintedInputs のコメントを参照。
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Layout;

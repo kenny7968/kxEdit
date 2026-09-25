@@ -127,6 +127,15 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // キャレット・選択の 4 経路は、今の入力がこれと等しければ Invalidate を省く(InvalidateIfFrameChanged)。
     // null = 「画面の絵の入力が分からない」= 比較は必ず「変化あり」になる(描画前・描画の例外・
     // 本文/フォントの丸ごと差し替え = InvalidateAndForgetPaintedFrame)。UI スレッド専用。
+    //
+    // 【前提(不変条件 2)】FrameInputs の元になる状態(_topLine・_topSegment・_scrollX・
+    // _cellHighlight・_style・_showWhitespace・_hscroll.Visible など)を書き換える経路は、
+    // 必ず自分で Invalidate() を呼ぶ(キャレット・選択の 4 経路だけは InvalidateIfFrameChanged())。
+    // 他の経路の Invalidate に便乗してはならない。便乗すると、便乗先が 4 経路のどれかで、
+    // そこが描画を省いたときに古い絵が画面に残る。
+    // また、この記録は DrawToBitmap / PrintWindow(WM_PRINT)や部分的な WM_PAINT でも更新されるので、
+    // Invalidate を忘れた状態変更は、以前のように次のキャレット移動では直らない(比較が「変化なし」になる)。
+    // (不変条件 1「描画が読む状態は FrameInputs の中にある」は、PaintBody が static であることでコンパイラが守る。)
     private FrameInputs? _lastPaintedInputs;
 
     // P6 Task 10 レビュー M-2: CurrentBuffer の null 経路で毎回 new すると

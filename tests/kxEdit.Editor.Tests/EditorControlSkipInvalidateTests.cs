@@ -134,12 +134,12 @@ public class EditorControlSkipInvalidateTests
                 Assert.True(
                     CountInvalidations(c, () => c.MoveCaretWithSelection(Line(c, 2) + 6)) >= 1
                 );
-                Paint(c);
+                PaintAndAssumeRecorded(c);
                 Assert.True(
                     CountInvalidations(c, () => c.SetSelectionCharRange(Line(c, 1), Line(c, 3)))
                         >= 1
                 );
-                Paint(c);
+                PaintAndAssumeRecorded(c);
                 Assert.True(
                     CountInvalidations(c, () => c.SetSelectionAnchored(Line(c, 4), Line(c, 1))) >= 1
                 );
