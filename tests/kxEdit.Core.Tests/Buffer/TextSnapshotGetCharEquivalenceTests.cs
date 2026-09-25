@@ -90,8 +90,7 @@ public class TextSnapshotGetCharEquivalenceTests
     public void GetChar_MatchesGetText_AfterEdits()
     {
         // ピース分割 + AppendBuffer 経由のタイピングを経た木でも一致すること
-        // (AppendBuffer の格子がゼロ領域を焼き付けない前提の網は
-        //  GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock が担う。
+        // (AppendBuffer の格子がゼロ領域を焼き付けない前提の網は AppendBufferGridTests が担う。
         //  本テストは GetChar と GetText が同じ木で一致することだけを見る)。
         var buf = TextBuffer.FromString(MixedFixture);
         for (int i = 0; i < 500; i++)
@@ -156,9 +155,10 @@ public class TextSnapshotGetCharEquivalenceTests
     [Fact]
     public void GetChar_MatchesSourceText_AcrossWholeAppendBufferBlock()
     {
-        // AppendBuffer が共有ブロックの格子点を書込済みの範囲にだけ置いていること
-        // (ゼロ領域を焼き付けないこと)を固定する。2026-09-25 以後は包み直しで格子点を
-        // 持つので、格子を実際に通って照合する。ctor 側の指定を守る。
+        // AppendBuffer の共有ブロックを埋めた文書で、末尾の GetChar と最終行頭を
+        // 元の文字列と照合する回帰網。2026-09-25(フェーズ 4)以後は書込のたびに包み直すので、
+        // 末尾ピースは全域書込済みの包みを指し、ゼロ領域の焼き付けの網ではない
+        // (その網は AppendBufferGridTests の AssertGrid 群と Old_snapshots_… が担う)。
         var buf = TextBuffer.FromString("");
         string src = AppendProbeBlock(buf);
         AssertProbeTailMatchesSource(buf.Current, src);
@@ -168,9 +168,10 @@ public class TextSnapshotGetCharEquivalenceTests
     public void GetChar_MatchesSourceText_AcrossSecondAppendBufferBlock()
     {
         // 姉妹テスト。AppendBuffer は 1 ブロックを使い切ると _block を再確保して
-        // TextChunk を作り直すので、gridLimit の指定は ctor・繰上げ・包み直しの 3 箇所にある。
-        // 照合対象は 2 ブロック目の末尾だけなので、落ちたら繰上げ側の指定が原因と分かる
-        // (1 ブロック = 64KB なので連続タイピングで現実に到達する経路)。
+        // TextChunk を作り直す。2 ブロック目(繰上げ後)の末尾も同じく元の文字列と照合する
+        // 回帰網(1 ブロック = 64KB なので連続タイピングで現実に到達する経路)。
+        // 上と同じ理由で、繰上げ側の gridLimit の指定の網ではない(AppendBufferGridTests の
+        // New_block_… が担う)。
         var buf = TextBuffer.FromString("");
         string first = AppendProbeBlock(buf); // 1 ブロック目を使い切って繰上げさせる
         string second = AppendProbeBlock(buf);
@@ -179,14 +180,16 @@ public class TextSnapshotGetCharEquivalenceTests
 
     /// <summary>
     /// AppendBuffer の 1 ブロック(64KB)をちょうど埋める探針テキストを末尾へ書き込み、
-    /// 書き込んだ文字列を返す。末尾への連続挿入は TextBuffer.Splice の隣接マージで
-    /// 1 ピースへ融合するので、ブロック全域を覆う 1 ピースができる。
+    /// 書き込んだ文字列を返す。2026-09-25(フェーズ 4)以後は書込のたびに包み直すため、
+    /// 包みの異なる書込は隣接マージされず、1 ブロックあたり 3 ピースになる(包み直し前は
+    /// TextBuffer.Splice の隣接マージでブロック全域を覆う 1 ピースだった)。
     ///
     /// 先頭 1 文字だけ 3 バイト(あ)にするのが要点。以降ブロック全域で
-    /// 「バイト位置 = 文字位置 + 2」となる。TextChunk 構築時ブロックは全ゼロなので、
-    /// 細かい格子はゼロ領域から求めた「1 バイト = 1 文字 / break 0 個」を格子点に焼き付ける。
-    /// 実際の内容はそこから常に 2 文字ずれているため、<b>格子幅がいくつであっても</b>
+    /// 「バイト位置 = 文字位置 + 2」となる。<b>もし</b>ゼロ領域に格子点を置く包みをピースが
+    /// 参照すると、格子はゼロ領域から求めた「1 バイト = 1 文字 / break 0 個」を焼き付け、
+    /// 実際の内容はそこから常に 2 文字ずれているため、格子幅がいくつであっても
     /// 格子点へ飛んだ瞬間に 2 文字数え過ぎ、2 文字手前のバイトを返す。
+    /// 現行の AppendBuffer ではどのピースも書込済み範囲の格子点しか持たないので、これは起きない。
     /// </summary>
     private static string AppendProbeBlock(TextBuffer buf)
     {
@@ -224,8 +227,8 @@ public class TextSnapshotGetCharEquivalenceTests
         Assert.Equal(src.Length, snap.CharLength);
         for (int pos = src.Length - 16; pos < src.Length; pos++)
             Assert.Equal(src[pos], snap.GetChar(pos));
-        // 格子は CharOff と同時に BreaksTo もゼロ領域から焼き付ける。行検索は
-        // TextChunk.NthBreakEndChar 経由でそれを読むので、最終行頭でまとめて捕まえる。
+        // 格子は CharOff と同時に BreaksTo も持つ(ゼロ領域なら焼き付けうる)。行検索は
+        // TextChunk.NthBreakEndChar 経由でそれを読むので、最終行頭でまとめて照合する。
         Assert.Equal(src.LastIndexOf('\n') + 1, snap.GetLineStart(snap.LineCount - 1));
     }
 

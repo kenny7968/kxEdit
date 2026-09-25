@@ -136,6 +136,7 @@ public class FuzzTests
         string text = "";
         var undoStack = new List<string>();
         var redoStack = new List<string>();
+        long appendedBytes = 0; // 追記バッファへ入れた総バイト数(Undo / Redo では追記しない)
         for (int op = 1; op <= 1500; op++)
         {
             int roll = rnd.Next(100);
@@ -144,6 +145,7 @@ public class FuzzTests
                 int pos = Math.Max(0, text.Length - rnd.Next(41));
                 string ins = rnd.Next(10) == 0 ? BigMaterial(rnd) : Material(rnd);
                 buffer.Insert(pos, ins);
+                appendedBytes += Encoding.UTF8.GetByteCount(ins);
                 text = ModelSplice(text, pos, 0, ins, undoStack, redoStack);
             }
             else if (roll < 82)
@@ -180,11 +182,9 @@ public class FuzzTests
                     Assert.Equal(text[p], buffer.Current.GetChar(p));
             }
         }
-        // 規模の自己チェック: 格子点とブロックを実際にまたいだこと
-        Assert.True(
-            Encoding.UTF8.GetByteCount(text) > 2 * TextChunk.DefaultGridBytes,
-            "追記量が足りない"
-        );
+        // 規模の自己チェック: 追記ブロック(64KB)の境界を実際にまたいだこと
+        // (最終本文長ではなく総追記バイト数で見る。Undo で本文が縮んでも追記バッファは戻らない)
+        Assert.True(appendedBytes > 2 * AppendBuffer.BlockBytes, "追記量が足りない");
     }
 
     private static string BigMaterial(Random rnd)

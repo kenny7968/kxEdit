@@ -66,6 +66,34 @@ public class AppendBufferGridTests
         AssertGrid(more[0].Chunk, 0, G);
     }
 
+    // 以下 2 本は no-change / 待機の検証を _nextNominal の既定値(G)ではない状態から始める
+    // (CLAUDE.md §4-B。既定値からだけだと while の進め方の誤りが生き残る)。
+
+    [Fact]
+    public void No_extra_rewrap_after_a_write_crossing_several_grid_points()
+    {
+        // 1 回の書込で 2 点(G・2G)をまたいだ後、次の書込で余計に包み直さない
+        // (while が 1 点しか進めないと、2G が「まだ入っていない」扱いになり包み直してしまう)
+        var ab = new AppendBuffer();
+        var first = ab.Append(new string('a', 2 * G + 10));
+        AssertGrid(first[0].Chunk, 0, G, 2 * G);
+        var second = ab.Append("x");
+        Assert.Same(first[0].Chunk, second[0].Chunk);
+    }
+
+    [Fact]
+    public void Snapped_point_equal_to_pos_after_multi_point_write_waits_for_next_write()
+    {
+        // 1 回の書込で G をまたぎ、末尾の「あ」(2G-1..2G+1)が 2G をまたぐ。スナップ後の 2G+2 は
+        // _pos と等しいので置かずに待ち、次の書込で包み直す(while の条件を <= にすると 2G を飛ばして漏れる)
+        var ab = new AppendBuffer();
+        var first = ab.Append(new string('a', 2 * G - 1) + "あ"); // _pos = 2G+2
+        AssertGrid(first[0].Chunk, 0, G);
+        var second = ab.Append("b");
+        Assert.NotSame(first[0].Chunk, second[0].Chunk);
+        AssertGrid(second[0].Chunk, 0, G, 2 * G + 2);
+    }
+
     // ---- TextBuffer 経由: 元の文字列との一致 ----
 
     [Fact]
