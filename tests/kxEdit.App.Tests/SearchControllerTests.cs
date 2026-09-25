@@ -20,6 +20,7 @@ public class SearchControllerTests
         public SearchController Search { get; }
         public FakeAnnouncer Announcer { get; } = new();
         public FakeFindReplaceView View { get; } = new();
+        public ManualDebounceScheduler CountDebounce { get; } = new();
         public FindReplaceCallbacks? Callbacks; // 直近のファクトリ呼び出しで渡されたコールバック束
         public int FactoryCalls;
 
@@ -37,7 +38,8 @@ public class SearchControllerTests
                     FactoryCalls++;
                     Callbacks = cb;
                     return View;
-                }
+                },
+                CountDebounce
             );
         }
 
@@ -134,6 +136,13 @@ public class SearchControllerTests
             Assert.Equal((4, 7), doc.Editor.GetSelectionCharRange());
             Assert.True(cb.FindPrev());
             Assert.Equal((0, 3), doc.Editor.GetSelectionCharRange());
+
+            // PatternChanged は予約だけ(発声も本文変更もステータス更新もしない)
+            int statusBefore = host.View.StatusLog.Count;
+            cb.PatternChanged();
+            Assert.True(host.CountDebounce.IsPending);
+            Assert.Equal(statusBefore, host.View.StatusLog.Count);
+            host.CountDebounce.Cancel(); // 以降の判別へ持ち越さない
 
             // Action 3 本の判別 1: UpdateCount は発声も本文変更もしない
             int saidBefore = host.Announcer.Said.Count;
@@ -1836,5 +1845,182 @@ public class SearchControllerTests
             Assert.Equal(200, hitLine); // ヒットは最終行(fixture の前提を固定する)
             Assert.True(doc.Editor.TopLine > 0, $"expected TopLine > 0, got {doc.Editor.TopLine}");
             Assert.InRange(hitLine, doc.Editor.TopLine, doc.Editor.TopLine + visibleRows - 1);
+        });
+
+    // ===== P-5(b)(2026-09-25): 検索語の打鍵で件数表示を間引く =====
+    // 打鍵(PatternChanged)は予約だけ・満了で UpdateCount。即時の更新と検索の実行は保留中の更新を取り消す。
+
+    [Fact]
+    public void PatternChanged_DefersCount_UntilDebounceFires() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc abc abc");
+            host.Search.OpenFind(); // 空の検索語=ステータスはクリア
+            int statusCalls = host.View.StatusLog.Count;
+
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+
+            Assert.Equal(statusCalls, host.View.StatusLog.Count); // 打鍵の時点では数えない
+            Assert.True(host.CountDebounce.IsPending);
+
+            host.CountDebounce.Fire();
+
+            Assert.Equal("3 件", host.View.Status);
+            Assert.Empty(host.Announcer.Said); // 件数は発声しない(従来どおり)
+        });
+
+    [Fact]
+    public void PatternChanged_Repeated_CountsOnceWithLatestPattern() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("ab abc abc");
+            host.Search.OpenFind();
+            int statusCalls = host.View.StatusLog.Count;
+
+            host.View.Pattern = "ab";
+            host.Callbacks!.PatternChanged();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+            host.CountDebounce.Fire();
+
+            Assert.Equal(statusCalls + 1, host.View.StatusLog.Count); // 1 回だけ数える
+            Assert.Equal("2 件", host.View.Status); // 最後の検索語で数える
+        });
+
+    [Fact]
+    public void UpdateCount_CancelsPendingDebounce() =>
+        Sta.Run(() =>
+        {
+            // チェックボックスの変化は即時(UpdateCount)。保留中の打鍵の更新は取り消す
+            // (即時の更新が現在の条件で数えている=満了しても同じ結果を上書きするだけ)。
+            using var host = new Host();
+            host.NewDoc("ABC abc");
+            host.Search.OpenFind();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+
+            host.View.MatchCase = true;
+            host.Callbacks!.UpdateCount();
+
+            Assert.Equal("1 件", host.View.Status);
+            Assert.False(host.CountDebounce.IsPending);
+        });
+
+    [Theory]
+    [InlineData("FindNext")]
+    [InlineData("FindPrev")]
+    [InlineData("ReplaceOne")]
+    [InlineData("ReplaceAll")]
+    public void SearchExecution_CancelsPendingDebounce(string op) =>
+        Sta.Run(() =>
+        {
+            // 取り消さないと、満了した UpdateCount が「N 件中 M 件目」「N 件置換しました」の
+            // ステータスを「N 件」で上書きする。
+            using var host = new Host();
+            var doc = host.NewDoc("abc abc");
+            host.Search.OpenReplace();
+            host.View.Pattern = "abc";
+            host.View.Replacement = "X";
+            doc.Editor.SelectCharRange(doc.Editor.Text.Length, 0); // FindPrev が末尾から探せるように
+            host.Callbacks!.PatternChanged();
+
+            switch (op)
+            {
+                case "FindNext":
+                    host.Search.FindNext();
+                    break;
+                case "FindPrev":
+                    host.Search.FindPrev();
+                    break;
+                case "ReplaceOne":
+                    host.Search.ReplaceOne();
+                    break;
+                default:
+                    host.Search.ReplaceAll();
+                    break;
+            }
+
+            Assert.False(host.CountDebounce.IsPending);
+        });
+
+    [Fact]
+    public void FindNext_WithEmptyPattern_KeepsPendingDebounce() =>
+        Sta.Run(() =>
+        {
+            // 空の検索語の Find は発声もステータス更新もせずに戻る。ここで取り消すと、
+            // 検索語を消した打鍵の更新(ステータスのクリア)が失われ、古い件数が残る。
+            using var host = new Host();
+            host.NewDoc("abc");
+            host.View.Pattern = "abc";
+            host.Search.OpenFind();
+            Assert.Equal("1 件", host.View.Status);
+
+            host.View.Pattern = "";
+            host.Callbacks!.PatternChanged();
+            Assert.False(host.Search.FindNext());
+            Assert.True(host.CountDebounce.IsPending);
+
+            host.CountDebounce.Fire();
+            Assert.Equal("", host.View.Status);
+        });
+
+    [Fact]
+    public void Dismissed_CancelsPendingDebounce_AndDoesNotResurrectSearcher() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc");
+            host.Search.OpenFind();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+
+            host.View.RaiseDismissed();
+
+            Assert.False(host.CountDebounce.IsPending);
+            Assert.Null(host.Search.SearcherForTest); // 満了で searcher とキャッシュを作り直さない
+            Assert.Null(host.Search.TextCacheForTest);
+        });
+
+    [Fact]
+    public void ActiveDocumentChanged_CancelsPendingDebounce() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("abc abc");
+            host.NewDoc("abc"); // アクティブ
+            host.Search.OpenFind();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+
+            // 既存タブへ切り替える(NewDoc は空の新文書へ切り替えてから本文を入れるので、
+            // 切替時点の件数が「見つかりません」になり、新しい文書で数えたことを弁別できない)。
+            // 表示中なので切替の直後に新しい文書で数える。
+            host.Docs.SelectAt(0);
+
+            Assert.False(host.CountDebounce.IsPending);
+            Assert.Equal("2 件", host.View.Status);
+        });
+
+    [Fact]
+    public void DocumentClosed_KeepsPendingDebounce() =>
+        Sta.Run(() =>
+        {
+            // 設計書 §10.2(b) からの逸脱(計画 §0.2): タブを閉じても取り消さない。
+            // 取り消すと、最後の打鍵の件数が表示されないまま古い件数が残る。
+            using var host = new Host();
+            var doc1 = host.NewDoc("abc");
+            _ = host.NewDoc("abc abc"); // アクティブ
+            host.Search.OpenFind();
+            host.View.Pattern = "abc";
+            host.Callbacks!.PatternChanged();
+
+            Assert.True(host.Docs.TryClose(doc1, _ => true)); // 非アクティブタブを閉じる
+
+            Assert.True(host.CountDebounce.IsPending);
+            host.CountDebounce.Fire();
+            Assert.Equal("2 件", host.View.Status); // アクティブ文書を数える
         });
 }

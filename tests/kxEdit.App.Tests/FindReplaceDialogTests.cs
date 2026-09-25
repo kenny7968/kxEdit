@@ -27,6 +27,7 @@ public class FindReplaceDialogTests
             FindPrev: () => true,
             ReplaceOne: () => { },
             ReplaceAll: () => { },
+            PatternChanged: () => { },
             UpdateCount: () => { },
             InSelectionToggled: _ => { }
         );
@@ -154,5 +155,36 @@ public class FindReplaceDialogTests
 
             Assert.False(dlg.Visible);
             Assert.Equal(0, dismissed);
+        });
+
+    // ===== 入力の変化の配線 =====
+
+    [Fact]
+    public void PatternTextChanged_RaisesPatternChanged_AndCheckboxesRaiseUpdateCount() =>
+        Sta.Run(() =>
+        {
+            // P-5(b): 検索語の打鍵だけ間引く。チェックボックスは従来どおり即時に数える。
+            int pattern = 0,
+                count = 0;
+            using var dlg = new FindReplaceDialog(
+                new FindReplaceCallbacks(
+                    FindNext: () => false,
+                    FindPrev: () => false,
+                    ReplaceOne: () => { },
+                    ReplaceAll: () => { },
+                    PatternChanged: () => pattern++,
+                    UpdateCount: () => count++,
+                    InSelectionToggled: _ => { }
+                )
+            );
+
+            Field<TextBox>(dlg, "_pattern").Text = "a";
+            Assert.Equal((1, 0), (pattern, count));
+
+            foreach (var name in new[] { "_matchCase", "_wholeWord", "_useRegex" })
+            {
+                Field<CheckBox>(dlg, name).Checked = true;
+            }
+            Assert.Equal((1, 3), (pattern, count));
         });
 }
