@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using kxEdit.Core.Backup;
+using kxEdit.Core.Buffers;
 using kxEdit.Core.Text;
 
 namespace kxEdit.App;
@@ -26,6 +27,13 @@ public sealed class BackupCoordinator : IDisposable
         public long LastSig;
         public bool HasBackup;
         public bool ForceWrite; // 前回の背景書込が失敗 → 次 tick で強制再書込(陳腐化・欠落を防ぐ)
+
+        /// <summary>P-6(性能改善フェーズ 6): <see cref="LastSig"/> を計算したスナップショット。
+        /// 不変条件: 対象が取れるなら、その署名は常に <see cref="LastSig"/> に等しい。そのため
+        /// <see cref="LastSig"/> を新しい内容の署名で書き換える 3 箇所(RegisterNew・AdoptRestored・
+        /// Write 分岐)で必ず同時に更新する。Delete 分岐は署名を変えないので残してよい。
+        /// 弱参照にするのは、TextBuffer の差し替え後も旧文書全体の木を保持し続けないため。</summary>
+        public WeakReference<TextSnapshot>? LastSnapshot;
     }
 
     /// <summary>BK-M-3 (v0.11): バックアップに載せる本文の上限 (chars=UTF-16 code units)。
@@ -453,10 +461,12 @@ public sealed class BackupCoordinator : IDisposable
     /// 自セッション dir へ移動して「同一ファイル継続使用」を回復する。移動失敗は trace のみ。</summary>
     public void AdoptRestored(Document doc, BackupRecord rec)
     {
+        var snap = doc.Editor.CurrentBuffer.Current;
         _map[doc] = new DocBackup
         {
             Id = rec.Id,
-            LastSig = ContentSignature.Of(doc.Editor.SnapshotText),
+            LastSig = ContentSignature.Of(Materialize(snap)),
+            LastSnapshot = new WeakReference<TextSnapshot>(snap),
             HasBackup = true,
         };
         try
@@ -585,7 +595,12 @@ public sealed class BackupCoordinator : IDisposable
             }
 
             bool modified = doc.Editor.Modified;
-            string content = modified ? doc.Editor.SnapshotText : ""; // クリーン時はスナップショット不要
+            // P-6: 覚えている参照と同じなら、署名は LastSig に等しい(不変条件)。ForceWrite でなければ
+            // Decide は必ず None を返すので、全文化もハッシュも省く。
+            var snap = doc.Editor.CurrentBuffer.Current;
+            if (modified && !info.ForceWrite && IsRemembered(info, snap))
+                continue;
+            string content = modified ? Materialize(snap) : ""; // クリーン時はスナップショット不要
             long sig = modified ? ContentSignature.Of(content) : info.LastSig;
 
             switch (
@@ -595,12 +610,16 @@ public sealed class BackupCoordinator : IDisposable
                 case BackupAction.Write:
                     EnqueueWrite(info, doc, content);
                     info.LastSig = sig;
+                    info.LastSnapshot = new WeakReference<TextSnapshot>(snap);
                     info.HasBackup = true;
                     info.ForceWrite = false;
                     break;
                 case BackupAction.Delete:
                     _writer?.Delete(info.Id);
                     info.HasBackup = false;
+                    // Delete はクリーン時だけ=ここでの sig は常に info.LastSig で、署名は変わらない。
+                    // そのため LastSnapshot を残しても P-6 の不変条件は崩れない。クリーンでも署名を
+                    // 計算するように変えるなら、ここで LastSnapshot も更新すること。
                     info.LastSig = sig;
                     info.ForceWrite = false;
                     break;
@@ -760,14 +779,39 @@ public sealed class BackupCoordinator : IDisposable
         return ContentSignature.Of(sb.ToString());
     }
 
+    /// <summary>テスト観測用: 署名のための全文化の累計回数(P-6)。</summary>
+    internal int MaterializeCountForTest { get; private set; }
+
+    /// <summary>テスト観測用: 覚えているスナップショットをすべて忘れる(GC による回収の再現)。
+    /// 回収後の <c>TryGetTarget</c> = false と未記憶の null は <see cref="IsRemembered"/> で同じ扱い。</summary>
+    internal void ForgetRememberedSnapshotsForTest()
+    {
+        foreach (var info in _map.Values)
+            info.LastSnapshot = null;
+    }
+
+    /// <summary>P-6: 署名の対象と、覚える参照を同じスナップショットから取る。
+    /// <c>EditorControl.SnapshotText</c> と同じ文字列を返す(未設定のバッファは空の静的バッファ=空文字列)。</summary>
+    private string Materialize(TextSnapshot snap)
+    {
+        MaterializeCountForTest++;
+        return snap.GetText(0, snap.CharLength);
+    }
+
+    /// <summary>P-6: 覚えている参照と同じか。回収済み・未記憶は「同じでない」(null 同士を一致とみなさない)。</summary>
+    private static bool IsRemembered(DocBackup info, TextSnapshot snap) =>
+        info.LastSnapshot is { } w && w.TryGetTarget(out var s) && ReferenceEquals(s, snap);
+
     /// <summary>未登録文書を登録する。登録時点で既に dirty なら即退避し保護窓を作らない(起動時無題タブ対策)。</summary>
     private void RegisterNew(Document doc)
     {
-        string content = doc.Editor.SnapshotText;
+        var snap = doc.Editor.CurrentBuffer.Current;
+        string content = Materialize(snap);
         var info = new DocBackup
         {
             Id = Guid.NewGuid().ToString("N"),
             LastSig = ContentSignature.Of(content),
+            LastSnapshot = new WeakReference<TextSnapshot>(snap),
             HasBackup = false,
         };
         _map[doc] = info;

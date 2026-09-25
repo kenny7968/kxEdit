@@ -223,4 +223,27 @@ public class MainFormExternalChangeTests
             Assert.Equal(ExternalChangeOutcome.Skipped, form.CheckExternalChangeOnActiveForTest());
             Assert.Empty(prompt.Log);
         });
+
+    /// <summary>性能改善フェーズ 6(設計書 §11.2): パスのないタブへ切り替えたときは、外部変更チェックを
+    /// 投函しない(実行しても Skipped で終わるため)。陽性対照として、ファイルのタブへ切り替えたときは投函する。
+    /// 投函したデリゲートの実行はウィンドウの活性化が要るので見ない(クラスの注記のとおり L5 の担当)。</summary>
+    [Fact]
+    public void SwitchToUntitledTab_DoesNotQueueCheck_FileTab_Does() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            using var form = ShowMainForm(NewSettings(), tmp, new FakePrompt());
+            string path = tmp.File("a.txt");
+            File2.WriteAllText(path, "v1");
+            var untitled = form.DocsForTest.Active!; // 起動直後の無題タブ
+            var fileDoc = form.FileForTest.TryOpenOrActivate(path)!;
+            Assert.NotSame(untitled, fileDoc); // sanity: 無題タブを再利用せず別のタブで開いた
+            int before = form.ExternalChangeChecksQueuedForTest;
+
+            form.DocsForTest.Activate(untitled);
+            Assert.Equal(before, form.ExternalChangeChecksQueuedForTest);
+
+            form.DocsForTest.Activate(fileDoc);
+            Assert.Equal(before + 1, form.ExternalChangeChecksQueuedForTest);
+        });
 }

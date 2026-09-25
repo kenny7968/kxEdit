@@ -1439,6 +1439,190 @@ public class BackupCoordinatorTests
             Assert.True(t2.IsActive);
         });
 
+    // ===== P-6(性能改善フェーズ 6): 同じスナップショットの照合を省く =====
+    // 省く条件は「modified かつ 覚えている参照と同じ かつ !ForceWrite」。この条件では従来も必ず None だった。
+    // 省かない側(ForceWrite・参照の変化・回収後)は、全文化したうえで従来どおりに判定すること。
+
+    [Fact]
+    public void Reconcile_SameSnapshot_DoesNotMaterialize() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            _ = host.NewDoc("hello");
+            host.Backup.Reconcile(); // 書込(ここで参照を覚える)
+            int before = host.Backup.MaterializeCountForTest;
+            Assert.True(before >= 1); // sanity: 登録で全文化している
+
+            host.Backup.Reconcile();
+            host.Backup.Reconcile();
+
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+            Assert.Single(host.Writer.Writes); // 判定は従来どおり None
+        });
+
+    [Fact]
+    public void Reconcile_SameSnapshot_AfterWrite_DoesNotMaterialize() =>
+        Sta.Run(() =>
+        {
+            // Write 分岐でも参照を覚えること(RegisterNew 以外の更新点)。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            doc.Editor.Text = "world";
+            doc.Editor.ClearSavePoint();
+            host.Backup.Reconcile(); // 内容が変わった → Write(ここで新しい参照を覚える)
+            Assert.Equal(2, host.Writer.Writes.Count);
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+            Assert.Equal(2, host.Writer.Writes.Count);
+        });
+
+    [Fact]
+    public void Reconcile_EditInSameBuffer_WritesThenSkips_UndoWritesBack() =>
+        Sta.Run(() =>
+        {
+            // 実際の入力の主経路(同じバッファ内の編集と Undo)。どちらも新しいスナップショットを作るので省略されない。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+
+            doc.Editor.ReplaceCharRange(5, 0, "!");
+            host.Backup.Reconcile();
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal("hello!", host.Writer.Writes[^1].Content);
+
+            int before = host.Backup.MaterializeCountForTest;
+            host.Backup.Reconcile(); // 編集なし → 省略
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+
+            doc.Editor.Undo();
+            host.Backup.Reconcile();
+            Assert.Equal(before + 1, host.Backup.MaterializeCountForTest);
+            Assert.Equal(3, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_ForceWrite_MaterializesAndRewrites() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            _ = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            var id = host.Writer.Writes[0].Id;
+            host.Writer.OnWriteFailed?.Invoke(id); // 背景失敗 → ForceWrite
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile(); // 参照は同じでも ForceWrite なので省かない
+
+            Assert.Equal(before + 1, host.Backup.MaterializeCountForTest);
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_NewSnapshotSameContent_HashesAndDoesNotWrite() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            doc.Editor.Text = "hello"; // 新しいバッファ=新しいスナップショット・内容は同じ
+            doc.Editor.ClearSavePoint();
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(before + 1, host.Backup.MaterializeCountForTest); // 参照が変わったのでハッシュまで進む
+            Assert.Single(host.Writer.Writes); // 署名が同じなので None
+        });
+
+    [Fact]
+    public void Reconcile_NewSnapshotChangedContent_Writes() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            doc.Editor.Text = "world";
+            doc.Editor.ClearSavePoint();
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal("world", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_AfterSnapshotCollected_MaterializesAndStaysCorrect() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            _ = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            host.Backup.ForgetRememberedSnapshotsForTest(); // 弱参照が回収された状態
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(before + 1, host.Backup.MaterializeCountForTest); // 省けないので全文化する
+            Assert.Single(host.Writer.Writes); // 内容は同じ → None(従来どおり)
+        });
+
+    [Fact]
+    public void Reconcile_AfterSnapshotCollected_ChangedContent_Writes() =>
+        Sta.Run(() =>
+        {
+            // 回収後に「参照が取れない」ことを「同じ」と取り違えないこと(null 同士の一致で省かない)。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            host.Backup.ForgetRememberedSnapshotsForTest();
+            doc.Editor.Text = "world";
+            doc.Editor.ClearSavePoint();
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(2, host.Writer.Writes.Count);
+            Assert.Equal("world", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_AdoptRestored_RemembersSnapshot() =>
+        Sta.Run(() =>
+        {
+            // AdoptRestored でも参照を覚えること(起動時の復元がタブ数の 2 乗にならない)。
+            using var host = new Host();
+            var doc = host.NewDoc("restored");
+            host.Backup.AdoptRestored(doc, Rec("adopt-p6", "restored"));
+            int writesBefore = host.Writer.Writes.Count;
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+            Assert.Equal(writesBefore, host.Writer.Writes.Count); // 署名は採用時に計算済み → None
+        });
+
+    [Fact]
+    public void Reconcile_CleanDocument_DoesNotMaterialize() =>
+        Sta.Run(() =>
+        {
+            // クリーンな文書は従来から全文化しない(省略の条件に modified が要る理由の裏側)。
+            using var host = new Host();
+            _ = host.NewDoc("hello", dirty: false);
+            host.Backup.Reconcile();
+            int before = host.Backup.MaterializeCountForTest;
+
+            host.Backup.Reconcile();
+
+            Assert.Equal(before, host.Backup.MaterializeCountForTest);
+            Assert.Empty(host.Writer.Writes);
+        });
+
     [Fact]
     public void Reconcile_LayoutUnchanged_DoesNotRewrite() =>
         Sta.Run(() =>

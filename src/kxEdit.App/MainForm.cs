@@ -285,11 +285,14 @@ public sealed partial class MainForm : Form
             UpdateStatus();
             // M-18(設計 2026-09-03 §3.4): TabControl の選択変更ハンドラの中でモーダルを出さない
             // (WinForms の再入)。BeginInvoke 先で「まだそのタブがアクティブ」「フォームがアクティブ」を
-            // 再確認する。ctor 中(ハンドル未生成)の発火は BeginInvoke できないので見送る
-            // (起動直後の無題タブは Path=null で判定対象にならない)。
+            // 再確認する。ctor 中(ハンドル未生成)の発火は BeginInvoke できないので見送る。
+            // 性能改善フェーズ 6(設計書 §11.2): パスのないタブは CheckExternalChange が即 Skipped を返すので
+            // 投函しない(結果は同じ)。投函から実行までに「名前を付けて保存」でパスが入っても、
+            // その時点の LastKnownWriteTimeUtc は保存直後の値なので NoChange で終わる。
             var doc = _docs.Active;
-            if (doc is null || !IsHandleCreated)
+            if (doc is null || doc.State.Path is null || !IsHandleCreated)
                 return;
+            ExternalChangeChecksQueuedForTest++;
             BeginInvoke(() =>
             {
                 if (IsDisposed || ActiveForm != this || !ReferenceEquals(_docs.Active, doc))
@@ -1619,6 +1622,9 @@ public sealed partial class MainForm : Form
     /// </summary>
     internal FileController FileForTest => _file;
 
+    /// <summary>テスト専用: タブの切替を実経路(<see cref="DocumentManager.Activate"/>)で起こすため。</summary>
+    internal DocumentManager DocsForTest => _docs;
+
     /// <summary>テスト専用: CSV モードの手動切替(M-18 の読み直し後のモード復帰を検証する)。</summary>
     internal CsvController CsvForTest => _csv;
 
@@ -1677,6 +1683,9 @@ public sealed partial class MainForm : Form
     /// <summary>テスト専用: <see cref="CheckExternalChangeOnActive"/> を活性化イベント無しで叩く。</summary>
     internal ExternalChangeOutcome CheckExternalChangeOnActiveForTest() =>
         CheckExternalChangeOnActive();
+
+    /// <summary>テスト観測用: <c>ActiveDocumentChanged</c> から外部変更チェックを投函した累計回数(フェーズ 6)。</summary>
+    internal int ExternalChangeChecksQueuedForTest { get; private set; }
 
     /// <summary>
     /// grep ジャンプ用: <paramref name="hit"/> のファイルを開き（既存タブがあれば再利用）、
