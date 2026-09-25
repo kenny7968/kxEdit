@@ -8,12 +8,24 @@ namespace kxEdit.App.Tests;
 /// 実 %LOCALAPPDATA% を触ることに注意。各テストは try/finally で
 /// 生成した Path を必ず後始末する (Dispose の副作用に頼らない)。
 ///
+/// 性能改善フェーズ 7(P-21(a)): 削除は背景で行う。Dispose の直後はフォルダーが残っていることがあるので、
+/// 削除を確かめるテストは <c>DeletionTask</c> の完了を待つ。
+///
 /// L5 検証項目 (WebView2 依存で unit test 不可):
 ///   - 2 プレビュー同時起動でロック競合しない
 ///   - プレビュー閉じたあと %LOCALAPPDATA%\kxEdit\WebView2\preview-* が増え続けない
 /// </summary>
 public class PreviewUserDataFolderTests
 {
+    // xUnit1031(Fact 直下での Task.Wait/.Result 直呼び禁止)・S2925(Thread.Sleep 直呼び禁止)は
+    // 「Fact 本体に直接書かれているか」だけを見るため、本ファイル既存の PumpUntil 系ヘルパーと同じく
+    // private ヘルパー経由にして回避する。待つこと自体・値はテストの主目的なので変えない。
+    private static bool WaitOrTimeout(Task task, TimeSpan timeout) => task.Wait(timeout);
+
+    private static int ResultOf(Task<int> task) => task.Result;
+
+    private static void SleepMs(int milliseconds) => Thread.Sleep(milliseconds);
+
     [Fact]
     public void Ctor_CreatesDirectory()
     {
@@ -58,6 +70,7 @@ public class PreviewUserDataFolderTests
         {
             Assert.True(System.IO.Directory.Exists(path));
             sut.Dispose();
+            Assert.True(WaitOrTimeout(sut.DeletionTask!, TimeSpan.FromSeconds(10))); // 削除は背景で行う(P-21(a))
             Assert.False(System.IO.Directory.Exists(path));
         }
         finally
@@ -76,8 +89,11 @@ public class PreviewUserDataFolderTests
         try
         {
             sut.Dispose();
-            // 2 回目でも throw しない (Directory.Exists ガードで silent)。
+            var first = sut.DeletionTask;
+            // 2 回目でも throw せず、削除を二重に投げない。
             sut.Dispose();
+            Assert.Same(first, sut.DeletionTask);
+            Assert.True(WaitOrTimeout(sut.DeletionTask!, TimeSpan.FromSeconds(10))); // 削除は背景で行う(P-21(a))
             Assert.False(System.IO.Directory.Exists(path));
         }
         finally
@@ -174,6 +190,7 @@ public class PreviewUserDataFolderTests
         try
         {
             sut.Dispose();
+            Assert.True(WaitOrTimeout(sut.DeletionTask!, TimeSpan.FromSeconds(10))); // 削除は背景で行う(P-21(a))
             Assert.False(System.IO.Directory.Exists(empty));
         }
         finally
@@ -181,6 +198,112 @@ public class PreviewUserDataFolderTests
             if (System.IO.Directory.Exists(sut.Path))
                 System.IO.Directory.Delete(sut.Path, recursive: true);
         }
+    }
+
+    // ===== 性能改善フェーズ 7(P-21(a)): 削除は背景で行い、短い間隔でリトライする =====
+
+    [Fact]
+    public void Dispose_WhileLocked_ReturnsWithoutWaiting_AndDeletesAfterUnlock()
+    {
+        // WebView2 のブラウザプロセスがプロファイルを掴んだまま閉じた形。Dispose は削除を待たずに戻り、
+        // ロックが外れた後のリトライで消える。
+        using var tmp = new TempDir();
+        var sut = new PreviewUserDataFolder(
+            tmp.Root,
+            Enumerable.Repeat(TimeSpan.FromMilliseconds(50), 100).ToArray()
+        );
+        string locked = System.IO.Path.Combine(sut.Path, "held");
+        var fs = new System.IO.FileStream(
+            locked,
+            System.IO.FileMode.CreateNew,
+            System.IO.FileAccess.Write,
+            System.IO.FileShare.None
+        );
+        try
+        {
+            sut.Dispose();
+
+            Assert.NotNull(sut.DeletionTask);
+            Assert.False(sut.DeletionTask!.IsCompleted); // 掴まれている間は終わらない=Dispose は待っていない
+            Assert.True(System.IO.Directory.Exists(sut.Path));
+        }
+        finally
+        {
+            fs.Dispose();
+        }
+
+        Assert.True(WaitOrTimeout(sut.DeletionTask!, TimeSpan.FromSeconds(10)));
+        Assert.False(System.IO.Directory.Exists(sut.Path));
+    }
+
+    [Fact]
+    public void DeleteWithRetry_RetriesAfterFailure()
+    {
+        using var tmp = new TempDir();
+        string dir = System
+            .IO.Directory.CreateDirectory(System.IO.Path.Combine(tmp.Root, "preview-x"))
+            .FullName;
+        var fs = new System.IO.FileStream(
+            System.IO.Path.Combine(dir, "held"),
+            System.IO.FileMode.CreateNew,
+            System.IO.FileAccess.Write,
+            System.IO.FileShare.None
+        );
+        Task<int> task;
+        try
+        {
+            task = PreviewUserDataFolder.DeleteWithRetryAsync(
+                dir,
+                Enumerable.Repeat(TimeSpan.FromMilliseconds(50), 100).ToArray()
+            );
+            SleepMs(300); // 掴まれている間に少なくとも 1 回失敗させる
+        }
+        finally
+        {
+            fs.Dispose();
+        }
+
+        Assert.True(WaitOrTimeout(task, TimeSpan.FromSeconds(10)));
+        Assert.True(ResultOf(task) >= 2, $"attempts={ResultOf(task)}"); // 失敗の後にリトライして消した
+        Assert.False(System.IO.Directory.Exists(dir));
+    }
+
+    [Fact]
+    public void DeleteWithRetry_GivesUpAfterRetries_WithoutThrowing()
+    {
+        // 最後まで消せなければ諦める(残骸は次回起動の sweeper が回収する)。例外は外へ出さない。
+        using var tmp = new TempDir();
+        string dir = System
+            .IO.Directory.CreateDirectory(System.IO.Path.Combine(tmp.Root, "preview-y"))
+            .FullName;
+        using var fs = new System.IO.FileStream(
+            System.IO.Path.Combine(dir, "held"),
+            System.IO.FileMode.CreateNew,
+            System.IO.FileAccess.Write,
+            System.IO.FileShare.None
+        );
+
+        var task = PreviewUserDataFolder.DeleteWithRetryAsync(
+            dir,
+            new[] { TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(10) }
+        );
+
+        Assert.True(WaitOrTimeout(task, TimeSpan.FromSeconds(10)));
+        Assert.Equal(3, ResultOf(task)); // 初回 + リトライ 2 回
+        Assert.True(System.IO.Directory.Exists(dir));
+    }
+
+    [Fact]
+    public void DeleteWithRetry_MissingDirectory_IsNoOp()
+    {
+        using var tmp = new TempDir();
+        var task = PreviewUserDataFolder.DeleteWithRetryAsync(
+            System.IO.Path.Combine(tmp.Root, "preview-missing"),
+            new[] { TimeSpan.FromMilliseconds(10) }
+        );
+
+        Assert.True(WaitOrTimeout(task, TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, ResultOf(task));
     }
 
     private static void SafeCleanup(PreviewUserDataFolder sut)

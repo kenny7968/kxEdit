@@ -263,6 +263,7 @@ public sealed class MarkdownPreviewForm : Form
     /// <c>base.Dispose(disposing)</c> (= WebView2 コントロール破棄) を先に呼び、その後で
     /// <see cref="PreviewUserDataFolder"/> を Dispose する順。逆順にすると WebView2 側の
     /// ロックにかかって Delete が Trace 警告に落ちる (silent fallback ではあるが残骸が残る)。
+    /// (P-21(a) 以後は背景でリトライするが、先に WebView2 を破棄する順は変えない)
     /// </summary>
     protected override void Dispose(bool disposing)
     {
