@@ -118,9 +118,25 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // UiaTextHostAdapter (_uia) へ移譲済み。EditorControl 本体は Adapter への通知経路
     // (OnSnapshotChanged / RaiseTextChanged) のみを持つ。
     //
-    // _lastFrame は Paint (OnPaint) のスナップショットで Uia 座標 API 用に公開している独立フィールド
-    // (Adapter 移譲対象外=Test hook TestHook_GetLastFrame でも参照)。
+    // _lastFrame は最後に描いた Frame(テスト観測用。TestHook_GetLastFrame が読む)。
+    // フェーズ 2(S-1)以降、UIA の座標 API は問い合わせのたびに求めるので、これを読まない
+    // (UiaTextHostAdapter_HasNoScreenCoordinateCache で固定)。描画を省いても UIA には影響しない。
     private volatile kxEdit.Core.Layout.Frame? _lastFrame;
+
+    // 2026-09-25 性能改善フェーズ 3(設計書 §8.2): 最後に描き終えたフレームの入力。
+    // キャレット・選択の 4 経路は、今の入力がこれと等しければ Invalidate を省く(InvalidateIfFrameChanged)。
+    // null = 「画面の絵の入力が分からない」= 比較は必ず「変化あり」になる(描画前・描画の例外・
+    // 本文/フォントの丸ごと差し替え = InvalidateAndForgetPaintedFrame)。UI スレッド専用。
+    //
+    // 【前提(不変条件 2)】FrameInputs の元になる状態(_topLine・_topSegment・_scrollX・
+    // _cellHighlight・_style・_showWhitespace・_hscroll.Visible など)を書き換える経路は、
+    // 必ず自分で Invalidate() を呼ぶ(キャレット・選択の 4 経路だけは InvalidateIfFrameChanged())。
+    // 他の経路の Invalidate に便乗してはならない。Invalidate せずに状態を変えると、その後に
+    // DrawToBitmap / PrintWindow(WM_PRINT)や部分的な WM_PAINT で記録が更新された場合、または
+    // 4 経路の中で比較の後に状態を変えた場合に、比較が「変化なし」になって古い絵が画面に残る。
+    // 以前のように、次のキャレット移動で必ず直るとは限らない。
+    // (不変条件 1「描画が読む状態は FrameInputs の中にある」は、PaintBody が static であることでコンパイラが守る。)
+    private FrameInputs? _lastPaintedInputs;
 
     // P6 Task 10 レビュー M-2: CurrentBuffer の null 経路で毎回 new すると
     // Assert.Same(ctrl.CurrentBuffer, ctrl.CurrentBuffer) が SetSource 前で失敗する反直観挙動になる。
@@ -242,7 +258,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             PositionCaret();
             NativeMethods.ShowCaret(Handle);
         }
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 12: 初期化時に未確定文字列用フォントを IME に通知(候補窓/未確定描画のメトリクス整合)。
         _imeCtrl.NotifyCompositionFont();
         // P5 Task 5 / Task 3d: RPC スレッド用スナップショットキャッシュを初期化 (Adapter 経由=
@@ -311,7 +327,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         {
             PositionCaret();
         }
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 3d: RPC スレッド用スナップショット更新 + _lastLineSegs 破棄を Adapter 経由に集約
         // (元 CacheSnapshot() + `_lastLineSegs = null;`)。
         _uia.OnSnapshotChanged(_buffer.Current);
@@ -401,37 +417,43 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     internal bool HasFocusCached => _hasFocus;
 
     /// <summary>
-    /// 可視の視覚行を列挙する唯一の入口。<c>OnPaint</c> と <see cref="GetVisibleCharRange"/> が
-    /// 同じ起点 (TopLine, TopSegment) と同じ折り返し設定を使うことを、言葉の約束ではなく
-    /// 呼び出しの共有で保証する(「どこまで見えているか」の定義を二重化しない)。
+    /// 可視の視覚行を列挙する唯一の入口。描画(<c>PaintBody</c>)と <see cref="GetVisibleCharRange"/> が
+    /// 同じ起点 (TopLine, TopSegment)・同じ折り返し設定・同じ可視高さを使うことを、言葉の約束ではなく
+    /// 呼び出しの共有で保証する(「どこまで見えているか」の定義を二重化しない。2026-08-22 A-6)。
     /// </summary>
     /// <remarks>
-    /// <paramref name="heightPx"/> だけは共有しない。<c>OnPaint</c> は同じ値を
-    /// <c>FrameBuilder.Build</c> にも渡す必要があり、ローカルへ 1 度だけ受けた
-    /// <c>paintHeight</c> をそのまま流す契約になっているため(<c>EditorControl.Paint.cs</c> の
-    /// 同旨のコメント参照)。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
+    /// 2026-09-25 フェーズ 3: 入力を <see cref="FrameInputs"/> から取る形にした。両者とも
+    /// <see cref="CaptureFrameInputs"/> を経由するので、従来は共有していなかった可視高さ
+    /// (<see cref="PaintHeightPx"/>)も共有される。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
     /// 折り返し OFF 専用で topSegment が 0 固定の別経路であり、起点の意味が違う。
     /// </remarks>
-    private IReadOnlyList<VisualRow> BuildVisibleRows(TextSnapshot snap, int heightPx) =>
-        ViewportLayout.Build(snap, _topLine, _topSegment, heightPx, _wrapColumns, _metrics);
+    private static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
+        ViewportLayout.Build(
+            inputs.Snapshot,
+            inputs.TopLine,
+            inputs.TopSegment,
+            inputs.PaintHeight,
+            inputs.WrapColumns,
+            inputs.Metrics
+        );
 
     /// <summary>
     /// UIA <c>ITextProvider.GetVisibleRanges</c> の実処理(UI スレッド専用)。
     /// 現在ビューポートに見えている本文の範囲 [Start, End) を返す。
     /// </summary>
     /// <remarks>
-    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="BuildVisibleRows"/> と
-    /// <see cref="PaintHeightPx"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
+    /// 描画 (<c>EditorControl.Paint.cs</c>) と**同じ** <see cref="CaptureFrameInputs"/> と
+    /// <see cref="BuildVisibleRows"/> を使う。「見えている行」の定義を二重化しないことが本メソッドの要点。
     /// 折り返し ON では視覚行境界になる。末尾行の改行は含めない。
     /// バッファ未設定・可視行ゼロでは (0, 0)。
     /// 典拠: docs/plans/2026-07-25-uia-scrollintoview-design.md §5.2。
     /// </remarks>
     internal (int Start, int End) GetVisibleCharRange()
     {
-        if (_buffer is null)
+        var inputs = CaptureFrameInputs();
+        if (inputs is null)
             return (0, 0);
-        var snap = _buffer.Current;
-        var rows = BuildVisibleRows(snap, PaintHeightPx);
+        var rows = BuildVisibleRows(inputs);
         if (rows.Count == 0)
             return (0, 0);
         var first = rows[0];
@@ -656,7 +678,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // になるので、この再配置は「保険」ではなく system caret 更新の唯一の経路になった。
         if (_hasFocus)
             PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // A-11: 以下は ReplaceSource が担っていた通知契約の再現
         // (スナップショット差し替えは上の caret 復元直後で済ませてある)。
         // 設計書 §10.12 (1): _wasModified は ReplaceSource:301 と同じく「代入で揃える」。
@@ -1791,7 +1813,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         _uia.OnSnapshotChanged(snap);
         if (_hasFocus)
             PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // ConvertEols と同じ扱い: 遷移検出(AfterEdit)に載せず代入で揃える。ここで
         // SavePointReached を焚くと「保存に失敗しただけ」なのに保存点到達イベントが飛ぶ。
         _wasModified = _buffer.Modified;
@@ -2813,7 +2835,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             NativeMethods.ShowCaret(Handle);
         }
         PositionCaret();
-        Invalidate();
+        InvalidateAndForgetPaintedFrame();
         // Task 12: フォント変更後に IME へ未確定文字列用フォントを再通知(本文と候補窓のメトリクス整合)。
         _imeCtrl.NotifyCompositionFont();
         // P8 Minor-5 / Task 3d: metrics/wrap 変化で Adapter の _lastLineSegs キャッシュ破棄。

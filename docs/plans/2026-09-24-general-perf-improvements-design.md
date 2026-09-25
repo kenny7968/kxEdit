@@ -473,6 +473,30 @@ dotnet-trace と WPR の手順を追記する。
   - `RangeFromPoint`(マウス追従の読み上げ)。
   - `tools/sr-regression.ps1`。
 
+### 7.4 実施記録(2026-09-25・PR #88)
+
+- **成果物**
+  - S-1: UIA の座標を問い合わせのたびに求める。原点の取得は `TryGetClientOrigin`(キャッシュ済みの `_hwnd` に対する `ClientToScreen`)に集約し、`BoundingRectangle` と 2 つの Compute で共有する。
+  - P-9 (a)(b): `ComputeBoundingRectangles` の行ループを可視域に限定する。
+  - P-9 (c): 折り返し OFF の `ComputeCaretPoint` を、積み上げなしで即答する。
+  - 実装計画・計測値・レビューの経緯は、`docs/plans/2026-09-25-perf-uia-rects.md`(以下「計画」)の実施記録にある。
+- **完了条件**
+  - **計測**(NVDA 起動中、3 回の中央値)
+    - S8 の全文(ja10k・UI スレッドから直接): 3,975.92 → 0.58 ms。40 行ぶん(0.53 ms)と同程度になり、範囲の行数によらなくなった。
+    - M-7 の全文(COM 越し): 2.8〜3.3 秒 → 2.6〜2.9 ms。
+    - S1〜S3 は、変更前の揺れの範囲に収まった。
+  - **ミューテーション検証**(P-9 (c) の判定式): M1〜M3・M6〜M8 は殺された。M4・M5・M9 は等価変異で生存した。M9 を受けて、参照実装に絶対値の assert を足した。
+  - **L5**: windows-mcp で可能な範囲を実施した。ウィンドウを動かした直後の `BoundingRectangle`・行の矩形・`RangeFromPoint` が、変更前はずれ、変更後は画面の描画と一致した。キャレット移動の発声と、TopLine > 0 での全選択も確かめた。視覚的ハイライトの表示位置とマウス追従の実発声は、ユーザーの判断で省いた。
+  - **レビュー**: 各タスクの仕様レビューと、最終レビューの 2 パスを実施した。fixup の再レビューも行った。
+- **本節からの精密化・訂正**
+  - **§7.2 (c) の条件**: `_wrapColumns <= 0` ではなく `maxWidthPx <= 0` にした。等価性の根拠である `LineLayout` の分岐そのものに揃えるため。`_wrapColumns <= 0` の場合を含む。
+  - **§7.1 の Compute 側の原点**: 「その場で `PointToScreen`」ではなく、`_hwnd` に対する `ClientToScreen` にした。脆弱性パスの I-1 で、既存の窓(`IsHandleCreated` の直後に Handle が破棄される)を通ると、`PointToScreen` が RPC スレッドで Handle を作り直すことが分かったため。
+- **意図的な挙動差**: §3.5 のフェーズ 2 の 3 行のとおり。ほかに、`BoundingRectangle` は UI スレッドがリサイズ中だと「新しい原点と古い大きさ」の組を返しうる(次の問い合わせで正しい値に戻る。従来の「次の描画まで古いまま」より窓は狭い)。
+- **以後のフェーズへの申し送り**
+  - **フェーズ 3**: `_lastFrame` のコメントを「テスト観測用」に直す。OnPaint を省いても UIA には影響しない(座標は問い合わせのたびに求める)。
+  - **既存の食い違い(割り当てなし)**: 折り返し OFF でも `SetTopPosition` で古い `_topSegment` が残ると、`ComputeCaretPoint` と描画とで TopLine の扱いが食い違う。従来の挙動を保った。実運用でこの状態に入れるかは未確認。
+  - **既存の競合(割り当てなし)**: `IsHandleCreated` と `InvokeRequired` の間で Handle が破棄されると、Compute が RPC スレッドで走り、`GdiCharMetrics` の幅メモに書き込みうる。
+
 ## 8. フェーズ 3: 無変化時の再描画省略(`perf-skip-invalidate`)
 
 **目的**: 描画内容が変わらないキャレット移動で、全面再描画をしない。

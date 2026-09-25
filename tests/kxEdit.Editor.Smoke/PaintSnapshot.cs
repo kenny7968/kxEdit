@@ -105,8 +105,8 @@ internal static class PaintSnapshot
         public int ScrollX { get; init; }
     }
 
-    /// <summary>本文と、状態が参照する位置。</summary>
-    private sealed record Body(string Text, int[] LineStarts)
+    /// <summary>本文と、状態が参照する位置(<see cref="PaintTransition"/> も使う)。</summary>
+    internal sealed record Body(string Text, int[] LineStarts)
     {
         public int Line(int line) => LineStarts[line];
     }
@@ -354,7 +354,7 @@ internal static class PaintSnapshot
     /// 破棄中の窓を別スレッドで作り直すところに UI スレッドの Dispose が重なる、というもの
     /// (docs/plans/2026-09-24-perf-paint-cost.md の実施記録)。
     /// </remarks>
-    private static void CloseQuietly(Form form)
+    internal static void CloseQuietly(Form form)
     {
         try
         {
@@ -609,7 +609,7 @@ internal static class PaintSnapshot
     }
 
     /// <summary>全画素を 32bpp ARGB の int 配列(行優先・stride の詰め物なし)で読む。</summary>
-    private static int[] ReadPixels(Bitmap bmp)
+    internal static int[] ReadPixels(Bitmap bmp)
     {
         int width = bmp.Width;
         int height = bmp.Height;
@@ -637,7 +637,7 @@ internal static class PaintSnapshot
     /// 60 行の固定本文(乱数なし)。縦スクロールバーが出る行数・日本語・ASCII・混在・
     /// サロゲートペア・空行・半角/全角空白とタブ・200 字の長い行(横スクロールバーが出る)を含む。
     /// </summary>
-    private static Body BuildBody()
+    internal static Body BuildBody()
     {
         var lines = new List<string>
         {
@@ -720,7 +720,9 @@ internal static class PaintSnapshot
     }
 }
 
-/// <summary><see cref="PaintSnapshot"/> の自己チェックの失敗。EXIT 1 で終わる。</summary>
+/// <summary>
+/// <see cref="PaintSnapshot"/> / <see cref="PaintTransition"/> の自己チェックの失敗。EXIT 1 で終わる。
+/// </summary>
 public sealed class PaintSnapshotException : Exception
 {
     public PaintSnapshotException() { }

@@ -29,6 +29,8 @@ internal interface IImeOverlayHost
     void Invalidate();
 
     // === 状態 / メトリクス (Draw / NotifyCandidateWindow から参照) ===
+    // 2026-09-25 フェーズ 3: Draw が host から読む値は、すべて FrameInputs に入っていること(入っていないと、
+    // キャレット移動で再描画を省いたときに古い未確定表示が残る)。読む値を増やすときは FrameInputs にも足す。
 
     /// <summary><c>_buffer is not null</c>。</summary>
     bool HasBuffer { get; }

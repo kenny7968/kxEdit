@@ -189,6 +189,8 @@ internal sealed class ImeController
     /// </summary>
     /// <remarks>
     /// <see cref="TextRenderer"/> を使う理由と Attrs 長不整合防御は旧 DrawImeOverlay と同じ (§3-3 / Task 2 M-5)。
+    /// 2026-09-25 フェーズ 3: Draw が host から読む値は、すべて <see cref="FrameInputs"/> に入っていること
+    /// (入っていないと、キャレット移動で再描画を省いたときに古い未確定表示が残る)。読む値を増やすときは FrameInputs にも足す。
     /// </remarks>
     public void Draw(Graphics g)
     {

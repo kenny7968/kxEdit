@@ -38,7 +38,7 @@ public sealed partial class EditorControl
         // 更新矩形が空なら何もしない(Paint イベントも発火しない)。旧 WmPaint(OptimizedDoubleBuffer)は
         // 更新矩形が空なら OnPaint 自体を呼ばずに return していたので、それに揃える
         // (クライアントに面積があって更新領域だけが空の WM_PAINT = RDW_INTERNALPAINT 等で、
-        // PaintBody・_lastFrame の更新・Paint イベントを走らせない)。OnPrint 経路のクリップは
+        // PaintAndRecord(描画と、_lastFrame・_lastPaintedInputs の記録)と Paint イベントを走らせない)。OnPrint 経路のクリップは
         // ClientRectangle なので、クライアント面積 0 もここで返る = 面積 0 の DIB は作らない。
         var clip = e.ClipRectangle;
         if (clip.Width <= 0 || clip.Height <= 0)
@@ -48,7 +48,7 @@ public sealed partial class EditorControl
         var buffer = TryAllocatePaintBuffer(e.Graphics, ClientRectangle);
         if (buffer is null)
         {
-            PaintBody(e.Graphics);
+            PaintAndRecord(e.Graphics);
         }
         else
         {
@@ -60,7 +60,7 @@ public sealed partial class EditorControl
                 // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
                 // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
                 buffer.Graphics.SetClip(clip);
-                PaintBody(buffer.Graphics);
+                PaintAndRecord(buffer.Graphics);
                 buffer.Render(e.Graphics);
             }
         }
@@ -107,90 +107,183 @@ public sealed partial class EditorControl
                 or IndexOutOfRangeException
                 or AccessViolationException;
 
-    private void PaintBody(Graphics g)
+    /// <summary>
+    /// 今の状態を集めて描き、描き終えた入力を <see cref="_lastPaintedInputs"/> に記録する(OnPaint の本体)。
+    /// 描く前に記録を捨てる=描画が例外で抜けたら記録は null のまま(次の比較は必ず「変化あり」)。
+    /// WM_PRINT 経由(DrawToBitmap / PrintWindow)でも記録してよい根拠は
+    /// 実装計画 docs/plans/2026-09-25-perf-skip-invalidate.md §0.2。
+    /// </summary>
+    private void PaintAndRecord(Graphics g)
     {
-        // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
-        // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
-        // (背景全域 FillRect)があっても消さない: RenderFrame の _scrollX シフトで右端に生じる隙間は、
-        // この塗りしか覆わない。_buffer が null(ソース未設定)の間も、この行が空のコントロールを
-        // BackColor で塗る。なお右下の角は VScrollBar(高さいっぱいに dock する子)が覆っており、
-        // この行の役目ではない(ctor の Dock 順の注意を参照)。
-        g.Clear(BackColor);
-        if (_buffer is not null)
-        {
-            var snap = _buffer.Current;
-            // Control.ClientSize は docked 子コントロールを引かないため、VScrollBar 幅・
-            // HScrollBar 高さを明示的に減算。(ScrollableControl と違って Control は
-            // DisplayRectangle でも同じ挙動)
-            int paintWidth = Math.Max(0, ClientSize.Width - _vscroll.Width);
-            // 可視高さの定義は PaintHeightPx (EditorControl.Caret.cs) に一本化する。
-            // ここで同じ式をコピーすると、UIA の GetVisibleCharRange / BringCaretIntoView /
-            // ScrollCharRangeIntoView と「どこまで見えているか」の定義が食い違う。
-            // ローカルへ 1 度だけ受けるのは、以降 2 箇所 (BuildVisibleRows / FrameBuilder.Build)
-            // で同一値を使うことを保証するため(式自体は移設前と同一=挙動不変)。
-            int paintHeight = PaintHeightPx;
-            // 起点 (TopLine, TopSegment) と折り返し設定は BuildVisibleRows に集約する
-            // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
-            // 言葉の約束ではなく呼び出しの共有にする=片側だけ起点がずれる変異が成立しなくなる。
-            var rows = BuildVisibleRows(snap, paintHeight);
-            int lnWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0;
-
-            // 選択がある間は現在行強調 FillRect を抑止する(選択矩形と重ねると
-            // ハイライトが二重になり視覚的に読みにくいため=EditorControl 層の責務)。
-            bool hasSelection = _caretCtrl.HasSelection;
-            int currentLineLogical =
-                (_highlightCurrentLine && !hasSelection)
-                    ? snap.GetLineIndexOfChar(_caretCtrl.Caret)
-                    : -1;
-            SelectionRange? selection = null;
-            if (hasSelection)
-            {
-                var (selS, selE) = GetSelectionCharRange();
-                selection = new SelectionRange(selS, selE);
-            }
-
-            var frame = FrameBuilder.Build(
-                snap,
-                rows,
-                paintWidth,
-                paintHeight,
-                lnWidth,
-                currentLineLogical,
-                selection,
-                _cellHighlight,
-                ShowWhitespace,
-                _style,
-                _metrics
-            );
-            RenderFrame(g, frame);
-
-            // P4 Task 9: 未確定文字列 overlay(本文 → cellHighlight → キャレット行強調 →
-            // ここ → システムキャレット の順序=設計 §3-3)。IsComposing=false(未確定期間外)は
-            // 呼ばない=空描画のコストゼロ。節ハイライト(反転)は Task 10・
-            // IME 内キャレット位置反映は Task 11 で扱う。
-            // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済 (IImeOverlayHost 経由で
-            // Font/Color/Metrics/ComputeCaretPoint を取得)。
-            if (IsComposing)
-                _imeCtrl.Draw(g);
-
-            // P5 Task 10: 描画完了時点の Frame を UIA 座標 API 用に公開(不変参照)。
+        _lastPaintedInputs = null;
+        var inputs = CaptureFrameInputs();
+        var frame = PaintBody(g, inputs, BackColor, _imeCtrl);
+        // テスト観測用(TestHook_GetLastFrame)。SetSource 前(frame が null)は従来どおり更新しない。
+        if (frame is not null)
             _lastFrame = frame;
-        }
+        _lastPaintedInputs = inputs;
     }
 
     /// <summary>
-    /// Frame の Ops を GDI 呼び出しに変換する。折り返し OFF 時の水平スクロール(<see cref="_scrollX"/>)は
-    /// <b>全 op の X から一様に差し引く</b>形で反映する(_wrapColumns&gt;0 時は _scrollX=0 で実質シフトなし)。
-    /// 先頭 op(背景全域 FillRect)も一緒にシフトされるが、PaintBody 冒頭で
-    /// <c>g.Clear(BackColor)</c> が全 client 領域を BackColor で塗っており、DefaultStyle.Background
-    /// と BackColor が一致している(共に White)ため、シフトで生じる右側の隙間は視覚的にクリアの
-    /// BackColor と同色になり結果は同じ。行番号マージンも一緒にシフトされる(仕様=YAGNI)。
+    /// 今の描画の入力が、最後に描いたフレームの入力と異なるときだけ Invalidate する(設計書 §8.2)。
+    /// キャレット・選択の 4 経路(EditorControl.Caret.cs)専用。
     /// </summary>
-    private void RenderFrame(Graphics g, Frame frame)
+    /// <remarks>
+    /// 正しさの根拠: 画面に出ているのは <see cref="_lastPaintedInputs"/> から決定的に描いた絵である。
+    /// 今の入力が同じなら、描き直しても同じ絵になる。未処理の無効領域がある場合でも、その描画は
+    /// 今の入力で描かれる。スクロールのセッターは自前で無条件に Invalidate するので、この比較の外にある。
+    /// この根拠は「描画の入力を変える経路は、必ず自分で Invalidate する(他の経路の Invalidate に
+    /// 便乗しない)」という前提の上にだけ成り立つ。前提の詳細は <see cref="_lastPaintedInputs"/> の
+    /// フィールドコメント(EditorControl.cs)を参照。
+    /// 他の Invalidate(編集・IME・外観・CSV 強調・スクロール・リサイズ)は無条件のまま(変更範囲を最小にする)。
+    /// </remarks>
+    private void InvalidateIfFrameChanged()
+    {
+        var current = CaptureFrameInputs();
+        if (current is not null && current.Equals(_lastPaintedInputs))
+            return;
+        Invalidate();
+    }
+
+    /// <summary>
+    /// 本文・フォント・テーマを丸ごと差し替える経路の Invalidate。記録を捨てて、古いスナップショットや
+    /// フォント・幅メモを次の描画まで握らない(描画されないタブで起きても解放される)。
+    /// 捨てた後の比較は必ず「変化あり」になる(安全側)。
+    /// </summary>
+    private void InvalidateAndForgetPaintedFrame()
+    {
+        _lastPaintedInputs = null;
+        Invalidate();
+    }
+
+    /// <summary>
+    /// 描画が読む状態を集める唯一の場所(設計書 §8.1)。SetSource 前は null。
+    /// 描画(<see cref="PaintBody"/>)は、ここで集めた値<b>だけ</b>を使う
+    /// (例外は IME の未確定表示。<see cref="FrameInputs"/> の remarks を参照)。
+    /// </summary>
+    private FrameInputs? CaptureFrameInputs()
+    {
+        if (_buffer is null)
+            return null;
+        var snap = _buffer.Current;
+        // 選択がある間は現在行強調 FillRect を抑止する(選択矩形と重ねると
+        // ハイライトが二重になり視覚的に読みにくいため=EditorControl 層の責務)。
+        bool hasSelection = _caretCtrl.HasSelection;
+        SelectionRange? selection = null;
+        if (hasSelection)
+        {
+            var (selS, selE) = GetSelectionCharRange();
+            selection = new SelectionRange(selS, selE);
+        }
+        var clientSize = ClientSize;
+        return new FrameInputs
+        {
+            Snapshot = snap,
+            TopLine = _topLine,
+            TopSegment = _topSegment,
+            ScrollX = _scrollX,
+            WrapColumns = _wrapColumns,
+            ClientSize = clientSize,
+            // Control.ClientSize は docked 子コントロールを引かないため、VScrollBar 幅・
+            // HScrollBar 高さを明示的に減算。(ScrollableControl と違って Control は
+            // DisplayRectangle でも同じ挙動)
+            PaintWidth = Math.Max(0, clientSize.Width - _vscroll.Width),
+            // 可視高さの定義は PaintHeightPx (EditorControl.Caret.cs) に一本化する。
+            // ここで同じ式をコピーすると、UIA の GetVisibleCharRange / BringCaretIntoView /
+            // ScrollCharRangeIntoView と「どこまで見えているか」の定義が食い違う。
+            // FrameInputs に 1 度だけ受けるのは、以降 2 箇所 (BuildVisibleRows / FrameBuilder.Build)
+            // で同一値を使うことを保証するため(式自体は移設前と同一=挙動不変)。
+            PaintHeight = PaintHeightPx,
+            ShowLineNumbers = _showLineNumbers,
+            LineNumberWidth = _showLineNumbers ? MeasureLineNumberWidth(snap.LineCount) : 0,
+            CurrentLineLogical =
+                (_highlightCurrentLine && !hasSelection)
+                    ? snap.GetLineIndexOfChar(_caretCtrl.Caret)
+                    : -1,
+            Selection = selection,
+            CellHighlight = _cellHighlight,
+            ShowWhitespace = _showWhitespace,
+            Style = _style,
+            Metrics = _metrics,
+            Font = _font,
+            UnderlineFont = _underlineFontCache,
+            TargetFont = _targetFontCache,
+            BackColor = BackColor,
+            Ime = _imeCtrl.State,
+        };
+    }
+
+    /// <summary>
+    /// <paramref name="inputs"/> <b>だけ</b>からフレームを組み立てて描き、描いたフレームを返す。
+    /// <paramref name="inputs"/> が null(SetSource 前)なら <paramref name="emptyBackColor"/> で塗るだけで null を返す。
+    /// </summary>
+    /// <remarks>
+    /// static にして、生の状態への出口を引数だけに限る(描画が FrameInputs の外の状態を読めないことを
+    /// コンパイラで保証する)。<paramref name="ime"/> が唯一の例外で、<see cref="ImeController.Draw"/> は
+    /// host 経由で生の状態を読む(<see cref="FrameInputs"/> の remarks)。
+    /// <paramref name="emptyBackColor"/> は inputs が null のときだけ使う。
+    /// </remarks>
+    private static Frame? PaintBody(
+        Graphics g,
+        FrameInputs? inputs,
+        Color emptyBackColor,
+        ImeController ime
+    )
+    {
+        // 2026-09-24 性能改善フェーズ 1(P-17): ControlStyles.Opaque で背景層(OnPaintBackground)を
+        // 省いたため、この行が client 全面を下塗りする唯一の箇所になった。FrameBuilder の工程 1
+        // (背景全域 FillRect)があっても消さない: RenderFrame の scrollX シフトで右端に生じる隙間は、
+        // この塗りしか覆わない。_buffer が null(ソース未設定 = inputs が null)の間も、この行が空の
+        // コントロールを BackColor(emptyBackColor)で塗る。なお右下の角は VScrollBar(高さいっぱいに
+        // dock する子)が覆っており、この行の役目ではない(ctor の Dock 順の注意を参照)。
+        g.Clear(inputs?.BackColor ?? emptyBackColor);
+        if (inputs is null)
+            return null;
+
+        // 起点 (TopLine, TopSegment)・折り返し設定・可視高さは BuildVisibleRows に集約する
+        // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
+        // 言葉の約束ではなく呼び出しの共有にする=片側だけ起点がずれる変異が成立しなくなる。
+        var frame = FrameBuilder.Build(
+            inputs.Snapshot,
+            BuildVisibleRows(inputs),
+            inputs.PaintWidth,
+            inputs.PaintHeight,
+            inputs.LineNumberWidth,
+            inputs.CurrentLineLogical,
+            inputs.Selection,
+            inputs.CellHighlight,
+            inputs.ShowWhitespace,
+            inputs.Style,
+            inputs.Metrics
+        );
+        RenderFrame(g, frame, inputs.ScrollX, inputs.Font);
+
+        // P4 Task 9: 未確定文字列 overlay(本文 → cellHighlight → キャレット行強調 →
+        // ここ → システムキャレット の順序=設計 §3-3)。未確定期間外は
+        // 呼ばない=空描画のコストゼロ。節ハイライト(反転)は Task 10・
+        // IME 内キャレット位置反映は Task 11 で扱う。
+        // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済 (IImeOverlayHost 経由で
+        // Font/Color/Metrics/ComputeCaretPoint を取得)。
+        // 2026-09-25 フェーズ 3: ImeController.Draw は host 経由で生の状態を読む(FrameInputs の remarks)。
+        if (inputs.Ime.IsActive)
+            ime.Draw(g);
+
+        return frame;
+    }
+
+    /// <summary>
+    /// Frame の Ops を GDI 呼び出しに変換する。折り返し OFF 時の水平スクロール(<paramref name="scrollX"/>)は
+    /// <b>全 op の X から一様に差し引く</b>形で反映する(<c>WrapColumns</c>&gt;0 時は scrollX=0 で実質シフトなし)。
+    /// 先頭 op(背景全域 FillRect)も一緒にシフトされるが、PaintBody 冒頭で
+    /// <c>g.Clear(inputs.BackColor)</c> が全 client 領域を塗っており、<c>Style.Background</c>
+    /// と <c>inputs.BackColor</c> が一致している(ctor は共に White、ApplyAppearance は同じテーマ色から両方を設定する)ため、
+    /// シフトで生じる右側の隙間は視覚的にクリアの色と同色になり結果は同じ。行番号マージンも一緒にシフトされる(仕様=YAGNI)。
+    /// </summary>
+    private static void RenderFrame(Graphics g, Frame frame, int scrollX, Font font)
     {
         foreach (var op in frame.Ops)
         {
-            int x = op.X - _scrollX; // 一様シフト
+            int x = op.X - scrollX; // 一様シフト
             switch (op.Kind)
             {
                 case PaintOpKind.FillRect:
@@ -212,7 +305,7 @@ public sealed partial class EditorControl
                     TextRenderer.DrawText(
                         g,
                         op.Text ?? string.Empty,
-                        _font,
+                        font,
                         new Rectangle(x, op.Y, textClipWidth, op.Height),
                         ToColor(op.Fore),
                         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left
@@ -245,6 +338,33 @@ public sealed partial class EditorControl
     /// 2026-09-14 設計書 §5.2 の不変条件は Editor 層でここからしか固定できない。
     /// </summary>
     internal static ViewportStyle TestHook_ViewportStyle(EditorControl c) => c._style;
+
+    /// <summary>
+    /// テスト専用: クライアント領域の大きさのビットマップに、OnPaint と同じ経路で描く。
+    /// <paramref name="record"/> が true なら「WM_PAINT で描いた」扱いで <see cref="_lastPaintedInputs"/> を
+    /// 記録する(<see cref="PaintAndRecord"/>)。false なら記録せずに今の状態を描く(オラクルの正解。
+    /// <see cref="_lastPaintedInputs"/> も <see cref="_lastFrame"/> も書き換えない)。
+    /// 画面外の HostForm には WM_PAINT が来ないので、描画とその記録はこれで同期的に起こす。
+    /// </summary>
+    internal static Bitmap TestHook_PaintToBitmap(EditorControl c, bool record)
+    {
+        var size = c.ClientSize;
+        var bmp = new Bitmap(
+            Math.Max(1, size.Width),
+            Math.Max(1, size.Height),
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb
+        );
+        using var g = Graphics.FromImage(bmp);
+        if (record)
+            c.PaintAndRecord(g);
+        else
+            PaintBody(g, c.CaptureFrameInputs(), c.BackColor, c._imeCtrl);
+        return bmp;
+    }
+
+    /// <summary>テスト専用: 最後に描いたフレームの入力を持っているか。</summary>
+    internal static bool TestHook_HasLastPaintedInputs(EditorControl c) =>
+        c._lastPaintedInputs is not null;
 
     private static ViewportStyle DefaultStyle() =>
         new(
