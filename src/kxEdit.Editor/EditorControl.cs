@@ -131,10 +131,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 【前提(不変条件 2)】FrameInputs の元になる状態(_topLine・_topSegment・_scrollX・
     // _cellHighlight・_style・_showWhitespace・_hscroll.Visible など)を書き換える経路は、
     // 必ず自分で Invalidate() を呼ぶ(キャレット・選択の 4 経路だけは InvalidateIfFrameChanged())。
-    // 他の経路の Invalidate に便乗してはならない。便乗すると、便乗先が 4 経路のどれかで、
-    // そこが描画を省いたときに古い絵が画面に残る。
-    // また、この記録は DrawToBitmap / PrintWindow(WM_PRINT)や部分的な WM_PAINT でも更新されるので、
-    // Invalidate を忘れた状態変更は、以前のように次のキャレット移動では直らない(比較が「変化なし」になる)。
+    // 他の経路の Invalidate に便乗してはならない。Invalidate せずに状態を変えると、その後に
+    // DrawToBitmap / PrintWindow(WM_PRINT)や部分的な WM_PAINT で記録が更新された場合、または
+    // 4 経路の中で比較の後に状態を変えた場合に、比較が「変化なし」になって古い絵が画面に残る。
+    // 以前のように、次のキャレット移動で必ず直るとは限らない。
     // (不変条件 1「描画が読む状態は FrameInputs の中にある」は、PaintBody が static であることでコンパイラが守る。)
     private FrameInputs? _lastPaintedInputs;
 
