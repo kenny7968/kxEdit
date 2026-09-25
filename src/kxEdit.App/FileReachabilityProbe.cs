@@ -172,8 +172,17 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
     /// <see cref="FileInfo"/> の生成(名前に NUL があると <see cref="ArgumentException"/>)や
     /// <c>Exists</c> の例外も「不在」として親フォルダーの確認へ進む。到達不能に倒すと、
     /// 共有全体を到達不能として記憶する挙動差になる。</item>
+    /// <item>
+    /// 脆弱性レビュー I-1(net9 実測): 既存ファイルに末尾区切りを付けたパス(<c>...\a.txt\</c> /
+    /// <c>...\a.txt/</c>)では <see cref="FileInfo.Exists"/> が内部の FillAttributeInfo で
+    /// 末尾区切りを落として true を返すが、<c>File.Exists</c> は正規化後の末尾区切りを見て
+    /// false を返す。ここで揃えないと (Reachable, Exists) がずれる(共有全体を誤って
+    /// 到達可能・既存として扱う)ので、<see cref="Path.EndsInDirectorySeparator(string)"/> の
+    /// ときも File.Exists と同じく「不在」として親フォルダーの確認へ進む。</item>
     /// <item>親フォルダーの確認と、それ以外の予期しない例外は、従来の保存先プローブと同じく到達不能へ倒す。</item>
-    /// <item>更新時刻の取得の例外は <c>Error</c> で返す(呼出側は null にし、記憶しない)。</item>
+    /// <item>更新時刻の取得の例外は <c>Error</c> で返す(呼出側は null にし、記憶しない)。
+    /// <c>Exists</c> が true なら属性は <see cref="FileInfo"/> の生成時に取り込み済みで
+    /// <see cref="FileSystemInfo.LastWriteTimeUtc"/> は通常例外を投げないが、防御のために分岐しておく。</item>
     /// </list>
     /// </summary>
     internal static TimestampProbeResult ReadTimestamp(string path)
@@ -184,7 +193,9 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
             try
             {
                 info = new FileInfo(path);
-                if (!info.Exists)
+                // 脆弱性レビュー I-1: 末尾区切り付きの既存ファイルは FileInfo.Exists が true を返すが
+                // File.Exists は false を返す(意味論のずれ)。File.Exists 側に揃える。
+                if (!info.Exists || Path.EndsInDirectorySeparator(path))
                     info = null;
             }
             catch

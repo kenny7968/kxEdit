@@ -216,10 +216,11 @@ public class FileTimestampProviderTests
     }
 
     /// <summary>期限切れ後に到達できれば、記憶が到達可能を塞がないことを固定する
-    /// (読みに進んだかは FileExists ゲートがあるので観測できない。プローブが走ったことだけを見る)。
-    /// Fake は「到達できるが不在」を返す = FileExists ゲートで止まり、実 <c>File.Exists</c>(実 SMB)へは
-    /// 進まない(最終コード品質レビュー Q-4: 以前は (true, true) で実 I/O へ到達していた)。パスは当時の
-    /// 名残で即答する <c>\\localhost\</c> の存在しない共有のまま(<c>IsRemote</c> は先頭 <c>\\</c> で true。
+    /// (読みに進んだかは Exists ゲートがあるので観測できない。プローブが走ったことだけを見る)。
+    /// Fake は「到達できるが不在」を返す = P-11 以降、リモートでは更新時刻もプローブの結果だけで
+    /// 答えるので、実 <c>File.Exists</c>(実 SMB)へ進む経路自体が無い(最終コード品質レビュー Q-4:
+    /// 以前は (true, true) で実 I/O へ到達していた)。パスは当時の名残で即答する
+    /// <c>\\localhost\</c> の存在しない共有のまま(<c>IsRemote</c> は先頭 <c>\\</c> で true。
     /// 今は I/O が起きないので何でもよい)。</summary>
     [Fact]
     public void UnreachableRoot_AfterTtl_ReachableAgain_IsNotBlockedByMemo()
@@ -430,6 +431,29 @@ public class FileTimestampProviderTests
             File.SetLastWriteTimeUtc(path, stamp);
 
             Assert.Equal(stamp, new FileTimestampProvider().GetLastWriteTimeUtc(path));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>既存ファイルに末尾区切りを付けたパスは null(脆弱性レビュー I-1)。
+    /// <c>FileInfo.Exists</c> は <c>FillAttributeInfo</c> が末尾区切りを落とすため true を返すが、
+    /// <c>File.Exists</c> は正規化後の末尾区切りを見て false を返す。ここで揃えないと、
+    /// 従来 null だった入力が固定の時刻を返す挙動変更になる。</summary>
+    [Fact]
+    public void LocalExistingFile_WithTrailingSeparator_ReturnsNull()
+    {
+        var dir = Directory.CreateTempSubdirectory("kxEditTs_").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "a.txt");
+            File.WriteAllText(path, "x");
+
+            Assert.Null(
+                new FileTimestampProvider().GetLastWriteTimeUtc(path + Path.DirectorySeparatorChar)
+            );
         }
         finally
         {

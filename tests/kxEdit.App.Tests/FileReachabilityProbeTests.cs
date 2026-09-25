@@ -289,6 +289,9 @@ public class FileReachabilityProbeTests
     /// ずれると到達不能の記憶の判定が変わる(共有全体を 60 秒黙らせる/黙らせない)。
     /// NUL 入りの名前は <c>FileInfo</c> の生成が例外を投げる入力で、これを到達不能に倒すと
     /// ここで落ちる(<c>File.Exists</c> は例外を投げずに false を返すので、従来は「親あり・不在」)。
+    /// 既存ファイルに末尾区切りを付けた入力(脆弱性レビュー I-1)は <c>FileInfo.Exists</c> が
+    /// <c>FillAttributeInfo</c> で末尾区切りを落として true を返す一方、<c>File.Exists</c> は
+    /// 正規化後の末尾区切りを見て false を返すため、ここで揃えないと (Reachable, Exists) がずれる。
     /// </summary>
     [Theory]
     [InlineData("existing")]
@@ -298,6 +301,7 @@ public class FileReachabilityProbeTests
     [InlineData("drive-root")]
     [InlineData("nul-in-name")]
     [InlineData("trailing-separator")]
+    [InlineData("file-trailing-separator")]
     public void ProbeTimestamp_MatchesSaveTargetProbe_OnReachableAndExists(string kind)
     {
         using var tmp = new TempDir();
@@ -312,6 +316,7 @@ public class FileReachabilityProbeTests
             "drive-root" => System.IO.Path.GetPathRoot(tmp.Root)!,
             "nul-in-name" => tmp.File("a\0b.txt"),
             "trailing-separator" => tmp.Root + System.IO.Path.DirectorySeparatorChar,
+            "file-trailing-separator" => existing + System.IO.Path.DirectorySeparatorChar,
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
         var probe = new FileReachabilityProbe();

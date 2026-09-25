@@ -1,7 +1,7 @@
 namespace kxEdit.App.Tests.Fakes;
 
 /// <summary>
-/// <see cref="IReachabilityProbe"/> のテスト用フェイク。4 メンバーとも、呼び出し回数と
+/// <see cref="IReachabilityProbe"/> のテスト用フェイク。5 メンバーとも、呼び出し回数と
 /// 呼出側が渡したタイムアウト値(5 秒契約)を pin するための観測点を持つ。
 /// <list type="bullet">
 /// <item><c>ProbeFileExistsWithTimeout</c> — 既定 <see cref="Result"/>=true
@@ -81,7 +81,8 @@ public sealed class FakeReachabilityProbe : IReachabilityProbe
 
     /// <summary>
     /// <c>ProbeTimestampWithTimeout</c> の応答。既定は「到達可能・不在」
-    /// (<see cref="SaveTargetResult"/> の既定と同じ形。FileExists ゲートで止まり、実 I/O へ進まない)。
+    /// (<see cref="SaveTargetResult"/> の既定と同じ形)。P-11 以降、リモートでは更新時刻も
+    /// このプローブの結果だけで答えるので、UI スレッド側で実 I/O へ進む経路自体がない。
     /// </summary>
     public TimestampProbeResult TimestampResult { get; set; } =
         new(Reachable: true, Exists: false, LastWriteUtc: null, Error: false);

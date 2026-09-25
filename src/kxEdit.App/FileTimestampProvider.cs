@@ -84,8 +84,14 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
                 // 不在時の LastWriteTimeUtc は 1601-01-01 を返す(例外を投げない)。
                 // そのまま返すと「非常に古いディスク」に見えて判定が黙って歪むため、Exists で弾く。
                 // Exists は File.Exists と同じくフォルダーに false を返す。
+                // 脆弱性レビュー I-1(net9 実測): 末尾区切り付きの既存ファイル(...\a.txt\)は
+                // FileInfo.Exists が FillAttributeInfo で区切りを落として true を返すが、
+                // File.Exists は正規化後の区切りを見て false を返す(意味論のずれ)。
+                // 揃えないと、従来 null だった入力が固定の時刻を返す挙動変更になる。
                 var info = new FileInfo(path);
-                return info.Exists ? info.LastWriteTimeUtc : null;
+                return info.Exists && !Path.EndsInDirectorySeparator(path)
+                    ? info.LastWriteTimeUtc
+                    : null;
             }
 
             string root = RootKey(path);
