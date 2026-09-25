@@ -816,3 +816,24 @@ CLAUDE.md §3 の 5・§6 に従う。
 
 - harness は 1 回ごとの揺れが大きく、ブロック内の単調増加は Smoke ほどはっきりしない。ブロックを越えた直後(74KB)の落ち込みは 3 回とも見える(53KB の 19.5〜21.5 → 13.7〜14.8)。
 - `backups` にファイルはなかった(harness の中止条件に当たらない)。
+
+### Task 2: TextChunk の gridLimit(d4e9adc)
+
+- Step 2 は予想どおりコンパイルエラー(`gridLimit` と `GridByteOffsets` がない)。Core.Tests 1553 件 PASS・Release 0 warning。
+- テストのコメントの誤記(「書込済み 10 バイト」→ 実際は 11)を直した。ほかは計画どおり。
+- **仕様レビュー**: ✅(既定値で格子表が旧実装と同一になることを論証。ゼロ領域のテストが gridLimit を無視する実装で FAIL することを手で追って確認)。
+  - Minor-1(スナップの上限 `p < limit` はどのテストでも観測できない): ② 受容。上限の先で止めても止めなくても、スナップ後が上限以上なら置かないので格子表は同じ。Task 4 の M3 で等価変異として扱う。
+  - Minor-2(負の値のテストが `ParamName` を見ていない): ③ 却下。`gridBytes` は既定で有効なので、例外の出所は `gridLimit` に限られる。
+
+### Task 3: AppendBuffer の包み直し(80f0441)
+
+- **Step 2**: 予想どおり 20 件中 5 件が FAIL(包み直しを期待する後半のアサーションだけ: `Typing_up_to_nominal…` の PieceCount・`New_block_…` の後半・`Nominal_inside_…`・`No_rewrap_…` の NotSame・`Piece_of_a_large_write…`)。元の文字列との一致を見るテストとファズは PASS。
+- **ファズの総追記バイト数**(5 seed): 427,735 / 402,631 / 314,267 / 361,279 / 314,271。すべて 64KB を大きく超え、op 数は 1500 のまま。
+- Core.Tests 1568・Editor.Tests 639・App.Tests 1011 件 PASS。Release 0 warning。
+- **仕様レビュー**: ❌(Important 2・Minor 3)。実装は計画のコードと同一で、正しさの問題はなし(`_nextNominal` の進め方と ctor の配置規則の整合、古い包みの不変、格子値が書込済みバイトだけから決まることを論証)。
+  - Important-1(「1 回だけ進める」と、while のスナップ条件の `<=` の 2 変異が全件を通過して生存した。no-change の検証が初期状態からしか始まっていない = CLAUDE.md §4-B): ① fixup でテスト 2 本を足す。
+  - Important-2(探針テストはゼロ領域の網ではなくなった。最初の挿入ですぐ包み直すので、初期・繰上げの包みはどのピースも参照しない。全経路を `gridLimit: BlockBytes` にする変異でも 14 件すべて通る): ① fixup でコメントを実態に合わせる。**設計書 §9.3 の「既存の `TextSnapshotGetCharEquivalenceTests`(ゼロ領域の網を含む)は全件通すこと」の前提は崩れた。** ゼロ領域の網は `AppendBufferGridTests`(AssertGrid 群と `Old_snapshots_…`)が担う。
+  - Minor-1(実施記録がない): ① 本節。
+  - Minor-2(ファズの自己チェックが「最終本文 > 8KB」だけで、ブロックをまたいだことを保証しない): ① fixup で総追記バイト数を数えて assert する。
+  - **fixup 7381283 の再レビュー**: 新テスト 2 本が 2 変異をそれぞれ殺すことを、実装者とレビューの双方がコピーで確認した。appendedBytes の数え方も妥当。Minor 1 件(`AppendProbeBlock` の「1 ブロックあたり 3 ピース」は誤りで、実測は 2 ピース): ① 本記録と同じ commit で直した。Core.Tests 1570 件 PASS。
+  - Minor-3(設計書 §9.2 の「格子点の直後に LF が後から書かれても補正が効く」は、厳密に内側に置く規則のもとでは起きない): ② 精密化として記録する。格子点 x を置く時点で s[x] は必ず書込済みで、後から LF が来るのはフロンティア(格子点がない)だけである。クエリ時の補正が読む s[x-1]・s[x] は書き換わらない。安全性の結論は変わらない。
