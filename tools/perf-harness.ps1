@@ -341,6 +341,9 @@ function Write-RunSettings([string]$ProfileDir, [string]$Root, [bool]$SessionRes
     if ($null -eq $marker -or $marker.State -ne 'cleared') {
         throw '計測用の設定を書けません(プロフィールを空にしていない)。利用者のプロフィールに触れずに中止します。'
     }
+    if ($marker.ProfilePath -ne $ProfileDir) {
+        throw "計測用の設定を書けません(目印の元の場所($($marker.ProfilePath))が対象($ProfileDir)と違います)。"
+    }
     if (-not (Test-Path -LiteralPath $ProfileDir)) { [void](New-Item -ItemType Directory -Path $ProfileDir) }
     Assert-NoReparsePoints $ProfileDir
     Set-Content -LiteralPath (Join-Path $ProfileDir 'settings.json') -Value '{"RestoreOpenFilesOnStartup":true}' -Encoding utf8
@@ -435,6 +438,8 @@ function Invoke-SelfTest {
     function HasReason([string[]]$Reasons, [string]$Needle) { return @($Reasons | Where-Object { $_.Contains($Needle) }).Count -gt 0 }
     function Pre { return Test-HarnessPreconditions $prof $root $noProc $noMutex }
     function Throws([scriptblock]$Block) { try { & $Block; return $false } catch { return $true } }
+    # 投げた理由が $Needle であること(別の理由で投げて PASS するのを防ぐ)。
+    function ThrowsWith([scriptblock]$Block, [string]$Needle) { try { & $Block; return $false } catch { return "$_".Contains($Needle) } }
     function New-FakeProfile {
         New-Item -ItemType Directory -Force -Path (Join-Path $prof 'sub\深い') | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $prof 'empty') | Out-Null
@@ -454,13 +459,15 @@ function Invoke-SelfTest {
         Check ((Read-Marker $root).State -eq 'stashed') '退避後の目印は stashed'
         Check (Throws { Save-ProfileStash $prof $root }) '退避が残っている間の再退避は拒否する(目印を上書きしない)'
         # Write-RunSettings(-SessionRestore): cleared の後だけ書く。stashed(まだ空にしていない)では投げて、何も書かない。
-        Check ((Throws { Write-RunSettings $prof $root $true }) -and -not ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw) -match 'RestoreOpenFilesOnStartup')) '空にする前は計測用の設定を書かない'
+        Check ((ThrowsWith { Write-RunSettings $prof $root $true } 'プロフィールを空にしていない') -and -not ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw) -match 'RestoreOpenFilesOnStartup')) '空にする前は計測用の設定を書かない'
         Clear-ProfileForRun $prof $root
         Check (@(Get-ChildItem -LiteralPath $prof -Force).Count -eq 0) '計測用にプロフィールが空になる'
         Write-RunSettings $prof $root $false
         Check (@(Get-ChildItem -LiteralPath $prof -Force).Count -eq 0) 'OFF のときは計測用の設定を書かない'
         Write-RunSettings $prof $root $true
         Check ((Get-Content -LiteralPath (Join-Path $prof 'settings.json') -Raw).Trim() -eq '{"RestoreOpenFilesOnStartup":true}') '空にした後は計測用の設定を書く'
+        $otherProf = Join-Path $base 'other\kxEdit'
+        Check ((ThrowsWith { Write-RunSettings $otherProf $root $true } '目印の元の場所') -and -not (Test-Path -LiteralPath $otherProf)) '目印の元の場所と違うプロフィールには書かない'
         Check (HasReason (Pre) '退避が残っています') '退避が残っている間は中止条件に当たる'
         Set-Content -LiteralPath (Join-Path $prof 'settings.json') -Value 'changed' -Encoding utf8
         New-Item -ItemType Directory -Force -Path (Join-Path $prof 'backups') | Out-Null
@@ -1162,6 +1169,7 @@ function Invoke-M1([string]$Exe) {
     for ($k = 0; $k -lt 6; $k++) {
         Assert-NoKxEditRunning
         Clear-ProfileForRun $script:ProfileDir $script:HarnessRoot
+        Write-RunSettings $script:ProfileDir $script:HarnessRoot $SessionRestore.IsPresent
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $p = Start-Process -FilePath $Exe -PassThru
         $script:Launched.Add($p)
