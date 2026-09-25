@@ -2048,4 +2048,71 @@ public class SearchControllerTests
             host.CountDebounce.Fire();
             Assert.Equal("2 件", host.View.Status); // アクティブ文書を数える
         });
+
+    // ===== P-14(2026-09-25): 「N 件中 M 件目」の発声が一致位置表の導入で変わらないこと =====
+    // 旧実装(全件列挙)で PASS することを確かめてから P-14 を入れる=特性テスト。
+
+    [Fact]
+    public void Announcements_ForF3ShiftF3AndReplace_AreStable() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("ab ab ab ab");
+            host.View.Pattern = "ab";
+            host.View.Replacement = "X";
+            host.Search.OpenReplace();
+
+            for (int i = 0; i < 5; i++)
+            {
+                host.Search.FindNext();
+            }
+            host.Search.FindPrev();
+            host.Search.FindPrev();
+            host.Search.ReplaceOne(); // 選択中の (3,2) を置換 → 次は新しいスナップショットで数える
+            host.Search.FindPrev(); // 置換後のスナップショットで Shift+F3
+
+            Assert.Equal(
+                new[]
+                {
+                    "4 件中 1 件目",
+                    "4 件中 2 件目",
+                    "4 件中 3 件目",
+                    "4 件中 4 件目",
+                    "これ以上見つかりません",
+                    "4 件中 3 件目",
+                    "4 件中 2 件目",
+                    "置換しました。3 件中 2 件目",
+                    "3 件中 1 件目",
+                },
+                host.Announcer.Said
+            );
+        });
+
+    [Fact]
+    public void Announcements_ForZeroWidthRegex_AreStable() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("ab cd");
+            host.View.Pattern = @"\b";
+            host.View.UseRegex = true;
+            host.Search.OpenFind();
+
+            for (int i = 0; i < 5; i++)
+            {
+                host.Search.FindNext();
+            }
+
+            Assert.Equal(
+                new[]
+                {
+                    "4 件中 1 件目",
+                    "4 件中 2 件目",
+                    "4 件中 3 件目",
+                    "4 件中 4 件目",
+                    "これ以上見つかりません",
+                },
+                host.Announcer.Said
+            );
+        });
 }
