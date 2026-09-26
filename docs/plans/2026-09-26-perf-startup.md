@@ -704,7 +704,7 @@ P-16(`fd2ccd86`)のテストが「フォントを使い回すこと」を実際�
 計測対象: Smoke S10 はブランチ HEAD `537feb12`(P-16 を含む。`537feb12` 自体は release.yml と
 README のみの変更で製品コードは `fd2ccd86` と同じ)の Release ビルド。M-1 と配布物は Task 3 の
 ReadyToRun publish(`<scratchpad>\perf-startup\after\publish`。CSV の `env` 行の版は
-`0.2.0+fd2ccd86`)=P-7 と P-16 の両方を含む。
+`0.2.0+fd2ccd86`)=P-7 と P-16 の両方を含むビルド(ただし起動には P-16 は効かない。下記「読み方と留保」)。
 
 #### Smoke --perf S10
 
@@ -713,7 +713,7 @@ dotnet build -c Release
 1..3 | ForEach-Object { dotnet run --project tests/kxEdit.Editor.Smoke -c Release --no-build -- --perf --scenario S10 --json "<scratchpad>\perf-startup\after-s10-$_.json" }
 ```
 
-3 回とも **EXIT 0**、`paints_per_op` はいずれも 1.00。計測環境は変更前と同一
+3 回とも **EXIT 0**(各回の `$LASTEXITCODE` で確認)、`paints_per_op` はいずれも 1.00。計測環境は変更前と同一
 (DeviceDpi=96 / ClientSize=884x661 / LineHeightPx=16 / n=200 / warmup=20 / Release / .NET 9.0.20 /
 Windows 10.0.26200)。
 
@@ -791,10 +791,11 @@ Compress-Archive -Path "<scratchpad>\perf-startup\after\publish\*" -DestinationP
 
 - S10 は Smoke(ReadyToRun と無関係な通常の Release ビルド)で測っているので、差は P-16
   (同じフォントなら作り直さない)によるもの。
-- M-1 の差は P-7(ReadyToRun)と P-16 の**合算**で、どちらがどれだけ効いたかは分けて測っていない。
-  入力受付までの −27.7ms は、調査記録で P-7 単独に見込んだ −13ms(NVDA なしの条件)より大きい。
-  起動時に `ApplyAppearance` が同じ設定で複数回呼ばれる分を P-16 が省いている可能性があるが、
-  切り分けは未実施。0.8 秒時点の CPU は OS の時間刻み(15.625ms)単位の値なので粒度が粗い。
+- M-1 の差は P-7(ReadyToRun)によるもの。計測条件 `session_restore=0` では起動時のタブは 1 つで、
+  `ApplyAppearance` は `MainForm.CreateEditor` から 1 回だけ呼ばれ、必ず初回=作り直しになるため
+  P-16 は効かない(§0.1)。調査記録の −13ms は NVDA なしの条件で、本フェーズ(NVDA 起動中)とは
+  条件が異なるので大小を比べない。変更後の値の内訳(どの処理が何 ms 縮んだか)は切り分けていない。
+  0.8 秒時点の CPU は OS の時間刻み(15.625ms)単位の値なので粒度が粗い。
 - 変更前と変更後は同日の別時刻に同じ機械・同じ条件(NVDA 起動中)で測った。
 - 配布物は zip で約 1.09MB(ほぼ 2 倍)増える。ReadyToRun がネイティブコードを IL に併載するための
   既知のトレードオフで、設計どおりの意図的な挙動差。
