@@ -96,14 +96,17 @@ public static class GrepService
                 }
 
                 byte[] bytes = File.ReadAllBytes(path);
-                var det = EncodingDetector.Detect(bytes);
                 // 対応エンコーディング(UTF-8/SJIS/EUC-JP)はいずれも正常な本文に NUL を含まないため、
                 // 先頭 8000B に NUL があればバイナリとみなしてスキップする。
+                // P-8: 文字コード判定(全文走査。UTF-8 でなければ UtfUnknown も全文にかかる)より先に行う。
+                // NUL の枝は判定結果を使わず、Detect の副作用も冪等な EnsureRegistered だけなので等価。
                 if (ContainsNul(bytes))
                     continue;
 
-                var loaded = TextFileService.DecodeBytes(bytes, det.CodePage);
-                CollectLineHits(path, loaded.Text, searcher, hits);
+                var det = EncodingDetector.Detect(bytes);
+                // P-8: grep は改行コードを使わないので、改行コード判定をしない復号を使う。
+                string text = TextFileService.DecodeTextOnly(bytes, det.CodePage);
+                CollectLineHits(path, text, searcher, hits);
             }
             catch (RegexMatchTimeoutException)
             {

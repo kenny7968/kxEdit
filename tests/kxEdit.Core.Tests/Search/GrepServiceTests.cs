@@ -199,6 +199,36 @@ public class GrepServiceTests
     }
 
     [Fact]
+    public void Nul_beyond_sniff_window_is_scanned_as_text()
+    {
+        using var t = new TempDir();
+        // NUL 判定の窓は先頭 8000 バイト。窓の外の NUL だけならテキストとして照合する(従来どおり)。
+        var bytes = new List<byte>(Encoding.ASCII.GetBytes("TARGET\n"));
+        while (bytes.Count < 8000)
+            bytes.Add((byte)'x');
+        bytes.Add(0x00);
+        t.Write("late-nul.txt", bytes.ToArray());
+
+        var outcome = GrepService.Search(Req(t.Root, "TARGET"));
+        var hit = Assert.Single(outcome.Hits);
+        Assert.Equal(1, hit.LineNumber);
+    }
+
+    [Fact]
+    public void Nul_at_last_byte_of_sniff_window_is_binary()
+    {
+        using var t = new TempDir();
+        // 窓の最後のバイト(添字 7999)の NUL はバイナリ扱い(境界の固定)。
+        var bytes = new List<byte>(Encoding.ASCII.GetBytes("TARGET\n"));
+        while (bytes.Count < 7999)
+            bytes.Add((byte)'x');
+        bytes.Add(0x00);
+        t.Write("edge-nul.txt", bytes.ToArray());
+
+        Assert.Empty(GrepService.Search(Req(t.Root, "TARGET")).Hits);
+    }
+
+    [Fact]
     public void MatchCase_and_whole_word_are_honored()
     {
         using var t = new TempDir();
