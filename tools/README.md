@@ -110,6 +110,7 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S
 | S7 | 全面再描画だけ(`Invalidate` + `Update`) |
 | S8-1 / 40 / 1000 / all | UIA `GetBoundingRectangles`(文書先頭から n 行)を UI スレッドから直接。描画なし |
 | S9a / S9b | P-10: 折り返し ON(40 桁)の ja10k で、say all 相当の行読み(`LineEnd` → `LineStartOf` → `LineEndNoBreakOf` を 1 歩)を**ワーカースレッドから**。S9a は UI スレッドがメッセージを汲むだけ、S9b は汲む合間に全面再描画を挟む。`param` 列は 1 歩あたりの UI スレッドへの Invoke 回数 |
+| S10 | P-16: 同じ設定(フォントも同じ)で `ApplyAppearance` + `Update`。設定ダイアログの OK の 1 タブぶん |
 
 - キーは WndProc へ直接入れるので、IME/TSF の費用(調査記録 §9 の S-2)は乗らない。体感値は perf-harness で見る。
 
