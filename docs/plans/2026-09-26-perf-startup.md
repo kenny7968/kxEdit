@@ -628,4 +628,61 @@ git commit -m "docs(perf): フェーズ 11 の変更後の計測値と起動確�
 
 ## 実施記録
 
-(実装時に追記する)
+### (1) 変更前の計測(Task 1)
+
+計測対象コミット: `a8d9ff26`(Smoke `--perf` に S10 を追加した commit。製品コードはこのフェーズの
+変更前のまま=`EditorControl.ApplyAppearance` はまだフォントを使い回さない)。
+
+#### Smoke --perf S10
+
+```powershell
+1..3 | ForEach-Object { dotnet run --project tests/kxEdit.Editor.Smoke -c Release --no-build -- --perf --scenario S10 --json "<scratchpad>\perf-startup\before-s10-$_.json" }
+```
+
+3 回とも **EXIT 0**、`paints_per_op` はいずれも 1.00(自己チェック OK=描画を測れている)。
+計測環境: DeviceDpi=96 / ClientSize=884x661 / LineHeightPx=16 / n=200 / warmup=20 / Release /
+.NET 9.0.20 / Windows 10.0.26200(3 回とも同一)。
+
+| doc | run | median_ms | min_ms | max_ms |
+|---|---|---|---|---|
+| ja10k | 1 | 10.223 | 9.374 | 12.638 |
+| ja10k | 2 | 10.435 | 9.377 | 12.380 |
+| ja10k | 3 | 10.336 | 9.358 | 12.654 |
+| en10k | 1 | 8.230 | 7.502 | 10.533 |
+| en10k | 2 | 8.397 | 7.723 | 10.542 |
+| en10k | 3 | 8.403 | 7.720 | 10.513 |
+
+- ja10k: median の中央値 = **10.336ms**、3 run 通した min–max = [9.358, 12.654]ms。
+- en10k: median の中央値 = **8.397ms**、3 run 通した min–max = [7.502, 10.542]ms。
+
+生データ: `<scratchpad>\perf-startup\before-s10-{1,2,3}.json`(commit しない)。
+
+#### 配布物の大きさ(P-7 前=ReadyToRun 無し)
+
+```powershell
+dotnet publish src/kxEdit.App -c Release -r win-x64 --self-contained false -p:DebugType=embedded -o "<scratchpad>\perf-startup\before\publish"
+Copy-Item -Recurse 説明書 "<scratchpad>\perf-startup\before\publish\説明書"; Copy-Item 変更履歴.txt "<scratchpad>\perf-startup\before\publish\変更履歴.txt"
+Compress-Archive -Path "<scratchpad>\perf-startup\before\publish\*" -DestinationPath "<scratchpad>\perf-startup\before\kxEdit.zip"
+```
+
+- publish フォルダー: **3,385,683 バイト**
+- zip(説明書・変更履歴を同梱): **1,143,191 バイト**
+
+生成物: `<scratchpad>\perf-startup\before\publish`、`<scratchpad>\perf-startup\before\kxEdit.zip`(commit しない)。
+
+#### perf-harness M-1(3 回・ユーザー承認済み)
+
+各 CSV の `env` 行: `status=completed`(3/3)。`NVDA起動中=1.00`(NVDA を起動したまま計測。
+ユーザー判断 2026-09-25 に基づく条件・設計書 §16.3)。
+
+| 指標 | run1 | run2 | run3 | 3 run の median |
+|---|---|---|---|---|
+| 窓の表示まで (ms) | 177.02 | 173.84 | 174.32 | 174.32 |
+| 入力受付まで (ms) | 193.00 | 196.19 | 196.25 | 196.19 |
+| 0.8秒時点のCPU (ms) | 312.50 | 312.50 | 281.25 | 312.50 |
+| ワーキングセット (MB) | 61.23 | 61.30 | 61.28 | 61.28 |
+
+調査記録 §9.2 の値(入力受付 213 → 200 ms・NVDA なし)とは NVDA 有無の条件が異なるため単純比較しない。
+変更前後の比較(Task 4)は同一条件(NVDA 起動中)で行う。
+
+生データ: `<scratchpad>\perf-startup\before-m1-{1,2,3}.csv`(commit しない)。
