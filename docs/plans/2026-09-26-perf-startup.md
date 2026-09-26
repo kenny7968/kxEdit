@@ -686,3 +686,140 @@ Compress-Archive -Path "<scratchpad>\perf-startup\before\publish\*" -Destination
 変更前後の比較(Task 4)は同一条件(NVDA 起動中)で行う。
 
 生データ: `<scratchpad>\perf-startup\before-m1-{1,2,3}.csv`(commit しない)。
+
+### (2) 陰性対照(Task 2)
+
+P-16(`fd2ccd86`)のテストが「フォントを使い回すこと」を実際に検出しているかを、実装を壊して確かめた。
+
+- 壊し方: `EditorControl.ApplyAppearance` の `if (_appliedFont != request)` の 1 行だけを消し、
+  フォントと幅メモを作り直すブロックが毎回走るようにした。
+- 結果: 次の 3 件が **FAIL**(RED 時と同じ 3 件)、P-16 で追加した残り 3 件は PASS。
+  - `ApplyAppearance_SameFontTwice_ReusesFontAndMetrics`
+  - `ApplyAppearance_SameFontDifferentTheme_ReusesFontButAppliesTheme`
+  - `ApplyAppearance_EmptyNameAndZeroSize_EqualToExplicitDefaults_Reuses`
+- 確認後 `git checkout` で元に戻した(commit には残していない)。
+
+### (3) 変更後の計測と比較(Task 3・4)
+
+計測対象: Smoke S10 はブランチ HEAD `537feb12`(P-16 を含む。`537feb12` 自体は release.yml と
+README のみの変更で製品コードは `fd2ccd86` と同じ)の Release ビルド。M-1 と配布物は Task 3 の
+ReadyToRun publish(`<scratchpad>\perf-startup\after\publish`。CSV の `env` 行の版は
+`0.2.0+fd2ccd86`)=P-7 と P-16 の両方を含む。
+
+#### Smoke --perf S10
+
+```powershell
+dotnet build -c Release
+1..3 | ForEach-Object { dotnet run --project tests/kxEdit.Editor.Smoke -c Release --no-build -- --perf --scenario S10 --json "<scratchpad>\perf-startup\after-s10-$_.json" }
+```
+
+3 回とも **EXIT 0**、`paints_per_op` はいずれも 1.00。計測環境は変更前と同一
+(DeviceDpi=96 / ClientSize=884x661 / LineHeightPx=16 / n=200 / warmup=20 / Release / .NET 9.0.20 /
+Windows 10.0.26200)。
+
+| doc | run | median_ms | min_ms | max_ms |
+|---|---|---|---|---|
+| ja10k | 1 | 7.539 | 6.873 | 11.802 |
+| ja10k | 2 | 7.338 | 6.806 | 9.970 |
+| ja10k | 3 | 7.592 | 6.841 | 9.376 |
+| en10k | 1 | 6.814 | 6.123 | 8.660 |
+| en10k | 2 | 6.936 | 6.179 | 8.960 |
+| en10k | 3 | 6.929 | 6.399 | 9.120 |
+
+- ja10k: median の中央値 = **7.539ms**、3 run 通した min–max = [6.806, 11.802]ms。
+- en10k: median の中央値 = **6.929ms**、3 run 通した min–max = [6.123, 9.120]ms。
+
+生データ: `<scratchpad>\perf-startup\after-s10-{1,2,3}.json`(commit しない)。
+
+#### 配布物の大きさ(P-7 後=ReadyToRun)
+
+Task 3 の publish(`dotnet publish src/kxEdit.App -c Release -r win-x64 --self-contained false -p:PublishReadyToRun=true -p:DebugType=embedded -o "<scratchpad>\perf-startup\after\publish"`)をそのまま使った(作り直していない)。
+
+- Task 3 の確認結果: publish は `-v:n -tl:off` で crossgen2 が走ったこと・「0 個の警告」・**EXIT 0** を確認。
+  `WebView2Loader.dll` は同梱されている。自前の `kxEdit.dll` / `kxEdit.Editor.dll` / `kxEdit.Core.dll` /
+  `kxEdit.Accessibility.dll` はすべて R2R(`ManagedNativeHeaderDirectory` あり)。依存の `Markdig.dll` /
+  `UtfUnknown.dll` も R2R になっていた。
+
+```powershell
+Copy-Item -Recurse 説明書 "<scratchpad>\perf-startup\after\publish\説明書"; Copy-Item 変更履歴.txt "<scratchpad>\perf-startup\after\publish\変更履歴.txt"
+Compress-Archive -Path "<scratchpad>\perf-startup\after\publish\*" -DestinationPath "<scratchpad>\perf-startup\after\kxEdit.zip"
+```
+
+- publish フォルダー: **5,864,123 バイト**(説明書・変更履歴を含む。含めない値は 5,845,136 バイト)
+- zip(説明書・変更履歴を同梱): **2,238,156 バイト**
+
+注: 変更前の 3,385,683 バイトは説明書・変更履歴を**含めた**値(`before\publish` に同梱済みの状態で
+集計)。比較は両方とも同梱後の値で行う(Task 3 の報告にある「5,845,136 との差 +2,459,453」は
+同梱前後が混ざった比較のため採らない)。
+
+#### perf-harness M-1(3 回・ユーザー承認済み)
+
+```powershell
+1..3 | ForEach-Object { pwsh -File tools\perf-harness.ps1 -PublishDir "<scratchpad>\perf-startup\after\publish" -Scenario M-1 -OutCsv "<scratchpad>\perf-startup\after-m1-$_.csv" }
+```
+
+3 回とも EXIT 0、各 CSV の `env` 行: `status=completed`(3/3)、`NVDA起動中=1.00`(変更前と同じ条件)、
+`screen=1024x767`。計測前に kxEdit が起動していないことを確認した。プロファイルはハーネスが
+退避・復元した(「プロフィールを復元しました(照合済み)」)。
+
+| 指標 | run1 | run2 | run3 | 3 run の median |
+|---|---|---|---|---|
+| 窓の表示まで (ms) | 156.90 | 153.39 | 150.31 | 153.39 |
+| 入力受付まで (ms) | 168.49 | 170.47 | 163.52 | 168.49 |
+| 0.8秒時点のCPU (ms) | 218.75 | 234.38 | 218.75 | 218.75 |
+| ワーキングセット (MB) | 58.09 | 58.05 | 58.06 | 58.06 |
+
+生データ: `<scratchpad>\perf-startup\after-m1-{1,2,3}.csv`(commit しない)。
+
+#### 変更前後の比較
+
+判定は設計書 §3.2 のとおり、変更後の中央値が変更前の 3 run の min–max の下限を下回ったときだけ
+「改善」とする。
+
+| 項目 | 変更前(中央値 / 3 run の範囲) | 変更後(中央値 / 3 run の範囲) | 差 | 判定 |
+|---|---|---|---|---|
+| S10 ja10k median (ms) | 10.336 / [9.358, 12.654] | 7.539 / [6.806, 11.802] | −2.797(−27.1%) | 改善(下限 9.358 を下回る) |
+| S10 en10k median (ms) | 8.397 / [7.502, 10.542] | 6.929 / [6.123, 9.120] | −1.468(−17.5%) | 改善(下限 7.502 を下回る) |
+| M-1 窓の表示まで (ms) | 174.32 / [173.84, 177.02] | 153.39 / [150.31, 156.90] | −20.93(−12.0%) | 改善(下限 173.84 を下回る) |
+| M-1 入力受付まで (ms) | 196.19 / [193.00, 196.25] | 168.49 / [163.52, 170.47] | −27.70(−14.1%) | 改善(下限 193.00 を下回る) |
+| M-1 0.8秒時点のCPU (ms) | 312.50 / [281.25, 312.50] | 218.75 / [218.75, 234.38] | −93.75 | 改善(下限 281.25 を下回る) |
+| M-1 ワーキングセット (MB) | 61.28 / [61.23, 61.30] | 58.06 / [58.05, 58.09] | −3.22 | 改善(下限 61.23 を下回る) |
+| publish フォルダー(バイト・同梱物込み) | 3,385,683 | 5,864,123 | +2,478,440(+73.2%) | 意図的な増加(P-7) |
+| zip(バイト) | 1,143,191 | 2,238,156 | **+1,094,965(+95.8%)** | 意図的な増加(P-7) |
+
+読み方と留保:
+
+- S10 は Smoke(ReadyToRun と無関係な通常の Release ビルド)で測っているので、差は P-16
+  (同じフォントなら作り直さない)によるもの。
+- M-1 の差は P-7(ReadyToRun)と P-16 の**合算**で、どちらがどれだけ効いたかは分けて測っていない。
+  入力受付までの −27.7ms は、調査記録で P-7 単独に見込んだ −13ms(NVDA なしの条件)より大きい。
+  起動時に `ApplyAppearance` が同じ設定で複数回呼ばれる分を P-16 が省いている可能性があるが、
+  切り分けは未実施。0.8 秒時点の CPU は OS の時間刻み(15.625ms)単位の値なので粒度が粗い。
+- 変更前と変更後は同日の別時刻に同じ機械・同じ条件(NVDA 起動中)で測った。
+- 配布物は zip で約 1.09MB(ほぼ 2 倍)増える。ReadyToRun がネイティブコードを IL に併載するための
+  既知のトレードオフで、設計どおりの意図的な挙動差。
+
+### (4) 起動確認(Task 4・ユーザー承認済み)
+
+`<scratchpad>\perf-startup\after\kxEdit.zip` を新しいフォルダー `<scratchpad>\perf-startup\after\unzipped`
+へ展開し、その `kxEdit.exe` を起動した(NVDA 起動中)。判定はすべて kxEdit のウィンドウを実解像度で
+取得した PNG(PrintWindow。キャレットの確認のみ画面からの等倍取得を 4 倍に拡大)で行った。
+画面取得は `<scratchpad>\perf-startup\startup-check\` に保存(commit しない)。
+
+| 段階 | 操作 | 結果 | 画像 |
+|---|---|---|---|
+| 1 | 展開した `kxEdit.exe` を起動 | 「無題 1 - kxEdit」の窓が表示された | `01-launch.png` |
+| 2 | Ctrl+O で見出し・箇条書き・リンクを含む Markdown(`startup-check.md`)を開く | 本文に内容が表示された(UTF-8 / LF) | `02-opened.png` |
+| 3 | モード → マークダウンプレビュー(Ctrl+Shift+U) | 「プレビュー: startup-check.md - kxEdit」の窓に見出し 2 つ・箇条書き 3 項目・リンクが HTML として描画された(WebView2 が動作=`WebView2Loader.dll` の欠落なし)。閉じる(C) で閉じた | `03-preview.png`、`04-after-preview.png` |
+| 4 | オプション → 設定 →[表示]→ 変更(F) でサイズを 12 → 20 にして OK、設定も OK | 設定のフォント表示が「ＭＳ ゴシック, 20.3 pt」になり、本文が大きく表示された。ステータスバーに「設定を適用しました」 | `08-fontdlg-20.png`、`09-settings-20.png`、`10-body-20pt.png` |
+| 5 | もう一度設定を開き、何も変えずに OK | 本文の表示は崩れず段階 4 と同じ。キャレット(行 3・桁 18)は文字の上端から下端までの高さで描かれ、20pt の行の高さと合っていた | `11-settings-again.png`、`12-body-2nd-ok-1.png`、`14-caret-zoom-1.png` |
+| 6 | 設定でサイズを 12 に戻して OK(後片付け) | 本文が元の大きさに戻り、`settings.json` の `FontSize` が 12 に戻った | `15-restore-fontdlg.png`、`16-restore-settings.png`、`17-body-restored-12pt.png` |
+
+- 後片付け: kxEdit は保存せずに閉じた(文書は未変更)。ファイルを開いたことで `settings.json` の
+  `RecentFiles` に試験文書が追加されたため、起動前に退避した `settings.json` で戻した
+  (SHA-256 が起動前と一致することを確認)。
+- 観察: フォントダイアログで 20 を選ぶと設定のフォント表示は「20.3 pt」になる。これはフォントダイアログが
+  返す値によるもので、本フェーズの変更(`ApplyAppearance` の使い回し判定・ReadyToRun)とは関係しないと
+  見ている(変更前のビルドでの再現は確認していない)。
+- 自動操作の注意(記録): NVDA のスピーチビューアー(最前面・半透明)が kxEdit の窓の左側に重なるため、
+  キャレットの確認は重ならない位置(行 3・桁 18)で行った。
