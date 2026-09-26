@@ -83,8 +83,10 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// <remarks>
     /// <see cref="Segs"/> は <c>LineLayout.Wrap(Snap の Line 行の本文, Wrap × Metrics.MeasureRun("0"), Metrics)</c>
     /// なので、キー (Snap, Line, Wrap, Metrics) だけで決まる。よってキーが一致すれば、どのスレッドが
-    /// いつ読んでも答えは「そのキーの条件に対して正しい」。Metrics は ApplyAppearance のたびに
-    /// 新しいインスタンスになるので参照で比べる(RPC スレッドはメソッドを呼ばない)。
+    /// いつ読んでも答えは「そのキーの条件に対して正しい」。Metrics は ApplyAppearance で前回と同じ
+    /// フォントの要求値(名前・サイズ)なら使い回されるが、同じインスタンス=同じフォントなので
+    /// 参照比較のまま正しい(性能改善フェーズ 11・P-16)。Wrap の違いはキーの Wrap で区別する
+    /// (RPC スレッドはメソッドを呼ばない)。
     /// </remarks>
     private sealed class LineSegsCache
     {
