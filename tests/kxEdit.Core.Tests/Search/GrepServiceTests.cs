@@ -226,7 +226,12 @@ public class GrepServiceTests
         bytes.Add(0x00);
         t.Write("edge-nul.txt", bytes.ToArray());
 
-        Assert.Empty(GrepService.Search(Req(t.Root, "TARGET")).Hits);
+        var outcome = GrepService.Search(Req(t.Root, "TARGET"));
+        Assert.Empty(outcome.Hits);
+        // 前提: バイナリとしてスキップ(continue)したことを固定する。例外が Errors に落ちて
+        // Hits が空になった場合(catch 節が誤って発火した場合)と区別する。
+        Assert.Empty(outcome.Errors);
+        Assert.Equal(1, outcome.FilesScanned);
     }
 
     [Fact]
@@ -528,6 +533,9 @@ public class GrepServiceTests
         var fallback = SearchWith(req, (_, _) => throw new RegexMatchTimeoutException());
         var without = SearchWith(req, (_, _) => true);
 
+        // 前提: catch の "return false" 変異(タイムアウトを「通す」でなく「弾く」に変える)は
+        // ヒットが空のままでも Equal(空, 空) が通ってしまい検出できない。ヒットが実在することを先に固定する。
+        Assert.NotEmpty(without.Hits);
         Assert.Equal(without.Hits, fallback.Hits);
         Assert.Equal(without.FilesMatched, fallback.FilesMatched);
         Assert.Empty(fallback.Errors); // プリフィルタのタイムアウトはエラーとして記録しない
@@ -539,13 +547,30 @@ public class GrepServiceTests
         using var t = new TempDir();
         for (int i = 0; i < 130; i++)
             t.WriteUtf8($"f{i:D3}.txt", "nothing\n"); // すべてプリフィルタで省かれる
+
+        // 前提: 130 ファイルが「本当にプリフィルタで省かれた」ことを固定する(呼び出し回数と
+        // false の回数)。判定そのものは既定の DefaultLiteralPrefilter に委ねるので、
+        // プリフィルタの実装を変えても no-op 化しない限りここは通る。
+        int calls = 0,
+            falseCalls = 0;
         var reports = new List<GrepProgress>();
         var outcome = GrepService.Search(
             Req(t.Root, "TARGET"),
             new SyncProgress(reports.Add),
+            (searcher, text) =>
+            {
+                calls++;
+                bool result = GrepService.DefaultLiteralPrefilter(searcher, text);
+                if (!result)
+                    falseCalls++;
+                return result;
+            },
             CancellationToken.None
         );
+
         Assert.Equal(130, outcome.FilesScanned);
+        Assert.Equal(130, calls);
+        Assert.Equal(130, falseCalls);
         // 64・128 ファイル目の途中通知と、最後の通知(CurrentFile=null)の 3 回。
         Assert.Equal(new[] { 64, 128, 130 }, reports.Select(r => r.FilesScanned));
     }
