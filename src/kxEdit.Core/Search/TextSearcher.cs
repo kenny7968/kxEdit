@@ -60,6 +60,12 @@ public sealed class TextSearcher
     public int Count(string text) => _regex is null ? 0 : _regex.Count(text);
 
     /// <summary>
+    /// text のどこかにヒットがあるか(grep のリテラル検索の全文プリフィルタ用・フェーズ 8)。無効なら false。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒・捕捉しない）。
+    /// </summary>
+    internal bool IsMatch(string text) => _regex is not null && _regex.IsMatch(text);
+
+    /// <summary>
     /// from 以降で最初のヒット（折り返しなし）。
     /// a*・\b・(?=...) 等のゼロ幅パターンでは Length=0 の MatchSpan を返し得る。
     /// 前方へ歩進する呼び出し側は同位置の無限ループを避けるため、from を
@@ -76,6 +82,22 @@ public sealed class TextSearcher
             return null;
         var m = _regex.Match(text, from);
         return m.Success ? new MatchSpan(m.Index, m.Length) : null;
+    }
+
+    /// <summary>
+    /// text の中で最初のヒット(grep の行単位照合用・フェーズ 8)。無効なら null。
+    /// <c>FindNext(text.ToString(), 0)</c> と同じ結果を返す: span 入力ではアンカー・後読み・先読み・
+    /// <c>\b</c> は span の外を見ないので、行を Substring して照合するのと同じ意味になる。
+    /// 呼び出し側は一致しなかった行の文字列を作らずに済む。
+    /// 等価性の網 = <c>TextSearcherFindFirstTests</c>。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
+    /// </summary>
+    internal MatchSpan? FindFirst(ReadOnlySpan<char> text)
+    {
+        if (_regex is null)
+            return null;
+        var e = _regex.EnumerateMatches(text);
+        return e.MoveNext() ? new MatchSpan(e.Current.Index, e.Current.Length) : null;
     }
 
     /// <summary>

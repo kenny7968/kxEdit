@@ -34,6 +34,17 @@ public static class GrepService
         GrepRequest request,
         IProgress<GrepProgress>? progress = null,
         CancellationToken cancellationToken = default
+    ) => Search(request, progress, DefaultLiteralPrefilter, cancellationToken);
+
+    /// <summary>
+    /// <see cref="Search(GrepRequest, IProgress{GrepProgress}?, CancellationToken)"/> の本体。
+    /// literalPrefilter はテストでプリフィルタを差し替えるための口(本番は <see cref="DefaultLiteralPrefilter"/>)。
+    /// </summary>
+    internal static GrepOutcome Search(
+        GrepRequest request,
+        IProgress<GrepProgress>? progress,
+        Func<TextSearcher, string, bool> literalPrefilter,
+        CancellationToken cancellationToken
     )
     {
         var hits = new List<GrepHit>();
@@ -96,14 +107,23 @@ public static class GrepService
                 }
 
                 byte[] bytes = File.ReadAllBytes(path);
-                var det = EncodingDetector.Detect(bytes);
                 // 対応エンコーディング(UTF-8/SJIS/EUC-JP)はいずれも正常な本文に NUL を含まないため、
                 // 先頭 8000B に NUL があればバイナリとみなしてスキップする。
+                // P-8: 文字コード判定(全文走査。UTF-8 でなければ UtfUnknown も全文にかかる)より先に行う。
+                // NUL の枝は判定結果を使わず、Detect の副作用も冪等な EnsureRegistered だけなので等価。
                 if (ContainsNul(bytes))
                     continue;
 
-                var loaded = TextFileService.DecodeBytes(bytes, det.CodePage);
-                CollectLineHits(path, loaded.Text, searcher, hits);
+                var det = EncodingDetector.Detect(bytes);
+                // P-8: grep は改行コードを使わないので、改行コード判定をしない復号を使う。
+                string text = TextFileService.DecodeTextOnly(bytes, det.CodePage);
+                // P-8: リテラル検索では、全文に一致がなければ行分割を丸ごと省く。
+                // continue で抜けない(ループ末尾の進捗通知を飛ばさないため)。
+                if (
+                    request.Options.UseRegex
+                    || PassesLiteralPrefilter(literalPrefilter, searcher, text)
+                )
+                    CollectLineHits(path, text, searcher, hits);
             }
             catch (RegexMatchTimeoutException)
             {
@@ -138,6 +158,37 @@ public static class GrepService
     }
 
     /// <summary>
+    /// リテラル検索の全文プリフィルタ(P-8)。行単位と同じ Regex(<c>Regex.Escape</c>、単語単位なら
+    /// <c>\b</c>)を全文にかける。ある行で一致するなら全文の同じ位置でも一致する: リテラルの比較は
+    /// 文字ごとで文脈に依らず、<c>\b</c> は行頭・行末でも全文でも「外側 = 非単語(入力の外か改行)」で
+    /// 同じ判定になるため。よって false なら行単位でも一致しない(偽陰性なし)。
+    /// <c>IndexOf</c> で代用しない(大小無視の扱いがずれる)。正規表現モードには使わない
+    /// (<c>^</c>/<c>$</c>・行の境界に接する先読み後読みで偽陰性が出るため)。
+    /// </summary>
+    internal static bool DefaultLiteralPrefilter(TextSearcher searcher, string text) =>
+        searcher.IsMatch(text);
+
+    /// <summary>
+    /// プリフィルタを呼ぶ。タイムアウト(上限 64MB の全文に 1 秒)したら、握って「通す」に倒す
+    /// (行単位の照合に戻る=結果は従来と同じ。設計書 §3.5 フェーズ 8)。
+    /// </summary>
+    private static bool PassesLiteralPrefilter(
+        Func<TextSearcher, string, bool> prefilter,
+        TextSearcher searcher,
+        string text
+    )
+    {
+        try
+        {
+            return prefilter(searcher, text);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
     /// text を行（\r\n / \n / \r 区切り）に分け、各行の先頭マッチを 1 ヒットとして hits へ加える。
     /// 行頭の絶対 UTF-16 オフセットを厳密に積算し、AbsoluteOffset＝行頭＋行内マッチ位置とする。
     /// 末尾の改行は空の最終行を作らない（標準 grep の行勘定）。
@@ -159,9 +210,9 @@ public static class GrepService
             while (eol < n && text[eol] != '\r' && text[eol] != '\n')
                 eol++;
 
-            // 行内容 [pos, eol)。FindNext は部分文字列に対して照合するので ^/$ が行境界に効く。
-            string line = text.Substring(pos, eol - pos);
-            var m = searcher.FindNext(line, 0);
+            // 行内容 [pos, eol)。span で照合するので ^/$・先読み・後読みは行の外を見ない
+            // (Substring して照合するのと同じ意味。P-8: 一致しない行の文字列を作らない)。
+            var m = searcher.FindFirst(text.AsSpan(pos, eol - pos));
             if (m is { } hit)
             {
                 hits.Add(
@@ -169,7 +220,7 @@ public static class GrepService
                         FilePath: path,
                         LineNumber: lineNumber,
                         Column: hit.Start + 1,
-                        LineText: line,
+                        LineText: text.Substring(pos, eol - pos),
                         MatchStartInLine: hit.Start,
                         MatchLength: hit.Length,
                         AbsoluteOffset: pos + hit.Start

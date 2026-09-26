@@ -1136,6 +1136,32 @@ GetChar と GetText の相互比較では格子の破損を検出できない(se
 - **計測**: bin/obj を含むリポジトリを grep した所要時間(ハーネスに grep のシナリオを足すか、手動で計測する)。
 - **L5**: 不要。
 
+### 13.4 実施記録(2026-09-26・PR #95)
+
+- **成果物**
+  - NUL 判定を `EncodingDetector.Detect` より先に行うようにした(`GrepService.Search`)。NUL 判定だけでスキップできるバイナリファイルで、全文走査になりうる文字コード判定を省く。
+  - `TextFileService.DecodeTextOnly(byte[], int codePage)` を追加した。`DecodeBytes` と共通の `DecodeBody` を切り出して共有し、grep が使わない改行コード判定(`LineEndingDetector.Detect`)と置換文字走査を省く。
+  - `TextSearcher.FindFirst(ReadOnlySpan<char>)` を追加し、`GrepService.CollectLineHits` の行照合を `Substring` から span へ変えた。一致した行だけ `LineText` の文字列を作る。
+  - `TextSearcher.IsMatch(string)` と、リテラル検索用の全文プリフィルタ(`GrepService.DefaultLiteralPrefilter`)を追加した。`UseRegex=false` のとき、行分割の前に全文へ `IsMatch` をかけ、一致がなければそのファイルの行分割を丸ごと省く。タイムアウトはプリフィルタなしの照合に握って戻す。差し替え口として internal 4 引数 `Search(request, progress, literalPrefilter, cancellationToken)` を足した。
+  - 実装計画・詳細な計測値・レビューの経緯・陰性対照の結果は `docs/plans/2026-09-26-perf-grep.md`(以下「計画」)の実施記録にある。
+- **完了条件**
+  - **計測**(計画 §0.1・NVDA 起動中・変更前後の Release ビルドに対しリポジトリの固定コピー(18,246 ファイル・約 742 MiB)を各 3 回)。G1〜G5 いずれも約 19〜21 倍(3 run の median の中央値で約 53.7〜53.9 秒 → 約 2.6〜2.8 秒)に短縮し、変更後の min–max が変更前の min–max を完全に下回った(基準を大きく上回って達成。詳細な表は計画参照)。走査・一致ファイル・ヒット・エラーの件数は変更前後で完全一致(挙動不変を確認)。
+  - **L5**: 不要(SR の経路に触れない。計画 §0.4)。
+  - **レビュー**: 前倒しの脆弱性レビューを Task 2(NUL 判定・復号経路)、Task 3+4 合同(span 照合・全文プリフィルタとタイムアウトの扱い)で行った。Task 4 のタスクレビューで Important 指摘 2 件 → fix round 1(CA1068 抑止の撤去・既定プリフィルタの実値テスト追加)で反映。最終レビュー(ブランチ全体・コード品質パス/脆弱性パス)はいずれもマージ可。Minor の指摘(テストの前提の assert 3 件・本節の丸め表記)を fix wave で反映した。
+  - **ミューテーション検証**: 行わない(§3.4・計画 Global Constraints)。各タスクの最後に陰性対照(実装を戻してテストが落ちることの確認)を行った(計画参照)。
+- **本節からの精密化・逸脱**(詳細は計画の「0.2 からの逸脱」)
+  - internal 4 引数 `Search` の引数順を `(request, progress, literalPrefilter, cancellationToken)` にした(`CancellationToken` を最後にして CA1068 の局所抑止を避けるため。計画の Interfaces 節の順序とは異なるが internal のため公開 API の制約対象外)。
+  - `TextSearcher.FindFirst` は `EnumerateMatches` を `MoveNext`/`Current` で読む列挙子形式にした(S1751 対策として計画が用意していた代替実装)。
+  - タスクレビュー指摘を受け、`DefaultLiteralPrefilter` の実返り値を直接固定するテストを追加した(同等性テストだけでは no-op 退化を検出できないため)。
+  - Task 1 の変更前計測値は、未 commit の計画変更が後続タスクの commit に混ざるのを避けるため、いったん Task 1 の報告ファイルへ記録し、本タスクで計画の実施記録へ転記した。
+- **意図的な挙動差**(計画 §0.5。設計書 §3.5 のフェーズ 8 の行として適用)
+  - リテラル検索のプリフィルタがタイムアウトしたら、プリフィルタなしの行単位照合に戻るので結果は変わらない。効果が出ない場合があるだけ。
+  - プリフィルタのタイムアウトで最悪 +約 1 秒/ファイル、キャンセル不能区間も最大 +約 1 秒(単語単位のリテラル `a` を 64MB の `aaaaaaaaaaaaaaa\n` 行のファイルで再現可能)。PR description に記載して受容する。
+- **以後への申し送り**
+  - 先頭 8000 バイトより後ろの NUL はテキスト扱いで照合され、`LineText` に NUL が入りうる。本フェーズ以前からの既存の性質(本フェーズが作ったものではない)。表示側での無害化は follow-up 候補。
+  - 正規表現モードでは、1 ファイル内のキャンセル不能時間に上限がない(行ごとに 1 秒のタイムアウトのため「行数 × 約 1 秒」になりうる)。`CollectLineHits` で N 行ごとに `CancellationToken` を確認すれば、プリフィルタのタイムアウトによる上乗せと合わせて改善できる。
+  - ヒット行の `LineText` は行全体を保持するので、64MB の 1 行で一致したファイルが多数あるとメモリを大きく使う(従来の Substring と同じ)。
+
 ## 14. フェーズ 9: 部分再描画とスクロール(`perf-partial-paint`)
 
 **目的**

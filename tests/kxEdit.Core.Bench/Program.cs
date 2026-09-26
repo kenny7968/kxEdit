@@ -19,6 +19,8 @@ using kxEdit.Core.Text;
 //             単独で早期 return する。
 // フェーズ 5(perf-search): --search 追加。3MB の日本語文書で全文化・検索語の打鍵・F3 を
 //             UI 抜きで測る(判定なし・EXIT 0)。単独で早期 return する。
+// フェーズ 8(perf-grep): --grep <folder> 追加。フォルダーを GrepService.Search で走査する所要時間を
+//             測る(判定なし・EXIT 0)。単独で早期 return する。
 
 int mb = 1024;
 bool layoutMode = false;
@@ -26,6 +28,7 @@ bool typingMode = false;
 bool charAccessMode = false;
 bool largeLineMode = false;
 bool searchMode = false;
+string? grepFolder = null;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out int m))
@@ -52,6 +55,11 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--search")
     {
         searchMode = true;
+    }
+    else if (args[i] == "--grep" && i + 1 < args.Length)
+    {
+        grepFolder = args[i + 1];
+        i++;
     }
 }
 
@@ -555,6 +563,49 @@ if (searchMode)
             before = hit.Start;
         }
     );
+    return 0;
+}
+
+// ---- 2026-09-26 フェーズ 8(perf-grep): --grep <folder> ----
+// 設計書 2026-09-24-general-perf-improvements-design.md §13。GrepService は Core の純ロジックなので、
+// UI(結果ウィンドウ・SR)を通さずに走査の所要時間だけを測る。対象は bin/obj を含むリポジトリの
+// 固定のコピーを想定する(作業中のリポジトリはビルドで中身が変わるため)。
+// 走査数・一致ファイル数・ヒット数・エラー数も出す。変更前後でこれらが一致することを
+// 端から端までの等価性の確認に使う。判定はしない(EXIT 0)。
+if (grepFolder is not null)
+{
+    Console.WriteLine("--grep: GrepService.Search の所要時間(判定なし)");
+    Console.WriteLine($"対象: {grepFolder}");
+    var grepCases = new (string Label, SearchOptions Options)[]
+    {
+        ("G1 リテラル・一致なし", new SearchOptions("kxEditNoSuchToken9f3b")),
+        ("G2 リテラル・頻出", new SearchOptions("TextBuffer")),
+        ("G3 リテラル・非 ASCII", new SearchOptions("文字コード")),
+        (
+            "G4 リテラル・単語単位・大小区別",
+            new SearchOptions("Search", MatchCase: true, WholeWord: true)
+        ),
+        ("G5 正規表現", new SearchOptions(@"^\s*public\s+sealed\s+class", UseRegex: true)),
+    };
+    foreach (var (label, options) in grepCases)
+    {
+        var request = new GrepRequest(grepFolder, "*.*", true, options);
+        // ウォームアップ 1 回(OS のファイルキャッシュを温める。計測外)。
+        GrepOutcome outcome = GrepService.Search(request);
+        var ms = new double[3];
+        for (int k = 0; k < ms.Length; k++)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            outcome = GrepService.Search(request);
+            ms[k] = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        }
+        Array.Sort(ms);
+        Console.WriteLine(
+            $"{label}: 中央値 {ms[1]:F0} ms(最小 {ms[0]:F0}・最大 {ms[2]:F0}・n=3)"
+                + $"・走査 {outcome.FilesScanned:N0}・一致ファイル {outcome.FilesMatched:N0}"
+                + $"・ヒット {outcome.Hits.Count:N0}・エラー {outcome.Errors.Count:N0}"
+        );
+    }
     return 0;
 }
 

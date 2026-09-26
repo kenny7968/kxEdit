@@ -252,7 +252,42 @@ public static partial class TextFileService
             : EncodingDetector.Detect(bytes);
 
         Encoding enc = EncodingCatalog.Get(det.CodePage);
+        string text = DecodeBody(bytes, det);
 
+        // 注: 本文中に元から U+FFFD が含まれる場合とデコード失敗の置換とを区別しない近似。
+        //     文字コード取り違えの「示唆」用途であり、厳密な判定ではない。
+        bool hadReplacement = text.Contains('�'); // U+FFFD REPLACEMENT CHARACTER
+        LineEnding eol = LineEndingDetector.Detect(text);
+
+        return new LoadedDocument
+        {
+            Text = text,
+            Encoding = enc,
+            HasBom = det.HasBom,
+            LineEnding = eol,
+            HadReplacementChar = hadReplacement,
+        };
+    }
+
+    /// <summary>
+    /// grep 用の復号(フェーズ 8・P-8)。<see cref="DecodeBytes"/> に codePage を強制したときの
+    /// <see cref="LoadedDocument.Text"/> と同じ文字列を返す。grep が使わない改行コード判定
+    /// (全文走査)と置換文字の走査を省く。BOM の判定も同じく <see cref="HasBomFor"/> で行う
+    /// (EncodingDetector の HasBom は使わない=従来の grep と 1 バイトも違わない)。
+    /// 等価性の網 = <c>TextFileServiceDecodeTextOnlyTests</c>。
+    /// </summary>
+    internal static string DecodeTextOnly(byte[] bytes, int codePage)
+    {
+        EncodingCatalog.EnsureRegistered();
+        return DecodeBody(bytes, new DetectedEncoding(codePage, HasBomFor(bytes, codePage)));
+    }
+
+    /// <summary>
+    /// BOM を除いた本文を、不正バイトを U+FFFD に落とすデコーダで復号する
+    /// (<see cref="DecodeBytes"/> と <see cref="DecodeTextOnly"/> の共通部品)。
+    /// </summary>
+    private static string DecodeBody(byte[] bytes, DetectedEncoding det)
+    {
         // 置換文字検出のため、不正バイトを U+FFFD（置換文字）に落とすデコーダを用意。
         // ※ 既定の Encoding.UTF8 インスタンスはデコード置換に U+FFFD を使うが、ここで使う
         //   Encoding.GetEncoding(cp, ...) に静的 DecoderFallback.ReplacementFallback を渡すと
@@ -269,21 +304,7 @@ public static partial class TextFileService
         //       BOM 付き UTF-8 でも先頭 3 バイトを確実に剥がすため、preamble 長は BOM を出す
         //       codepage 既定の Encoding（decoder）から取得する。
         int preambleLen = det.HasBom ? decoder.GetPreamble().Length : 0;
-        string text = decoder.GetString(bytes, preambleLen, bytes.Length - preambleLen);
-
-        // 注: 本文中に元から U+FFFD が含まれる場合とデコード失敗の置換とを区別しない近似。
-        //     文字コード取り違えの「示唆」用途であり、厳密な判定ではない。
-        bool hadReplacement = text.Contains('�'); // U+FFFD REPLACEMENT CHARACTER
-        LineEnding eol = LineEndingDetector.Detect(text);
-
-        return new LoadedDocument
-        {
-            Text = text,
-            Encoding = enc,
-            HasBom = det.HasBom,
-            LineEnding = eol,
-            HadReplacementChar = hadReplacement,
-        };
+        return decoder.GetString(bytes, preambleLen, bytes.Length - preambleLen);
     }
 
     private static bool HasBomFor(byte[] bytes, int codePage)
