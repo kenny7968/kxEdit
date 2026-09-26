@@ -93,17 +93,24 @@ public class EditorControlCacheTests
     public void LineSegs_MissFromWorkerThread_InvokesOnce() =>
         Sta.Run(() =>
         {
-            // wrap=4 で "abcdefghij" は [0,4)[4,8)[8,10) に折り返す。offset 6 は 2 つ目の視覚行。
+            // wrap=4 で "abcdefghij" は複数の視覚行に折り返す。セグメント境界はフォントに依存する
+            // (既定コンストラクタのフォントは比例フォールバックフォントへ解決し得るため、固定値では
+            // なく UI スレッドでの実測を期待値として使う。最終レビュー指摘・コントローラ裁定 2026-09-26)。
             var (f, c) = MakeControl("abcdefghij", 4);
             using (f)
             using (c)
             {
                 var host = (IUiaTextHost)c;
+                // 正解: UI スレッドで実測してから、折り返し桁の付け直しでキャッシュを破棄する。
+                int expected = host.LineStartOf(6);
+                Assert.True(expected > 0, "前提: offset 6 は先頭ではない視覚行に属する");
+                c.WrapColumns = 0;
+                c.WrapColumns = 4;
                 c.TestHook_ResetLastLineSegsCounters();
                 var worker = System.Threading.Tasks.Task.Run(() => host.LineStartOf(6));
                 PumpUntil(worker);
                 Assert.True(worker.IsCompleted, "ワーカーからの問い合わせが終わらない");
-                Assert.Equal(4, worker.Result);
+                Assert.Equal(expected, worker.Result);
                 Assert.Equal(1, c.TestHook_LineSegsInvokeCount);
                 Assert.Equal(1, c.TestHook_LastLineSegsMissCount);
             }
@@ -134,7 +141,8 @@ public class EditorControlCacheTests
                 );
                 // まず汲まずに待つ。Invoke していれば UI スレッドが応えないので時間内に終わらない
                 // (STA の待機が一部のメッセージを汲むことがあるので、決め手は下の Invoke 回数)。
-                bool doneWithoutPump = worker.Wait(2000);
+                // 待ち時間はスレッドプール起動の揺らぎを吸収するためのもので、判定の決め手ではない。
+                bool doneWithoutPump = worker.Wait(5000);
                 PumpUntil(worker); // 失敗時にワーカーを解放してから assert する
                 Assert.True(doneWithoutPump, "キャッシュにヒットしたのに UI スレッドを待った");
                 Assert.Equal(expected, worker.Result);
@@ -158,7 +166,9 @@ public class EditorControlCacheTests
                 var worker = System.Threading.Tasks.Task.Run(() =>
                     (host.LineStartOf(4), host.LineEnd(4), host.LineEndNoBreakOf(4))
                 );
-                bool doneWithoutPump = worker.Wait(2000);
+                // 待ち時間はスレッドプール起動の揺らぎを吸収するためのもので、判定の決め手は
+                // 下の Invoke 回数(この待ちを汲まずに越えられるかは補助的な観測に過ぎない)。
+                bool doneWithoutPump = worker.Wait(5000);
                 PumpUntil(worker);
                 Assert.True(doneWithoutPump, "空行の問い合わせで UI スレッドを待った");
                 Assert.Equal((4, 6, 4), worker.Result);
@@ -239,6 +249,8 @@ public class EditorControlCacheTests
                     c.WrapColumns = 4;
                     expected[o] = (host.LineStartOf(o), host.LineEnd(o), host.LineEndNoBreakOf(o));
                 }
+                // 前提: expected ループで積んだヒット/ミス/Invoke を捨ててから、ワーカーの分だけを測る。
+                c.TestHook_ResetLastLineSegsCounters();
                 // 実際: ワーカースレッドから、先頭から順に(say all と同じくヒットとミスが混ざる)。
                 var worker = System.Threading.Tasks.Task.Run(() =>
                 {
@@ -254,7 +266,20 @@ public class EditorControlCacheTests
                 PumpUntil(worker, timeoutMs: 10_000);
                 Assert.True(worker.IsCompleted, "ワーカーの掃引が終わらない");
                 Assert.Equal(expected, worker.Result);
-                Assert.True(c.TestHook_LastLineSegsHitCount > 0); // 前提: ヒットの経路を通った
+                // 前提: ワーカーがキャッシュ経由で答えた(Invoke だけで賄っていない)。
+                Assert.True(
+                    c.TestHook_LastLineSegsHitCount > 0,
+                    "前提: ワーカーがキャッシュ経由で答えた"
+                );
+                Assert.True(
+                    c.TestHook_LineSegsInvokeCount < 3 * (len + 1),
+                    "前提: ワーカーがキャッシュ経由で答えた"
+                );
+                // 上の上限だけでは緩すぎる(空行の分しか差が出ず、キャッシュ照合を外す陰性対照でも
+                // 141 < 147 のように通ってしまうことを確認済み)。Invoke は真のミスのときだけ起きる
+                // 契約(このテストは単一ワーカーの逐次読みで、Invoke 中に別スレッドがキャッシュを
+                // 埋めることはないので Miss と 1:1 対応する)を厳密に確認する。
+                Assert.Equal(c.TestHook_LastLineSegsMissCount, c.TestHook_LineSegsInvokeCount);
             }
         });
 }
