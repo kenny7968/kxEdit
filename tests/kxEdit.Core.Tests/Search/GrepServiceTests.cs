@@ -401,7 +401,7 @@ public class GrepServiceTests
     private static GrepOutcome SearchWith(
         GrepRequest req,
         Func<TextSearcher, string, bool> prefilter
-    ) => GrepService.Search(req, progress: null, CancellationToken.None, prefilter);
+    ) => GrepService.Search(req, progress: null, prefilter, CancellationToken.None);
 
     // プリフィルタを常に通す(=プリフィルタなし)ときと、既定のプリフィルタのときの結果を比べる。
     private static void AssertSameAsWithoutPrefilter(GrepRequest req)
@@ -461,6 +461,26 @@ public class GrepServiceTests
     {
         using var t = PrefilterCorpus();
         AssertSameAsWithoutPrefilter(Req(t.Root, pattern, useRegex: true));
+    }
+
+    // 同等性テスト(Literal_results_are_same_with_and_without_prefilter 等)は、
+    // DefaultLiteralPrefilter が常に true を返す no-op に退化していても通ってしまう
+    // (「プリフィルタ有り」と「プリフィルタなし」が同じ経路になるため)。
+    // 実物の DefaultLiteralPrefilter の返り値そのものを固定して、no-op 退化を検出する。
+    [Fact]
+    public void DefaultLiteralPrefilter_returns_actual_match_result()
+    {
+        var plain = new TextSearcher(new SearchOptions("TARGET"));
+        Assert.False(GrepService.DefaultLiteralPrefilter(plain, "nothing\r\nhere\r\n"));
+        Assert.True(GrepService.DefaultLiteralPrefilter(plain, "xx\nxTARGETx\n"));
+
+        var wholeWord = new TextSearcher(new SearchOptions("TARGET", WholeWord: true));
+        Assert.False(GrepService.DefaultLiteralPrefilter(wholeWord, "xTARGETx\n"));
+        Assert.True(GrepService.DefaultLiteralPrefilter(wholeWord, "xx\nTARGET\n"));
+
+        // 大小無視・全角(既定で MatchCase=false)。
+        var fullWidth = new TextSearcher(new SearchOptions("ｔａｒｇｅｔ"));
+        Assert.True(GrepService.DefaultLiteralPrefilter(fullWidth, "ＴＡＲＧＥＴ"));
     }
 
     [Fact]

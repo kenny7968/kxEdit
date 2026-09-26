@@ -34,24 +34,18 @@ public static class GrepService
         GrepRequest request,
         IProgress<GrepProgress>? progress = null,
         CancellationToken cancellationToken = default
-    ) => Search(request, progress, cancellationToken, DefaultLiteralPrefilter);
+    ) => Search(request, progress, DefaultLiteralPrefilter, cancellationToken);
 
     /// <summary>
     /// <see cref="Search(GrepRequest, IProgress{GrepProgress}?, CancellationToken)"/> の本体。
     /// literalPrefilter はテストでプリフィルタを差し替えるための口(本番は <see cref="DefaultLiteralPrefilter"/>)。
     /// </summary>
-    // cancellationToken は public オーバーロードと同じ位置(第 3 引数)に揃えている。CA1068 は
-    // 「最後の引数に」を求めるが、この internal 4 引数版は literalPrefilter をテスト用の差し替え口
-    // として public オーバーロードの引数列にそのまま 1 つ追加した形にしたい(public 側の呼び出しの
-    // 見た目=第 1〜3 引数の並びを完全に保つ)ための意図的な例外。
-#pragma warning disable CA1068 // reason: 上記。cancellationToken は public オーバーロードと同じ第 3 引数の位置を保つ
     internal static GrepOutcome Search(
         GrepRequest request,
         IProgress<GrepProgress>? progress,
-        CancellationToken cancellationToken,
-        Func<TextSearcher, string, bool> literalPrefilter
+        Func<TextSearcher, string, bool> literalPrefilter,
+        CancellationToken cancellationToken
     )
-#pragma warning restore CA1068
     {
         var hits = new List<GrepHit>();
         var errors = new List<GrepError>();
