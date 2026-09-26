@@ -159,6 +159,8 @@ kxEdit/
 `Directory.Build.props` の値は開発ビルドの既定値として働く。
 
 配布物は ReadyToRun(`-p:PublishReadyToRun=true`)で publish する(起動時の JIT を減らす。性能改善フェーズ 11)。
+ただし WebView2 の管理 DLL 3 個は、Microsoft の Authenticode 署名を保つため対象から外している
+(`src/kxEdit.App/kxEdit.App.csproj` の `PublishReadyToRunExclude`)。
 ci.yml と `tools/pre-merge-check.ps1` は publish しないので、publish の手順を変えたときは
 ローカルで release.yml と同じ publish を実行し、警告が出ないこと(`-warnaserror`)と
 `WebView2Loader.dll` が出力に含まれることを確かめる。配布物は publish の出力から作り、手でコピーしない。

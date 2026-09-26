@@ -910,7 +910,7 @@ release.yml と同じ publish を新フォルダー(`<scratchpad>\perf-startup\f
 
 #### 受容(修正しない)項目
 
-最終レビューで指摘は無かったが、実施記録 (1)〜(4) の範囲外として次を受容する:
+コード品質パスの Minor-3 として指摘された次の点は、修正せずに受容する(PR description にも記載する):
 
 - **起動後に不足フォントを導入した・DPI/ClearType を変えた場合**、同じ設定で OK を押しても
   `_appliedFont` が変わらないため幅メモを作り直さない。変更前も `WM_FONTCHANGE`/`DpiChanged` の
