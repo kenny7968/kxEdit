@@ -34,7 +34,24 @@ public static class GrepService
         GrepRequest request,
         IProgress<GrepProgress>? progress = null,
         CancellationToken cancellationToken = default
+    ) => Search(request, progress, cancellationToken, DefaultLiteralPrefilter);
+
+    /// <summary>
+    /// <see cref="Search(GrepRequest, IProgress{GrepProgress}?, CancellationToken)"/> の本体。
+    /// literalPrefilter はテストでプリフィルタを差し替えるための口(本番は <see cref="DefaultLiteralPrefilter"/>)。
+    /// </summary>
+    // cancellationToken は public オーバーロードと同じ位置(第 3 引数)に揃えている。CA1068 は
+    // 「最後の引数に」を求めるが、この internal 4 引数版は literalPrefilter をテスト用の差し替え口
+    // として public オーバーロードの引数列にそのまま 1 つ追加した形にしたい(public 側の呼び出しの
+    // 見た目=第 1〜3 引数の並びを完全に保つ)ための意図的な例外。
+#pragma warning disable CA1068 // reason: 上記。cancellationToken は public オーバーロードと同じ第 3 引数の位置を保つ
+    internal static GrepOutcome Search(
+        GrepRequest request,
+        IProgress<GrepProgress>? progress,
+        CancellationToken cancellationToken,
+        Func<TextSearcher, string, bool> literalPrefilter
     )
+#pragma warning restore CA1068
     {
         var hits = new List<GrepHit>();
         var errors = new List<GrepError>();
@@ -106,7 +123,13 @@ public static class GrepService
                 var det = EncodingDetector.Detect(bytes);
                 // P-8: grep は改行コードを使わないので、改行コード判定をしない復号を使う。
                 string text = TextFileService.DecodeTextOnly(bytes, det.CodePage);
-                CollectLineHits(path, text, searcher, hits);
+                // P-8: リテラル検索では、全文に一致がなければ行分割を丸ごと省く。
+                // continue で抜けない(ループ末尾の進捗通知を飛ばさないため)。
+                if (
+                    request.Options.UseRegex
+                    || PassesLiteralPrefilter(literalPrefilter, searcher, text)
+                )
+                    CollectLineHits(path, text, searcher, hits);
             }
             catch (RegexMatchTimeoutException)
             {
@@ -138,6 +161,37 @@ public static class GrepService
             cancelled = true;
         progress?.Report(new GrepProgress(filesScanned, hits.Count, null));
         return new GrepOutcome(hits, filesScanned, filesMatched, errors, cancelled);
+    }
+
+    /// <summary>
+    /// リテラル検索の全文プリフィルタ(P-8)。行単位と同じ Regex(<c>Regex.Escape</c>、単語単位なら
+    /// <c>\b</c>)を全文にかける。ある行で一致するなら全文の同じ位置でも一致する: リテラルの比較は
+    /// 文字ごとで文脈に依らず、<c>\b</c> は行頭・行末でも全文でも「外側 = 非単語(入力の外か改行)」で
+    /// 同じ判定になるため。よって false なら行単位でも一致しない(偽陰性なし)。
+    /// <c>IndexOf</c> で代用しない(大小無視の扱いがずれる)。正規表現モードには使わない
+    /// (<c>^</c>/<c>$</c>・行の境界に接する先読み後読みで偽陰性が出るため)。
+    /// </summary>
+    internal static bool DefaultLiteralPrefilter(TextSearcher searcher, string text) =>
+        searcher.IsMatch(text);
+
+    /// <summary>
+    /// プリフィルタを呼ぶ。タイムアウト(上限 64MB の全文に 1 秒)したら、握って「通す」に倒す
+    /// (行単位の照合に戻る=結果は従来と同じ。設計書 §3.5 フェーズ 8)。
+    /// </summary>
+    private static bool PassesLiteralPrefilter(
+        Func<TextSearcher, string, bool> prefilter,
+        TextSearcher searcher,
+        string text
+    )
+    {
+        try
+        {
+            return prefilter(searcher, text);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return true;
+        }
     }
 
     /// <summary>

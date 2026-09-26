@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using kxEdit.Core.Search;
 using kxEdit.Core.Text;
 using Xunit;
@@ -393,5 +394,139 @@ public class GrepServiceTests
         var outcome = GrepService.Search(Req(missing, "TARGET"));
         Assert.Empty(outcome.Hits);
         Assert.NotEmpty(outcome.Errors); // 列挙時の DirectoryNotFound を集約
+    }
+
+    // ---- フェーズ 8(perf-grep): リテラル検索の全文プリフィルタ ----
+
+    private static GrepOutcome SearchWith(
+        GrepRequest req,
+        Func<TextSearcher, string, bool> prefilter
+    ) => GrepService.Search(req, progress: null, CancellationToken.None, prefilter);
+
+    // プリフィルタを常に通す(=プリフィルタなし)ときと、既定のプリフィルタのときの結果を比べる。
+    private static void AssertSameAsWithoutPrefilter(GrepRequest req)
+    {
+        var with = GrepService.Search(req);
+        var without = SearchWith(req, (_, _) => true);
+        Assert.Equal(without.Hits, with.Hits);
+        Assert.Equal(without.FilesScanned, with.FilesScanned);
+        Assert.Equal(without.FilesMatched, with.FilesMatched);
+        Assert.Equal(without.Errors, with.Errors);
+    }
+
+    private static TempDir PrefilterCorpus()
+    {
+        var t = new TempDir();
+        t.WriteUtf8("a.txt", "xx\nTARGET\nxTARGET\nTARGETx\n"); // 単語単位が行頭・行末で効く
+        t.WriteUtf8("b.txt", "nothing\r\nhere\r\n"); // 一致しない
+        t.WriteUtf8("c.txt", "target\rTaRgEt\n"); // 大小無視・CR 区切り
+        t.WriteUtf8("d.txt", "ｔａｒｇｅｔ\nＴＡＲＧＥＴ\n"); // 全角(大小無視で互いに一致)
+        t.WriteUtf8("e.txt", "Kelvin K and k\nǅ ǆ Ǆ\n"); // ケルビン記号・タイトルケース
+        t.WriteUtf8("f.txt", "TAR\nGET\n"); // 行をまたぐと一致する(行単位では不一致)
+        t.WriteUtf8("g.txt", "");
+        t.Write("h.txt", EncodingCatalog.Get(932).GetBytes("これは TARGET です\n"));
+        return t;
+    }
+
+    [Theory]
+    [InlineData("TARGET", false, false)]
+    [InlineData("TARGET", true, false)]
+    [InlineData("TARGET", false, true)]
+    [InlineData("TARGET", true, true)]
+    [InlineData("ｔａｒｇｅｔ", false, false)]
+    [InlineData("k", false, false)]
+    [InlineData("k", false, true)]
+    [InlineData("ǆ", false, false)]
+    [InlineData("TAR\nGET", false, false)]
+    [InlineData("nothing", false, true)]
+    public void Literal_results_are_same_with_and_without_prefilter(
+        string pattern,
+        bool matchCase,
+        bool wholeWord
+    )
+    {
+        using var t = PrefilterCorpus();
+        AssertSameAsWithoutPrefilter(
+            Req(t.Root, pattern, matchCase: matchCase, wholeWord: wholeWord)
+        );
+    }
+
+    [Theory]
+    [InlineData("^TARGET")]
+    [InlineData("TARGET$")]
+    [InlineData("(?<=x)TARGET")]
+    [InlineData("TAR\\nGET")]
+    [InlineData("^$")]
+    public void Regex_results_are_same_with_and_without_prefilter(string pattern)
+    {
+        using var t = PrefilterCorpus();
+        AssertSameAsWithoutPrefilter(Req(t.Root, pattern, useRegex: true));
+    }
+
+    [Fact]
+    public void Prefilter_is_not_consulted_in_regex_mode()
+    {
+        using var t = PrefilterCorpus();
+        int calls = 0;
+        var outcome = SearchWith(
+            Req(t.Root, "TARGET", useRegex: true),
+            (_, _) =>
+            {
+                calls++;
+                return false;
+            }
+        );
+        Assert.Equal(0, calls);
+        Assert.NotEmpty(outcome.Hits); // プリフィルタが false でも正規表現モードは照合する
+    }
+
+    [Fact]
+    public void Prefilter_false_skips_line_matching_in_literal_mode()
+    {
+        using var t = PrefilterCorpus();
+        int calls = 0;
+        var outcome = SearchWith(
+            Req(t.Root, "TARGET"),
+            (_, _) =>
+            {
+                calls++;
+                return false;
+            }
+        );
+        // 差し替え口が使われていること(テキストのファイル 8 件すべてで呼ばれる)の確認。
+        Assert.Equal(8, calls);
+        Assert.Empty(outcome.Hits);
+        Assert.Equal(8, outcome.FilesScanned);
+        Assert.Empty(outcome.Errors);
+    }
+
+    [Fact]
+    public void Prefilter_timeout_falls_back_to_line_matching_without_error()
+    {
+        using var t = PrefilterCorpus();
+        var req = Req(t.Root, "TARGET");
+        var fallback = SearchWith(req, (_, _) => throw new RegexMatchTimeoutException());
+        var without = SearchWith(req, (_, _) => true);
+
+        Assert.Equal(without.Hits, fallback.Hits);
+        Assert.Equal(without.FilesMatched, fallback.FilesMatched);
+        Assert.Empty(fallback.Errors); // プリフィルタのタイムアウトはエラーとして記録しない
+    }
+
+    [Fact]
+    public void Prefilter_skip_keeps_progress_notifications()
+    {
+        using var t = new TempDir();
+        for (int i = 0; i < 130; i++)
+            t.WriteUtf8($"f{i:D3}.txt", "nothing\n"); // すべてプリフィルタで省かれる
+        var reports = new List<GrepProgress>();
+        var outcome = GrepService.Search(
+            Req(t.Root, "TARGET"),
+            new SyncProgress(reports.Add),
+            CancellationToken.None
+        );
+        Assert.Equal(130, outcome.FilesScanned);
+        // 64・128 ファイル目の途中通知と、最後の通知(CurrentFile=null)の 3 回。
+        Assert.Equal(new[] { 64, 128, 130 }, reports.Select(r => r.FilesScanned));
     }
 }

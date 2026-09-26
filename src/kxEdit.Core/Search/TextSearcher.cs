@@ -60,6 +60,12 @@ public sealed class TextSearcher
     public int Count(string text) => _regex is null ? 0 : _regex.Count(text);
 
     /// <summary>
+    /// text のどこかにヒットがあるか(grep のリテラル検索の全文プリフィルタ用・フェーズ 8)。無効なら false。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒・捕捉しない）。
+    /// </summary>
+    internal bool IsMatch(string text) => _regex is not null && _regex.IsMatch(text);
+
+    /// <summary>
     /// from 以降で最初のヒット（折り返しなし）。
     /// a*・\b・(?=...) 等のゼロ幅パターンでは Length=0 の MatchSpan を返し得る。
     /// 前方へ歩進する呼び出し側は同位置の無限ループを避けるため、from を
