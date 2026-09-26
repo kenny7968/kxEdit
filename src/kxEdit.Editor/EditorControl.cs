@@ -36,6 +36,16 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // 内部の Paint hot-path から呼ばれる MeasureRun 等が interface dispatch を通らないよう concrete 型で保持する。
     // 外部公開 (`Metrics` property) は ICharMetrics のまま (contract 不変)。
     private GdiCharMetrics _metrics;
+
+    // 性能改善フェーズ 11(P-16 前半): 前回 ApplyAppearance で適用したフォントの要求値(既定値の補完後)。
+    // 今回と同じならフォント 3 個と _metrics(幅メモ)を作り直さない=設定変更のたびに全タブの幅メモを捨てない。
+    // null=まだ適用していない(ctor のフォントは要求値として記録しない=初回は必ず作り直す)。
+    // _font.Name とは比べない(英語 UI では "MS Gothic"、存在しない名前ではフォールバック名が返り、毎回作り直しになる)。
+    private FontRequest? _appliedFont;
+
+    /// <summary><see cref="ApplyAppearance"/> が作るフォントの要求値(スタイルは常に Regular なので持たない)。</summary>
+    private readonly record struct FontRequest(string Name, float Size);
+
     private ViewportStyle _style;
     private readonly VScrollBar _vscroll;
     private readonly HScrollBar _hscroll;
@@ -2754,6 +2764,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 挙動:
     /// - フォント: 既存 Font を Dispose して新 Font に差し替え、<see cref="GdiCharMetrics"/> も再構築する
     ///   (LineHeightPx が変わるため後段の VScroll/HScroll 再計算とキャレット再配置が必須)。
+    ///   前回適用した要求値(名前・サイズ。既定値の補完後)と同じなら差し替えない(性能改善フェーズ 11・P-16)。
     /// - テーマ: <see cref="AppearanceThemes.ById"/> で解決し、<see cref="ViewportStyle"/> を算出。
     ///   現在行/行番号/空白グリフの色は fore/back のブレンドで導出(現行 App 層 Blend の移植)。
     ///   BackColor は <see cref="Graphics.Clear"/> 用に Background と一致させる(<see cref="RenderFrame"/>
@@ -2776,28 +2787,35 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // フォント差し替え + GdiCharMetrics 再構築(古い Font は明示的に Dispose して GDI HFONT リーク回避)。
         // 例外安全: newFont / newMetrics を両方作り切ってから旧 Font を Dispose する。
         // GdiCharMetrics のコンストラクタが throw した場合は newFont も破棄して呼び出し元へ propagate
-        // (旧 _font / _metrics は生きたまま=次回 OnPaint も従前の高さで安全に描画できる)。
-        var newFont = new Font(
+        // (旧 _font / _metrics は生きたまま=次回 OnPaint も従前の高さで安全に描画できる。
+        // _appliedFont も更新しない=次回は作り直しを試みる)。
+        // フェーズ 11(P-16 前半): 要求値が前回と同じなら丸ごと飛ばす(同じ引数の new Font は同じフォント)。
+        var request = new FontRequest(
             string.IsNullOrEmpty(settings.FontName) ? "ＭＳ ゴシック" : settings.FontName,
             settings.FontSize > 0 ? settings.FontSize : 12f
         );
-        GdiCharMetrics newMetrics;
-        try
+        if (_appliedFont != request)
         {
-            newMetrics = new GdiCharMetrics(newFont);
+            var newFont = new Font(request.Name, request.Size);
+            GdiCharMetrics newMetrics;
+            try
+            {
+                newMetrics = new GdiCharMetrics(newFont);
+            }
+            catch
+            {
+                newFont.Dispose();
+                throw;
+            }
+            _font.Dispose();
+            _underlineFontCache.Dispose();
+            _targetFontCache.Dispose(); // Task 10
+            _font = newFont;
+            _underlineFontCache = new Font(_font, _font.Style | FontStyle.Underline);
+            _targetFontCache = new Font(_font, _font.Style | FontStyle.Underline | FontStyle.Bold); // Task 10
+            _metrics = newMetrics;
+            _appliedFont = request;
         }
-        catch
-        {
-            newFont.Dispose();
-            throw;
-        }
-        _font.Dispose();
-        _underlineFontCache.Dispose();
-        _targetFontCache.Dispose(); // Task 10
-        _font = newFont;
-        _underlineFontCache = new Font(_font, _font.Style | FontStyle.Underline);
-        _targetFontCache = new Font(_font, _font.Style | FontStyle.Underline | FontStyle.Bold); // Task 10
-        _metrics = newMetrics;
 
         // テーマから ViewportStyle 算出 + Graphics.Clear 用 BackColor 同期
         var theme = AppearanceThemes.ById(settings.Theme);

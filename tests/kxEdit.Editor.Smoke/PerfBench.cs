@@ -91,6 +91,7 @@ internal static class PerfBench
         "S7",
         "S8",
         "S9",
+        "S10",
     ];
 
     /// <summary>計測中に EditorControl の <c>Paint</c> が発火した回数(描画が本当に配送されたかの観測)。</summary>
@@ -229,6 +230,8 @@ internal static class PerfBench
                     results.AddRange(MeasureScroll(editor, Fresh(text), name, opt));
                 if (opt.Scenarios.Contains("S7"))
                     results.Add(MeasureFullRepaint(editor, Fresh(text), name, opt));
+                if (opt.Scenarios.Contains("S10"))
+                    results.Add(MeasureApplySameSettings(editor, Fresh(text), name, opt));
             }
             if (opt.Scenarios.Contains("S8"))
                 results.AddRange(MeasureUiaRects(editor, Fresh(docs[0].Text), docs[0].Name, opt));
@@ -460,6 +463,36 @@ internal static class PerfBench
             opt.Warmup,
             update: true,
             editor.Invalidate,
+            requireOnePaint: true
+        );
+    }
+
+    /// <summary>
+    /// S10: P-16。設定ダイアログで OK を押したときの 1 タブぶん=<b>フォントを含めて同じ</b>設定で
+    /// <c>ApplyAppearance</c> → <c>Update()</c>。変更前はフォントと <c>GdiCharMetrics</c> を作り直し、
+    /// 幅メモが空になるので直後の描画が可視域の run を測り直す。
+    /// </summary>
+    private static Result MeasureApplySameSettings(
+        EditorControl editor,
+        TextBuffer buffer,
+        string doc,
+        Options opt
+    )
+    {
+        editor.SetOrReplaceSource(buffer);
+        editor.SetCaretCharOffset(0);
+        editor.TopLine = 0;
+        editor.Update();
+        // 計測前の外観と同じ(Run の ApplyAppearance(new AppSettings()))=状態を変えない。
+        var settings = new AppSettings();
+        return Measure(
+            editor,
+            "S10",
+            doc,
+            opt.N,
+            opt.Warmup,
+            update: true,
+            () => editor.ApplyAppearance(settings),
             requireOnePaint: true
         );
     }

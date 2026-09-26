@@ -110,6 +110,7 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S
 | S7 | 全面再描画だけ(`Invalidate` + `Update`) |
 | S8-1 / 40 / 1000 / all | UIA `GetBoundingRectangles`(文書先頭から n 行)を UI スレッドから直接。描画なし |
 | S9a / S9b | P-10: 折り返し ON(40 桁)の ja10k で、say all 相当の行読み(`LineEnd` → `LineStartOf` → `LineEndNoBreakOf` を 1 歩)を**ワーカースレッドから**。S9a は UI スレッドがメッセージを汲むだけ、S9b は汲む合間に全面再描画を挟む。`param` 列は 1 歩あたりの UI スレッドへの Invoke 回数 |
+| S10 | P-16: 同じ設定(フォントも同じ)で `ApplyAppearance` + `Update`。設定ダイアログの OK の 1 タブぶん |
 
 - キーは WndProc へ直接入れるので、IME/TSF の費用(調査記録 §9 の S-2)は乗らない。体感値は perf-harness で見る。
 
@@ -136,6 +137,7 @@ pwsh -File tools\perf-harness.ps1 -PublishDir <作業フォルダ>\publish
 pwsh -File tools\perf-harness.ps1 -PublishDir <作業フォルダ>\publish -Scenario M-2,M-7
 ```
 
+- 配布物と同じ条件で測るときは、publish に `-p:PublishReadyToRun=true -p:DebugType=embedded` を足す(release.yml と同じ。性能改善フェーズ 11 以降)。
 - **pwsh(PowerShell 7)専用**。計測中(全シナリオで十数分)は画面・キーボード・マウスに触らない。前面の窓が計測対象でなくなったら中止する。
 - シナリオ M-1〜M-7 と n / interval は調査記録 §9.5 のとおり。結果は CSV(`scenario,condition,doc,n,value,unit,flags`)で、既定の出力先は `%LOCALAPPDATA%\kxEdit-perf-harness\results-<日時>.csv`。`-OutCsv` の既存ファイルは上書きしない(中止する)。
 - 設計書 §3.2 の判断基準(3 回の最小〜最大)を当てるときは、改善対象のシナリオを 3 回走らせる(`-OutCsv` を毎回別名にするか、既定の日時付きの名前に任せる)。
