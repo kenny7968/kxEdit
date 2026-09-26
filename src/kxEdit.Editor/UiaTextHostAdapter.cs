@@ -401,6 +401,8 @@ internal class UiaTextHostAdapter : IUiaTextHost
             return null; // UI スレッドが束縛されていない=論理行フォールバック
         if (_host.InvokeRequired)
         {
+            // フェーズ 10: UI スレッドへマーシャリングした回数(テストと Smoke S9 が観測する)。
+            Interlocked.Increment(ref _testHook_lineSegsInvokeCount);
             try
             {
                 return _host.Invoke(
@@ -814,9 +816,16 @@ internal class UiaTextHostAdapter : IUiaTextHost
     internal long TestHook_LastLineSegsHitCount { get; private set; }
     internal long TestHook_LastLineSegsMissCount { get; private set; }
 
+    // フェーズ 10: TryFindVisualSegment が UI スレッドへ同期 Invoke した回数。RPC スレッドから加算する。
+    private long _testHook_lineSegsInvokeCount;
+
+    internal long TestHook_LineSegsInvokeCount =>
+        Interlocked.Read(ref _testHook_lineSegsInvokeCount);
+
     internal void TestHook_ResetLastLineSegsCounters()
     {
         TestHook_LastLineSegsHitCount = 0;
         TestHook_LastLineSegsMissCount = 0;
+        Interlocked.Exchange(ref _testHook_lineSegsInvokeCount, 0);
     }
 }

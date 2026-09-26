@@ -22,6 +22,17 @@ public class EditorControlCacheTests
         return (f, c);
     }
 
+    /// <summary>
+    /// UI スレッドでメッセージを汲みながら <paramref name="t"/> の完了を待つ(上限つき)。
+    /// ワーカーからの Invoke は、UI スレッドが汲まない限り進まない。
+    /// </summary>
+    private static void PumpUntil(System.Threading.Tasks.Task t, int timeoutMs = 3000)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (!t.IsCompleted && sw.ElapsedMilliseconds < timeoutMs)
+            Application.DoEvents();
+    }
+
     [Fact]
     public void LastLineSegs_HitsAcrossThreeUiaLineCalls() =>
         Sta.Run(() =>
@@ -75,6 +86,26 @@ public class EditorControlCacheTests
                 _ = host.LineStartOf(5);
                 Assert.Equal(1, c.TestHook_LastLineSegsMissCount);
                 Assert.Equal(0, c.TestHook_LastLineSegsHitCount);
+            }
+        });
+
+    [Fact]
+    public void LineSegs_MissFromWorkerThread_InvokesOnce() =>
+        Sta.Run(() =>
+        {
+            // wrap=4 で "abcdefghij" は [0,4)[4,8)[8,10) に折り返す。offset 6 は 2 つ目の視覚行。
+            var (f, c) = MakeControl("abcdefghij", 4);
+            using (f)
+            using (c)
+            {
+                var host = (IUiaTextHost)c;
+                c.TestHook_ResetLastLineSegsCounters();
+                var worker = System.Threading.Tasks.Task.Run(() => host.LineStartOf(6));
+                PumpUntil(worker);
+                Assert.True(worker.IsCompleted, "ワーカーからの問い合わせが終わらない");
+                Assert.Equal(4, worker.Result);
+                Assert.Equal(1, c.TestHook_LineSegsInvokeCount);
+                Assert.Equal(1, c.TestHook_LastLineSegsMissCount);
             }
         });
 }

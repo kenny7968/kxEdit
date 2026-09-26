@@ -42,7 +42,8 @@ namespace kxEdit.Editor.Smoke;
 /// <b>測らないもの</b>(体感値は perf-harness で測る): IME/TSF の費用(調査記録 §9 の S-2)、
 /// 実キー入力の対になる片側(文字キーの WM_KEYDOWN・BackSpace の WM_CHAR 0x08)、
 /// PreProcessMessage / ProcessCmdKey、App 層のステータスバー更新、UIA イベントの配信(クライアント不在)、
-/// S8 の RPC スレッドからの Invoke によるマーシャリング、IME の Imm 呼び出し。
+/// S8 の RPC スレッドからの Invoke によるマーシャリング(RPC スレッドからの折り返し ON の行読みは
+/// S9 がワーカースレッドで測る)、IME の Imm 呼び出し。
 /// <b>計測中はメッセージを汲まないので、BeginInvoke やタイマーに回した処理も計上しない</b>
 /// (現状の打鍵経路には無い)。処理を投函・間引きに回すフェーズ(例: フェーズ 3・5)の効果は、
 /// 静穏待ちまで含めて CPU を測る perf-harness で判定すること。
@@ -89,6 +90,7 @@ internal static class PerfBench
         "S6",
         "S7",
         "S8",
+        "S9",
     ];
 
     /// <summary>計測中に EditorControl の <c>Paint</c> が発火した回数(描画が本当に配送されたかの観測)。</summary>
@@ -232,6 +234,10 @@ internal static class PerfBench
                 results.AddRange(MeasureUiaRects(editor, Fresh(docs[0].Text), docs[0].Name, opt));
             if (opt.Scenarios.Contains("S5"))
                 results.AddRange(MeasureAppendBlock(editor));
+            if (opt.Scenarios.Contains("S9"))
+                results.AddRange(
+                    MeasureUiaWrapLines(editor, Fresh(docs[0].Text), docs[0].Name, opt)
+                );
         }
         catch (PerfSelfCheckException e)
         {
@@ -507,6 +513,108 @@ internal static class PerfBench
             );
         }
         return results;
+    }
+
+    /// <summary>
+    /// S9(P-10・フェーズ 10): 折り返し ON(40 桁)で、NVDA の say all 相当の行読みを<b>ワーカースレッドから</b>
+    /// 行う(UIA の RPC スレッドの代わり)。1 歩 = <c>TextRangeProviderV2.Move(Line, 1)</c> +
+    /// 非退化レンジの <c>ExpandToEnclosingUnit(Line)</c> と同じ呼び出し列
+    /// (<c>LineEnd</c> → <c>LineStartOf</c> → <c>LineEndNoBreakOf</c>)。
+    /// S9a は UI スレッドがメッセージを汲むだけ(アイドル)、S9b は汲む合間に全面再描画を挟む
+    /// (描画中の say all)。<c>param</c> 列は 1 歩あたりの UI スレッドへの Invoke 回数。
+    /// </summary>
+    private static List<Result> MeasureUiaWrapLines(
+        EditorControl editor,
+        TextBuffer buffer,
+        string doc,
+        Options opt
+    )
+    {
+        const int Wrap = 40;
+        editor.SetOrReplaceSource(buffer);
+        editor.SetCaretCharOffset(0);
+        editor.TopLine = 0;
+        int oldWrap = editor.WrapColumns;
+        editor.WrapColumns = Wrap;
+        editor.Update();
+        var host = (IUiaTextHost)editor;
+        try
+        {
+            var snap = buffer.Current;
+            Check(
+                host.LineEnd(0) < snap.GetLineEnd(0, includeBreak: false),
+                $"S9/{doc}: 行 0 が折り返されていない(折り返し ON の経路を測れていない)"
+            );
+            return
+            [
+                MeasureWorkerLineReads(editor, host, "S9a", doc, opt, busyUi: false),
+                MeasureWorkerLineReads(editor, host, "S9b", doc, opt, busyUi: true),
+            ];
+        }
+        finally
+        {
+            editor.WrapColumns = oldWrap;
+        }
+    }
+
+    /// <summary>
+    /// S9 の 1 本。文書先頭から <c>Warmup + N</c> 歩、ワーカースレッドで行を読み進め、1 歩ずつ測る。
+    /// その間 UI スレッドは <c>Application.DoEvents</c> で Invoke を汲む(<paramref name="busyUi"/> なら
+    /// 汲む前に毎回 <c>Invalidate</c> + <c>Update</c> で全面を描く)。
+    /// </summary>
+    private static Result MeasureWorkerLineReads(
+        EditorControl editor,
+        IUiaTextHost host,
+        string id,
+        string doc,
+        Options opt,
+        bool busyUi
+    )
+    {
+        var samples = new List<Sample>(opt.N);
+        long invokes0 = 0;
+        long invokes1 = 0;
+        CollectGarbage();
+        var worker = Task.Run(() =>
+        {
+            int pos = 0;
+            for (int k = 0; k < opt.Warmup + opt.N; k++)
+            {
+                if (k == opt.Warmup)
+                    invokes0 = editor.TestHook_LineSegsInvokeCount;
+                int p0 = Volatile.Read(ref s_paints);
+                long t0 = Stopwatch.GetTimestamp();
+                int next = host.LineEnd(pos);
+                int start = host.LineStartOf(next);
+                int end = host.LineEndNoBreakOf(next);
+                double ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                if (next <= pos || start != next || end <= start)
+                    throw new PerfSelfCheckException(
+                        $"{id}/{doc}: 行読みが進まない(pos {pos} → {next}・[{start}, {end}))"
+                    );
+                if (k >= opt.Warmup)
+                    samples.Add(new Sample(ms, Volatile.Read(ref s_paints) - p0));
+                pos = next;
+            }
+            invokes1 = editor.TestHook_LineSegsInvokeCount;
+        });
+        while (!worker.IsCompleted)
+        {
+            if (busyUi)
+            {
+                editor.Invalidate();
+                editor.Update();
+            }
+            Application.DoEvents();
+        }
+        worker.GetAwaiter().GetResult(); // ワーカーの例外(自己チェックの失敗を含む)をそのまま投げ直す
+        double invokesPerStep = (double)(invokes1 - invokes0) / opt.N;
+        return Summarize(
+            id,
+            doc,
+            invokesPerStep.ToString("F2", CultureInfo.InvariantCulture),
+            samples
+        );
     }
 
     /// <summary>

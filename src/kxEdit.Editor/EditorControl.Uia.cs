@@ -27,7 +27,13 @@ public sealed partial class EditorControl
     /// </summary>
     internal long TestHook_LastLineSegsMissCount => _uia.TestHook_LastLineSegsMissCount;
 
-    /// <summary>segs キャッシュのヒット/ミスカウンタをリセット。</summary>
+    /// <summary>
+    /// 折り返し ON の行問い合わせが UI スレッドへ同期 Invoke した回数
+    /// (フェーズ 10。Editor.Tests EditorControlCacheTests と Smoke S9)。
+    /// </summary>
+    internal long TestHook_LineSegsInvokeCount => _uia.TestHook_LineSegsInvokeCount;
+
+    /// <summary>segs キャッシュのヒット/ミス/Invoke のカウンタをリセット。</summary>
     internal void TestHook_ResetLastLineSegsCounters() => _uia.TestHook_ResetLastLineSegsCounters();
 
     // Task 6 テスト用フック: WndProc 経路と self-served 判定を Editor.Tests から観察する。
