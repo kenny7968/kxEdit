@@ -824,3 +824,95 @@ Compress-Archive -Path "<scratchpad>\perf-startup\after\publish\*" -DestinationP
   見ている(変更前のビルドでの再現は確認していない)。
 - 自動操作の注意(記録): NVDA のスピーチビューアー(最前面・半透明)が kxEdit の窓の左側に重なるため、
   キャレットの確認は重ならない位置(行 3・桁 18)で行った。
+
+### (5) 最終レビューの反映
+
+最終ブランチレビュー(コード品質パス・脆弱性パス)の指摘 3 件を fixup commit で反映した。
+
+#### Fix 1(脆弱性パス Minor-1): WebView2 の管理 DLL を PublishReadyToRun から除外
+
+`<scratchpad>\perf-startup\before\publish` と `after\publish`(Task 3/4 の ReadyToRun publish)の
+全 DLL の `Get-AuthenticodeSignature` を比較し、Valid → NotSigned に変わった DLL を洗い出した
+(Markdig.dll・UtfUnknown.dll は変更前から NotSigned=対象外。ネイティブの WebView2Loader.dll は
+crossgen2 の対象外で変更前後とも Valid)。
+
+| DLL | 変更前(R2R 無し) | 変更後(全 DLL R2R・Task 3/4) | 除外後(本 Fix・final) |
+|---|---|---|---|
+| Microsoft.Web.WebView2.Core.dll | Valid | NotSigned | **Valid** |
+| Microsoft.Web.WebView2.WinForms.dll | Valid | NotSigned | **Valid** |
+| Microsoft.Web.WebView2.Wpf.dll | Valid | NotSigned | **Valid** |
+| WebView2Loader.dll(ネイティブ・R2R 対象外) | Valid | Valid | Valid |
+| Markdig.dll | NotSigned | NotSigned(R2R 化) | NotSigned(R2R 化・変更なし) |
+| UtfUnknown.dll | NotSigned | NotSigned(R2R 化) | NotSigned(R2R 化・変更なし) |
+
+`src/kxEdit.App/kxEdit.App.csproj` に `PublishReadyToRunExclude` の ItemGroup を追加し、上記 3 個の
+WebView2 管理 DLL を対象から外した。理由をコメントで明記(R2R で再生成すると Microsoft の
+Authenticode 署名が消える・プレビュー表示時にしか読まないので起動の改善には効かない)。
+
+release.yml と同じ publish を新フォルダー(`<scratchpad>\perf-startup\final\publish`)へ実行し確認:
+
+- `dotnet publish ... -p:PublishReadyToRun=true ... -v:n -tl:off` は **EXIT 0**、ログ(`final-publish.log`)
+  に「0 個の警告」。`WebView2Loader.dll` 同梱。
+- 除外した 3 個の WebView2 管理 DLL は署名 **Valid** に復帰し、R2R 化されていない(`ManagedNativeHeaderDirectory.Size` が 0)ことを `PEReader` で確認。
+- 自前の 4 個(`kxEdit.dll`・`kxEdit.Editor.dll`・`kxEdit.Core.dll`・`kxEdit.Accessibility.dll`)は
+  引き続き R2R(`ManagedNativeHeaderDirectory.Size > 0`)。
+
+配布物の大きさ(説明書・変更履歴を同梱、`Compress-Archive`):
+
+| 対象 | publish フォルダー(バイト) | zip(バイト) |
+|---|---|---|
+| 変更前(R2R 無し・Task 1) | 3,385,683 | 1,143,191 |
+| 変更後(全 DLL R2R・Task 3/4) | 5,864,123 | 2,238,156 |
+| 除外後(本 Fix・final) | **5,203,283** | **2,003,728** |
+
+- final vs 全 DLL R2R: フォルダー −660,840 バイト(−11.3%)、zip −234,428 バイト(−10.5%)。
+  WebView2 の R2R ネイティブコード分が減った(署名の復帰と表裏)。
+- final vs 変更前: フォルダー +1,817,600 バイト(+53.7%)、zip +860,537 バイト(+75.3%)。
+  自前 DLL・Markdig・UtfUnknown の R2R 化による増分は残る(意図的な挙動差。設計書 §3.5)。
+
+起動確認(簡易・ユーザー承認済み): `final\publish\kxEdit.exe` を起動し、主窓の表示(`MainWindowHandle`)を
+確認してから `CloseMainWindow()`(WM_CLOSE)で閉じ、プロセスの終了(`HasExited=True`)を確認した。
+未保存確認ダイアログは出なかった(文書は無変更のため)。
+
+**M-1・S10 は本 Fix の後に再計測していない**。除外した 3 個の WebView2 管理 DLL は Markdown
+プレビューを開いたときにしか読み込まれず、起動(M-1)や「同じ設定の `ApplyAppearance`」(S10)の
+経路には出現しないため、この除外は両計測に影響しない。よって Task 1・3・4 で測った値
+(実施記録 (1)(3))は本 Fix 後も有効とみなす。
+
+#### Fix 2(コード品質パス・脆弱性パスの双方): 古くなったコメントの修正
+
+`src/kxEdit.Editor/UiaTextHostAdapter.cs` の `LineSegsCache` の doc コメント(86〜87 行付近)が
+「Metrics は ApplyAppearance のたびに新しいインスタンスになるので参照で比べる」と書いていたが、
+本フェーズ(P-16)で前回と同じフォント要求値なら使い回すようになったため誤りになっていた。
+参照比較が引き続き正しい理由(使い回すのは同じフォントのときだけ=同じインスタンス=同じ答え)を
+明記する記述に直した。Editor プロジェクト全体を `ApplyAppearance のたびに` 等のパターンで検索し、
+他に同様の記述がないことを確認した(該当はこの 1 箇所のみ)。
+
+#### Fix 3(コード品質パス Minor-2): `_font.Name` と比較していないことを固定するテスト
+
+`tests/kxEdit.Editor.Tests/ApplyAppearanceFontReuseTests.cs` に
+`ApplyAppearance_NonexistentFontNameTwice_Reuses` を追加した。存在しないフォント名
+(`kxEdit-NoSuchFont`)を要求すると GDI+ が別ファミリーへフォールバックすることを前提 assert
+(`DrawFont(c).Name != "kxEdit-NoSuchFont"`)で確認し、同じ設定を 2 回 `ApplyAppearance` して
+`Metrics`・描画フォント(`_font`)が `Assert.Same` になることを確かめる。
+
+陰性対照: `EditorControl.cs` の判定を一時的に `if (_font.Name != request.Name || _font.Size != request.Size)`
+に書き換え、`-p:TreatWarningsAsErrors=false` でビルド(既存の他アナライザ警告 2 件
+`S4487`(未使用フィールド `_appliedFont`)・`S1244`(浮動小数点の厳密比較)が出るが、これは
+アナライザの通常の指摘であり誤りではない=ビルドは **成功**)。テスト結果は
+**7 本中 1 本のみ FAIL**(`ApplyAppearance_NonexistentFontNameTwice_Reuses`)、残り 6 本(既存の
+`SameFontTwice`・`SameFontDifferentTheme`・`EmptyNameAndZeroSize` を含む)は **PASS** のままだった。
+これは既存 6 本が使う `"Consolas"`・`"ＭＳ ゴシック"`・`"Arial"` はいずれも GDI+ がそのまま解決する
+(`_font.Name` が要求名と一致する)ため、`_font.Name` 比較でも要求値比較と同じ結果になり、既存テストは
+この取り違えを検出できないことを裏づける。新テストだけがこの誤りを検出できることを確認した。
+確認後 `git checkout -- src/kxEdit.Editor/EditorControl.cs` で復元し、`git status --short` が
+`EditorControl.cs` について変更なしであることを確認した。
+
+#### 受容(修正しない)項目
+
+最終レビューで指摘は無かったが、実施記録 (1)〜(4) の範囲外として次を受容する:
+
+- **起動後に不足フォントを導入した・DPI/ClearType を変えた場合**、同じ設定で OK を押しても
+  `_appliedFont` が変わらないため幅メモを作り直さない。変更前も `WM_FONTCHANGE`/`DpiChanged` の
+  ハンドリングは無く、名前かサイズを一度変えれば(既定値への往復でも)回復するため、この挙動差は
+  受容する。
