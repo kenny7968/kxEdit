@@ -14,7 +14,8 @@
 //   - IUiaTextHost 全メンバの実装 (RPC スレッドから呼ばれ得る)。応答の仕方は 4 通り:
 //       書き込み系 (SetSelection / SetFocus / ScrollRangeIntoView) = UI スレッドへ BeginInvoke
 //       UI スレッド専用状態を要する読み取り (GetBoundingRectangles / OffsetFromScreenPoint /
-//         GetVisibleRange / 折り返し ON の TryFindVisualSegment) = 同期 Invoke
+//         GetVisibleRange / 折り返し ON の TryFindVisualSegment のキャッシュミス) = 同期 Invoke
+//       折り返し ON の TryFindVisualSegment のキャッシュヒット・空行 = RPC スレッドで即答 (フェーズ 10)
 //       BoundingRectangle = キャッシュ済み _hwnd に対する Win32 API でその場計算 (マーシャリングしない)
 //       それ以外 = 不変スナップショット参照 (マーシャリングしない)
 //   - UI スレッド側からの通知経路: OnSnapshotChanged /
@@ -66,13 +67,54 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     // P8 Minor-5: SR の Line 単位連続読み(LineStartOf/LineEndNoBreakOf/LineEnd)で
     // 同一 (snap, logicalLine, wrap) が繰り返されるため単一エントリキャッシュ。
-    // UI スレッド上でのみ更新される(TryFindVisualSegmentCore は Invoke マーシャリング後)。
+    // フェーズ 10(P-10・2026-09-26): 不変の LineSegsCache の volatile 参照にし、RPC スレッドも読む。
+    // キーが一致すれば RPC スレッドで即答し、UI スレッドへ Invoke しない。書くのは UI スレッドだけ
+    // (TryFindVisualSegmentCore のミス時)。
     // 無効化ポイント: OnSnapshotChanged / InvalidateLastLineSegs (WrapColumns setter /
-    // ApplyAppearance から)。
+    // ApplyAppearance の先頭と末尾から)。
     // 設計原則: _bufferSnapshot を更新するすべての経路で _lastLineSegs も破棄する
-    // (correctness は ReferenceEquals(c.Snap) 判定で守られるが、旧 TextSnapshot の Root
-    //  PieceTree が強参照で pin されて大容量ファイル差替後の GC を阻害するため)。
-    private (TextSnapshot Snap, int Line, int Wrap, IReadOnlyList<WrapSegment> Segs)? _lastLineSegs;
+    // (correctness はキー照合で守られるが、旧 TextSnapshot の Root PieceTree が強参照で
+    //  pin されて大容量ファイル差替後の GC を阻害するため)。
+    private volatile LineSegsCache? _lastLineSegs;
+
+    /// <summary>
+    /// フェーズ 10: 論理行 1 本ぶんの視覚セグメント列と、それを求めた条件(キー)の不変の組。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Segs"/> は <c>LineLayout.Wrap(Snap の Line 行の本文, Wrap × Metrics.MeasureRun("0"), Metrics)</c>
+    /// なので、キー (Snap, Line, Wrap, Metrics) だけで決まる。よってキーが一致すれば、どのスレッドが
+    /// いつ読んでも答えは「そのキーの条件に対して正しい」。Metrics は ApplyAppearance のたびに
+    /// 新しいインスタンスになるので参照で比べる(RPC スレッドはメソッドを呼ばない)。
+    /// </remarks>
+    private sealed class LineSegsCache
+    {
+        public LineSegsCache(
+            TextSnapshot snap,
+            int line,
+            int wrap,
+            ICharMetrics metrics,
+            IReadOnlyList<WrapSegment> segs
+        )
+        {
+            Snap = snap;
+            Line = line;
+            Wrap = wrap;
+            Metrics = metrics;
+            Segs = segs;
+        }
+
+        public TextSnapshot Snap { get; }
+        public int Line { get; }
+        public int Wrap { get; }
+        public ICharMetrics Metrics { get; }
+        public IReadOnlyList<WrapSegment> Segs { get; }
+
+        public bool Matches(TextSnapshot snap, int line, int wrap, ICharMetrics metrics) =>
+            ReferenceEquals(Snap, snap)
+            && Line == line
+            && Wrap == wrap
+            && ReferenceEquals(Metrics, metrics);
+    }
 
     // P5 Task 14 (I-2): UIA プロバイダは RPC スレッドから Handle を取得する。Control.Handle は
     // Handle 未生成時に CreateHandle を誘発し得るため、OnHandleCreated で捕捉した値をキャッシュ。
@@ -391,6 +433,9 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// disposed reference レースが発生する。RPC スレッドからは <see cref="Control.Invoke(Delegate)"/> で
     /// UI スレッドへマーシャリングして両問題を解決する(SR の Line 単位読みは典型的に秒あたり数回=
     /// Invoke レイテンシ数 ms は許容)。Handle 未生成時(SetSource 前)は null=論理行フォールバック。
+    /// フェーズ 10(P-10): キャッシュにヒットするとき(と空行のとき)は Invoke せずに即答する。
+    /// Handle のガードはキャッシュより前に置く(teardown 後は、キャッシュが残っていても論理行へ
+    /// フォールバックする従来の挙動を保つ)。
     /// </remarks>
     private WrapSegment? TryFindVisualSegment(TextSnapshot snap, int line, int offsetInLine)
     {
@@ -399,8 +444,18 @@ internal class UiaTextHostAdapter : IUiaTextHost
             return null;
         if (!_host.IsHandleCreated)
             return null; // UI スレッドが束縛されていない=論理行フォールバック
+        // 空行は視覚セグメントを持たない(TryFindVisualSegmentCore も null を返す)。
+        // 不変の snap だけで判定できるので、RPC スレッドでも Invoke せずに答える。
+        if (snap.GetLineStart(line) == snap.GetLineEnd(line, includeBreak: false))
+            return null;
+        // フェーズ 10: キーが一致すれば RPC スレッドでも即答する(LineSegsCache の remarks)。
+        // _host.Metrics は参照を読むだけ(比較にしか使わない)。
+        if (TryGetCachedSegs(snap, line, wrap, _host.Metrics, out var cached))
+            return VisualSegments.FindContaining(cached, offsetInLine).Segment;
         if (_host.InvokeRequired)
         {
+            // フェーズ 10: UI スレッドへマーシャリングした回数(テストと Smoke S9 が観測する)。
+            Interlocked.Increment(ref _testHook_lineSegsInvokeCount);
             try
             {
                 return _host.Invoke(
@@ -429,21 +484,10 @@ internal class UiaTextHostAdapter : IUiaTextHost
         int wrap
     )
     {
-        IReadOnlyList<WrapSegment> segs;
-
-        if (
-            _lastLineSegs is { } c
-            && ReferenceEquals(c.Snap, snap)
-            && c.Line == line
-            && c.Wrap == wrap
-        )
+        var metrics = _host.Metrics;
+        // Invoke を待つ間に、別の問い合わせが同じ行を埋めていることがあるので、もう一度見る。
+        if (!TryGetCachedSegs(snap, line, wrap, metrics, out var segs))
         {
-            segs = c.Segs;
-            TestHook_LastLineSegsHitCount++;
-        }
-        else
-        {
-            var metrics = _host.Metrics;
             int logicalStart = snap.GetLineStart(line);
             int logicalEnd = snap.GetLineEnd(line, includeBreak: false);
             if (logicalStart == logicalEnd)
@@ -451,11 +495,36 @@ internal class UiaTextHostAdapter : IUiaTextHost
             string lineText = snap.GetText(logicalStart, logicalEnd - logicalStart);
             int maxWidthPx = wrap * metrics.MeasureRun("0".AsSpan());
             segs = LineLayout.Wrap(lineText.AsSpan(), maxWidthPx, metrics);
-            _lastLineSegs = (snap, line, wrap, segs);
-            TestHook_LastLineSegsMissCount++;
+            // 全フィールドを設定したインスタンスを volatile 書き込みで公開する(RPC スレッドが読む)。
+            // キーは実際に使った wrap と metrics(Segs がキーだけの関数であることを保つ)。
+            _lastLineSegs = new LineSegsCache(snap, line, wrap, metrics, segs);
+            Interlocked.Increment(ref _testHook_lastLineSegsMissCount);
         }
 
         return VisualSegments.FindContaining(segs, offsetInLine).Segment;
+    }
+
+    /// <summary>
+    /// キャッシュのキーが (<paramref name="snap"/>, <paramref name="line"/>, <paramref name="wrap"/>,
+    /// <paramref name="metrics"/>) と一致すれば、その視覚セグメント列を返す。どのスレッドから呼んでもよい。
+    /// </summary>
+    private bool TryGetCachedSegs(
+        TextSnapshot snap,
+        int line,
+        int wrap,
+        ICharMetrics metrics,
+        out IReadOnlyList<WrapSegment> segs
+    )
+    {
+        var c = _lastLineSegs; // volatile 読みは 1 回だけ(照合と Segs の取り出しを同じ組で行う)
+        if (c is not null && c.Matches(snap, line, wrap, metrics))
+        {
+            segs = c.Segs;
+            Interlocked.Increment(ref _testHook_lastLineSegsHitCount);
+            return true;
+        }
+        segs = Array.Empty<WrapSegment>();
+        return false;
     }
 
     // 2026-08-04: 単語系 4 経路は走査上限つき (WordBoundary.DefaultMaxScan)。空白ゼロの
@@ -810,13 +879,26 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     // === Test hook (Editor.Tests から観測) ===
 
-    // Editor.Tests から観測するためのヒットカウンタ(internal・テスト以外の呼び出しは想定しない)。
-    internal long TestHook_LastLineSegsHitCount { get; private set; }
-    internal long TestHook_LastLineSegsMissCount { get; private set; }
+    // Editor.Tests から観測するためのヒット/ミスのカウンタ(internal・テスト以外の呼び出しは想定しない)。
+    // フェーズ 10: ヒットは RPC スレッドからも加算するので Interlocked にする。
+    private long _testHook_lastLineSegsHitCount;
+    private long _testHook_lastLineSegsMissCount;
+
+    internal long TestHook_LastLineSegsHitCount =>
+        Interlocked.Read(ref _testHook_lastLineSegsHitCount);
+    internal long TestHook_LastLineSegsMissCount =>
+        Interlocked.Read(ref _testHook_lastLineSegsMissCount);
+
+    // フェーズ 10: TryFindVisualSegment が UI スレッドへ同期 Invoke した回数。RPC スレッドから加算する。
+    private long _testHook_lineSegsInvokeCount;
+
+    internal long TestHook_LineSegsInvokeCount =>
+        Interlocked.Read(ref _testHook_lineSegsInvokeCount);
 
     internal void TestHook_ResetLastLineSegsCounters()
     {
-        TestHook_LastLineSegsHitCount = 0;
-        TestHook_LastLineSegsMissCount = 0;
+        Interlocked.Exchange(ref _testHook_lastLineSegsHitCount, 0);
+        Interlocked.Exchange(ref _testHook_lastLineSegsMissCount, 0);
+        Interlocked.Exchange(ref _testHook_lineSegsInvokeCount, 0);
     }
 }
