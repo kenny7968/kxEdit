@@ -835,4 +835,92 @@ git commit -m "docs(perf): フェーズ 10 の L5 の結果"
 
 ## 実施記録
 
-(Task 1〜5 で追記する)
+### (1) 計測(S9・変更前後 3 run ずつ)
+
+コマンド(1 run。変更前は Task 1、変更後は Task 3 で実行):
+
+```powershell
+1..3 | ForEach-Object { dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S9 --json "<out>\{before,after}-$_.json" }
+```
+
+6 run(変更前 3・変更後 3)とも **EXIT 0**(自己チェック失敗なし)。計測環境は変更前後で同一:
+DeviceDpi=96 / ClientSize=884x661 / LineHeightPx=16 / n=200 / warmup=20 / Release / .NET 9.0.20 /
+Windows 10.0.26200。
+
+#### S9a(折り返し ON・UI スレッドはアイドルで汲むだけ)
+
+| 状態 | run | median_ms | min_ms | max_ms | param(Invoke/歩) |
+|---|---|---|---|---|---|
+| 変更前 | 1 | 0.339 | 0.209 | 4.263 | 3.01 |
+| 変更前 | 2 | 0.359 | 0.108 | 4.447 | 3.01 |
+| 変更前 | 3 | 0.349 | 0.121 | 4.697 | 3.01 |
+| 変更後 | 1 | 0.086 | 0.003 | 3.280 | 0.50 |
+| 変更後 | 2 | 0.097 | 0.003 | 3.185 | 0.50 |
+| 変更後 | 3 | 0.071 | 0.003 | 4.174 | 0.50 |
+
+- 変更前: median の中央値 = 0.349ms、3 run 通した min–max = [0.108, 4.697]ms。
+- 変更後: median の中央値 = 0.086ms、3 run 通した min–max = [0.003, 4.174]ms。
+- 判断(設計書 §3.2): 変更後の median の中央値(0.086ms)が変更前の min–max の下限(0.108ms)を
+  下回る → **改善を達成**。
+
+#### S9b(折り返し ON・UI スレッドは汲む合間に全面再描画)
+
+| 状態 | run | median_ms | min_ms | max_ms | param(Invoke/歩) |
+|---|---|---|---|---|---|
+| 変更前 | 1 | 19.035 | 12.402 | 27.010 | 3.00 |
+| 変更前 | 2 | 19.072 | 6.098 | 20.861 | 3.00 |
+| 変更前 | 3 | 18.969 | 6.746 | 25.368 | 3.00 |
+| 変更後 | 1 | 3.065 | 0.003 | 13.842 | 0.51 |
+| 変更後 | 2 | 0.229 | 0.003 | 16.233 | 0.51 |
+| 変更後 | 3 | 0.505 | 0.003 | 8.216 | 0.51 |
+
+- 変更前: median の中央値 = 19.035ms、3 run 通した min–max = [6.098, 27.010]ms。
+- 変更後: median の中央値 = 0.505ms、3 run 通した min–max = [0.003, 16.233]ms。
+- 判断(設計書 §3.2): 変更後の median の中央値(0.505ms)が変更前の min–max の下限(6.098ms)を
+  大きく下回る → **改善を達成**。
+
+`param`(1 歩あたりの UI スレッドへの Invoke 回数)は S9a/S9b とも、変更前は約 3.00
+(1 歩 = `LineEnd`/`LineStartOf`/`LineEndNoBreakOf` の 3 呼び出しが毎回 Invoke)、変更後は約 0.50
+(ja10k は 1 論理行 72 桁が折り返し 40 桁で 2 視覚行になるため、論理行が変わる歩だけ Invoke する
+設計どおりの見込み値)。期待どおりの結果だった。
+
+参考(深追いしない範囲での確認): 変更前 S9a の `param` が 3.00 ちょうどではなく 3.01(200 歩に対し
+602 回 Invoke 相当)である点(Task 1 からの申し送り)について、`LineStartOf`/`LineEnd`/
+`LineEndNoBreakOf`(`LineEndNoBreakOf` は内部で `LineEnd` を呼ぶ)の呼び出し経路を確認したところ、
+1 歩あたり `TryFindVisualSegment` を通る箇所は 3 回で説明がつくが、+2 回(600→602)の出所は
+コードレビューだけでは特定できなかった。600 に対し 2 回(0.3%)の小さな誤差であり、変更後の
+約 0.50 との差(6 倍以上)には影響しないため、本タスクの判断には影響しない。
+
+### (2) 陰性対照(Task 2 Step 6・3 件)
+
+| # | 変異内容 | 落ちたテスト |
+|---|---|---|
+| 1 | `TryFindVisualSegment` のキャッシュ照合 `if (TryGetCachedSegs(...)) return ...;` を削除 | `LineSegs_HitFromWorkerThread_AnswersWithoutInvoke` |
+| 2 | 空行判定 `if (snap.GetLineStart(line) == snap.GetLineEnd(line, includeBreak: false)) return null;` を削除 | `LineSegs_EmptyLineFromWorkerThread_AnswersWithoutInvoke` |
+| 3 | Handle ガード `if (!_host.IsHandleCreated) return null;` をキャッシュ照合の後ろへ移動 | `LineSegs_AfterHandleDestroyed_FallsBackToLogicalLine_EvenWithCachedSegs` |
+
+各変異とも対象テストのみが FAIL し、他 8 本(`EditorControlCacheTests` 内)は PASS のままだった
+(build は `-p:TreatWarningsAsErrors=false` で 0 警告/0 エラー)。3 件とも
+`git checkout -- src/kxEdit.Editor/UiaTextHostAdapter.cs` で復元済み(詳細は Task 2 実施報告)。
+
+### (3) sr-regression
+
+`pwsh -File tools/sr-regression.ps1` → **EXIT 0**(`verify-uia-editor.ps1` 5 件・`word-sim.ps1` 6 件、
+全 11 件 PASS)。判定は UIA 応答の疎通までで、実発声は検出できない(L5 は Task 4 で別途実施)。
+
+### (4) 計画からの逸脱(コントローラ裁定)
+
+- (a) **Task 1 の変更前計測値の記録場所**: Task 1 Step 9 は本書「実施記録」への記録を指示していたが、
+  後続タスク(Task 2)の commit に未 commit の計画書編集が混ざるのを避けるため、変更前計測値は
+  いったん Task 1 実施報告書に記録し、Task 3(本タスク)でまとめて本書へ転記する扱いとした
+  (Task 1 実施報告の申し送りに明記済み)。
+- (b) **Task 2 のテストフィクスチャの期待値**: 本計画(Task 2 Step 1)は `wrap=4` の
+  `"abcdefghij"` が `[0,4)[4,8)[8,10)` に折り返す前提で固定値(`LineStartOf(6)==4` /
+  `LineEnd(6)==8` / `LineEndNoBreakOf(6)==8` 等)を検証するテストを指定していたが、
+  `EditorControl` の既定コンストラクタのフォント名(半角「MS ゴシック」)が実在フォントに
+  解決されず比例フォント(Microsoft Sans Serif)へフォールバックする既知の未起票課題により、
+  本環境の実際の折り返しは `[0,4)[4,9)[9,10)` になっていた。ctor のフォント修正は本フェーズの
+  スコープ外と裁定し、代わりに該当テストを UI スレッドで実測した値を `expected` とする・
+  境界値そのものは検証せず構造的前提(範囲・大小関係)のみを検証する形に修正した
+  (詳細は Task 2 実施報告)。製品コードの折り返しロジック自体は変更しておらず、
+  挙動不変の原則には反しない。
