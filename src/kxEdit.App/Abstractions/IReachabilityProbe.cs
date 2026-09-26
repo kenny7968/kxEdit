@@ -13,6 +13,26 @@ namespace kxEdit.App;
 public readonly record struct SaveTargetProbeResult(bool Reachable, bool FileExists);
 
 /// <summary>
+/// 外部変更チェック用に、更新時刻を 1 回の境界付き I/O で調べた結果(性能改善フェーズ 7・P-11)。
+/// <c>Reachable</c> と <c>Exists</c> の意味は <see cref="SaveTargetProbeResult"/> の
+/// <c>Reachable</c> / <c>FileExists</c> と同じ(ファイルが在る、または親フォルダーが在る)。
+/// <b><c>default</c> は「到達不能」</b>で、タイムアウト時の値と同じ(ゼロ値をフェイルセーフ側に置く)。
+/// </summary>
+/// <param name="Reachable">ファイルが在る、または親フォルダーが在る。false のとき他の値は無意味。</param>
+/// <param name="Exists">ファイルが在る(<c>File.Exists</c> の意味論。フォルダーは false)。</param>
+/// <param name="LastWriteUtc">更新時刻。<c>Exists</c> が true で、取得に成功したときだけ値を持つ。</param>
+/// <param name="Error">
+/// 存在は確認できたが、更新時刻の取得で例外が出た。呼出側は null を返し、到達不能として記憶しない
+/// (従来の UI スレッド側の扱いと同じ)。
+/// </param>
+public readonly record struct TimestampProbeResult(
+    bool Reachable,
+    bool Exists,
+    DateTime? LastWriteUtc,
+    bool Error
+);
+
+/// <summary>
 /// 境界付き正規化の結果状態(Issue #48 / 設計書 §4)。
 /// <b>ゼロ値をフェイルセーフ側に置いてある</b>: 初期化漏れや <c>default</c> が
 /// 「正規化できた」に転ばないようにするため、<see cref="TimedOut"/> を 0 にする。
@@ -152,6 +172,15 @@ public interface IReachabilityProbe
     /// 2 つの述語を 1 タスクにまとめてあるのは、遠隔共有での待ちを 5 秒 1 回に収めるため。
     /// </summary>
     SaveTargetProbeResult ProbeSaveTargetWithTimeout(string path, TimeSpan timeout);
+
+    /// <summary>
+    /// 外部変更チェック用に、到達性・存在・更新時刻を 1 回の境界付き I/O で得る(性能改善フェーズ 7・P-11)。
+    /// 従来は <see cref="ProbeSaveTargetWithTimeout"/> の後に、UI スレッドで境界なしの
+    /// <c>File.Exists</c> + <c>GetLastWriteTimeUtc</c> を再び呼んでいた(リモートで往復 4 回)。
+    /// <see cref="ProbeSaveTargetWithTimeout"/> は保存経路と共用なので戻り値の型を変えず、別メソッドにした。
+    /// 呼出側は正規化済みの絶対パスを渡す(ファイル系プローブの契約)。
+    /// </summary>
+    TimestampProbeResult ProbeTimestampWithTimeout(string path, TimeSpan timeout);
 
     /// <summary>
     /// パスを境界付きで正規化する(Issue #48 / S-15)。

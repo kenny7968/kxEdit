@@ -1056,6 +1056,50 @@ GetChar と GetText の相互比較では格子の破損を検出できない(se
 - **計測**: リモート(SMB 共有)が用意できれば、M-6 のリモート版とウィンドウ復帰の時間を測る。用意できなければ、Win32 の呼び出し回数をテストで確認することで代える。
 - **L5**: 不要。
 
+### 12.7 実施記録(2026-09-26・PR #94)
+
+- **成果物**
+  - P-11: `IReachabilityProbe` に `ProbeTimestampWithTimeout` を追加した。work は `FileReachabilityProbe.ReadTimestamp` に切り出し、`FileInfo` を 1 回だけ作って `TimestampProbeResult`(Reachable, Exists, LastWriteUtc, Error)を返す。`FileTimestampProvider.GetCore` のリモート経路は、この結果だけで答える(往復は従来の 4 回から 1 回になった)。ローカル経路も `FileInfo` 1 回にした。
+  - P-22: `FileController.RegisterRecent` で `RecentFilesList.Add` の前後を `SequenceEqual(StringComparer.Ordinal)` で比べ、等しければ保存とメニュー再構築を省くようにした。
+  - P-12: `BackupStore` の `JsonSerializerOptions` に `Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping` を追加した(読込は新旧どちらの形式も可能)。
+  - P-15: `PreviewUserDataSweeper` の判定部を `SweepIfAnyAndSole(string root, Func<bool> isSoleInstance)` に切り出し、先に `preview-*` を列挙して 1 件以上あるときだけプロセス列挙(`IsSoleInstance`)を呼ぶようにした。
+  - P-21(a): `PreviewUserDataFolder.Dispose` の再帰削除を `DeleteWithRetryAsync` として背景タスクへ移した。リトライ間隔は 100・200・400・800 ms(4 回・合計 1.5 秒)。
+  - 実装計画・計測値・レビューの経緯は `docs/plans/2026-09-26-perf-io-settings.md`(以下「計画」)の実施記録にある。
+- **完了条件**
+  - **計測**(計画 §0.1・NVDA 起動中・変更前後の Release ビルドに対して各 3 回)。リモートは管理共有 `\\localhost\C$` へのループバックで代用した(VPN 越しの遅延は再現しないため、往復回数はテストで確認した)。主な数値(3 run の median の中央値。単位は ms、`backup-bytes` のみ bytes):
+    - `ts-unc-loopback`: 2.488 → 0.672(往復 4→1 の効果が揺れを超えて出た)
+    - `backup-bytes`: 989154 → 539145(約 55%に縮小)
+    - `backup-write`: 5.748 → 4.491
+    - `preview-dispose`: 54.562 → 0.026(削除を待たずに UI スレッドへ戻る。フェーズ 7 で最も効果が大きい項目)
+    - `ts-local`: 0.016 → 0.008
+    - `settings-save`(P-22 が省く 1 回あたりの費用・呼出自体のコストは不変のため基準の対象外): 約 2.7 ms
+    - `is-sole-instance`(P-15 が省く 1 回あたりの費用・呼出自体のコストは不変のため基準の対象外): 約 0.4 ms
+    - harness M-6 のリモート版は作らなかった(計画 §0.1 の逸脱。ループバックでは差が揺れに埋もれるため)。
+  - **L5**: 不要(SR の経路に触れない。計画 §0.4)。
+  - **レビュー**: 前倒しの脆弱性レビューを Task 2(P-11)・Task 4(P-12)・Task 5+6(P-15・P-21(a)、合同)で行った。最終レビューはコード品質パス・脆弱性パスの 2 パスを行い、指摘は fixup commit で反映した。
+  - **ミューテーション検証**: 行わない(§3.4・計画 Global Constraints)。各タスクの最後に陰性対照(実装を戻してテストが落ちることの確認)を 1 回行った。
+- **本節からの精密化・逸脱**(詳細は計画 §0.2)
+  - P-11 の Exists 系の例外は `File.Exists` の意味論に揃えた: `FileInfo` の生成や `Exists` の例外(例: 名前に NUL を含むパス)は、`File.Exists` と同じく「存在しない」として親フォルダーの確認へ進む。到達不能に倒すと、共有全体を誤って 60 秒記憶する挙動差になるため。
+  - 末尾区切り(`...\a.txt\` 等)の判定も同じ理由で `File.Exists` に揃えたが、Task 2 レビューで一度反映した判定は正規化前(raw)のパスに対する `Path.EndsInDirectorySeparator` だったため、正規化で初めて区切りが現れる入力(末尾に空白 1 文字・`.` + 空白等)を取りこぼしていた。最終レビューで指摘され、判定を `info.FullName`(`GetFullPath` 済み)に変えて塞いだ(fix wave で反映)。
+  - work は `FileReachabilityProbe.ReadTimestamp` に切り出した(タイムアウトを決定的にテストできるよう、骨格 `RunTimestampProbe` と分離するため)。
+  - P-21(a) のリトライ間隔は 100・200・400・800 ms とした。
+  - `PreviewUserDataFolder` の親フォルダー既定値を `PreviewUserDataSweeper.DefaultRoot` に一本化した(従来は 2 か所で同じ値を組み立てていた)。
+  - P-15 の判定部は `SweepIfAnyAndSole` という別名にした(IL テストの目印 `SweepIfSoleInstance` との名前照合に紛れを作らないため)。
+  - Task 6 実装中、アナライザ由来の追加の書き換えを 2 件行った: 削除ループを `for (;;attempt++)` から `while (true)` + 手動インクリメントに変更(S1994「停止インクリメンタがループ条件に現れない」を回避)。テストの待ち(`Task.Wait`/`.Result`・`Thread.Sleep`)は private ヘルパー経由にした(xUnit1031・S2925 を回避。待つこと自体・値はテストの主目的なので変えていない)。
+  - P-12 の単独サロゲートのテストは `[Theory]`/`[InlineData]` ではなく `[Fact]` 内で文字列を組み立てる形にした(属性の文字列リテラルは UTF-8 でメタデータに入るため、単独サロゲートはコンパイル時に U+FFFD に化けて検証にならない)。
+- **意図的な挙動差**(計画 §0.5。設計書 §3.5 のフェーズ 7 の行として適用)
+  - バックアップ JSON の非 ASCII がエスケープされなくなる(読込は新旧互換)。
+  - 最近使ったファイルの一覧が変わらない場合は、settings.json を保存しない。
+  - リモートのファイルの更新時刻の取得も期限付きになる。タイムアウト時は「到達不能として記憶」になる。
+  - プレビューの `Dispose` から戻った時点で、作業フォルダーがまだ残っていることがある。
+  - 終了直後に閉じたプレビューの残骸は、次回起動の sweeper が回収する。
+- **以後への申し送り**(どのフェーズにも割り当てていない)
+  - バックアップで本文の単独サロゲートが U+FFFD になるのは既存の性質で、Encoder 変更の前後で変わらない(2026-09-26 に実測)。
+  - `ProbeSaveTargetWithTimeout` は、末尾区切りのとき `Path.GetDirectoryName` がファイル自身を親として返す性質に依存して到達不能になっている(未変更)。
+  - `DeleteWithRetryAsync` で IO/UA 以外の例外が起きた場合、観測されない faulted Task になる(自作パスなので事実上起きない)。
+  - `DeleteWithRetry_RetriesAfterFailure` は `Sleep(300)` を前提にしており、スレッドプール枯渇時に低確率で落ちうる。
+  - NUL 入りの `[InlineData]` は、将来 trx ロガーを導入したとき表示名で問題になりうる。
+
 ## 13. フェーズ 8: grep(`perf-grep`)
 
 **目的**: バイナリと、一致しないファイルに対する無駄な処理をなくす。

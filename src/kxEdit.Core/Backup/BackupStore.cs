@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace kxEdit.Core.Backup;
@@ -17,7 +18,17 @@ namespace kxEdit.Core.Backup;
 /// </summary>
 public static class BackupStore
 {
-    private static readonly JsonSerializerOptions Options = new() { WriteIndented = false };
+    /// <summary>性能改善フェーズ 7(P-12): 非 ASCII を \uXXXX にエスケープせず、生の UTF-8 で書く
+    /// (日本語の本文はファイルが約半分になり、終了時の最終書込待ちが短くなる)。前例は
+    /// <c>SessionLayoutStore</c> / <c>LastSessionBuffersStore</c>。読込は新旧どちらの形式も読める
+    /// (Encoder は書込にしか効かない)。<c>UnsafeRelaxed</c> は HTML/JS に埋め込む文脈で危険という意味で、
+    /// このファイルは %APPDATA% のローカルファイルで、HTML にも JS にも埋め込まない。
+    /// 単独サロゲートは、この変更の前後とも U+FFFD に置き換わる(ライターの性質)。</summary>
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     /// <summary>既定のバックアップディレクトリ（%APPDATA%\kxEdit\backups）。</summary>
     public static string DefaultDirectory =>

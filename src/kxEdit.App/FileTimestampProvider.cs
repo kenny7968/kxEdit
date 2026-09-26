@@ -78,38 +78,53 @@ public sealed class FileTimestampProvider : IFileTimestampProvider
     {
         try
         {
-            if (RemotePathDetector.IsRemote(path))
+            if (!RemotePathDetector.IsRemote(path))
             {
-                string root = RootKey(path);
-                DateTimeOffset now = _clock.GetUtcNow();
-                if (useMemo && _unreachableUntil.TryGetValue(root, out var until) && now < until)
-                    return null;
-                // 脆弱性レビュー L-1(2026-09-03): 「到達不能」と「到達できるが不在」を区別する。
-                // ProbeFileExistsWithTimeout は File.Exists 意味論で両者を区別しないため、到達可能な
-                // 共有上の一時的な不在(別ツールの delete→recreate・rename 保存の途中)でルート全体を
-                // 到達不能として記憶し、以後その共有の全文書で検知が黙って止まっていた。
-                // 保存先用のプローブは (Reachable, FileExists) を分けて返すので読む側でもこれを使う。
-                // ただし Reachable は「ファイルが在る、または親フォルダーが在る」(FileReachabilityProbe の
-                // 定義)なので、記憶しないのは「ファイルは無いが親フォルダーは在る」場合だけ。
-                // 親フォルダーごと消えた/改名された場合は到達不能として TTL の間記憶される残余がある。
-                var probe = _probe.ProbeSaveTargetWithTimeout(path, ProbeTimeout);
-                if (!probe.Reachable)
-                {
-                    _unreachableUntil[root] = now + _unreachableTtl;
-                    return null;
-                }
-                // 復旧を確認した根の記憶をここで捨てる。期限切れの記録は到達不能なら上の分岐で上書きされるが、
-                // 復旧したときは上書きされないので明示的に消す。これで**この根については**壁時計が逆行しても
-                // 期限切れの記録が復活しない。期限切れ後に一度も再照会されていない根は until を持ったまま残るので、
-                // 一般命題としては閉じていない(設計 2026-09-03 §11.5「壁時計の逆行」)。
-                _unreachableUntil.Remove(root);
-                if (!probe.FileExists)
-                    return null; // 不在は記憶しない(次の問い合わせで再び見る)
+                // 性能改善フェーズ 7(P-11): FileInfo 1 回(Exists が取り込んだ属性から更新時刻も読む)。
+                // 不在時の LastWriteTimeUtc は 1601-01-01 を返す(例外を投げない)。
+                // そのまま返すと「非常に古いディスク」に見えて判定が黙って歪むため、Exists で弾く。
+                // Exists は File.Exists と同じくフォルダーに false を返す。
+                // 脆弱性レビュー I-1(net9 実測): 末尾区切り付きの既存ファイル(...\a.txt\)は
+                // FileInfo.Exists が FillAttributeInfo で区切りを落として true を返すが、
+                // File.Exists は正規化後の区切りを見て false を返す(意味論のずれ)。
+                // 揃えないと、従来 null だった入力が固定の時刻を返す挙動変更になる。
+                // 最終レビュー指摘: 末尾区切りの判定は info.FullName(GetFullPath 済み)で行う。
+                // File.Exists と同じ順序(正規化後に判定)にしないと、正規化で初めて末尾区切りが
+                // 現れる入力(末尾に空白 1 文字・"." + 空白等)を素通ししてしまう
+                // (実測: net9 で File.Exists=false / FileInfo.Exists=true のまま残る)。
+                var info = new FileInfo(path);
+                return info.Exists && !Path.EndsInDirectorySeparator(info.FullName)
+                    ? info.LastWriteTimeUtc
+                    : null;
             }
 
-            // 不在時の File.GetLastWriteTimeUtc は 1601-01-01 を返す(例外を投げない)。
-            // そのまま返すと「非常に古いディスク」に見えて判定が黙って歪むため明示的に弾く。
-            return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null;
+            string root = RootKey(path);
+            DateTimeOffset now = _clock.GetUtcNow();
+            if (useMemo && _unreachableUntil.TryGetValue(root, out var until) && now < until)
+                return null;
+            // 脆弱性レビュー L-1(2026-09-03): 「到達不能」と「到達できるが不在」を区別する。
+            // 到達可能な共有上の一時的な不在(別ツールの delete→recreate・rename 保存の途中)で
+            // ルート全体を到達不能として記憶すると、以後その共有の全文書で検知が黙って止まる。
+            // Reachable は「ファイルが在る、または親フォルダーが在る」(FileReachabilityProbe の定義)なので、
+            // 記憶しないのは「ファイルは無いが親フォルダーは在る」場合だけ。
+            // 親フォルダーごと消えた/改名された場合は到達不能として TTL の間記憶される残余がある。
+            // 性能改善フェーズ 7(P-11): 更新時刻も同じ境界付きプローブの中で取る。従来は保存先プローブの後に、
+            // UI スレッドで境界なしの File.Exists + GetLastWriteTimeUtc を再び呼んでいた(リモートで往復 4 回・無期限)。
+            // 更新時刻の取得も期限の内側に入ったので、タイムアウト時は到達不能として記憶する(設計書 §3.5)。
+            var probe = _probe.ProbeTimestampWithTimeout(path, ProbeTimeout);
+            if (!probe.Reachable)
+            {
+                _unreachableUntil[root] = now + _unreachableTtl;
+                return null;
+            }
+            // 復旧を確認した根の記憶をここで捨てる。期限切れの記録は到達不能なら上の分岐で上書きされるが、
+            // 復旧したときは上書きされないので明示的に消す。これで**この根については**壁時計が逆行しても
+            // 期限切れの記録が復活しない。期限切れ後に一度も再照会されていない根は until を持ったまま残るので、
+            // 一般命題としては閉じていない(設計 2026-09-03 §11.5「壁時計の逆行」)。
+            _unreachableUntil.Remove(root);
+            // 不在は記憶しない(次の問い合わせで再び見る)。更新時刻の取得に失敗した(Error)ときも
+            // LastWriteUtc は null で、記憶しない(従来の UI スレッド側の例外の扱いと同じ)。
+            return probe.Exists ? probe.LastWriteUtc : null;
         }
         catch (Exception ex)
             when (ex

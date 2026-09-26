@@ -4,6 +4,7 @@
 // クラッシュすると PreviewUserDataFolder が回収されない。起動時 sweep で拾う。
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 
 namespace kxEdit.App;
 
@@ -50,15 +51,27 @@ internal static class PreviewUserDataSweeper
     {
         try
         {
-            if (!IsSoleInstance())
-                return;
-            Sweep(DefaultRoot);
+            SweepIfAnyAndSole(DefaultRoot, IsSoleInstance);
         }
         catch (Exception ex)
         {
             // 掃除は best-effort。ここで起動を止めない(残骸が残るだけ)。
             Trace.TraceWarning($"preview sweep skipped: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 性能改善フェーズ 7(P-15): 先に <c>preview-*</c> を探し、1 件以上あるときだけ
+    /// <paramref name="isSoleInstance"/>(OS の全プロセスの列挙)を呼ぶ。掃除対象がなければ結果は同じで、
+    /// 起動のたびの全プロセスの列挙を省ける。判定と削除の間の TOCTOU の窓の性質は変わらない
+    /// (従来も「プロセスの判定 → 列挙 → 削除」の間に別インスタンスが起動しうる)。
+    /// </summary>
+    /// <returns>削除できた数(テスト用)。</returns>
+    internal static int SweepIfAnyAndSole(string root, Func<bool> isSoleInstance)
+    {
+        if (!Directory.Exists(root) || !Directory.EnumerateDirectories(root, Pattern).Any())
+            return 0;
+        return isSoleInstance() ? Sweep(root) : 0;
     }
 
     /// <summary>自分以外に同名プロセスが居ないか。取得に失敗したら false(=掃除しない側)。</summary>

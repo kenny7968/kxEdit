@@ -78,6 +78,81 @@ public class BackupStoreTests
         Assert.Equal("no path content", loaded.Content);
     }
 
+    // ===== 性能改善フェーズ 7(P-12): 非 ASCII を \uXXXX にエスケープしない =====
+
+    [Fact]
+    public void Write_stores_non_ascii_as_raw_utf8()
+    {
+        using var t = new TempDir();
+        var rec = Rec("id-raw", @"C:\文書\メモ.txt", "日本語の本文");
+        BackupStore.Write(t.Root, rec);
+
+        string json = System.Text.Encoding.UTF8.GetString(
+            File.ReadAllBytes(Path.Combine(t.Root, rec.Id + ".json"))
+        );
+        Assert.Contains("日本語の本文", json, StringComparison.Ordinal);
+        Assert.Contains("メモ.txt", json, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"\u65E5", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("日本語とかな")]
+    [InlineData("絵文字 😀 と結合 👨‍👩‍👧")]
+    [InlineData("制御文字 \u0001\u001F と DEL \u007F")]
+    [InlineData("引用符 \" とバックスラッシュ \\ と C:\\path\\")]
+    [InlineData("HTML 的な <script>&amp;'</script>")]
+    [InlineData("行区切り \u2028 と段落区切り \u2029")]
+    [InlineData("改行 \r\n と LF \n と CR \r とタブ \t")]
+    [InlineData("NUL \u0000 入り")]
+    public void Write_then_LoadAll_roundtrips_special_characters(string content)
+    {
+        using var t = new TempDir();
+        var rec = Rec("id-special", @"C:\docs\a.txt", content);
+        BackupStore.Write(t.Root, rec);
+
+        Assert.Equal(content, Assert.Single(BackupStore.LoadAll(t.Root)).Content);
+    }
+
+    /// <summary>
+    /// 単独サロゲートは、書込で U+FFFD に置き換わる。これは Encoder を変える前(既定のエスケープ)でも
+    /// 同じ挙動で、System.Text.Json のライターが不正な UTF-16 を置き換えるため(2026-09-26 に実測。
+    /// 旧: <c>"a\uFFFDb"</c> / 新: 同じ)。Encoder の変更で例外や別の文字にならないことを固定する。
+    /// 本文の単独サロゲートがバックアップで失われること自体は既存の性質(設計書 §12 の実施記録の申し送り)。
+    /// 属性の文字列は UTF-8 でメタデータに入り、単独サロゲートはコンパイル時に U+FFFD に化けるため、
+    /// [Fact] で文字列を code で構築する。
+    /// </summary>
+    [Fact]
+    public void Write_replaces_lone_surrogate_with_replacement_char_as_before()
+    {
+        foreach (string content in new[] { "a" + '\uD800' + "b", "a" + '\uDC00' + "b" })
+        {
+            using var t = new TempDir();
+            Assert.Equal(3, content.Length);
+            Assert.True(char.IsSurrogate(content[1])); // 前提の自己検証(本当に単独サロゲート)
+            var rec = Rec("id-lone", @"C:\docs\a.txt", content);
+            BackupStore.Write(t.Root, rec);
+            Assert.Equal("a\uFFFDb", Assert.Single(BackupStore.LoadAll(t.Root)).Content);
+        }
+    }
+
+    /// <summary>旧形式(非 ASCII を \uXXXX にエスケープ)のファイルも読める(Encoder は書込にしか効かない)。
+    /// 旧形式は、Encoder を指定しない既定のオプションで作る(変更前の BackupStore と同じ設定)。</summary>
+    [Fact]
+    public void LoadAll_reads_legacy_escaped_format()
+    {
+        using var t = new TempDir();
+        var rec = Rec("id-legacy", @"C:\文書\メモ.txt", "日本語\r\n\"引用\" 😀");
+        byte[] legacy = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(rec);
+        Assert.Contains(
+            @"\u65E5",
+            System.Text.Encoding.UTF8.GetString(legacy),
+            StringComparison.OrdinalIgnoreCase
+        ); // 前提の自己検証(本当に旧形式)
+        File.WriteAllBytes(Path.Combine(t.Root, rec.Id + ".json"), legacy);
+
+        Assert.Equal(rec, Assert.Single(BackupStore.LoadAll(t.Root)));
+    }
+
     [Fact]
     public void Write_then_LoadAll_roundtrips_null_content()
     {

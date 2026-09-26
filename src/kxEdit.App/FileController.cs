@@ -1705,11 +1705,18 @@ public sealed class FileController
 
     // ==================== 内部 ====================
 
-    /// <summary>開いた/保存したファイルを最近のファイルへ登録し、永続化＆メニュー再構築を促す。</summary>
+    /// <summary>開いた/保存したファイルを最近のファイルへ登録し、永続化＆メニュー再構築を促す。
+    /// 性能改善フェーズ 7(P-22): 一覧が変わらなければ、settings.json の fsync 付き書込とメニューの再構築を省く
+    /// (既に開いているタブへ grep の結果から飛ぶとき・先頭のファイルを開き直すとき)。
+    /// 比較は Ordinal: <c>PathKey</c> で比べると、先頭項目の表記(大文字小文字など)だけが置き換わった変化を
+    /// 取りこぼす。省いた場合も、終了時には設定が必ず保存される(設計書 §12.2 の影響の整理)。</summary>
     private void RegisterRecent(string path)
     {
         var s = _settings();
-        s.RecentFiles = RecentFilesList.Add(s.RecentFiles, path, RecentFilesList.MaxItems);
+        var updated = RecentFilesList.Add(s.RecentFiles, path, RecentFilesList.MaxItems);
+        if (updated.SequenceEqual(s.RecentFiles, StringComparer.Ordinal))
+            return;
+        s.RecentFiles = updated;
         _saveSettings();
         _recentChanged();
     }
