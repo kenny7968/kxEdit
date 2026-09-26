@@ -2769,6 +2769,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     {
         ArgumentNullException.ThrowIfNull(settings);
 
+        // フェーズ 10(P-10): RPC スレッドが _lastLineSegs を読むようになったので、先頭でも破棄する
+        // (途中の状態でヒットさせず、ここより前の答えとして線形化する。キーの Metrics 照合との二重化)。
+        _uia.InvalidateLastLineSegs();
+
         // フォント差し替え + GdiCharMetrics 再構築(古い Font は明示的に Dispose して GDI HFONT リーク回避)。
         // 例外安全: newFont / newMetrics を両方作り切ってから旧 Font を Dispose する。
         // GdiCharMetrics のコンストラクタが throw した場合は newFont も破棄して呼び出し元へ propagate
