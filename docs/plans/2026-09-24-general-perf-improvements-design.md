@@ -1251,7 +1251,7 @@ GetChar と GetText の相互比較では格子の破損を検出できない(se
 - `TestHook_LastLineSegs*Count` は、RPC スレッドから加算されることになるので `Interlocked` にする。
 - **L5 必須**: 折り返し ON で、NVDA の上下矢印と say all の読み上げが不変であること。
 
-### 15.3 実施記録(2026-09-26・PR #<番号>)
+### 15.3 実施記録(2026-09-26・PR #96)
 
 - **成果物**
   - `UiaTextHostAdapter._lastLineSegs` を、不変クラス `LineSegsCache(Snap, Line, Wrap, Metrics, Segs)`
