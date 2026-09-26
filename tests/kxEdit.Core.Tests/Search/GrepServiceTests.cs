@@ -261,6 +261,59 @@ public class GrepServiceTests
     }
 
     [Fact]
+    public void Regex_line_anchors_match_middle_lines()
+    {
+        using var t = new TempDir();
+        // 途中の行(2・3 行目)でも ^ / $ が行頭・行末に効く。CRLF・LF・CR の混在も含める。
+        t.WriteUtf8("a.txt", "head\r\nTARGET mid\nmid TARGET\rtail\n");
+
+        var head = Assert.Single(GrepService.Search(Req(t.Root, "^TARGET", useRegex: true)).Hits);
+        Assert.Equal(2, head.LineNumber);
+        Assert.Equal("TARGET mid", head.LineText);
+
+        var tail = Assert.Single(GrepService.Search(Req(t.Root, "TARGET$", useRegex: true)).Hits);
+        Assert.Equal(3, tail.LineNumber);
+        Assert.Equal("mid TARGET", tail.LineText);
+        Assert.Equal(4, tail.MatchStartInLine);
+
+        // 空行に一致する ^$ は、途中の空行を拾う(ゼロ幅・LineText は空)。
+        t.WriteUtf8("b.txt", "x\n\ny\n");
+        var empty = GrepService.Search(Req(t.Root, "^$", useRegex: true, patterns: "b.txt"));
+        var e = Assert.Single(empty.Hits);
+        Assert.Equal(2, e.LineNumber);
+        Assert.Equal("", e.LineText);
+        Assert.Equal(0, e.MatchLength);
+    }
+
+    [Fact]
+    public void Lookaround_does_not_see_across_line_boundary()
+    {
+        using var t = new TempDir();
+        // 前の行の末尾 a・次の行の先頭 b。行単位の照合では、後読み・先読みは行の外を見ない。
+        t.WriteUtf8("a.txt", "xa\nbx\n");
+
+        Assert.Empty(GrepService.Search(Req(t.Root, "(?<=a)b", useRegex: true)).Hits);
+        Assert.Empty(GrepService.Search(Req(t.Root, "a(?=b)", useRegex: true)).Hits);
+        Assert.Empty(GrepService.Search(Req(t.Root, @"(?<=\n)b", useRegex: true)).Hits);
+        // \A と \z は行の先頭・末尾になる(全文の先頭・末尾ではない)。
+        var a = Assert.Single(GrepService.Search(Req(t.Root, @"\Ab", useRegex: true)).Hits);
+        Assert.Equal(2, a.LineNumber);
+        var z = Assert.Single(GrepService.Search(Req(t.Root, @"a\z", useRegex: true)).Hits);
+        Assert.Equal(1, z.LineNumber);
+    }
+
+    [Fact]
+    public void Whole_word_at_line_edges_is_honored()
+    {
+        using var t = new TempDir();
+        // 単語単位の \b は行頭・行末でも境界になる。前の行の末尾が単語文字でも影響しない。
+        t.WriteUtf8("a.txt", "xx\nTARGET\nxTARGET\nTARGETx\n");
+        var hits = GrepService.Search(Req(t.Root, "TARGET", wholeWord: true)).Hits;
+        var h = Assert.Single(hits);
+        Assert.Equal(2, h.LineNumber);
+    }
+
+    [Fact]
     public void Multiple_matches_in_line_yield_single_hit_at_first()
     {
         using var t = new TempDir();
