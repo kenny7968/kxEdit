@@ -166,4 +166,39 @@ public class ApplyAppearanceFontReuseTests
                 Assert.Same(metrics, c.Metrics);
             }
         });
+
+    /// <summary>
+    /// 品質レビュー指摘(Minor-2): 使い回しの判定が要求値(<c>FontRequest</c>)どうしの比較であり、
+    /// 生成された <c>_font.Name</c>(GDI+ が解決した実フォント名)との比較ではないことを固定する。
+    /// 存在しないフォント名を要求すると GDI+ は別のフォントファミリーへフォールバックするため、
+    /// <c>_font.Name</c> は要求名と一致しない。もし実装が誤って <c>_font.Name</c>/<c>_font.Size</c> を
+    /// 比較していたら、この要求名は解決後の名前と一致しないので毎回「変化した」と判定され、
+    /// 同じ設定の 2 回目でもフォントと <c>GdiCharMetrics</c> を作り直してしまう(このテストは
+    /// その取り違えを検出できる。陰性対照は実施計画・実施記録を参照)。
+    /// </summary>
+    [Fact]
+    public void ApplyAppearance_NonexistentFontNameTwice_Reuses() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl();
+            using (f)
+            using (c)
+            {
+                var s = new AppSettings { FontName = "kxEdit-NoSuchFont", FontSize = 15f };
+                c.ApplyAppearance(s);
+                var metrics = c.Metrics;
+                var font = DrawFont(c);
+
+                // 前提: GDI+ が要求名をそのまま解決していない(フォールバック先の名前になっている)。
+                // これが要求名と一致してしまうと、_font.Name で比較しても本テストは区別できない。
+                Assert.NotEqual("kxEdit-NoSuchFont", font.Name);
+
+                c.ApplyAppearance(
+                    new AppSettings { FontName = "kxEdit-NoSuchFont", FontSize = 15f }
+                );
+
+                Assert.Same(metrics, c.Metrics);
+                Assert.Same(font, DrawFont(c));
+            }
+        });
 }
