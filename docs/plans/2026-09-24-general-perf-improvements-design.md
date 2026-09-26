@@ -1056,7 +1056,7 @@ GetChar と GetText の相互比較では格子の破損を検出できない(se
 - **計測**: リモート(SMB 共有)が用意できれば、M-6 のリモート版とウィンドウ復帰の時間を測る。用意できなければ、Win32 の呼び出し回数をテストで確認することで代える。
 - **L5**: 不要。
 
-### 12.7 実施記録(2026-09-26・PR #TBD)
+### 12.7 実施記録(2026-09-26・PR #94)
 
 - **成果物**
   - P-11: `IReachabilityProbe` に `ProbeTimestampWithTimeout` を追加した。work は `FileReachabilityProbe.ReadTimestamp` に切り出し、`FileInfo` を 1 回だけ作って `TimestampProbeResult`(Reachable, Exists, LastWriteUtc, Error)を返す。`FileTimestampProvider.GetCore` のリモート経路は、この結果だけで答える(往復は従来の 4 回から 1 回になった)。ローカル経路も `FileInfo` 1 回にした。
