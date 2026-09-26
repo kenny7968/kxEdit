@@ -137,6 +137,7 @@ pwsh -File tools\perf-harness.ps1 -PublishDir <作業フォルダ>\publish
 pwsh -File tools\perf-harness.ps1 -PublishDir <作業フォルダ>\publish -Scenario M-2,M-7
 ```
 
+- 配布物と同じ条件で測るときは、publish に `-p:PublishReadyToRun=true -p:DebugType=embedded` を足す(release.yml と同じ。性能改善フェーズ 11 以降)。
 - **pwsh(PowerShell 7)専用**。計測中(全シナリオで十数分)は画面・キーボード・マウスに触らない。前面の窓が計測対象でなくなったら中止する。
 - シナリオ M-1〜M-7 と n / interval は調査記録 §9.5 のとおり。結果は CSV(`scenario,condition,doc,n,value,unit,flags`)で、既定の出力先は `%LOCALAPPDATA%\kxEdit-perf-harness\results-<日時>.csv`。`-OutCsv` の既存ファイルは上書きしない(中止する)。
 - 設計書 §3.2 の判断基準(3 回の最小〜最大)を当てるときは、改善対象のシナリオを 3 回走らせる(`-OutCsv` を毎回別名にするか、既定の日時付きの名前に任せる)。

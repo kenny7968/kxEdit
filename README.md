@@ -158,6 +158,11 @@ kxEdit/
 配布物のアセンブリバージョンはタグから `-p:Version` で渡されるので、
 `Directory.Build.props` の値は開発ビルドの既定値として働く。
 
+配布物は ReadyToRun(`-p:PublishReadyToRun=true`)で publish する(起動時の JIT を減らす。性能改善フェーズ 11)。
+ci.yml と `tools/pre-merge-check.ps1` は publish しないので、publish の手順を変えたときは
+ローカルで release.yml と同じ publish を実行し、警告が出ないこと(`-warnaserror`)と
+`WebView2Loader.dll` が出力に含まれることを確かめる。配布物は publish の出力から作り、手でコピーしない。
+
 ## 開発について
 
 本プロジェクトは [Claude Code](https://claude.com/claude-code) (Anthropic) + [superpowers プラグイン](https://github.com/obra/superpowers) を主要な実装手段として開発している。
