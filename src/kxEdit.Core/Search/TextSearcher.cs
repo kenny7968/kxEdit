@@ -79,6 +79,22 @@ public sealed class TextSearcher
     }
 
     /// <summary>
+    /// text の中で最初のヒット(grep の行単位照合用・フェーズ 8)。無効なら null。
+    /// <c>FindNext(text.ToString(), 0)</c> と同じ結果を返す: span 入力ではアンカー・後読み・先読み・
+    /// <c>\b</c> は span の外を見ないので、行を Substring して照合するのと同じ意味になる。
+    /// 呼び出し側は一致しなかった行の文字列を作らずに済む。
+    /// 等価性の網 = <c>TextSearcherFindFirstTests</c>。
+    /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
+    /// </summary>
+    internal MatchSpan? FindFirst(ReadOnlySpan<char> text)
+    {
+        if (_regex is null)
+            return null;
+        var e = _regex.EnumerateMatches(text);
+        return e.MoveNext() ? new MatchSpan(e.Current.Index, e.Current.Length) : null;
+    }
+
+    /// <summary>
     /// 開始位置（Index）が before より厳密に前にある最後のヒットを返す（折り返しなし）。
     /// 開始が before より前で終端が before を越える“またぎ”ヒットも返り得る。
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。

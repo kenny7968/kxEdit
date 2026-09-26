@@ -162,9 +162,9 @@ public static class GrepService
             while (eol < n && text[eol] != '\r' && text[eol] != '\n')
                 eol++;
 
-            // 行内容 [pos, eol)。FindNext は部分文字列に対して照合するので ^/$ が行境界に効く。
-            string line = text.Substring(pos, eol - pos);
-            var m = searcher.FindNext(line, 0);
+            // 行内容 [pos, eol)。span で照合するので ^/$・先読み・後読みは行の外を見ない
+            // (Substring して照合するのと同じ意味。P-8: 一致しない行の文字列を作らない)。
+            var m = searcher.FindFirst(text.AsSpan(pos, eol - pos));
             if (m is { } hit)
             {
                 hits.Add(
@@ -172,7 +172,7 @@ public static class GrepService
                         FilePath: path,
                         LineNumber: lineNumber,
                         Column: hit.Start + 1,
-                        LineText: line,
+                        LineText: text.Substring(pos, eol - pos),
                         MatchStartInLine: hit.Start,
                         MatchLength: hit.Length,
                         AbsoluteOffset: pos + hit.Start
