@@ -91,6 +91,17 @@ internal static class PaintTransition
 
         /// <summary>陽性対照: 描画 0 回で、X = A かつ X ≠ Y であること。</summary>
         Stale,
+
+        /// <summary>
+        /// フェーズ 9: 部分再描画(描画 1 回以上・クリップの和の面積がクライアント全体より小さい・X = Y)。
+        /// </summary>
+        Partial,
+
+        /// <summary>
+        /// フェーズ 9b の陽性対照: 画素を移した直後に無効領域を取り消す。描画 0 回で、X ≠ A(画素が動いた)かつ
+        /// X ≠ Y(露出した帯が古い)であること。
+        /// </summary>
+        StaleScroll,
     }
 
     /// <summary>1 つの遷移。</summary>
@@ -182,6 +193,18 @@ internal static class PaintTransition
             },
             VerifyAfter = (e, _) => e.ShowWhitespace ? null : "ShowWhitespace が効かない",
         },
+        new("control-stale-scroll", Expect.StaleScroll)
+        {
+            Arrange = (e, _) => e.TopLine = 5,
+            Arranged = _ => (0, 0),
+            ArrangedScroll = (5, 0),
+            Act = (e, _) =>
+            {
+                e.TopLine = 6;
+                ValidateRect(e.Handle, 0); // 露出した帯を描かせない
+            },
+            VerifyAfter = (e, _) => e.TopLine == 6 ? null : "TopLine が 6 にならない",
+        },
         CaretMove("caret-right", Expect.Skip, CurLine, CurCol + 1),
         CaretMove("caret-down", Expect.Skip, CurLine + 1, CurCol),
         CaretMove(
@@ -194,12 +217,12 @@ internal static class PaintTransition
         CaretMove("curline-same-line", Expect.Skip, CurLine, 6, s => s.HighlightCurrentLine = true),
         CaretMove(
             "curline-next-line",
-            Expect.Paint,
+            Expect.Partial,
             CurLine + 1,
             CurCol,
             s => s.HighlightCurrentLine = true
         ),
-        new("select-extend", Expect.Paint)
+        new("select-extend", Expect.Partial)
         {
             Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
             Arranged = b => Caret(b, CurLine, CurCol),
@@ -209,7 +232,7 @@ internal static class PaintTransition
                     ? null
                     : $"選択が張られない({e.GetSelectionCharRange()})",
         },
-        new("select-clear", Expect.Paint)
+        new("select-clear", Expect.Partial)
         {
             Arrange = (e, b) => e.SetSelectionCharRange(At(b, 1, 4), At(b, 3, 5)),
             Arranged = b => (At(b, 1, 4), At(b, 3, 5)),
@@ -238,7 +261,7 @@ internal static class PaintTransition
                 CaretAt(e, b.Line(LongLine + 1) - 2)
                 ?? (e.ScrollX > 0 ? null : "ScrollX が 0 のまま(水平スクロールが起きない)"),
         },
-        new("ime-cancel-by-move", Expect.Paint)
+        new("ime-cancel-by-move", Expect.Partial)
         {
             Arrange = (e, b) =>
             {
@@ -257,6 +280,119 @@ internal static class PaintTransition
                 e.__TestIsComposing() ? "未確定が取り消されない" : CaretAt(e, At(b, 3, 0)),
         },
         CaretMove("theme-then-move", Expect.Skip, CurLine + 1, CurCol, s => s.Theme = DarkTheme),
+        new("type-char", Expect.Partial)
+        {
+            Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
+            Arranged = b => Caret(b, CurLine, CurCol),
+            Act = (e, b) => e.ReplaceCharRange(At(b, CurLine, CurCol), 0, "x"),
+            VerifyAfter = (e, b) => CaretAt(e, At(b, CurLine, CurCol) + 1),
+        },
+        new("type-enter", Expect.Partial)
+        {
+            Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
+            Arranged = b => Caret(b, CurLine, CurCol),
+            Act = (e, b) => e.ReplaceCharRange(At(b, CurLine, CurCol), 0, "\r\n"),
+            VerifyAfter = (e, b) => CaretAt(e, At(b, CurLine, CurCol) + 2),
+        },
+        new("wrap-type", Expect.Partial)
+        {
+            Configure = s =>
+            {
+                s.WrapColumnEnabled = true;
+                s.WrapColumn = 20;
+            },
+            Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
+            Arranged = b => Caret(b, CurLine, CurCol),
+            Act = (e, b) => e.ReplaceCharRange(At(b, CurLine, CurCol), 0, "xxxxxxxx"),
+            VerifyAfter = (e, b) => CaretAt(e, At(b, CurLine, CurCol) + 8),
+        },
+        new("ime-update", Expect.Partial)
+        {
+            Arrange = (e, b) =>
+            {
+                MoveTo(e, b, ImeLine, ImeCol);
+                e.__TestApplyComposition(
+                    ImeText,
+                    ImeText.Length,
+                    [.. Enumerable.Repeat(ImeAttribute.Input, ImeText.Length)],
+                    []
+                );
+            },
+            Arranged = b => Caret(b, ImeLine, ImeCol),
+            Composing = true,
+            Act = (e, _) =>
+                e.__TestApplyComposition(
+                    ImeText + "を",
+                    ImeText.Length + 1,
+                    [.. Enumerable.Repeat(ImeAttribute.Input, ImeText.Length + 1)],
+                    []
+                ),
+            VerifyAfter = (e, _) =>
+                e.__TestImeText() == ImeText + "を" ? null : "未確定が更新されない",
+        },
+        new("cell-highlight-move", Expect.Partial)
+        {
+            // BuildBody() の行 4 は空行(0 文字)なので、開始列 2・長さ 4(≥6 文字が要る)を満たす行 5 に変える
+            // (実施記録に記載)。
+            Arrange = (e, b) =>
+            {
+                MoveTo(e, b, CurLine, CurCol);
+                e.HighlightCharRange(At(b, 3, 2), 4);
+            },
+            Arranged = b => Caret(b, CurLine, CurCol),
+            Act = (e, b) => e.HighlightCharRange(At(b, 5, 2), 4),
+            VerifyAfter = (e, b) => CaretAt(e, At(b, CurLine, CurCol)),
+        },
+        new("scroll-down-1", Expect.Partial)
+        {
+            Arrange = (e, _) => e.TopLine = 5,
+            Arranged = _ => (0, 0),
+            ArrangedScroll = (5, 0),
+            Act = (e, _) => e.TopLine = 6,
+            VerifyAfter = (e, _) => e.TopLine == 6 ? null : "TopLine が 6 にならない",
+        },
+        new("scroll-up-1", Expect.Partial)
+        {
+            Arrange = (e, _) => e.TopLine = 6,
+            Arranged = _ => (0, 0),
+            ArrangedScroll = (6, 0),
+            Act = (e, _) => e.TopLine = 5,
+            VerifyAfter = (e, _) => e.TopLine == 5 ? null : "TopLine が 5 にならない",
+        },
+        new("scroll-down-1-curline", Expect.Partial)
+        {
+            Configure = s => s.HighlightCurrentLine = true,
+            Arrange = (e, b) =>
+            {
+                MoveTo(e, b, 8, 0);
+                e.TopLine = 5;
+            },
+            Arranged = b => Caret(b, 8, 0),
+            ArrangedScroll = (5, 0),
+            Act = (e, _) => e.TopLine = 6,
+            VerifyAfter = (e, b) => CaretAt(e, At(b, 8, 0)),
+        },
+        new("hscroll-small", Expect.Partial)
+        {
+            Arrange = (e, b) =>
+            {
+                MoveTo(e, b, LongLine, 0);
+                e.ScrollX = 40;
+            },
+            Arranged = b => Caret(b, LongLine, 0),
+            ArrangedScroll = (0, 40),
+            Act = (e, _) => e.ScrollX = 70,
+            VerifyAfter = (e, _) =>
+                e.ScrollX == 70 ? null : $"ScrollX が 70 にならない({e.ScrollX})",
+        },
+        new("page-down", Expect.Paint)
+        {
+            Arrange = (e, _) => e.TopLine = 5,
+            Arranged = _ => (0, 0),
+            ArrangedScroll = (5, 0),
+            Act = (e, _) => e.TopLine = 45,
+            VerifyAfter = (e, _) => e.TopLine == 45 ? null : "TopLine が 45 にならない",
+        },
         new("theme-change", Expect.Paint)
         {
             Arrange = (e, b) => MoveTo(e, b, CurLine, CurCol),
@@ -307,6 +443,9 @@ internal static class PaintTransition
 
     /// <summary>エディタの描画回数(Paint イベント)。</summary>
     private static int s_paints;
+
+    /// <summary>操作中にエディタへ配送されたクリップ矩形の和(フェーズ 9 の部分再描画を確かめる)。</summary>
+    private static Rectangle s_clip;
 
     /// <summary>メッセージ処理中(描画中など)に起きた最初の例外。</summary>
     private static Exception? s_error;
@@ -379,7 +518,11 @@ internal static class PaintTransition
         form.Controls.Add(sink);
         form.Show();
         form.ActiveControl = sink;
-        editor.Paint += (_, _) => s_paints++;
+        editor.Paint += (_, e) =>
+        {
+            s_paints++;
+            s_clip = s_clip.IsEmpty ? e.ClipRectangle : Rectangle.Union(s_clip, e.ClipRectangle);
+        };
         Application.DoEvents();
 
         int failed = 0;
@@ -455,17 +598,24 @@ internal static class PaintTransition
         var a = Capture(editor, $"{name}(A)");
 
         int p0 = s_paints;
+        s_clip = Rectangle.Empty;
         t.Act(editor, body);
         Application.DoEvents();
         _ = DwmFlush(); // 失敗しても致命ではない
         CheckNoError(name);
         int paints = s_paints - p0;
-        if (t.Expect != Expect.Stale)
+        var clip = s_clip;
+        if (t.Expect is not (Expect.Stale or Expect.StaleScroll))
         {
             Check(
                 !GetUpdateRect(editor.Handle, 0, false),
                 $"{name}: メッセージを流した後も保留中の無効領域が残る(描画が配送されていない)"
             );
+            foreach (Control child in editor.Controls)
+                Check(
+                    !child.IsHandleCreated || !GetUpdateRect(child.Handle, 0, false),
+                    $"{name}: 子({child.GetType().Name})に保留中の無効領域が残る"
+                );
         }
         string? after = t.VerifyAfter?.Invoke(editor, body);
         Check(after is null, $"{name}: {after}");
@@ -484,7 +634,7 @@ internal static class PaintTransition
         // 遷移の表の自己チェック: Paint は絵が変わる遷移、Skip は絵が変わらない遷移でなければ意味がない。
         long changed = Diff(a, y).Count;
         Check(
-            t.Expect != Expect.Paint || changed != 0,
+            t.Expect is not (Expect.Paint or Expect.Partial) || changed != 0,
             $"{name}: Paint の遷移なのに、正解の絵が状態 A と同じ(遷移の定義が誤り)"
         );
         Check(
@@ -501,7 +651,19 @@ internal static class PaintTransition
             Expect.Stale when Diff(x, a).Count != 0 =>
                 "陽性対照の X が状態 A の絵と違う(撮り方が画面の絵を読めていない)",
             Expect.Stale => null,
+            Expect.StaleScroll when paints != 0 =>
+                "陽性対照で描画が起きた(ValidateRect が効かない)",
+            Expect.StaleScroll when Diff(x, a).Count == 0 =>
+                "陽性対照で画素が動いていない(ScrollWindowEx の経路を通っていない)",
+            Expect.StaleScroll when diff == 0 =>
+                "陽性対照で差が出ない(露出した帯の古さを撮れていない)",
+            Expect.StaleScroll => null,
             _ when diff != 0 => "古い絵が残る",
+            Expect.Partial when paints == 0 => "描き直しが要るのに描画 0 回",
+            Expect.Partial
+                when (long)clip.Width * clip.Height
+                    >= (long)editor.ClientSize.Width * editor.ClientSize.Height =>
+                $"部分再描画を期待したが全面を描いた(クリップの和 {clip})",
             Expect.Paint when paints == 0 => "描き直しが要るのに描画 0 回",
             Expect.Skip when expectSkip && paints != 0 => "描画の省略を期待したが描いた",
             _ => null,
@@ -509,6 +671,7 @@ internal static class PaintTransition
         string label = t.Expect switch
         {
             Expect.Stale => "陽性対照",
+            Expect.StaleScroll => "陽性対照(スクロール)",
             _ => t.Expect.ToString(),
         };
         Console.WriteLine(
@@ -523,7 +686,7 @@ internal static class PaintTransition
             SavePng(y, Path.Combine(outDir, $"{name}-y.png"));
         }
         // 陽性対照の失敗は道具の前提が崩れたことを意味する = 以降の遷移の結果に意味がないので止める。
-        if (failure is not null && t.Expect == Expect.Stale)
+        if (failure is not null && t.Expect is Expect.Stale or Expect.StaleScroll)
             throw new PaintSnapshotException($"{name}: {failure}");
         return failure is null;
     }
