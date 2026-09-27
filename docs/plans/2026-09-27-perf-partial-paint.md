@@ -2593,4 +2593,28 @@ Expected: どちらも EXIT 0。
 - **S6b・S7**: 悪化なし(変更後の値は変更前の中央値以下)。
 - **S1・S2 の en10k**: 中央値で +0.05〜0.07 ms。変更前の最大値をわずかに超える。`CaptureFrameInputs` は変わっていない(未確定がないときの `ComputeOrigin` は即 return)ので、日内の揺れとみるが、改善とも悪化とも主張しない。ja10k は変化なし。
 - **harness**: 揺れを超えて下がったのは、文字入力x(ja・en)・Shift+→(ja・en)・M-4 のホイール(上下とも)・PageDown/PageUp(en)。BackSpace は 3 回中 2〜3 回が変更前の最小値を下回る。→← と ↓↑ は描画を省く対象(フェーズ 3)で、本フェーズの影響外。揺れの範囲内。
-- **`ViewportLayout.Build` を行で絞るか**(設計書 §14.1): 絞らない。S3 の残り(ja 1.47 ms)には、キャプチャ・可視行の構築・記述子・1 行の描画が含まれ、全面再描画(6.3 ms)に対して 8 割減を達成しているため。内訳の採取は申し送りにする。
+- **`ViewportLayout.Build` を行で絞るか**(設計書 §14.1): 絞らない(下の段落の理由)。
+
+### Task 8: 最終ブランチレビュー(2 パス)と品質ゲート(fixup 4cca497)
+
+**コード品質パス**(Ready to merge: Yes・Critical / Important なし)
+- 不変条件 2・3 を破る経路なし(状態の代入を全件 grep で確認)。帯の計算・`RowsTouching`・オラクルの強さも確認された。
+- Minor 1〜3・6 と、Task 5 の申し送り(`TryPlanScroll` の summary)・脆弱性パスの Minor-V2 を ① 4cca497 で直した。
+  - 古いテストのコメント(全面になるのは `CanScroll` が false だから)。
+  - `EnsureVisibleCharRange` の finally の無効化は「今は冗長な防御(不変条件 2 のため)」と書き直した(等価であることをレビュアーも故障注入で確認)。
+  - `ImeController.Draw(g, origin)` が `_ime` を読むことを remarks に足した。
+  - `RowsTouching` の全行の近道を、最終行が途中で切れる通常の全面描画でも効くようにした(結果は同一。テスト 1 件追加)。
+  - `TryPlanScroll` の `fullRows` を `Math.Max(1, lh)` で防御した。
+- Minor 4(テスト用ヘルパーの散らばり)・5(`EditorControl.Paint.cs` の肥大)は ② 申し送り。
+- 先送りした Minor はすべて「マージ前に直す必要なし」と仕分けられた。
+
+**脆弱性パス**(Ready to merge: Yes・Critical / Important なし)
+- 確かめられたこと: P/Invoke の宣言と戻り値(ERROR = 0 だけを失敗)、flags 0 で再入なし、RPC スレッドから到達しないこと(UIA は `Invoke` / `BeginInvoke` 経由)、ハンドルの寿命、解放済みフォントを使わないこと、矩形の算術、テストフックが internal であること。
+- Minor-V1(`RowPaintKey.Text` が可視行の本文を複製して最大 2 件保持する。長大行で増幅): ② 申し送り(F-1 = 長大行と同じ領域で扱う)。
+- Minor-V2(0 除算の防御): ① 4cca497。
+
+**品質ゲート**(4cca497 時点)
+- `tools/pre-merge-check.ps1`: EXIT 0。
+- `tools/sr-regression.ps1`: 全通過(EXIT 0)。
+
+**`ViewportLayout.Build` を行で絞らない理由**: S3 の残り(ja 1.47 ms)には、キャプチャ・可視行の構築・記述子・1 行の描画が含まれ、全面再描画(6.3 ms)に対して 8 割減を達成しているため。内訳の採取は申し送りにする。
