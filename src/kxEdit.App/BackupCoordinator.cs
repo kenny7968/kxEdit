@@ -527,8 +527,9 @@ public sealed class BackupCoordinator : IDisposable
     /// 応答時間が悪化する。必要なのは「clean 化 / 閉じた文書のバックアップ削除 + レイアウト更新」
     /// だけで、これは ReconcileMapMaintenance の意味論そのもの。
     /// ReconcileMapMaintenance は info.ForceWrite を落とさないが、
-    /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害
-    /// (次に dirty 化したとき 1 回余分に書くだけ = 安全側)。
+    /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害。
+    /// 次に dirty 化したときは HasBackup=false なので forceWrite に関係なく書く(Issue #93)=
+    /// 残った ForceWrite が余分な書込を生むこともない。
     /// </remarks>
     private void OnBackupBecameUnneeded(bool becameUnneeded)
     {

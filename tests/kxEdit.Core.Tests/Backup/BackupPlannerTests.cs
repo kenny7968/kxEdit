@@ -33,13 +33,15 @@ public class BackupPlannerTests
 
     [Fact]
     public void Dirty_unchanged_but_forced_writes() =>
+        // hasBackup=true: 退避がない組み合わせは forceWrite なしでも Write になる(Issue #93)ため、
+        // forceWrite の効きを単独で確かめるには退避ありの状態で判定させる。
         Assert.Equal(
             BackupAction.Write,
             BackupPlanner.Decide(
                 modified: true,
                 currentSig: 5,
                 lastSig: 5,
-                hasBackup: false,
+                hasBackup: true,
                 forceWrite: true
             )
         );
