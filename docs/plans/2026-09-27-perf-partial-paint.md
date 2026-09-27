@@ -2604,7 +2604,7 @@ Expected: どちらも EXIT 0。
   - `EnsureVisibleCharRange` の finally の無効化は「今は冗長な防御(不変条件 2 のため)」と書き直した(等価であることをレビュアーも故障注入で確認)。
   - `ImeController.Draw(g, origin)` が `_ime` を読むことを remarks に足した。
   - `RowsTouching` の全行の近道を、最終行が途中で切れる通常の全面描画でも効くようにした(結果は同一。テスト 1 件追加)。
-  - `TryPlanScroll` の `fullRows` を `Math.Max(1, lh)` で防御した。
+  - `TryPlanScroll` の `fullRows` の割り算を `Math.Max(1, now.Metrics.LineHeightPx)` で防御した。
 - Minor 4(テスト用ヘルパーの散らばり)・5(`EditorControl.Paint.cs` の肥大)は ② 申し送り。
 - 先送りした Minor はすべて「マージ前に直す必要なし」と仕分けられた。
 
@@ -2627,7 +2627,7 @@ Expected: どちらも EXIT 0。
 - 操作のたびに 2 枚撮って比べた。X = 描画を起こさずに `CopyFromScreen` で撮った絵、Y = `RedrawWindow`(全面・子を含む・即時)の後に撮った絵。システムキャレットの矩形(±3px)は除いた。
 - 陽性対照として、直前の Y と今の Y の差(操作で絵が変わった画素数)も数えた。
 
-**結果**: 6 設定・117 操作のすべてで、X と Y の差は **0 画素**(古い絵は残らない)。
+**結果**: 6 設定・118 操作のすべてで、X と Y の差は **0 画素**(古い絵は残らない)。
 
 | 設定 | 内容 | 操作 | 操作による絵の変化 |
 |---|---|---|---|
