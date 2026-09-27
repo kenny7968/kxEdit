@@ -28,7 +28,7 @@ namespace kxEdit.Editor;
 /// </para>
 /// <para>
 /// 未確定表示の原点は <see cref="ImeOrigin"/> で受け取る。<see cref="ImeController.Draw(Graphics, Point)"/> が
-/// host から読むのはフォントと色で、どちらも <see cref="Style"/>・フォント 3 つとしてここにある。
+/// host から読むのはフォント・色・行高で、いずれもフォント 3 つ・<see cref="Style"/>・<see cref="Metrics"/> としてここにある。
 /// </para>
 /// </remarks>
 internal sealed record FrameInputs

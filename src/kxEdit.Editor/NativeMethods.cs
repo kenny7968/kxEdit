@@ -50,6 +50,29 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
 
+    // 2026-09-27 フェーズ 9b: スクロールで既存の画素を移す(設計書 §14.2)。UI スレッド専用。
+    // 戻り値 0 = ERROR。prcUpdate は、移した結果として描き直しが要る領域(露出した帯と、他の窓に隠れていた部分)の外接矩形。
+    [DllImport("user32.dll")]
+    public static extern int ScrollWindowEx(
+        nint hWnd,
+        int dx,
+        int dy,
+        ref RECT prcScroll,
+        ref RECT prcClip,
+        nint hrgnUpdate,
+        out RECT prcUpdate,
+        uint flags
+    );
+
+    // 保留中の無効領域があるか(lpRect = 0 で有無だけを見る)。
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetUpdateRect(
+        nint hWnd,
+        nint lpRect,
+        [MarshalAs(UnmanagedType.Bool)] bool bErase
+    );
+
     // ==========================================================================================
     // P4 (IME) 用: WM_IME_* メッセージ / IMM32 API / 関連構造体
     // ==========================================================================================

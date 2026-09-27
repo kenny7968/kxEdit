@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Reflection;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Layout;
 
@@ -110,35 +109,19 @@ public class FrameRowCacheTests
         Assert.NotSame(rowsB, cache.Rows(b));
     }
 
-    /// <summary>
-    /// <c>FrameRowCache.Keys</c> を呼ぶ。戻り値の型(RowPaintKey)は Core の internal で、
-    /// このテストアセンブリからは見えない(Core の InternalsVisibleTo の外)ので、リフレクションで呼んで配列として受ける。
-    /// </summary>
-    private static Array KeysOf(FrameRowCache cache, FrameInputs inputs) =>
-        (Array)
-            typeof(FrameRowCache)
-                .GetMethod("Keys", BindingFlags.Public | BindingFlags.Instance)!
-                .Invoke(cache, [inputs])!;
-
-    private static bool IsCurrentLine(Array keys, int i)
-    {
-        object key = keys.GetValue(i)!;
-        return (bool)key.GetType().GetProperty("IsCurrentLine")!.GetValue(key)!;
-    }
-
     [Fact]
     public void Keys_are_computed_once_per_entry()
     {
         var cache = new FrameRowCache();
         var a = Inputs(1);
-        var keys = KeysOf(cache, a);
-        Assert.Same(keys, KeysOf(cache, a with { }));
+        RowPaintKey[] keys = cache.Keys(a);
+        Assert.Same(keys, cache.Keys(a with { }));
         Assert.Equal(3, keys.Length);
-        Assert.True(IsCurrentLine(keys, 1)); // 前提: 入力から作った記述子
-        Assert.False(IsCurrentLine(keys, 0));
+        Assert.True(keys[1].IsCurrentLine); // 前提: 入力から作った記述子
+        Assert.False(keys[0].IsCurrentLine);
         // 追い出されると作り直す(エントリごとのメモである)。
         cache.Rows(Inputs(0));
         cache.Rows(Inputs(2));
-        Assert.NotSame(keys, KeysOf(cache, a));
+        Assert.NotSame(keys, cache.Keys(a));
     }
 }

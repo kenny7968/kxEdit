@@ -20,5 +20,7 @@
          差替段を差し替える必要がある。kxEdit.Editor が既に App.Tests へ internal を
          可視化しているのと同じ扱い。 -->
     <InternalsVisibleTo Include="kxEdit.App.Tests" />
+    <!-- 2026-09-27 フェーズ 9: FrameRowCacheTests が FrameRowCache.Keys の戻り値(RowPaintKey)を型のまま読む。 -->
+    <InternalsVisibleTo Include="kxEdit.Editor.Tests" />
   </ItemGroup>
 </Project>

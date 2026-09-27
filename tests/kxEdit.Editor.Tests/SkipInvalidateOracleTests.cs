@@ -3,6 +3,7 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Settings;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -15,8 +16,9 @@ namespace kxEdit.Editor.Tests;
 /// 実画面に古い絵が残る不具合である。フレームではなく画素で比べるのは、RenderFrame のシフトと
 /// IME の未確定表示(Frame の外で描く)も含めるため(実装計画 §0.2)。
 /// 検出範囲: Invalidate を省きうる経路(4 経路)と、行の帯だけを無効化する経路(4 経路・編集・IME・セル強調)で、
-/// 無効化の不足があれば検出する。無条件に全面を Invalidate するセッターの裏にある
-/// 状態(ShowWhitespace・スクロールなど)は、漏れても古い絵にならないので対象外。
+/// 無効化の不足があれば検出する。フェーズ 9b: スクロールのセッターは画素を移すので、偽の画面(<see cref="Fakes.ScreenSurface"/>)で
+/// 画素を実際に動かし、露出した帯と差の行の無効化の不足も検出する(画面外の Form では hscroll が出ず横のスクロールは no-op なので、確かめるのは縦だけ。横は ScrollPixelsTests)。
+/// 無条件に全面を Invalidate するセッターの裏にある状態(ShowWhitespace など)は、漏れても古い絵にならないので対象外。
 /// 描画が生の状態を読む故障は PaintBody が static であることで、比較の漏れは FrameInputsTests で防ぐ。
 /// </summary>
 public class SkipInvalidateOracleTests
@@ -46,7 +48,7 @@ public class SkipInvalidateOracleTests
         return (f, c);
     }
 
-    private static int[] Pixels(Bitmap bmp)
+    internal static int[] Pixels(Bitmap bmp)
     {
         var data = bmp.LockBits(
             new Rectangle(Point.Empty, bmp.Size),
@@ -66,10 +68,59 @@ public class SkipInvalidateOracleTests
         }
     }
 
-    private static int[] Paint(EditorControl c, bool record)
+    internal static int[] Paint(EditorControl c, bool record)
     {
         using var bmp = EditorControl.TestHook_PaintToBitmap(c, record);
         return Pixels(bmp);
+    }
+
+    /// <summary>
+    /// 画面に見える範囲 = クライアントのうちスクロールバー(子ウィンドウ)に隠れない部分。
+    /// VScrollBar は製品で常に表示される(Visible を落とす経路がない)ので、画面外の Form で Visible が false でも除く。
+    /// HScrollBar は実際に表示されているときだけ除く。
+    /// フェーズ 9b: 画素の移動(ScrollWindowEx)はこの範囲だけを動かすので、隠れた部分の画素は比べない
+    /// (実画面では子ウィンドウが覆っていて見えない)。
+    /// </summary>
+    private static Rectangle OnScreen(EditorControl c)
+    {
+        var r = c.ClientRectangle;
+        foreach (Control child in c.Controls)
+        {
+            if (child is VScrollBar)
+                r.Width = Math.Min(r.Width, child.Left);
+            else if (child is HScrollBar && child.Visible)
+                r.Height = Math.Min(r.Height, child.Top);
+        }
+        return r;
+    }
+
+    /// <summary>画面に見える範囲(<see cref="OnScreen"/>)の画素が等しいか。</summary>
+    internal static bool SameOnScreen(EditorControl c, int[] a, int[] b) =>
+        DiffBounds(c, a, b).IsEmpty;
+
+    /// <summary>画面に見える範囲で画素が違う部分の外接矩形(等しければ空)。失敗の診断にも使う。</summary>
+    internal static Rectangle DiffBounds(EditorControl c, int[] a, int[] b)
+    {
+        var view = OnScreen(c);
+        int width = c.ClientSize.Width;
+        int l = int.MaxValue,
+            t = int.MaxValue,
+            r = -1,
+            btm = -1;
+        for (int y = view.Top; y < view.Bottom; y++)
+        {
+            for (int x = view.Left; x < view.Right; x++)
+            {
+                int i = y * width + x;
+                if (a[i] == b[i])
+                    continue;
+                l = Math.Min(l, x);
+                t = Math.Min(t, y);
+                r = Math.Max(r, x);
+                btm = Math.Max(btm, y);
+            }
+        }
+        return r < 0 ? Rectangle.Empty : Rectangle.FromLTRB(l, t, r + 1, btm + 1);
     }
 
     /// <summary>オラクルが「古い絵」を検出できること(画素比較が自明に一致しないことの陽性対照)。</summary>
@@ -104,17 +155,30 @@ public class SkipInvalidateOracleTests
             {
                 var rng = new Random(seed);
                 var log = new List<string>();
-                int[] screen = Paint(c, record: true);
+                // フェーズ 9b: 画素の移動は偽の画面で受け、画面の配列をそれと共有する
+                // (TryScroll は Pixels の中身を書き換える = screen と同じ配列を指し続ける)。
+                var surface = new ScreenSurface(c.ClientSize.Width, c.ClientSize.Height);
+                EditorControl.TestHook_SetPaintSurface(c, surface);
+                surface.Pixels = Paint(c, record: true);
+                int[] screen = surface.Pixels;
                 int skipped = 0;
                 int partial = 0;
-                for (int step = 0; step < 200; step++)
+                // フェーズ 9b: スクロールの操作(26〜30)を足して抽選が 26 → 31 通りになったので、
+                // キャレット・選択の操作の回数を保つため 200 → 300 手にする(下の前提の閾値は変えない)。
+                for (int step = 0; step < 300; step++)
                 {
                     var (name, skippable, act) = PickOp(rng, c);
                     log.Add(name);
                     int caretBefore = c.CaretCharOffset;
                     int anchorBefore = c.SelectionAnchor;
                     var rects = new List<Rectangle>();
-                    InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
+                    // 前の操作の無効化は下の Composite で描き直した = 保留中の無効領域はない。
+                    surface.Pending = false;
+                    InvalidateEventHandler h = (_, e) =>
+                    {
+                        rects.Add(e.InvalidRect);
+                        surface.Pending = true;
+                    };
                     c.Invalidated += h;
                     try
                     {
@@ -136,10 +200,14 @@ public class SkipInvalidateOracleTests
                     )
                         skipped++; // 省略の経路を通った(4 経路で、位置が動いたのに描き直していない)
                     int[] truth = Paint(c, record: false);
-                    Assert.True(
-                        screen.AsSpan().SequenceEqual(truth),
-                        $"seed={seed} step={step}: 古い絵が残る。直前の操作: {string.Join(" → ", log.TakeLast(8))}"
-                    );
+                    var diff = DiffBounds(c, screen, truth);
+                    if (!diff.IsEmpty)
+                    {
+                        Assert.Fail(
+                            $"seed={seed} step={step}: 古い絵が残る(差の外接矩形 {diff})。"
+                                + $"直前の操作: {string.Join(" → ", log.TakeLast(8))}"
+                        );
+                    }
                 }
                 // 前提: 省略の経路を実際に通っている(通らなければこのテストは何も確かめていない)。
                 // 数えるのは、キャレット・選択の 4 経路の操作で、キャレットかアンカーが実際に動き、
@@ -150,6 +218,11 @@ public class SkipInvalidateOracleTests
                     partial >= 20,
                     $"seed={seed}: 部分的な無効化が {partial} 回しか起きていない"
                 );
+                // 前提: 画素の移動(フェーズ 9b)の経路を実際に通っている。
+                Assert.True(
+                    surface.Scrolls >= 5,
+                    $"seed={seed}: 画素の移動が {surface.Scrolls} 回しか起きていない"
+                );
             }
         });
 
@@ -157,7 +230,7 @@ public class SkipInvalidateOracleTests
     /// WM_PAINT を模す: 無効化した矩形の外接矩形をクリップにして描き(実際の e.ClipRectangle と同じ)、
     /// 矩形の和の中の画素だけを画面へ写す(実際の DC は更新領域でクリップされている)。
     /// </summary>
-    private static void Composite(EditorControl c, int[] screen, List<Rectangle> rects)
+    internal static void Composite(EditorControl c, int[] screen, List<Rectangle> rects)
     {
         var client = c.ClientRectangle;
         var bounds = Rectangle.Empty;
@@ -201,6 +274,24 @@ public class SkipInvalidateOracleTests
             }
         });
 
+    /// <summary>陽性対照: 画素を移した後に露出した帯を描かなければ、古い絵として検出される。</summary>
+    [Fact]
+    public void Oracle_detects_an_unpainted_exposed_band() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted();
+            using (f)
+            {
+                var surface = new ScreenSurface(c.ClientSize.Width, c.ClientSize.Height);
+                EditorControl.TestHook_SetPaintSurface(c, surface);
+                c.TopLine = 5;
+                surface.Pixels = Paint(c, record: true);
+                c.TopLine = 6;
+                Assert.Equal(1, surface.Scrolls); // 前提: 画素を移した
+                Assert.False(SameOnScreen(c, surface.Pixels, Paint(c, record: false)));
+            }
+        });
+
     /// <summary>
     /// 操作の抽選。キャレット移動(省略されうる)を厚めに、描画の入力を変える操作を一通り混ぜる。
     /// 描画の入力を足したら、それを変える操作もここに足すこと。
@@ -213,7 +304,7 @@ public class SkipInvalidateOracleTests
         int len = snap.CharLength;
         int Rand() => rng.Next(0, len + 1);
         int caret = c.CaretCharOffset;
-        switch (rng.Next(0, 26))
+        switch (rng.Next(0, 31))
         {
             case 0:
             case 1:
@@ -332,6 +423,39 @@ public class SkipInvalidateOracleTests
                     false,
                     () => c.ReplaceCharRange(Math.Max(0, caret - 1), caret > 0 ? 1 : 0, "")
                 );
+            case 26:
+            case 27:
+            {
+                int d = rng.Next(1, 4) * (rng.Next(2) == 0 ? -1 : 1);
+                return (
+                    "小スクロール(縦)",
+                    false,
+                    () => c.TopLine = Math.Clamp(c.TopLine + d, 0, snap.LineCount - 1)
+                );
+            }
+            case 28:
+            {
+                int d = rng.Next(1, 30) * (rng.Next(2) == 0 ? -1 : 1);
+                return ("小スクロール(横)", false, () => c.ScrollX = Math.Max(0, c.ScrollX + d));
+            }
+            case 29:
+                return (
+                    "視覚行スクロール",
+                    false,
+                    () => c.SetTopPosition(c.TopLine, rng.Next(0, 3))
+                );
+            case 30:
+            {
+                // 一時的にキャレットを動かして追従スクロールし、戻す経路(Review Focus 1)。
+                // 半分は可視域のすぐ外(数行の画素の移動になる)、半分は任意の位置。
+                int visible = c.ClientSize.Height / Math.Max(1, c.Metrics.LineHeightPx);
+                int near =
+                    rng.Next(2) == 0
+                        ? Math.Min(snap.LineCount - 1, c.TopLine + visible + rng.Next(0, 3))
+                        : Math.Max(0, c.TopLine - rng.Next(1, 4));
+                int target = rng.Next(2) == 0 ? snap.GetLineStart(near) : Rand();
+                return ("EnsureVisible", false, () => c.EnsureVisibleCharRange(target, 0));
+            }
             default:
             {
                 bool dark = rng.Next(2) == 0;

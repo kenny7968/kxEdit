@@ -137,8 +137,24 @@ public sealed partial class EditorControl
     /// 正しさの根拠は計画 §0.3 の不変条件 3。無効化する帯は、前回の絵と今の絵で画素が違いうる範囲をすべて覆う
     /// (記述子が行の絵を決め尽くす = <see cref="RowPaintKey"/> の doc。IME は原点の行と次の行)。
     /// 描画の入力を変える経路は、必ずこれか <see cref="Control.Invalidate()"/> を自分で呼ぶ(不変条件 2)。
+    /// この引数なしの版はスクロールでは画素を移さない = スクロール位置が違えば全面(<c>allowScroll: false</c>)。
     /// </remarks>
-    private void InvalidateChangedRows()
+    private void InvalidateChangedRows() => InvalidateChangedRows(allowScroll: false);
+
+    /// <summary>
+    /// <see cref="InvalidateChangedRows()"/> と同じ。<paramref name="allowScroll"/> が true(スクロールのセッター)なら、
+    /// スクロール位置の差を <see cref="IPaintSurface.TryScroll"/> で画素の移動に変え、露出した帯と、
+    /// 行の対応をずらして比べたときに記述子が違う行だけを無効化する(設計書 §14.2)。
+    /// </summary>
+    /// <remarks>
+    /// 画素を移した後は <see cref="_lastPaintedInputs"/> を今の入力にする(計画 §0.3 の不変条件 3。
+    /// 画面は、これから無効化する範囲を除いて、今の入力から描いた絵と同じになった)。
+    /// 全面に落とす条件: 記録がない・行の外に効く入力が違う・縦と横が同時に変わった・IME の未確定がある・
+    /// 移動量が可視域以上・行の対応が見つからない・<see cref="IPaintSurface.CanScroll"/> が false・移動に失敗した。
+    /// 全面のまま残すもの(設計書 §14.2): クランプ(UpdateVerticalScrollbar など)・ReplaceSource・ApplyAppearance・
+    /// WrapColumns は、この経路を通らないか allowScroll が false の経路で呼ばれる。
+    /// </remarks>
+    private void InvalidateChangedRows(bool allowScroll)
     {
         var now = CaptureFrameInputs();
         var old = _lastPaintedInputs;
@@ -149,21 +165,126 @@ public sealed partial class EditorControl
         }
         if (now.Equals(old))
             return;
-        bool scrolled =
-            now.TopLine != old.TopLine
-            || now.TopSegment != old.TopSegment
-            || now.ScrollX != old.ScrollX;
-        if (scrolled || !now.SameLayoutAs(old))
+        if (!now.SameLayoutAs(old))
         {
             Invalidate();
             return;
         }
         int lh = now.Metrics.LineHeightPx;
-        InvalidateBands(
-            FrameDiff.DirtyBands(_rowCache.Keys(old), _rowCache.Keys(now), 0, lh, now.PaintHeight)
+        bool scrolled =
+            now.TopLine != old.TopLine
+            || now.TopSegment != old.TopSegment
+            || now.ScrollX != old.ScrollX;
+        if (!scrolled)
+        {
+            InvalidateBands(
+                FrameDiff.DirtyBands(
+                    _rowCache.Keys(old),
+                    _rowCache.Keys(now),
+                    0,
+                    lh,
+                    now.PaintHeight
+                )
+            );
+            InvalidateImeRows(old, now);
+            return;
+        }
+        if (
+            !allowScroll
+            || old.Ime.IsActive
+            || now.Ime.IsActive
+            || !TryPlanScroll(old, now, out int shift, out int dx)
+            || !_paintSurface.CanScroll(this)
+        )
+        {
+            Invalidate();
+            return;
+        }
+        var bands = FrameDiff.DirtyBands(
+            _rowCache.Keys(old),
+            _rowCache.Keys(now),
+            shift,
+            lh,
+            now.PaintHeight
         );
-        InvalidateImeRows(old, now);
+        var area = new Rectangle(0, 0, now.PaintWidth, now.PaintHeight);
+        int dy = -shift * lh;
+        if (!_paintSurface.TryScroll(this, dx, dy, area, out var uncovered))
+        {
+            Invalidate();
+            return;
+        }
+        _lastPaintedInputs = now;
+        // ScrollWindowEx はシステムキャレットも画素と一緒に動かしうるので、置き直す(設計書 §14.2 の実機確認 1)。
+        PositionCaret();
+        InvalidateRectIfAny(uncovered);
+        InvalidateRectIfAny(ExposedStrip(area, dx, dy));
+        InvalidateBands(bands);
     }
+
+    /// <summary>
+    /// 行の対応(新しい行 i = 古い行 i + <paramref name="shift"/>)と横の移動量を決める。縦と横が同時に変わるとき・
+    /// 移動量が可視域以上のとき・行の対応が見つからないときは false(全面)。
+    /// 行の対応は可視行の (論理行, 視覚行) で探す。対応が誤っていても記述子の比較が違う行を無効化するので、
+    /// 正しさには効かない(効率だけ)。
+    /// </summary>
+    private bool TryPlanScroll(FrameInputs old, FrameInputs now, out int shift, out int dx)
+    {
+        shift = 0;
+        dx = 0;
+        bool vertical = now.TopLine != old.TopLine || now.TopSegment != old.TopSegment;
+        bool horizontal = now.ScrollX != old.ScrollX;
+        if (vertical && horizontal)
+            return false;
+        if (horizontal)
+        {
+            dx = old.ScrollX - now.ScrollX;
+            return Math.Abs(dx) < now.PaintWidth;
+        }
+        var oldRows = _rowCache.Rows(old);
+        var nowRows = _rowCache.Rows(now);
+        if (oldRows.Count == 0 || nowRows.Count == 0)
+            return false;
+        int k = IndexOfRow(oldRows, nowRows[0]);
+        if (k > 0)
+            shift = k;
+        else
+        {
+            int j = IndexOfRow(nowRows, oldRows[0]);
+            if (j <= 0)
+                return false;
+            shift = -j;
+        }
+        return Math.Abs(shift) * now.Metrics.LineHeightPx < now.PaintHeight;
+    }
+
+    private static int IndexOfRow(IReadOnlyList<VisualRow> rows, VisualRow target)
+    {
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (
+                rows[i].LogicalLine == target.LogicalLine
+                && rows[i].SegmentIndex == target.SegmentIndex
+            )
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// 画素を移して露出した帯。<see cref="IPaintSurface.TryScroll"/> の uncovered とは別に必ず無効化する
+    /// (途中で切れていた旧最下行の下半分もこの帯に入る。設計書 §14.2)。
+    /// </summary>
+    private static Rectangle ExposedStrip(Rectangle area, int dx, int dy) =>
+        dy < 0 ? Rectangle.FromLTRB(area.Left, area.Bottom + dy, area.Right, area.Bottom)
+        : dy > 0 ? Rectangle.FromLTRB(area.Left, area.Top, area.Right, area.Top + dy)
+        : dx < 0 ? Rectangle.FromLTRB(area.Right + dx, area.Top, area.Right, area.Bottom)
+        : dx > 0 ? Rectangle.FromLTRB(area.Left, area.Top, area.Left + dx, area.Bottom)
+        : Rectangle.Empty;
+
+    /// <summary>テスト専用: 画素の移動先を差し替える(偽の画面)。</summary>
+    internal static void TestHook_SetPaintSurface(EditorControl c, IPaintSurface surface) =>
+        c._paintSurface = surface;
 
     private void InvalidateBands(List<(int Top, int Bottom)> bands)
     {
