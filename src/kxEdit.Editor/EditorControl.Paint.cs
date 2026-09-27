@@ -48,7 +48,7 @@ public sealed partial class EditorControl
         var buffer = TryAllocatePaintBuffer(e.Graphics, ClientRectangle);
         if (buffer is null)
         {
-            PaintAndRecord(e.Graphics);
+            PaintAndRecord(e.Graphics, clip);
         }
         else
         {
@@ -60,7 +60,7 @@ public sealed partial class EditorControl
                 // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
                 // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
                 buffer.Graphics.SetClip(clip);
-                PaintAndRecord(buffer.Graphics);
+                PaintAndRecord(buffer.Graphics, clip);
                 buffer.Render(e.Graphics);
             }
         }
@@ -112,13 +112,17 @@ public sealed partial class EditorControl
     /// 描く前に記録を捨てる=描画が例外で抜けたら記録は null のまま(次の比較は必ず「変化あり」)。
     /// WM_PRINT 経由(DrawToBitmap / PrintWindow)でも記録してよい根拠は
     /// 実装計画 docs/plans/2026-09-25-perf-skip-invalidate.md §0.2。
+    /// クリップに交差する行だけを描く。全面の入力を記録してよい根拠は計画
+    /// docs/plans/2026-09-27-perf-partial-paint.md §0.3(不変条件 3)。
     /// </summary>
-    private void PaintAndRecord(Graphics g)
+    private void PaintAndRecord(Graphics g, Rectangle clip)
     {
         _lastPaintedInputs = null;
         var inputs = CaptureFrameInputs();
-        var frame = PaintBody(g, inputs, BackColor, _imeCtrl);
+        var rows = inputs is null ? null : _rowCache.Rows(inputs);
+        var frame = PaintBody(g, inputs, rows, clip, BackColor, _imeCtrl);
         // テスト観測用(TestHook_GetLastFrame)。SetSource 前(frame が null)は従来どおり更新しない。
+        // フェーズ 9: クリップに交差する行だけのフレームになる(本番コードで読む箇所はない)。
         if (frame is not null)
             _lastFrame = frame;
         _lastPaintedInputs = inputs;
@@ -153,6 +157,7 @@ public sealed partial class EditorControl
     private void InvalidateAndForgetPaintedFrame()
     {
         _lastPaintedInputs = null;
+        _rowCache.Clear();
         Invalidate();
     }
 
@@ -210,22 +215,28 @@ public sealed partial class EditorControl
             TargetFont = _targetFontCache,
             BackColor = BackColor,
             Ime = _imeCtrl.State,
+            ImeOrigin = _imeCtrl.ComputeOrigin(),
         };
     }
 
     /// <summary>
     /// <paramref name="inputs"/> <b>だけ</b>からフレームを組み立てて描き、描いたフレームを返す。
     /// <paramref name="inputs"/> が null(SetSource 前)なら <paramref name="emptyBackColor"/> で塗るだけで null を返す。
+    /// クリップに交差する行だけを描く(設計書 §14.1)。
     /// </summary>
     /// <remarks>
     /// static にして、生の状態への出口を引数だけに限る(描画が FrameInputs の外の状態を読めないことを
-    /// コンパイラで保証する)。<paramref name="ime"/> が唯一の例外で、<see cref="ImeController.Draw"/> は
-    /// host 経由で生の状態を読む(<see cref="FrameInputs"/> の remarks)。
+    /// コンパイラで保証する)。<paramref name="ime"/> はフォントと色を host から読む(値は
+    /// <see cref="FrameInputs"/> の <see cref="FrameInputs.Style"/>・フォントと同じ)。
     /// <paramref name="emptyBackColor"/> は inputs が null のときだけ使う。
+    /// <paramref name="rows"/> は <paramref name="inputs"/> から <see cref="FrameRowCache"/> が作ったもの
+    /// (描画と差分で共有する)。
     /// </remarks>
     private static Frame? PaintBody(
         Graphics g,
         FrameInputs? inputs,
+        IReadOnlyList<VisualRow>? rows,
+        Rectangle clip,
         Color emptyBackColor,
         ImeController ime
     )
@@ -237,15 +248,22 @@ public sealed partial class EditorControl
         // コントロールを BackColor(emptyBackColor)で塗る。なお右下の角は VScrollBar(高さいっぱいに
         // dock する子)が覆っており、この行の役目ではない(ctor の Dock 順の注意を参照)。
         g.Clear(inputs?.BackColor ?? emptyBackColor);
-        if (inputs is null)
+        if (inputs is null || rows is null)
             return null;
 
-        // 起点 (TopLine, TopSegment)・折り返し設定・可視高さは BuildVisibleRows に集約する
-        // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
-        // 言葉の約束ではなく呼び出しの共有にする=片側だけ起点がずれる変異が成立しなくなる。
+        // フェーズ 9: クリップに交差する行だけを組み立てて描く(設計書 §14.1)。g のクリップは呼び出し側が掛けている
+        // (WM_PAINT は BeginPaint の DC、バッファは SetClip)。行の外の描画(g.Clear・背景全域 op・IME)は
+        // g のクリップで絞られる。
+        var drawn = FrameBuilder.RowsTouching(
+            rows,
+            clip.Top,
+            clip.Bottom,
+            inputs.Metrics.LineHeightPx,
+            inputs.CellHighlight
+        );
         var frame = FrameBuilder.Build(
             inputs.Snapshot,
-            BuildVisibleRows(inputs),
+            drawn,
             inputs.PaintWidth,
             inputs.PaintHeight,
             inputs.LineNumberWidth,
@@ -264,9 +282,9 @@ public sealed partial class EditorControl
         // IME 内キャレット位置反映は Task 11 で扱う。
         // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済 (IImeOverlayHost 経由で
         // Font/Color/Metrics/ComputeCaretPoint を取得)。
-        // 2026-09-25 フェーズ 3: ImeController.Draw は host 経由で生の状態を読む(FrameInputs の remarks)。
-        if (inputs.Ime.IsActive)
-            ime.Draw(g);
+        // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る。
+        if (inputs.ImeOrigin is Point origin)
+            ime.Draw(g, origin);
 
         return frame;
     }
@@ -345,8 +363,14 @@ public sealed partial class EditorControl
     /// 記録する(<see cref="PaintAndRecord"/>)。false なら記録せずに今の状態を描く(オラクルの正解。
     /// <see cref="_lastPaintedInputs"/> も <see cref="_lastFrame"/> も書き換えない)。
     /// 画面外の HostForm には WM_PAINT が来ないので、描画とその記録はこれで同期的に起こす。
+    /// <paramref name="clip"/> を渡すと、その矩形でクリップして描く(WM_PAINT の部分再描画を模す)。
+    /// 省略時はクライアント全域。
     /// </summary>
-    internal static Bitmap TestHook_PaintToBitmap(EditorControl c, bool record)
+    internal static Bitmap TestHook_PaintToBitmap(
+        EditorControl c,
+        bool record,
+        Rectangle? clip = null
+    )
     {
         var size = c.ClientSize;
         var bmp = new Bitmap(
@@ -355,10 +379,18 @@ public sealed partial class EditorControl
             System.Drawing.Imaging.PixelFormat.Format32bppArgb
         );
         using var g = Graphics.FromImage(bmp);
+        var area = clip ?? new Rectangle(Point.Empty, size);
+        if (clip is not null)
+            g.SetClip(area);
         if (record)
-            c.PaintAndRecord(g);
+            c.PaintAndRecord(g, area);
         else
-            PaintBody(g, c.CaptureFrameInputs(), c.BackColor, c._imeCtrl);
+        {
+            // 正解の絵: キャッシュを通さず、今の状態から可視行を作り直して全面を描く(オラクルの独立性)。
+            var inputs = c.CaptureFrameInputs();
+            var rows = inputs is null ? null : BuildVisibleRows(inputs);
+            PaintBody(g, inputs, rows, area, c.BackColor, c._imeCtrl);
+        }
         return bmp;
     }
 

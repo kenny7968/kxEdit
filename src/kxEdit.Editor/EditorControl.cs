@@ -148,6 +148,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     // (不変条件 1「描画が読む状態は FrameInputs の中にある」は、PaintBody が static であることでコンパイラが守る。)
     private FrameInputs? _lastPaintedInputs;
 
+    // 2026-09-27 性能改善フェーズ 9: 描画の入力 → 可視行と記述子(直近 2 件)。
+    // InvalidateAndForgetPaintedFrame で _lastPaintedInputs と一緒に捨てる(古い本文を握らない)。
+    private readonly FrameRowCache _rowCache = new();
+
     // P6 Task 10 レビュー M-2: CurrentBuffer の null 経路で毎回 new すると
     // Assert.Same(ctrl.CurrentBuffer, ctrl.CurrentBuffer) が SetSource 前で失敗する反直観挙動になる。
     // 空 TextBuffer は immutable な使い方に留める前提(=呼び出し側は Save 読み出し等の read-only 用途)
@@ -436,8 +440,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <see cref="CaptureFrameInputs"/> を経由するので、従来は共有していなかった可視高さ
     /// (<see cref="PaintHeightPx"/>)も共有される。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
     /// 折り返し OFF 専用で topSegment が 0 固定の別経路であり、起点の意味が違う。
+    /// 2026-09-27 フェーズ 9: <see cref="FrameRowCache"/> もここを通す(直近 2 件のキャッシュ経由)。
     /// </remarks>
-    private static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
+    internal static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
         ViewportLayout.Build(
             inputs.Snapshot,
             inputs.TopLine,

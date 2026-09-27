@@ -181,6 +181,26 @@ internal sealed class ImeController
     }
 
     /// <summary>
+    /// 未確定表示の原点(client 座標・水平スクロール適用後)。未確定がない・バッファがない・可視外なら null。
+    /// 2026-09-27 フェーズ 9: <see cref="FrameInputs.ImeOrigin"/> として描画の入力に取り込む
+    /// (無効化する帯を原点から求めるため。設計書 §14.1)。
+    /// </summary>
+    public Point? ComputeOrigin()
+    {
+        if (!_host.HasBuffer || _ime.Text.Length == 0)
+            return null;
+        var (x, y, visible) = _host.ComputeCaretPoint(_ime.Start);
+        return visible ? new Point(x - _host.ScrollX, y) : null;
+    }
+
+    /// <summary>今の状態から原点を求めて描く(テスト・旧来の呼び出し用)。</summary>
+    public void Draw(Graphics g)
+    {
+        if (ComputeOrigin() is Point origin)
+            Draw(g, origin);
+    }
+
+    /// <summary>
     /// 未確定文字列 overlay 描画。旧 <c>EditorControl.DrawImeOverlay</c> bit-perfect 移設。
     /// 節 (<c>_ime.Clauses[i]..[i+1]</c>) ごとに Attrs を見て target 節 (TargetConverted) を
     /// SelectionBack + Underline|Bold + <see cref="IImeOverlayHost.OverlayTargetForeColor"/> で強調、
@@ -191,16 +211,14 @@ internal sealed class ImeController
     /// <see cref="TextRenderer"/> を使う理由と Attrs 長不整合防御は旧 DrawImeOverlay と同じ (§3-3 / Task 2 M-5)。
     /// 2026-09-25 フェーズ 3: Draw が host から読む値は、すべて <see cref="FrameInputs"/> に入っていること
     /// (入っていないと、キャレット移動で再描画を省いたときに古い未確定表示が残る)。読む値を増やすときは FrameInputs にも足す。
+    /// 2026-09-27 フェーズ 9: 原点は <see cref="FrameInputs.ImeOrigin"/> から受け取る。
     /// </remarks>
-    public void Draw(Graphics g)
+    public void Draw(Graphics g, Point origin)
     {
-        if (!_host.HasBuffer || _ime.Text.Length == 0)
+        if (_ime.Text.Length == 0)
             return;
-        var (x, y, visible) = _host.ComputeCaretPoint(_ime.Start);
-        if (!visible)
-            return;
-
-        int curX = x - _host.ScrollX;
+        int curX = origin.X;
+        int y = origin.Y;
 
         // Clauses が空 or 節境界が 2 未満なら 1 節扱い (Task 9 と同挙動)
         if (_ime.Clauses.Length < 2)

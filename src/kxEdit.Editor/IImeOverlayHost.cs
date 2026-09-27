@@ -31,6 +31,7 @@ internal interface IImeOverlayHost
     // === 状態 / メトリクス (Draw / NotifyCandidateWindow から参照) ===
     // 2026-09-25 フェーズ 3: Draw が host から読む値は、すべて FrameInputs に入っていること(入っていないと、
     // キャレット移動で再描画を省いたときに古い未確定表示が残る)。読む値を増やすときは FrameInputs にも足す。
+    // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る(ComputeCaretPoint はそれを求めるためだけに残る)。
 
     /// <summary><c>_buffer is not null</c>。</summary>
     bool HasBuffer { get; }
