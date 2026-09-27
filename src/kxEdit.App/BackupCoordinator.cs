@@ -595,10 +595,12 @@ public sealed class BackupCoordinator : IDisposable
             }
 
             bool modified = doc.Editor.Modified;
-            // P-6: 覚えている参照と同じなら、署名は LastSig に等しい(不変条件)。ForceWrite でなければ
-            // Decide は必ず None を返すので、全文化もハッシュも省く。
+            // P-6: 覚えている参照と同じなら、署名は LastSig に等しい(不変条件)。退避があり ForceWrite で
+            // なければ Decide は必ず None を返すので、全文化もハッシュも省く。HasBackup を見るのは、
+            // 退避がないときは署名が同じでも Write になるため(Issue #93。clean 化で消した後に同じ参照の
+            // まま dirty になる経路 = ClearSavePoint・エンコーディングの変更)。
             var snap = doc.Editor.CurrentBuffer.Current;
-            if (modified && !info.ForceWrite && IsRemembered(info, snap))
+            if (info.HasBackup && modified && !info.ForceWrite && IsRemembered(info, snap))
                 continue;
             string content = modified ? Materialize(snap) : ""; // クリーン時はスナップショット不要
             long sig = modified ? ContentSignature.Of(content) : info.LastSig;

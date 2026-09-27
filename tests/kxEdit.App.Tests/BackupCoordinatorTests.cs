@@ -1440,7 +1440,8 @@ public class BackupCoordinatorTests
         });
 
     // ===== P-6(性能改善フェーズ 6): 同じスナップショットの照合を省く =====
-    // 省く条件は「modified かつ 覚えている参照と同じ かつ !ForceWrite」。この条件では従来も必ず None だった。
+    // 省く条件は「HasBackup かつ modified かつ 覚えている参照と同じ かつ !ForceWrite」。この条件では必ず None になる
+    // (HasBackup は Issue #93 で追加。退避がなければ署名が同じでも Write になるため)。
     // 省かない側(ForceWrite・参照の変化・回収後)は、全文化したうえで従来どおりに判定すること。
 
     [Fact]
@@ -1621,6 +1622,120 @@ public class BackupCoordinatorTests
 
             Assert.Equal(before, host.Backup.MaterializeCountForTest);
             Assert.Empty(host.Writer.Writes);
+        });
+
+    // ===== Issue #93: 未保存なのに退避がない状態は、署名が前回と同じでも書く =====
+    // 保存(clean 化)でバックアップを消しても LastSig は残る。そこから同じ内容の dirty に戻る経路で
+    // 「署名が同じ = None」と判定すると、その状態はどこにも退避されない。
+
+    [Fact]
+    public void Reconcile_UndoAfterSaveToBackedUpContent_WritesBackup() =>
+        Sta.Run(() =>
+        {
+            // 削除が ReconcileContent の Delete 分岐で起きる経路(即時反映のゲートは閉じたまま)。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // "hello" を退避
+            doc.Editor.ReplaceCharRange(5, 0, "!");
+            doc.Editor.SetSavePoint(); // "hello!" を保存
+            host.Backup.Reconcile(); // clean → Delete(HasBackup=false・LastSig=sig("hello"))
+            Assert.Single(host.Writer.Deletes);
+            int writesBefore = host.Writer.Writes.Count;
+
+            doc.Editor.Undo(); // "hello" に戻す。ディスクの "hello!" とは違う未保存状態
+            Assert.True(doc.Editor.Modified); // 前提: Undo で保存点を越えて dirty になる
+            host.Backup.Reconcile();
+
+            Assert.Equal(writesBefore + 1, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+
+            host.Backup.Reconcile(); // 退避済みになったので、以後は書かない
+            Assert.Equal(writesBefore + 1, host.Writer.Writes.Count);
+        });
+
+    [Fact]
+    public void SavePoint_ThenUndoToBackedUpContent_WritesBackup() =>
+        Sta.Run(() =>
+        {
+            // 削除が保存直後の即時反映(ReconcileMapMaintenance)で起きる経路。
+            using var host = new Host();
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // "hello" を退避
+            doc.Editor.ReplaceCharRange(5, 0, "!");
+            doc.Editor.SetSavePoint(); // 保存 → 即時に Delete(Reconcile は呼ばない)
+            Assert.Single(host.Writer.Deletes);
+            int writesBefore = host.Writer.Writes.Count;
+
+            doc.Editor.Undo();
+            Assert.True(doc.Editor.Modified);
+            host.Backup.Reconcile();
+
+            Assert.Equal(writesBefore + 1, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_SameSnapshotDirtiedAfterDelete_WritesBackup() =>
+        Sta.Run(() =>
+        {
+            // P-6 の省略経路: 覚えている参照と同じスナップショットのまま dirty になる
+            // (ClearSavePoint・エンコーディングの変更)。省略条件に HasBackup がないと迂回される。
+            using var host = new Host();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile(); // 退避(ここで参照を覚える)
+            doc.Editor.SetSavePoint(); // 内容は変えずに保存
+            host.Backup.Reconcile(); // Delete
+            Assert.Single(host.Writer.Deletes);
+            int writesBefore = host.Writer.Writes.Count;
+
+            doc.Editor.ClearSavePoint(); // 同じ参照のまま dirty
+            host.Backup.Reconcile();
+
+            Assert.Equal(writesBefore + 1, host.Writer.Writes.Count);
+            Assert.Equal("hello", host.Writer.Writes[^1].Content);
+        });
+
+    [Fact]
+    public void Reconcile_RegisteredCleanThenDirtiedSameContent_WritesBackup() =>
+        Sta.Run(() =>
+        {
+            // RegisterNew はクリーンな文書を HasBackup=false・LastSig=現内容で登録する。
+            // 内容を変えずに dirty になった場合も書くこと。
+            using var host = new Host();
+            var doc = host.NewDoc("hello", dirty: false);
+            host.Backup.Reconcile(); // クリーンで登録(書かない)
+            Assert.Empty(host.Writer.Writes);
+
+            doc.Editor.ClearSavePoint();
+            host.Backup.Reconcile();
+
+            var write = Assert.Single(host.Writer.Writes);
+            Assert.Equal("hello", write.Content);
+        });
+
+    [Fact]
+    public void FinalFlushForRestore_AfterUndoToBackedUpContent_WritesBackupAndLayoutBackupId() =>
+        Sta.Run(() =>
+        {
+            // Issue #93 の手順 5: hot exit の最終 flush が None を返し、レイアウトの BackupId が
+            // null になる(次回起動で Undo 後の内容が失われる)。
+            using var host = new Host(restoreSessionEnabled: true);
+            host.Backup.MarkStartupRestoreComplete();
+            var doc = host.NewDoc("hello");
+            host.Backup.Reconcile();
+            doc.Editor.ReplaceCharRange(5, 0, "!");
+            doc.Editor.SetSavePoint();
+            doc.Editor.Undo();
+            int writesBefore = host.Writer.Writes.Count;
+
+            host.Backup.FinalFlushForRestore();
+
+            Assert.Equal(writesBefore + 1, host.Writer.Writes.Count);
+            var written = host.Writer.Writes[^1];
+            Assert.Equal("hello", written.Content);
+            var tab = Assert.Single(host.Writer.LayoutWrites[^1].Tabs);
+            Assert.Equal(written.Id, tab.BackupId);
         });
 
     [Fact]

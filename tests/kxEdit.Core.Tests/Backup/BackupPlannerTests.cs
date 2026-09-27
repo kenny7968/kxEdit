@@ -45,6 +45,21 @@ public class BackupPlannerTests
         );
 
     [Fact]
+    public void Dirty_unchanged_without_backup_writes() =>
+        // Issue #93: 保存でバックアップを消した後(hasBackup=false・lastSig は残る)に Undo で
+        // 退避済みの内容へ戻ると、署名が lastSig と一致する。退避がディスクにないので書くこと。
+        Assert.Equal(
+            BackupAction.Write,
+            BackupPlanner.Decide(
+                modified: true,
+                currentSig: 5,
+                lastSig: 5,
+                hasBackup: false,
+                forceWrite: false
+            )
+        );
+
+    [Fact]
     public void Clean_with_backup_deletes() =>
         Assert.Equal(
             BackupAction.Delete,
