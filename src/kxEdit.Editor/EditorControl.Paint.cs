@@ -129,24 +129,74 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
-    /// 今の描画の入力が、最後に描いたフレームの入力と異なるときだけ Invalidate する(設計書 §8.2)。
-    /// キャレット・選択の 4 経路(EditorControl.Caret.cs)専用。
+    /// 今の描画の入力と、画面の絵の入力(<see cref="_lastPaintedInputs"/>)の差から、描き直しが要る行の帯だけを
+    /// 無効化する(設計書 §14.1・計画 §0.2)。等しければ何もしない(フェーズ 3 の省略)。
+    /// 行の外に効く入力(<see cref="FrameInputs.SameLayoutAs"/>)やスクロール位置が違えば全面。
     /// </summary>
     /// <remarks>
-    /// 正しさの根拠: 画面に出ているのは <see cref="_lastPaintedInputs"/> から決定的に描いた絵である。
-    /// 今の入力が同じなら、描き直しても同じ絵になる。未処理の無効領域がある場合でも、その描画は
-    /// 今の入力で描かれる。スクロールのセッターは自前で無条件に Invalidate するので、この比較の外にある。
-    /// この根拠は「描画の入力を変える経路は、必ず自分で Invalidate する(他の経路の Invalidate に
-    /// 便乗しない)」という前提の上にだけ成り立つ。前提の詳細は <see cref="_lastPaintedInputs"/> の
-    /// フィールドコメント(EditorControl.cs)を参照。
-    /// 他の Invalidate(編集・IME・外観・CSV 強調・スクロール・リサイズ)は無条件のまま(変更範囲を最小にする)。
+    /// 正しさの根拠は計画 §0.3 の不変条件 3。無効化する帯は、前回の絵と今の絵で画素が違いうる範囲をすべて覆う
+    /// (記述子が行の絵を決め尽くす = <see cref="RowPaintKey"/> の doc。IME は原点の行と次の行)。
+    /// 描画の入力を変える経路は、必ずこれか <see cref="Control.Invalidate()"/> を自分で呼ぶ(不変条件 2)。
     /// </remarks>
-    private void InvalidateIfFrameChanged()
+    private void InvalidateChangedRows()
     {
-        var current = CaptureFrameInputs();
-        if (current is not null && current.Equals(_lastPaintedInputs))
+        var now = CaptureFrameInputs();
+        var old = _lastPaintedInputs;
+        if (now is null || old is null)
+        {
+            Invalidate();
             return;
-        Invalidate();
+        }
+        if (now.Equals(old))
+            return;
+        bool scrolled =
+            now.TopLine != old.TopLine
+            || now.TopSegment != old.TopSegment
+            || now.ScrollX != old.ScrollX;
+        if (scrolled || !now.SameLayoutAs(old))
+        {
+            Invalidate();
+            return;
+        }
+        int lh = now.Metrics.LineHeightPx;
+        InvalidateBands(
+            FrameDiff.DirtyBands(_rowCache.Keys(old), _rowCache.Keys(now), 0, lh, now.PaintHeight)
+        );
+        InvalidateImeRows(old, now);
+    }
+
+    private void InvalidateBands(List<(int Top, int Bottom)> bands)
+    {
+        int width = ClientSize.Width;
+        foreach (var (top, bottom) in bands)
+            InvalidateRectIfAny(new Rectangle(0, top, width, bottom - top));
+    }
+
+    /// <summary>
+    /// 未確定表示の行を無効化する。未確定表示は行の帯でクリップせずに描くので、原点の行と次の行の 2 行ぶんにする
+    /// (太字のディセンダが帯を越える場合の余裕。越えないことは L5 で確かめる。設計書 §14.1 の例外 2)。
+    /// </summary>
+    private void InvalidateImeRows(FrameInputs old, FrameInputs now)
+    {
+        if (old.Ime.Equals(now.Ime) && old.ImeOrigin == now.ImeOrigin)
+            return;
+        int lh = now.Metrics.LineHeightPx;
+        int width = ClientSize.Width;
+        if (old.ImeOrigin is Point o)
+            InvalidateRectIfAny(new Rectangle(0, o.Y, width, 2 * lh));
+        if (now.ImeOrigin is Point n)
+            InvalidateRectIfAny(new Rectangle(0, n.Y, width, 2 * lh));
+    }
+
+    /// <summary>
+    /// クライアント領域と交差する部分だけを無効化する。空なら何もしない
+    /// (<c>Invalidate(Rectangle.Empty)</c> は全面の無効化に化ける。設計書 §14.1)。
+    /// </summary>
+    private void InvalidateRectIfAny(Rectangle r)
+    {
+        r.Intersect(ClientRectangle);
+        if (r.Width > 0 && r.Height > 0)
+            Invalidate(r);
     }
 
     /// <summary>
@@ -164,7 +214,9 @@ public sealed partial class EditorControl
     /// <summary>
     /// 描画が読む状態を集める唯一の場所(設計書 §8.1)。SetSource 前は null。
     /// 描画(<see cref="PaintBody"/>)は、ここで集めた値<b>だけ</b>を使う
-    /// (例外は IME の未確定表示。<see cref="FrameInputs"/> の remarks を参照)。
+    /// (IME の未確定表示も、原点は <see cref="FrameInputs.ImeOrigin"/> として、フォント・色・行高は
+    /// フォント 3 つ・<see cref="FrameInputs.Style"/>・<see cref="FrameInputs.Metrics"/> としてここに入る。
+    /// <see cref="FrameInputs"/> の remarks を参照)。
     /// </summary>
     private FrameInputs? CaptureFrameInputs()
     {
@@ -280,9 +332,9 @@ public sealed partial class EditorControl
         // ここ → システムキャレット の順序=設計 §3-3)。未確定期間外は
         // 呼ばない=空描画のコストゼロ。節ハイライト(反転)は Task 10・
         // IME 内キャレット位置反映は Task 11 で扱う。
-        // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済 (IImeOverlayHost 経由で
-        // Font/Color/Metrics/ComputeCaretPoint を取得)。
-        // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る。
+        // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済。
+        // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る。Draw が host から読むのは
+        // フォント・色・行高だけ(FrameInputs の フォント 3 つ・Style・Metrics と同じ値)。
         if (inputs.ImeOrigin is Point origin)
             ime.Draw(g, origin);
 
@@ -397,6 +449,32 @@ public sealed partial class EditorControl
     /// <summary>テスト専用: 最後に描いたフレームの入力を持っているか。</summary>
     internal static bool TestHook_HasLastPaintedInputs(EditorControl c) =>
         c._lastPaintedInputs is not null;
+
+    /// <summary>テスト専用: キャレットとアンカーを動かさずに本文を置き換え、編集の後処理(AfterEdit)を通す。</summary>
+    internal void TestHook_ReplaceWithoutCaret(int start, int length, string text)
+    {
+        _buffer!.Replace(start, length, text);
+        AfterEdit();
+    }
+
+    /// <summary>テスト専用: 今の可視行のうち、<paramref name="offset"/> を含む最初の視覚行の番号(ない場合は -1)。</summary>
+    internal int TestHook_VisualRowIndexOf(int offset)
+    {
+        var rows = _rowCache.Rows(CaptureFrameInputs()!);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (
+                offset >= rows[i].SegmentStartChar
+                && offset <= rows[i].SegmentStartChar + rows[i].SegmentLength
+            )
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>テスト専用: 画面の絵の入力(記録)と今の入力が等しいか。</summary>
+    internal static bool TestHook_LastPaintedEqualsCurrent(EditorControl c) =>
+        c._lastPaintedInputs is { } p && p.Equals(c.CaptureFrameInputs());
 
     private static ViewportStyle DefaultStyle() =>
         new(

@@ -46,7 +46,8 @@ public sealed partial class EditorControl : IImeOverlayHost
 
     void IImeOverlayHost.PositionCaret() => PositionCaret();
 
-    void IImeOverlayHost.Invalidate() => Invalidate();
+    // フェーズ 9: 未確定の行だけ(差の行と、未確定表示の原点の行・次の行)。
+    void IImeOverlayHost.Invalidate() => InvalidateChangedRows();
 
     bool IImeOverlayHost.HasBuffer => _buffer is not null;
     bool IImeOverlayHost.HasFocus => _hasFocus;

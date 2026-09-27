@@ -181,8 +181,7 @@ public class EditorControlSkipInvalidateTests
         });
 
     /// <summary>
-    /// スクロールを伴う移動: スクロールのセッターが無条件に 1 回、InvalidateIfFrameChanged が TopLine の
-    /// 違いを見てもう 1 回(設計書 §8.4。変更前も 2 回)。
+    /// スクロールを伴う移動: スクロールのセッターが無条件に 1 回、InvalidateChangedRows が TopLine の違いを見て全面をもう 1 回(設計書 §8.4。変更前も 2 回)。
     /// </summary>
     [Fact]
     public void CaretMove_WithScroll_InvalidatesAtMostTwice() =>

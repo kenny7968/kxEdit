@@ -9,13 +9,14 @@ namespace kxEdit.Editor.Tests;
 /// <summary>
 /// 2026-09-25 性能改善フェーズ 3 のオラクル(設計書 §8.4)。FrameInputs 同士の比較だけでは、
 /// 「描画が読む状態が FrameInputs に入っていない」故障を検出できない(等しければ出力は自明に一致する)。
-/// そこで「画面の絵」を模したビットマップを持ち、Invalidate が 1 回以上起きた操作の後だけ描き直す。
-/// 各操作の後に、今の状態から描いた絵(正解)と画素で比べる。Invalidate を省いた時点で差があれば、
+/// そこで「画面の絵」を模したビットマップを持ち、無効化が起きた操作の後だけ、無効化した矩形の中を描き直す
+/// (フェーズ 9: WM_PAINT の更新領域を模して矩形を合成する。<c>Composite</c>)。
+/// 各操作の後に、今の状態から描いた絵(正解)と画素で比べる。無効化を省いた・足りなかった時点で差があれば、
 /// 実画面に古い絵が残る不具合である。フレームではなく画素で比べるのは、RenderFrame のシフトと
 /// IME の未確定表示(Frame の外で描く)も含めるため(実装計画 §0.2)。
-/// 検出範囲は、Invalidate が省かれうる 4 経路で変わる状態(キャレット・アンカー)と、そこから派生する
-/// 入力(CurrentLineLogical・Selection)の漏れや誤りに限る。無条件に Invalidate するセッターの裏にある
-/// 状態(ShowWhitespace・IME・スクロールなど)は、漏れても古い絵にならないので対象外。
+/// 検出範囲: Invalidate を省きうる経路(4 経路)と、行の帯だけを無効化する経路(4 経路・編集・IME・セル強調)で、
+/// 無効化の不足があれば検出する。無条件に全面を Invalidate するセッターの裏にある
+/// 状態(ShowWhitespace・スクロールなど)は、漏れても古い絵にならないので対象外。
 /// 描画が生の状態を読む故障は PaintBody が static であることで、比較の漏れは FrameInputsTests で防ぐ。
 /// </summary>
 public class SkipInvalidateOracleTests
@@ -105,14 +106,15 @@ public class SkipInvalidateOracleTests
                 var log = new List<string>();
                 int[] screen = Paint(c, record: true);
                 int skipped = 0;
+                int partial = 0;
                 for (int step = 0; step < 200; step++)
                 {
                     var (name, skippable, act) = PickOp(rng, c);
                     log.Add(name);
                     int caretBefore = c.CaretCharOffset;
                     int anchorBefore = c.SelectionAnchor;
-                    int invalidated = 0;
-                    InvalidateEventHandler h = (_, _) => invalidated++;
+                    var rects = new List<Rectangle>();
+                    InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
                     c.Invalidated += h;
                     try
                     {
@@ -122,8 +124,12 @@ public class SkipInvalidateOracleTests
                     {
                         c.Invalidated -= h;
                     }
-                    if (invalidated > 0)
-                        screen = Paint(c, record: true); // WM_PAINT が来た
+                    if (rects.Count > 0)
+                    {
+                        Composite(c, screen, rects); // WM_PAINT: 無効化した矩形の中だけが描き直される
+                        if (!rects.Any(r => r.Contains(c.ClientRectangle)))
+                            partial++;
+                    }
                     else if (
                         skippable
                         && (c.CaretCharOffset != caretBefore || c.SelectionAnchor != anchorBefore)
@@ -139,6 +145,59 @@ public class SkipInvalidateOracleTests
                 // 数えるのは、キャレット・選択の 4 経路の操作で、キャレットかアンカーが実際に動き、
                 // かつ Invalidate が 0 回だったときだけ(早期 return の no-op は数えない)。
                 Assert.True(skipped >= 20, $"seed={seed}: 省略が {skipped} 回しか起きていない");
+                // 前提: 部分的な無効化の経路を実際に通っている。
+                Assert.True(
+                    partial >= 20,
+                    $"seed={seed}: 部分的な無効化が {partial} 回しか起きていない"
+                );
+            }
+        });
+
+    /// <summary>
+    /// WM_PAINT を模す: 無効化した矩形の外接矩形をクリップにして描き(実際の e.ClipRectangle と同じ)、
+    /// 矩形の和の中の画素だけを画面へ写す(実際の DC は更新領域でクリップされている)。
+    /// </summary>
+    private static void Composite(EditorControl c, int[] screen, List<Rectangle> rects)
+    {
+        var client = c.ClientRectangle;
+        var bounds = Rectangle.Empty;
+        foreach (var r in rects)
+            bounds = bounds.IsEmpty ? r : Rectangle.Union(bounds, r);
+        bounds.Intersect(client);
+        if (bounds.IsEmpty)
+            return;
+        using var bmp = EditorControl.TestHook_PaintToBitmap(c, record: true, bounds);
+        int[] px = Pixels(bmp);
+        int w = bmp.Width;
+        foreach (var r0 in rects)
+        {
+            var r = Rectangle.Intersect(r0, client);
+            for (int y = r.Top; y < r.Bottom; y++)
+            {
+                Array.Copy(px, y * w + r.Left, screen, y * w + r.Left, r.Width);
+            }
+        }
+    }
+
+    /// <summary>陽性対照: 無効化した矩形の一部を合成しなければ、古い絵として検出される。</summary>
+    [Fact]
+    public void Oracle_detects_a_missing_rectangle() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeHosted();
+            using (f)
+            {
+                c.HighlightCurrentLine = true;
+                c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(2) + 3);
+                int[] screen = Paint(c, record: true);
+                var rects = new List<Rectangle>();
+                InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
+                c.Invalidated += h;
+                c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(5) + 1);
+                c.Invalidated -= h;
+                Assert.True(rects.Count >= 2, "前提: 旧行と新行の 2 つの帯が無効化される");
+                Composite(c, screen, [rects[^1]]); // 旧行の帯を捨てる
+                Assert.False(screen.AsSpan().SequenceEqual(Paint(c, record: false)));
             }
         });
 
@@ -154,7 +213,7 @@ public class SkipInvalidateOracleTests
         int len = snap.CharLength;
         int Rand() => rng.Next(0, len + 1);
         int caret = c.CaretCharOffset;
-        switch (rng.Next(0, 22))
+        switch (rng.Next(0, 26))
         {
             case 0:
             case 1:
@@ -237,6 +296,42 @@ public class SkipInvalidateOracleTests
                                 []
                             )
                     );
+            case 22:
+                return ("改行挿入", false, () => c.ReplaceCharRange(caret, 0, "\r\n"));
+            case 23:
+            {
+                int s = Rand();
+                int n = rng.Next(1, 12);
+                return (
+                    "範囲削除",
+                    false,
+                    () => c.ReplaceCharRange(s, Math.Min(n, len - Math.Min(s, len)), "")
+                );
+            }
+            case 24:
+                return c.__TestIsComposing()
+                    ? (
+                        "IME 更新",
+                        false,
+                        () => c.__TestApplyComposition("かなかな", 2, [0, 0, 0, 0], [])
+                    )
+                    : (
+                        "セル強調を隣の行へ",
+                        false,
+                        () =>
+                            c.HighlightCharRange(
+                                snap.GetLineStart(
+                                    Math.Min(snap.LineCount - 1, snap.GetLineIndexOfChar(caret) + 1)
+                                ),
+                                3
+                            )
+                    );
+            case 25:
+                return (
+                    "1 文字削除",
+                    false,
+                    () => c.ReplaceCharRange(Math.Max(0, caret - 1), caret > 0 ? 1 : 0, "")
+                );
             default:
             {
                 bool dark = rng.Next(2) == 0;
