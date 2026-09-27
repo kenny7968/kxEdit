@@ -216,29 +216,37 @@
 - **成果物**
   - `BackupPlanner.Decide` の modified の分岐を `forceWrite || !hasBackup || currentSig != lastSig` にした。
   - P-6 の省略条件を `info.HasBackup && modified && !info.ForceWrite && IsRemembered(...)` にした。
-  - 実装計画は `docs/plans/2026-09-27-backup-undo-gap.md`(以下「計画」)。
+  - 実装計画は `docs/plans/2026-09-27-backup-undo-gap.md`。
 - **完了条件**
   - **テスト**: 計 6 件を足した。
     - Core 1 件: `Decide` の「modified・同じ sig・hasBackup=false・force=false → Write」
-    - App 5 件: clean 化の 2 経路(Delete 分岐と即時反映)の後に Undo で戻す形、同じスナップショットのまま `ClearSavePoint` する形(P-6 の省略経路)、登録時にクリーンで同じ内容のまま dirty になる形、hot exit の最終 flush でレイアウトの `BackupId` が埋まる形
+    - App 5 件
+      - clean 化の 2 経路(Delete 分岐と即時反映)それぞれの後に、Undo で戻す形(2 件)
+      - 同じスナップショットのまま `ClearSavePoint` する形(P-6 の省略経路)
+      - 登録時にクリーンで、同じ内容のまま dirty になる形(同じく P-6 の省略経路)
+      - hot exit の最終 flush で、レイアウトの `BackupId` が埋まる形
   - **陰性対照**
-    - 変更前のコードで、6 件すべてが期待どおりの理由(書込の件数・`BackupId`)で落ちた。
-    - P-6 の条件だけを外すと、`ClearSavePoint` 系の 2 件だけが落ちた。
+    - 変更前のコードで、6 件すべてが期待どおりの理由(書込の件数)で落ちた。
+    - P-6 の条件だけを外すと、P-6 の省略経路を通る 2 件だけが落ちた。
   - **手動確認**: 実アプリの hot exit で、Undo 後の内容が未保存のまま復元された(windows-mcp で操作。PASS)。
+    - 設定: 自動バックアップ ON・間隔 5 秒・起動時に前回のファイルを開く ON
     - 手順: `base` を開く → `1` を追記して退避される → `2` を追記して保存(退避は消える)→ Undo で `base1` に戻す → 退避される → Alt+F4 → 再起動
   - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
-  - **レビュー**: CLAUDE.md §3 の簡略化の基準に当たるので、最終レビューの 2 パスを別エージェント 1 回に統合した。Critical・Important はなかった。
+  - **レビュー**: 製品コードは 2 ファイル・十数行の小変更なので、CLAUDE.md §3 の簡略化の基準に沿うと判断し、最終レビューの 2 パスを別エージェント 1 回に統合した。Critical・Important はなかった。
     - Minor 2 件は fixup で直した。1 件目は、既存テスト `Dirty_unchanged_but_forced_writes` を `hasBackup: true` にしたこと(`forceWrite` の効きを単独で確かめるため)。2 件目は、`OnBackupBecameUnneeded` の remarks の更新。
     - 残りの Minor 1 件は受容した(P-6 経路の新しいテストに「書いた後に増えない」の確認がない。既存の `Reconcile_SameSnapshot_DoesNotMaterialize` が押さえている)。
 - **本節からの精密化・訂正**
   - **§5.3 の「hot exit を手動で 1 回確かめる」**: kxEdit はコマンドライン引数でファイルを開かないので、Ctrl+O で開いた。
-  - **§5 の原因の 3 つ目**(「Undo は以前のスナップショットの参照を返しうる」): 今の実装では、Undo は新しいスナップショットを作る(陰性対照で、P-6 の条件を外しても Undo 系のテストは落ちなかった)。
-    - そのため、Undo の経路を止めていたのは `Decide` のほうである。
-    - P-6 の省略経路を実際に通るのは、原因の 4 つ目の `ClearSavePoint` とエンコーディングの変更である。
-    - 将来 Undo がスナップショットを再利用するように変わっても、P-6 の条件で守られる。
-- **申し送り**(以前からある挙動。本フェーズの範囲外)
+  - **§5 の原因の 3 つ目**(「Undo は以前のスナップショットの参照を返しうる」): 今の実装では当たらない。
+    - Undo/Redo は毎回新しい `TextSnapshot` を作る(`TextBuffer.Undo` の `new TextSnapshot(e.Value.RootBefore)`)。木のルートは以前のものを使い回すが、P-6 の `IsRemembered` はスナップショットの参照を比べるので、Undo の後は必ず不一致になる。
+    - 陰性対照でも、P-6 の条件を外して落ちたのは Undo 系以外の 2 件だけだった。
+    - そのため、Undo の経路を止めていたのは `Decide` のほうである。P-6 の省略経路を実際に通るのは、原因の 4 つ目の経路(`ClearSavePoint`・エンコーディングの変更)と、登録時にクリーンな文書である。
+    - 将来 Undo が `TextSnapshot` を使い回すか、`IsRemembered` をルートの比較に変えても、P-6 の条件で守られる。
+- **申し送り**(以前からある挙動。本フェーズの範囲外。回収先は未定で、次に申し送りを回収するときに扱う)
   - 退避済みのままエンコーディングだけを変えると、署名が同じなので再退避されず、バックアップの CodePage/HasBom が古いまま残る。本文は失われない。
-  - 起動時の復元の途中で Reconcile が走ると、新しい Id で登録された文書を後から `AdoptRestored` が上書きし、孤児ファイルが残りうる(`BackupCoordinator.cs` のコメントで認識済み。30 日の sweep で消える)。
+  - 起動時の復元の途中で Reconcile が走ると、新しい Id で登録された文書を後から `AdoptRestored` が上書きし、孤児ファイルが残りうる。
+    - 上書き自体は `BackupCoordinator.cs:329` のコメントで認識済みだが、孤児が残る点には触れていない。
+    - 孤児は `_map` に載らないので、クリーン終了でも消えない。次回の起動で復元の候補に出うる(未確認)。最終的には 30 日の sweep で消える。
 
 ## 6. フェーズ 2: UIA のスレッド境界(`uia-thread-guard`)
 
