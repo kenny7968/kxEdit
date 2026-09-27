@@ -82,6 +82,49 @@ public class ScrollPixelsTests
             }
         });
 
+    /// <summary>
+    /// Fix round 2(S6b の退行): 移動量がちょうど可視行数(= PaintHeight / 行高、切り捨て)のとき、
+    /// 「移動量(行) × 行高 &lt; PaintHeight」だった旧判定は最後の部分行の余白で誤って画素スクロールを
+    /// 受理していた(設計書 §14.2「可視行数未満」に反する)。PageUp/PageDown 相当のこの移動量は全面にする。
+    /// 非既定の TopLine(5)から始める(CLAUDE.md §4-B)。
+    /// </summary>
+    [Fact]
+    public void Exactly_full_visible_rows_invalidates_everything_without_scrolling() =>
+        Sta.Run(() =>
+        {
+            var (f, c, s) = MakeHosted();
+            using (f)
+            {
+                c.TopLine = 5;
+                Paint(c);
+                int lh = c.Metrics.LineHeightPx;
+                int fullRows = c.ClientSize.Height / lh;
+                var rects = Rects(c, () => c.TopLine = 5 + fullRows);
+                Assert.Equal(5 + fullRows, c.TopLine); // 前提: クランプされずに実際に動いた
+                Assert.Equal(0, s.Scrolls);
+                Assert.Contains(rects, r => r.Contains(c.ClientRectangle));
+            }
+        });
+
+    /// <summary>可視行数 - 1 の移動は、これまでどおり画素スクロールする(境界の反対側)。</summary>
+    [Fact]
+    public void FullRows_minus_one_still_scrolls_pixels() =>
+        Sta.Run(() =>
+        {
+            var (f, c, s) = MakeHosted();
+            using (f)
+            {
+                c.TopLine = 5;
+                Paint(c);
+                int lh = c.Metrics.LineHeightPx;
+                int fullRows = c.ClientSize.Height / lh;
+                var rects = Rects(c, () => c.TopLine = 5 + fullRows - 1);
+                Assert.Equal(5 + fullRows - 1, c.TopLine); // 前提: クランプされずに実際に動いた
+                Assert.Equal(1, s.Scrolls);
+                Assert.DoesNotContain(rects, r => r.Contains(c.ClientRectangle));
+            }
+        });
+
     [Fact]
     public void A_pending_update_prevents_scrolling() =>
         Sta.Run(() =>

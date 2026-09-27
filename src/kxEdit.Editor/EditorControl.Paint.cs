@@ -224,10 +224,17 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// 行の対応(新しい行 i = 古い行 i + <paramref name="shift"/>)と横の移動量を決める。縦と横が同時に変わるとき・
-    /// 移動量が可視域以上のとき・行の対応が見つからないときは false(全面)。
+    /// 移動量が可視行数以上のとき・行の対応が見つからないときは false(全面)。
     /// 行の対応は可視行の (論理行, 視覚行) で探す。対応が誤っていても記述子の比較が違う行を無効化するので、
     /// 正しさには効かない(効率だけ)。
     /// </summary>
+    /// <remarks>
+    /// 設計書 §14.2: 「移動量が可視行数未満」のときだけ画素スクロールを許す。PageUp/PageDown のように
+    /// 可視行数以上動く場合は全面にする。可視行数は <c>PaintHeight / 行高</c>(切り捨て。
+    /// <see cref="VisibleRowCount"/> と同じ定義)であり、「移動量(行) × 行高 &lt; PaintHeight」では
+    /// ちょうど可視行数ぶんの移動を最後の部分行の余白で誤って通してしまう(2026-09-27 実測の退行:
+    /// 可視行数 41・行高 16px・PaintHeight 661px のとき 41*16=656&lt;661 で受理していた)。
+    /// </remarks>
     private bool TryPlanScroll(FrameInputs old, FrameInputs now, out int shift, out int dx)
     {
         shift = 0;
@@ -255,7 +262,8 @@ public sealed partial class EditorControl
                 return false;
             shift = -j;
         }
-        return Math.Abs(shift) * now.Metrics.LineHeightPx < now.PaintHeight;
+        int fullRows = now.PaintHeight / now.Metrics.LineHeightPx;
+        return Math.Abs(shift) < fullRows;
     }
 
     private static int IndexOfRow(IReadOnlyList<VisualRow> rows, VisualRow target)
