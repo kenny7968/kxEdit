@@ -98,24 +98,47 @@ public class ScrollPixelsTests
             }
         });
 
-    [Fact]
-    public void An_active_composition_prevents_scrolling() =>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void An_active_composition_prevents_scrolling(bool composing) =>
         Sta.Run(() =>
         {
             var (f, c, s) = MakeHosted();
             using (f)
             {
                 c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(8));
-                c.__TestApplyComposition("か", 1, [0], []);
+                if (composing)
+                    c.__TestApplyComposition("か", 1, [0], []);
                 c.TopLine = 5;
                 Paint(c);
+                // 前提: guard の発火条件(未確定の有無)が、スクロールの時点でも成り立っている(CLAUDE.md §4-B)。
+                Assert.Equal(composing, c.__TestIsComposing());
                 c.TopLine = 6;
-                Assert.Equal(0, s.Scrolls);
+                // 対照(未確定なし)は同じ配置で画素を移す = 0 回は未確定のせいである。
+                Assert.Equal(composing ? 0 : 1, s.Scrolls);
             }
         });
 
-    [Fact]
-    public void Horizontal_scroll_moves_pixels_sideways() =>
+    /// <summary>
+    /// 横の画素の移動: 偽の画面に無効化した矩形を合成し、今の状態の絵と画素で一致すること(移動の向き・露出した帯)。
+    /// 行番号(一緒にシフトされる)・現在行強調・選択を含む構成でも確かめる。
+    /// 選択がある間は現在行強調が効かない(CaptureFrameInputs)ので、強調は選択なしの構成で見る。
+    /// </summary>
+    [Theory]
+    [InlineData(40, 60, false, false, false)]
+    [InlineData(60, 35, false, false, false)]
+    [InlineData(40, 60, true, true, true)]
+    [InlineData(60, 35, true, true, true)]
+    [InlineData(40, 60, true, true, false)]
+    [InlineData(60, 35, true, true, false)]
+    public void Horizontal_scroll_moves_pixels_sideways(
+        int from,
+        int to,
+        bool lineNumbers,
+        bool highlight,
+        bool selection
+    ) =>
         Sta.Run(() =>
         {
             var (f, c, s) = MakeHosted();
@@ -125,12 +148,25 @@ public class ScrollPixelsTests
                 // (ClipPaintTests の同種コメント参照)。描画は Bitmap への TestHook_PaintToBitmap なので、
                 // 表示しても比較には影響しない。
                 f.Show();
-                c.ScrollX = 40;
-                Assert.Equal(40, c.ScrollX); // 前提: hscroll が表示されている(行 3 が長い)
-                Paint(c);
-                var rects = Rects(c, () => c.ScrollX = 60);
+                var snap = c.CurrentBuffer.Current;
+                c.ShowLineNumbers = lineNumbers;
+                c.HighlightCurrentLine = highlight;
+                // キャレットは行頭近く(ScrollX = 0 で見えている = 追従の横スクロールは起きない)。
+                if (selection)
+                    c.SetSelectionAnchored(snap.GetLineStart(3) + 5, snap.GetLineStart(5) + 2);
+                else
+                    c.SetCaretCharOffset(snap.GetLineStart(2));
+                c.ScrollX = from;
+                Assert.Equal(from, c.ScrollX); // 前提: hscroll が表示されている(行 3 が長い)
+                s.Pixels = SkipInvalidateOracleTests.Paint(c, record: true);
+                var rects = Rects(c, () => c.ScrollX = to);
+                Assert.Equal(to, c.ScrollX); // 前提
                 Assert.Equal(1, s.Scrolls);
                 Assert.DoesNotContain(rects, r => r.Contains(c.ClientRectangle));
+                SkipInvalidateOracleTests.Composite(c, s.Pixels, rects);
+                var truth = SkipInvalidateOracleTests.Paint(c, record: false);
+                var diff = SkipInvalidateOracleTests.DiffBounds(c, s.Pixels, truth);
+                Assert.True(diff.IsEmpty, $"古い絵が残る(差の外接矩形 {diff})");
             }
         });
 

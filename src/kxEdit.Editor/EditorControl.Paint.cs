@@ -272,8 +272,9 @@ public sealed partial class EditorControl
     }
 
     /// <summary>
-    /// 画素を移して露出した帯。<see cref="IPaintSurface.TryScroll"/> の uncovered とは別に必ず無効化する
-    /// (途中で切れていた旧最下行の下半分もこの帯に入る。設計書 §14.2)。
+    /// 画素を移して露出した帯。この帯は必ず描き直しが要る(露出した行に加え、途中で切れていた旧最下行の、
+    /// 画面になかった下半分もこの帯に入る。設計書 §14.2)。ScrollWindowEx の prcUpdate(uncovered)も通常はこの帯を含むが、
+    /// その中身は実装(と偽の画面)に依存するので、それに頼らず自分で求めた帯も無効化する(保険)。
     /// </summary>
     private static Rectangle ExposedStrip(Rectangle area, int dx, int dy) =>
         dy < 0 ? Rectangle.FromLTRB(area.Left, area.Bottom + dy, area.Right, area.Bottom)

@@ -17,7 +17,9 @@ namespace kxEdit.Editor.Tests;
 /// IME の未確定表示(Frame の外で描く)も含めるため(実装計画 §0.2)。
 /// 検出範囲: Invalidate を省きうる経路(4 経路)と、行の帯だけを無効化する経路(4 経路・編集・IME・セル強調)で、
 /// 無効化の不足があれば検出する。フェーズ 9b: スクロールのセッターは画素を移すので、偽の画面(<see cref="Fakes.ScreenSurface"/>)で
-/// 画素を実際に動かし、露出した帯と差の行の無効化の不足も検出する(画面外の Form では hscroll が出ず横のスクロールは no-op なので、確かめるのは縦だけ。横は ScrollPixelsTests)。
+/// 画素を実際に動かし、露出した帯と差の行の無効化の不足も検出する(確かめるのは縦だけ。画面外の Form では HScrollBar が表示されず ScrollX のセッターが no-op なので、
+/// 「小スクロール(横)」(case 28)は何もしない。横の画素の正しさは ScrollPixelsTests.Horizontal_scroll_moves_pixels_sideways の
+/// 合成比較(Form を表示して行う)が確かめる)。
 /// 無条件に全面を Invalidate するセッターの裏にある状態(ShowWhitespace など)は、漏れても古い絵にならないので対象外。
 /// 描画が生の状態を読む故障は PaintBody が static であることで、比較の漏れは FrameInputsTests で防ぐ。
 /// </summary>
