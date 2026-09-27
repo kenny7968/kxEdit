@@ -37,7 +37,44 @@ public class FrameInputsTests
         "TargetFont",
         "BackColor",
         "Ime",
+        "ImeOrigin",
     ];
+
+    /// <summary>
+    /// 行の中身とスクロール位置(差分の無効化とスクロールが扱う)。これ以外のメンバーが変わったら全面を描き直す。
+    /// </summary>
+    private static readonly string[] RowContentOrScroll =
+    [
+        "Snapshot",
+        "TopLine",
+        "TopSegment",
+        "ScrollX",
+        "CurrentLineLogical",
+        "Selection",
+        "CellHighlight",
+        "Ime",
+        "ImeOrigin",
+    ];
+
+    [Theory]
+    [MemberData(nameof(Members))]
+    public void SameLayoutAs_ignores_exactly_row_content_and_scroll(string member) =>
+        Sta.Run(() =>
+        {
+            var a = Base(new GdiCharMetrics(s_font));
+            var prop = typeof(FrameInputs).GetProperty(member)!;
+            var b = a with { };
+            var different = Different(prop.GetValue(a));
+            try
+            {
+                prop.SetValue(b, different);
+                Assert.Equal(RowContentOrScroll.Contains(member), b.SameLayoutAs(a));
+            }
+            finally
+            {
+                (different as IDisposable)?.Dispose();
+            }
+        });
 
     public static TheoryData<string> Members() => [.. ExpectedMembers];
 
@@ -79,6 +116,7 @@ public class FrameInputsTests
             TargetFont = s_target,
             BackColor = Color.White,
             Ime = ImeCompositionState.Empty,
+            ImeOrigin = new Point(10, 20),
         };
 
     /// <summary>メンバーの値を「描画が変わりうる別の値」にする。参照で比べる型は、値が同じ別インスタンスにする。</summary>
@@ -88,6 +126,7 @@ public class FrameInputsTests
             int i => i + 1,
             bool b => !b,
             Size s => new Size(s.Width + 1, s.Height),
+            Point p => new Point(p.X + 1, p.Y),
             Color c => Color.FromArgb(c.ToArgb() ^ 0x000001),
             TextSnapshot => TextBuffer.FromString("abc\r\ndef").Current, // 同じ本文・別の参照
             SelectionRange r => new SelectionRange(r.Start, r.End + 1),

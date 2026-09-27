@@ -59,6 +59,54 @@ internal static class FrameBuilder
     private const string TabGlyph = "→";
 
     /// <summary>
+    /// クリップの縦の範囲 [<paramref name="clipTop"/>, <paramref name="clipBottom"/>) を描くのに要る行
+    /// (フェーズ 9・設計書 §14.1)。行 r は [r.YPx, r.YPx + lineHeight) を塗るので、それが交差する行を返す。
+    /// 例外はセル強調枠の下辺(工程 8)で、行 r の枠は r.YPx + lineHeight の 1 画素(= 次の行の先頭画素)に引かれる。
+    /// その画素がクリップに入り、行 r がセル強調と交差するときだけ、行 r も足す。
+    /// </summary>
+    /// <remarks>
+    /// すべての行の本体がクリップと交差し、縁だけの追加(工程 8 のセル強調枠下辺)が 1 行も起きないときは
+    /// <paramref name="rows"/> をそのまま返す(全面の描画で配列を作り直さない)。行は昇順(<see cref="VisualRow.YPx"/> が
+    /// 単調増加)なので、<c>clipTop &lt;= 0</c> かつ <c>clipBottom &gt; rows[^1].YPx</c> であれば
+    /// 「本体条件 <c>row.YPx &lt; clipBottom &amp;&amp; row.YPx + lineHeight &gt; clipTop</c>」がすべての行で成り立つ
+    /// (最下行より Y が小さい行はなおのこと <c>clipBottom</c> の手前にあり、<c>clipTop &lt;= 0</c> なら
+    /// <c>row.YPx + lineHeight &gt; 0</c> は YPx&gt;=0・lineHeight&gt;0 から自明)。本体が全行で true なら
+    /// 縁だけの行(<c>!body &amp;&amp; ...</c> のときだけ足す)は生まれないので、ループの結果は rows と同じ並びになる。
+    /// <b>最下行がクリップの途中で切れていてもこの近道は使える</b>(旧実装は <c>clipBottom &gt; rows[^1].YPx + lineHeight</c>
+    /// を要求しており、最下行の下端までクリップが届く「完全な全面」しか近道にできていなかった)。
+    /// 行の Y は <see cref="ViewportLayout.Build"/> が 0 から lineHeight ずつ積んだもの(昇順)である前提。
+    /// </remarks>
+    internal static IReadOnlyList<VisualRow> RowsTouching(
+        IReadOnlyList<VisualRow> rows,
+        int clipTop,
+        int clipBottom,
+        int lineHeight,
+        SelectionRange? cellHighlight
+    )
+    {
+        if (rows.Count == 0 || clipBottom <= clipTop)
+            return [];
+        if (clipTop <= 0 && clipBottom > rows[^1].YPx)
+            return rows;
+        var result = new List<VisualRow>();
+        foreach (var row in rows)
+        {
+            bool body = row.YPx < clipBottom && row.YPx + lineHeight > clipTop;
+            int edgeY = row.YPx + lineHeight;
+            bool edge =
+                !body
+                && edgeY >= clipTop
+                && edgeY < clipBottom
+                && cellHighlight is SelectionRange hl
+                && hl.Start < hl.End
+                && TryComputeRowIntersection(row, hl, out _, out _);
+            if (body || edge)
+                result.Add(row);
+        }
+        return result;
+    }
+
+    /// <summary>
     /// フレームを構築する。<paramref name="rows"/> は <see cref="ViewportLayout.Build"/> の結果を渡す想定。
     /// </summary>
     /// <param name="snapshot">描画対象のテキストスナップショット。</param>
@@ -328,12 +376,13 @@ internal static class FrameBuilder
     /// 選択矩形(工程 3)と本文の分割(工程 5)が必ず同じ境界を使うよう、計算はここ 1 箇所に置く。
     /// <b>行内オフセットへの変換までをここで済ませる</b>のは、呼び出し側で
     /// <c>- row.SegmentStartChar</c> を書かせると境界の定義が再び 2 箇所へ散るため。
+    /// フェーズ 9: <see cref="FrameDiff.Describe"/> とも共有する。
     /// </summary>
     /// <remarks>
     /// true を返すとき <c>0 &lt;= startInRow &lt; endInRow &lt;= row.SegmentLength</c> が成り立つ
     /// (呼び出し側はこの区間をそのまま行テキストの添字に使える)。
     /// </remarks>
-    private static bool TryComputeRowIntersection(
+    internal static bool TryComputeRowIntersection(
         VisualRow row,
         SelectionRange range,
         out int startInRow,

@@ -152,7 +152,7 @@ public sealed partial class EditorControl
     /// 無変化呼び出しの早期 return を設けたのと同じ理由)。代償として「キャレットは既にその位置
     /// にあるが画面だけスクロールで離れている」ケースでは追従しない=受容する。
     ///
-    /// 順序は <c>PositionCaret</c> → <c>BringCaretIntoView</c> → <c>InvalidateIfFrameChanged</c> で
+    /// 順序は <c>PositionCaret</c> → <c>BringCaretIntoView</c> → <c>InvalidateChangedRows</c> で
     /// <c>AfterEdit</c> と揃える(先出しの PositionCaret が要る理由も同メソッドの remarks 参照)。
     /// </remarks>
     public void SetCaretCharOffset(int offset)
@@ -167,7 +167,7 @@ public sealed partial class EditorControl
         _caretCtrl.SetTo(snapped, _buffer.Current); // 単純キャレット移動は選択解除
         PositionCaret();
         BringCaretIntoView();
-        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
+        InvalidateChangedRows(); // フェーズ 9: 変わった行だけ(設計書 §14.1)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -211,7 +211,7 @@ public sealed partial class EditorControl
         _caretCtrl.SetSelection(s, e, _buffer.Current);
         PositionCaret();
         BringCaretIntoView();
-        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
+        InvalidateChangedRows(); // フェーズ 9: 変わった行だけ(設計書 §14.1)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -243,7 +243,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.MoveTo(snapped, extend: true, _buffer.Current);
         PositionCaret();
-        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
+        InvalidateChangedRows(); // フェーズ 9: 変わった行だけ(設計書 §14.1)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -278,7 +278,7 @@ public sealed partial class EditorControl
             return;
         _caretCtrl.SetSelection(a, c, _buffer.Current);
         PositionCaret();
-        InvalidateIfFrameChanged(); // フェーズ 3: フレームが変わらなければ描き直さない(設計書 §8.2)
+        InvalidateChangedRows(); // フェーズ 9: 変わった行だけ(設計書 §14.1)
         // P5 Task 8: 純粋な選択/キャレット移動での UIA イベント発火
         if (RaiseUiaSelectionEvents)
             _uia.RaiseSelectionChanged();
@@ -500,8 +500,14 @@ public sealed partial class EditorControl
             _caretCtrl.SetSelection(savedAnchor, savedCaret, _buffer.Current);
             // OS 側キャレットを savedCaret の座標に戻す(TopLine/ScrollX setter が
             // 内部で Caret=end のまま SetCaretPos を発火した副作用を上書きする)。
-            // 末尾 Invalidate は削除: setter が Invalidate 発行済み、no-op ケースなら不要。
             PositionCaret();
+            // フェーズ 9: 一時的に動かしたキャレット(現在行強調・選択)を戻したので、描画の入力が変わりうる。
+            // 検証の結果、この呼び出しは今日時点では load-bearing ではない: 復元後の状態の行キーは、
+            // スクロールのセッターが記録した一時状態の行キーと shift ぶんだけずれた同じ集合になるため、
+            // 一時状態↔復元後の差はそのセッターが既に無効化した帯の中に収まっている(=削っても画素は変わらない)。
+            // それでも不変条件 2(描画の入力を変える経路は必ず自分で無効化する。他経路の無効化に便乗しない)を
+            // 守るための防御として残す(Review Focus 1)。
+            InvalidateChangedRows();
         }
     }
 

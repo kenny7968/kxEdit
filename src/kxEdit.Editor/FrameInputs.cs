@@ -3,7 +3,8 @@
 // 製品コードでは EditorControl.CaptureFrameInputs() だけが作り、OnPaint はこの値だけからフレームを組み立てて描く。
 // 描画に新しい入力を足すときは、必ずここにメンバーを足し、Equals と FrameInputsTests も直すこと
 // (足さずに描画から生の状態を読むと、キャレット移動で再描画を省いたときに古い絵が画面に残る)。
-// ここに入る状態を書き換える経路は必ず自分で Invalidate する規則は EditorControl._lastPaintedInputs のコメントを参照。
+// ここに入る状態を書き換える経路は必ず自分で Invalidate() か InvalidateChangedRows()(フェーズ 9: 変わった行だけ)を
+// 呼ぶ規則は EditorControl._lastPaintedInputs のコメントを参照。
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Layout;
@@ -26,10 +27,12 @@ namespace kxEdit.Editor;
 /// (record の <c>==</c> は null 同士を true にするので使わない)。
 /// </para>
 /// <para>
-/// <b>IME の未確定表示だけは例外</b>: <see cref="ImeController.Draw"/> は host 経由で生の状態を読む。
-/// 描画は <c>CaptureFrameInputs()</c> と同じ同期処理の中で走るので値は一致し、読む状態
-/// (<see cref="Ime"/>・<see cref="ScrollX"/>・<c>ComputeCaretPoint</c> の入力・フォント・<see cref="Style"/>)は
-/// すべてここに入っている(実装計画 docs/plans/2026-09-25-perf-skip-invalidate.md §0.2)。
+/// 未確定表示の原点は <see cref="ImeOrigin"/> で受け取る。<see cref="ImeController.Draw(Graphics, Point)"/> が
+/// host から読むのはフォント・色・行高で、いずれもフォント 3 つ・<see cref="Style"/>・<see cref="Metrics"/> としてここにある。
+/// 節の文字列本体・節境界・Attrs は Draw が <see cref="ImeController"/> 自身が持つ <c>_ime</c> から読む
+/// (FrameInputs にはメンバーを持たない)。この値は <see cref="Ime"/> と等しい —— キャプチャ(<c>CaptureFrameInputs</c>
+/// が <c>_imeCtrl.State</c> を読む)とこの描画呼び出しが同じ同期呼び出しの中で起きるため、その間に別の
+/// IME イベントが割り込んで <c>_ime</c> だけを書き換えることはない。
 /// </para>
 /// </remarks>
 internal sealed record FrameInputs
@@ -68,29 +71,47 @@ internal sealed record FrameInputs
     public required Color BackColor { get; init; }
     public required ImeCompositionState Ime { get; init; }
 
-    public bool Equals(FrameInputs? other) =>
-        other is not null
-        && ReferenceEquals(Snapshot, other.Snapshot)
-        && TopLine == other.TopLine
-        && TopSegment == other.TopSegment
-        && ScrollX == other.ScrollX
-        && WrapColumns == other.WrapColumns
+    /// <summary>
+    /// 未確定表示の原点(<see cref="ImeController.ComputeOrigin"/>)。表示しないときは null。
+    /// フェーズ 9: 無効化する帯を原点から求める。
+    /// </summary>
+    public required Point? ImeOrigin { get; init; }
+
+    /// <summary>
+    /// 行の外に効く入力(画面全体の描き方)が等しいか。等しくなければ、全面を描き直す(フェーズ 9・計画 §0.2)。
+    /// 行の中身(<see cref="Snapshot"/>・<see cref="CurrentLineLogical"/>・<see cref="Selection"/>・
+    /// <see cref="CellHighlight"/>・<see cref="Ime"/>・<see cref="ImeOrigin"/>)とスクロール位置
+    /// (<see cref="TopLine"/>・<see cref="TopSegment"/>・<see cref="ScrollX"/>)は比べない。
+    /// <see cref="Snapshot"/> が変わっても、行番号幅と hscroll の表示は <see cref="LineNumberWidth"/>・
+    /// <see cref="PaintHeight"/> としてここで比べる。
+    /// </summary>
+    public bool SameLayoutAs(FrameInputs other) =>
+        WrapColumns == other.WrapColumns
         && ClientSize == other.ClientSize
         && PaintWidth == other.PaintWidth
         && PaintHeight == other.PaintHeight
         && ShowLineNumbers == other.ShowLineNumbers
         && LineNumberWidth == other.LineNumberWidth
-        && CurrentLineLogical == other.CurrentLineLogical
-        && Selection == other.Selection
-        && CellHighlight == other.CellHighlight
         && ShowWhitespace == other.ShowWhitespace
         && Style.Equals(other.Style)
         && ReferenceEquals(Metrics, other.Metrics)
         && ReferenceEquals(Font, other.Font)
         && ReferenceEquals(UnderlineFont, other.UnderlineFont)
         && ReferenceEquals(TargetFont, other.TargetFont)
-        && BackColor.ToArgb() == other.BackColor.ToArgb()
-        && Ime.Equals(other.Ime);
+        && BackColor.ToArgb() == other.BackColor.ToArgb();
+
+    public bool Equals(FrameInputs? other) =>
+        other is not null
+        && SameLayoutAs(other)
+        && ReferenceEquals(Snapshot, other.Snapshot)
+        && TopLine == other.TopLine
+        && TopSegment == other.TopSegment
+        && ScrollX == other.ScrollX
+        && CurrentLineLogical == other.CurrentLineLogical
+        && Selection == other.Selection
+        && CellHighlight == other.CellHighlight
+        && Ime.Equals(other.Ime)
+        && ImeOrigin == other.ImeOrigin;
 
     // 等しい値は同じハッシュになる(Equals が見るメンバーの部分集合から作る)。
     public override int GetHashCode() =>

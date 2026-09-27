@@ -48,7 +48,7 @@ public sealed partial class EditorControl
         var buffer = TryAllocatePaintBuffer(e.Graphics, ClientRectangle);
         if (buffer is null)
         {
-            PaintAndRecord(e.Graphics);
+            PaintAndRecord(e.Graphics, clip);
         }
         else
         {
@@ -60,7 +60,7 @@ public sealed partial class EditorControl
                 // Render の BitBlt が BeginPaint の DC のクリップで絞られるので、これが無くても画素は
                 // 変わらないが、GDI+ / GDI の描画量と Graphics の状態を従来と揃えておく。
                 buffer.Graphics.SetClip(clip);
-                PaintAndRecord(buffer.Graphics);
+                PaintAndRecord(buffer.Graphics, clip);
                 buffer.Render(e.Graphics);
             }
         }
@@ -112,37 +112,223 @@ public sealed partial class EditorControl
     /// 描く前に記録を捨てる=描画が例外で抜けたら記録は null のまま(次の比較は必ず「変化あり」)。
     /// WM_PRINT 経由(DrawToBitmap / PrintWindow)でも記録してよい根拠は
     /// 実装計画 docs/plans/2026-09-25-perf-skip-invalidate.md §0.2。
+    /// クリップに交差する行だけを描く。全面の入力を記録してよい根拠は計画
+    /// docs/plans/2026-09-27-perf-partial-paint.md §0.3(不変条件 3)。
     /// </summary>
-    private void PaintAndRecord(Graphics g)
+    private void PaintAndRecord(Graphics g, Rectangle clip)
     {
         _lastPaintedInputs = null;
         var inputs = CaptureFrameInputs();
-        var frame = PaintBody(g, inputs, BackColor, _imeCtrl);
+        var rows = inputs is null ? null : _rowCache.Rows(inputs);
+        var frame = PaintBody(g, inputs, rows, clip, BackColor, _imeCtrl);
         // テスト観測用(TestHook_GetLastFrame)。SetSource 前(frame が null)は従来どおり更新しない。
+        // フェーズ 9: クリップに交差する行だけのフレームになる(本番コードで読む箇所はない)。
         if (frame is not null)
             _lastFrame = frame;
         _lastPaintedInputs = inputs;
     }
 
     /// <summary>
-    /// 今の描画の入力が、最後に描いたフレームの入力と異なるときだけ Invalidate する(設計書 §8.2)。
-    /// キャレット・選択の 4 経路(EditorControl.Caret.cs)専用。
+    /// 今の描画の入力と、画面の絵の入力(<see cref="_lastPaintedInputs"/>)の差から、描き直しが要る行の帯だけを
+    /// 無効化する(設計書 §14.1・計画 §0.2)。等しければ何もしない(フェーズ 3 の省略)。
+    /// 行の外に効く入力(<see cref="FrameInputs.SameLayoutAs"/>)やスクロール位置が違えば全面。
     /// </summary>
     /// <remarks>
-    /// 正しさの根拠: 画面に出ているのは <see cref="_lastPaintedInputs"/> から決定的に描いた絵である。
-    /// 今の入力が同じなら、描き直しても同じ絵になる。未処理の無効領域がある場合でも、その描画は
-    /// 今の入力で描かれる。スクロールのセッターは自前で無条件に Invalidate するので、この比較の外にある。
-    /// この根拠は「描画の入力を変える経路は、必ず自分で Invalidate する(他の経路の Invalidate に
-    /// 便乗しない)」という前提の上にだけ成り立つ。前提の詳細は <see cref="_lastPaintedInputs"/> の
-    /// フィールドコメント(EditorControl.cs)を参照。
-    /// 他の Invalidate(編集・IME・外観・CSV 強調・スクロール・リサイズ)は無条件のまま(変更範囲を最小にする)。
+    /// 正しさの根拠は計画 §0.3 の不変条件 3。無効化する帯は、前回の絵と今の絵で画素が違いうる範囲をすべて覆う
+    /// (記述子が行の絵を決め尽くす = <see cref="RowPaintKey"/> の doc。IME は原点の行と次の行)。
+    /// 描画の入力を変える経路は、必ずこれか <see cref="Control.Invalidate()"/> を自分で呼ぶ(不変条件 2)。
+    /// この引数なしの版はスクロールでは画素を移さない = スクロール位置が違えば全面(<c>allowScroll: false</c>)。
     /// </remarks>
-    private void InvalidateIfFrameChanged()
+    private void InvalidateChangedRows() => InvalidateChangedRows(allowScroll: false);
+
+    /// <summary>
+    /// <see cref="InvalidateChangedRows()"/> と同じ。<paramref name="allowScroll"/> が true(スクロールのセッター)なら、
+    /// スクロール位置の差を <see cref="IPaintSurface.TryScroll"/> で画素の移動に変え、露出した帯と、
+    /// 行の対応をずらして比べたときに記述子が違う行だけを無効化する(設計書 §14.2)。
+    /// </summary>
+    /// <remarks>
+    /// 画素を移した後は <see cref="_lastPaintedInputs"/> を今の入力にする(計画 §0.3 の不変条件 3。
+    /// 画面は、これから無効化する範囲を除いて、今の入力から描いた絵と同じになった)。
+    /// 全面に落とす条件: 記録がない・行の外に効く入力が違う・縦と横が同時に変わった・IME の未確定がある・
+    /// 移動量が可視域以上・行の対応が見つからない・<see cref="IPaintSurface.CanScroll"/> が false・移動に失敗した。
+    /// 全面のまま残すもの(設計書 §14.2): クランプ(UpdateVerticalScrollbar など)・ReplaceSource・ApplyAppearance・
+    /// WrapColumns は、この経路を通らないか allowScroll が false の経路で呼ばれる。
+    /// </remarks>
+    private void InvalidateChangedRows(bool allowScroll)
     {
-        var current = CaptureFrameInputs();
-        if (current is not null && current.Equals(_lastPaintedInputs))
+        var now = CaptureFrameInputs();
+        var old = _lastPaintedInputs;
+        if (now is null || old is null)
+        {
+            Invalidate();
             return;
-        Invalidate();
+        }
+        if (now.Equals(old))
+            return;
+        if (!now.SameLayoutAs(old))
+        {
+            Invalidate();
+            return;
+        }
+        int lh = now.Metrics.LineHeightPx;
+        bool scrolled =
+            now.TopLine != old.TopLine
+            || now.TopSegment != old.TopSegment
+            || now.ScrollX != old.ScrollX;
+        if (!scrolled)
+        {
+            InvalidateBands(
+                FrameDiff.DirtyBands(
+                    _rowCache.Keys(old),
+                    _rowCache.Keys(now),
+                    0,
+                    lh,
+                    now.PaintHeight
+                )
+            );
+            InvalidateImeRows(old, now);
+            return;
+        }
+        if (
+            !allowScroll
+            || old.Ime.IsActive
+            || now.Ime.IsActive
+            || !TryPlanScroll(old, now, out int shift, out int dx)
+            || !_paintSurface.CanScroll(this)
+        )
+        {
+            Invalidate();
+            return;
+        }
+        var bands = FrameDiff.DirtyBands(
+            _rowCache.Keys(old),
+            _rowCache.Keys(now),
+            shift,
+            lh,
+            now.PaintHeight
+        );
+        var area = new Rectangle(0, 0, now.PaintWidth, now.PaintHeight);
+        int dy = -shift * lh;
+        if (!_paintSurface.TryScroll(this, dx, dy, area, out var uncovered))
+        {
+            Invalidate();
+            return;
+        }
+        _lastPaintedInputs = now;
+        // ScrollWindowEx はシステムキャレットも画素と一緒に動かしうるので、置き直す(設計書 §14.2 の実機確認 1)。
+        PositionCaret();
+        InvalidateRectIfAny(uncovered);
+        InvalidateRectIfAny(ExposedStrip(area, dx, dy));
+        InvalidateBands(bands);
+    }
+
+    /// <summary>
+    /// 行の対応(新しい行 i = 古い行 i + <paramref name="shift"/>)と横の移動量を決める。縦と横が同時に変わるとき・
+    /// 移動量が(縦は可視行数以上・横は描画幅(<see cref="FrameInputs.PaintWidth"/>)以上)のとき・
+    /// 行の対応が見つからないときは false(全面)。
+    /// 行の対応は可視行の (論理行, 視覚行) で探す。対応が誤っていても記述子の比較が違う行を無効化するので、
+    /// 正しさには効かない(効率だけ)。
+    /// </summary>
+    /// <remarks>
+    /// 設計書 §14.2: 「移動量が可視行数未満」のときだけ画素スクロールを許す。PageUp/PageDown のように
+    /// 可視行数以上動く場合は全面にする。可視行数は <c>PaintHeight / 行高</c>(切り捨て。
+    /// <see cref="VisibleRowCount"/> と同じ定義)であり、「移動量(行) × 行高 &lt; PaintHeight」では
+    /// ちょうど可視行数ぶんの移動を最後の部分行の余白で誤って通してしまう(2026-09-27 実測の退行:
+    /// 可視行数 41・行高 16px・PaintHeight 661px のとき 41*16=656&lt;661 で受理していた)。
+    /// </remarks>
+    private bool TryPlanScroll(FrameInputs old, FrameInputs now, out int shift, out int dx)
+    {
+        shift = 0;
+        dx = 0;
+        bool vertical = now.TopLine != old.TopLine || now.TopSegment != old.TopSegment;
+        bool horizontal = now.ScrollX != old.ScrollX;
+        if (vertical && horizontal)
+            return false;
+        if (horizontal)
+        {
+            dx = old.ScrollX - now.ScrollX;
+            return Math.Abs(dx) < now.PaintWidth;
+        }
+        var oldRows = _rowCache.Rows(old);
+        var nowRows = _rowCache.Rows(now);
+        if (oldRows.Count == 0 || nowRows.Count == 0)
+            return false;
+        int k = IndexOfRow(oldRows, nowRows[0]);
+        if (k > 0)
+            shift = k;
+        else
+        {
+            int j = IndexOfRow(nowRows, oldRows[0]);
+            if (j <= 0)
+                return false;
+            shift = -j;
+        }
+        // 行高 0 の防御(VisibleRowCount と同じ形): 万一 0 のとき、ガードなしでは 0 除算例外になる。
+        int fullRows = now.PaintHeight / Math.Max(1, now.Metrics.LineHeightPx);
+        return Math.Abs(shift) < fullRows;
+    }
+
+    private static int IndexOfRow(IReadOnlyList<VisualRow> rows, VisualRow target)
+    {
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (
+                rows[i].LogicalLine == target.LogicalLine
+                && rows[i].SegmentIndex == target.SegmentIndex
+            )
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// 画素を移して露出した帯。この帯は必ず描き直しが要る(露出した行に加え、途中で切れていた旧最下行の、
+    /// 画面になかった下半分もこの帯に入る。設計書 §14.2)。ScrollWindowEx の prcUpdate(uncovered)も通常はこの帯を含むが、
+    /// その中身は実装(と偽の画面)に依存するので、それに頼らず自分で求めた帯も無効化する(保険)。
+    /// </summary>
+    private static Rectangle ExposedStrip(Rectangle area, int dx, int dy) =>
+        dy < 0 ? Rectangle.FromLTRB(area.Left, area.Bottom + dy, area.Right, area.Bottom)
+        : dy > 0 ? Rectangle.FromLTRB(area.Left, area.Top, area.Right, area.Top + dy)
+        : dx < 0 ? Rectangle.FromLTRB(area.Right + dx, area.Top, area.Right, area.Bottom)
+        : dx > 0 ? Rectangle.FromLTRB(area.Left, area.Top, area.Left + dx, area.Bottom)
+        : Rectangle.Empty;
+
+    /// <summary>テスト専用: 画素の移動先を差し替える(偽の画面)。</summary>
+    internal static void TestHook_SetPaintSurface(EditorControl c, IPaintSurface surface) =>
+        c._paintSurface = surface;
+
+    private void InvalidateBands(List<(int Top, int Bottom)> bands)
+    {
+        int width = ClientSize.Width;
+        foreach (var (top, bottom) in bands)
+            InvalidateRectIfAny(new Rectangle(0, top, width, bottom - top));
+    }
+
+    /// <summary>
+    /// 未確定表示の行を無効化する。未確定表示は行の帯でクリップせずに描くので、原点の行と次の行の 2 行ぶんにする
+    /// (太字のディセンダが帯を越える場合の余裕。越えないことは L5 で確かめる。設計書 §14.1 の例外 2)。
+    /// </summary>
+    private void InvalidateImeRows(FrameInputs old, FrameInputs now)
+    {
+        if (old.Ime.Equals(now.Ime) && old.ImeOrigin == now.ImeOrigin)
+            return;
+        int lh = now.Metrics.LineHeightPx;
+        int width = ClientSize.Width;
+        if (old.ImeOrigin is Point o)
+            InvalidateRectIfAny(new Rectangle(0, o.Y, width, 2 * lh));
+        if (now.ImeOrigin is Point n)
+            InvalidateRectIfAny(new Rectangle(0, n.Y, width, 2 * lh));
+    }
+
+    /// <summary>
+    /// クライアント領域と交差する部分だけを無効化する。空なら何もしない
+    /// (<c>Invalidate(Rectangle.Empty)</c> は全面の無効化に化ける。設計書 §14.1)。
+    /// </summary>
+    private void InvalidateRectIfAny(Rectangle r)
+    {
+        r.Intersect(ClientRectangle);
+        if (r.Width > 0 && r.Height > 0)
+            Invalidate(r);
     }
 
     /// <summary>
@@ -153,13 +339,16 @@ public sealed partial class EditorControl
     private void InvalidateAndForgetPaintedFrame()
     {
         _lastPaintedInputs = null;
+        _rowCache.Clear();
         Invalidate();
     }
 
     /// <summary>
     /// 描画が読む状態を集める唯一の場所(設計書 §8.1)。SetSource 前は null。
     /// 描画(<see cref="PaintBody"/>)は、ここで集めた値<b>だけ</b>を使う
-    /// (例外は IME の未確定表示。<see cref="FrameInputs"/> の remarks を参照)。
+    /// (IME の未確定表示も、原点は <see cref="FrameInputs.ImeOrigin"/> として、フォント・色・行高は
+    /// フォント 3 つ・<see cref="FrameInputs.Style"/>・<see cref="FrameInputs.Metrics"/> としてここに入る。
+    /// <see cref="FrameInputs"/> の remarks を参照)。
     /// </summary>
     private FrameInputs? CaptureFrameInputs()
     {
@@ -210,22 +399,30 @@ public sealed partial class EditorControl
             TargetFont = _targetFontCache,
             BackColor = BackColor,
             Ime = _imeCtrl.State,
+            ImeOrigin = _imeCtrl.ComputeOrigin(),
         };
     }
 
     /// <summary>
     /// <paramref name="inputs"/> <b>だけ</b>からフレームを組み立てて描き、描いたフレームを返す。
     /// <paramref name="inputs"/> が null(SetSource 前)なら <paramref name="emptyBackColor"/> で塗るだけで null を返す。
+    /// クリップに交差する行だけを描く(設計書 §14.1)。
     /// </summary>
     /// <remarks>
     /// static にして、生の状態への出口を引数だけに限る(描画が FrameInputs の外の状態を読めないことを
-    /// コンパイラで保証する)。<paramref name="ime"/> が唯一の例外で、<see cref="ImeController.Draw"/> は
-    /// host 経由で生の状態を読む(<see cref="FrameInputs"/> の remarks)。
+    /// コンパイラで保証する)。<paramref name="ime"/> はフォントと色を host から読む(値は
+    /// <see cref="FrameInputs"/> の <see cref="FrameInputs.Style"/>・フォントと同じ)。加えて未確定文字列の
+    /// 文字列本体・節境界・Attrs は <paramref name="ime"/> 自身が持つ <c>_ime</c> から読む
+    /// (<paramref name="inputs"/>.Ime と同じ値: キャプチャとこの描画呼び出しが同じ同期呼び出しの中で起きるため)。
     /// <paramref name="emptyBackColor"/> は inputs が null のときだけ使う。
+    /// <paramref name="rows"/> は <paramref name="inputs"/> から <see cref="FrameRowCache"/> が作ったもの
+    /// (描画と差分で共有する)。
     /// </remarks>
     private static Frame? PaintBody(
         Graphics g,
         FrameInputs? inputs,
+        IReadOnlyList<VisualRow>? rows,
+        Rectangle clip,
         Color emptyBackColor,
         ImeController ime
     )
@@ -237,15 +434,22 @@ public sealed partial class EditorControl
         // コントロールを BackColor(emptyBackColor)で塗る。なお右下の角は VScrollBar(高さいっぱいに
         // dock する子)が覆っており、この行の役目ではない(ctor の Dock 順の注意を参照)。
         g.Clear(inputs?.BackColor ?? emptyBackColor);
-        if (inputs is null)
+        if (inputs is null || rows is null)
             return null;
 
-        // 起点 (TopLine, TopSegment)・折り返し設定・可視高さは BuildVisibleRows に集約する
-        // (2026-08-22 A-6)。GetVisibleCharRange の doc が言う「描画と同じ Build を使う」を
-        // 言葉の約束ではなく呼び出しの共有にする=片側だけ起点がずれる変異が成立しなくなる。
+        // フェーズ 9: クリップに交差する行だけを組み立てて描く(設計書 §14.1)。g のクリップは呼び出し側が掛けている
+        // (WM_PAINT は BeginPaint の DC、バッファは SetClip)。行の外の描画(g.Clear・背景全域 op・IME)は
+        // g のクリップで絞られる。
+        var drawn = FrameBuilder.RowsTouching(
+            rows,
+            clip.Top,
+            clip.Bottom,
+            inputs.Metrics.LineHeightPx,
+            inputs.CellHighlight
+        );
         var frame = FrameBuilder.Build(
             inputs.Snapshot,
-            BuildVisibleRows(inputs),
+            drawn,
             inputs.PaintWidth,
             inputs.PaintHeight,
             inputs.LineNumberWidth,
@@ -262,11 +466,13 @@ public sealed partial class EditorControl
         // ここ → システムキャレット の順序=設計 §3-3)。未確定期間外は
         // 呼ばない=空描画のコストゼロ。節ハイライト(反転)は Task 10・
         // IME 内キャレット位置反映は Task 11 で扱う。
-        // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済 (IImeOverlayHost 経由で
-        // Font/Color/Metrics/ComputeCaretPoint を取得)。
-        // 2026-09-25 フェーズ 3: ImeController.Draw は host 経由で生の状態を読む(FrameInputs の remarks)。
-        if (inputs.Ime.IsActive)
-            ime.Draw(g);
+        // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済。
+        // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る。Draw が host から読むのは
+        // フォント・色・行高だけ(FrameInputs の フォント 3 つ・Style・Metrics と同じ値)。未確定文字列の
+        // テキスト・節境界・Attrs は ime 自身が持つ _ime から読む(inputs.Ime と同じ値。キャプチャと
+        // この呼び出しが同じ同期呼び出しの中で起きるため)。
+        if (inputs.ImeOrigin is Point origin)
+            ime.Draw(g, origin);
 
         return frame;
     }
@@ -345,8 +551,14 @@ public sealed partial class EditorControl
     /// 記録する(<see cref="PaintAndRecord"/>)。false なら記録せずに今の状態を描く(オラクルの正解。
     /// <see cref="_lastPaintedInputs"/> も <see cref="_lastFrame"/> も書き換えない)。
     /// 画面外の HostForm には WM_PAINT が来ないので、描画とその記録はこれで同期的に起こす。
+    /// <paramref name="clip"/> を渡すと、その矩形でクリップして描く(WM_PAINT の部分再描画を模す)。
+    /// 省略時はクライアント全域。
     /// </summary>
-    internal static Bitmap TestHook_PaintToBitmap(EditorControl c, bool record)
+    internal static Bitmap TestHook_PaintToBitmap(
+        EditorControl c,
+        bool record,
+        Rectangle? clip = null
+    )
     {
         var size = c.ClientSize;
         var bmp = new Bitmap(
@@ -355,16 +567,50 @@ public sealed partial class EditorControl
             System.Drawing.Imaging.PixelFormat.Format32bppArgb
         );
         using var g = Graphics.FromImage(bmp);
+        var area = clip ?? new Rectangle(Point.Empty, size);
+        if (clip is not null)
+            g.SetClip(area);
         if (record)
-            c.PaintAndRecord(g);
+            c.PaintAndRecord(g, area);
         else
-            PaintBody(g, c.CaptureFrameInputs(), c.BackColor, c._imeCtrl);
+        {
+            // 正解の絵: キャッシュを通さず、今の状態から可視行を作り直して全面を描く(オラクルの独立性)。
+            var inputs = c.CaptureFrameInputs();
+            var rows = inputs is null ? null : BuildVisibleRows(inputs);
+            PaintBody(g, inputs, rows, area, c.BackColor, c._imeCtrl);
+        }
         return bmp;
     }
 
     /// <summary>テスト専用: 最後に描いたフレームの入力を持っているか。</summary>
     internal static bool TestHook_HasLastPaintedInputs(EditorControl c) =>
         c._lastPaintedInputs is not null;
+
+    /// <summary>テスト専用: キャレットとアンカーを動かさずに本文を置き換え、編集の後処理(AfterEdit)を通す。</summary>
+    internal void TestHook_ReplaceWithoutCaret(int start, int length, string text)
+    {
+        _buffer!.Replace(start, length, text);
+        AfterEdit();
+    }
+
+    /// <summary>テスト専用: 今の可視行のうち、<paramref name="offset"/> を含む最初の視覚行の番号(ない場合は -1)。</summary>
+    internal int TestHook_VisualRowIndexOf(int offset)
+    {
+        var rows = _rowCache.Rows(CaptureFrameInputs()!);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (
+                offset >= rows[i].SegmentStartChar
+                && offset <= rows[i].SegmentStartChar + rows[i].SegmentLength
+            )
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>テスト専用: 画面の絵の入力(記録)と今の入力が等しいか。</summary>
+    internal static bool TestHook_LastPaintedEqualsCurrent(EditorControl c) =>
+        c._lastPaintedInputs is { } p && p.Equals(c.CaptureFrameInputs());
 
     private static ViewportStyle DefaultStyle() =>
         new(

@@ -134,19 +134,31 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     private volatile kxEdit.Core.Layout.Frame? _lastFrame;
 
     // 2026-09-25 性能改善フェーズ 3(設計書 §8.2): 最後に描き終えたフレームの入力。
-    // キャレット・選択の 4 経路は、今の入力がこれと等しければ Invalidate を省く(InvalidateIfFrameChanged)。
-    // null = 「画面の絵の入力が分からない」= 比較は必ず「変化あり」になる(描画前・描画の例外・
+    // 【不変条件 3】これは「画面の絵が表す入力」である。画面は、保留中の無効領域を除いて、この入力から
+    // 描いた絵と画素で一致する(フェーズ 9: 部分描画でも全面の入力を記録してよい根拠。計画 §0.3)。
+    // フェーズ 9b: スクロールのセッターは画素を移した直後にこれを今の入力にする。画素を移すのは
+    // 保留中の無効領域がないときだけ(IPaintSurface.CanScroll)。
+    // InvalidateChangedRows は、今の入力とこれの差から描き直しが要る行の帯だけを無効化する
+    // (等しければ何もしない)。
+    // null = 「画面の絵の入力が分からない」= 必ず全面を無効化する(描画前・描画の例外・
     // 本文/フォントの丸ごと差し替え = InvalidateAndForgetPaintedFrame)。UI スレッド専用。
     //
-    // 【前提(不変条件 2)】FrameInputs の元になる状態(_topLine・_topSegment・_scrollX・
+    // 【不変条件 2】FrameInputs の元になる状態(_topLine・_topSegment・_scrollX・
     // _cellHighlight・_style・_showWhitespace・_hscroll.Visible など)を書き換える経路は、
-    // 必ず自分で Invalidate() を呼ぶ(キャレット・選択の 4 経路だけは InvalidateIfFrameChanged())。
-    // 他の経路の Invalidate に便乗してはならない。Invalidate せずに状態を変えると、その後に
+    // 状態を変えた「後に」、必ず自分で Invalidate() か InvalidateChangedRows() を呼ぶ
+    // (差の行だけを無効化する経路 = キャレット・選択の 4 経路・AfterEdit・IME・セル強調は InvalidateChangedRows())。
+    // 他の経路の無効化に便乗してはならない。無効化せずに状態を変えると、その後に
     // DrawToBitmap / PrintWindow(WM_PRINT)や部分的な WM_PAINT で記録が更新された場合、または
-    // 4 経路の中で比較の後に状態を変えた場合に、比較が「変化なし」になって古い絵が画面に残る。
-    // 以前のように、次のキャレット移動で必ず直るとは限らない。
+    // 比較の後に状態を変えた場合に、差が「変化なし」や一部の行だけになって古い絵が画面に残る。
     // (不変条件 1「描画が読む状態は FrameInputs の中にある」は、PaintBody が static であることでコンパイラが守る。)
     private FrameInputs? _lastPaintedInputs;
+
+    // 2026-09-27 性能改善フェーズ 9: 描画の入力 → 可視行と記述子(直近 2 件)。
+    // InvalidateAndForgetPaintedFrame で _lastPaintedInputs と一緒に捨てる(古い本文を握らない)。
+    private readonly FrameRowCache _rowCache = new();
+
+    // 2026-09-27 性能改善フェーズ 9b: スクロールで画素を移す先(テストは TestHook_SetPaintSurface で差し替える)。
+    private IPaintSurface _paintSurface = Win32PaintSurface.Instance;
 
     // P6 Task 10 レビュー M-2: CurrentBuffer の null 経路で毎回 new すると
     // Assert.Same(ctrl.CurrentBuffer, ctrl.CurrentBuffer) が SetSource 前で失敗する反直観挙動になる。
@@ -436,8 +448,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// <see cref="CaptureFrameInputs"/> を経由するので、従来は共有していなかった可視高さ
     /// (<see cref="PaintHeightPx"/>)も共有される。<c>UpdateHorizontalScrollbar</c> は<b>本ヘルパを使わない</b>=
     /// 折り返し OFF 専用で topSegment が 0 固定の別経路であり、起点の意味が違う。
+    /// 2026-09-27 フェーズ 9: <see cref="FrameRowCache"/> もここを通す(直近 2 件のキャッシュ経由)。
     /// </remarks>
-    private static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
+    internal static IReadOnlyList<VisualRow> BuildVisibleRows(FrameInputs inputs) =>
         ViewportLayout.Build(
             inputs.Snapshot,
             inputs.TopLine,
@@ -894,7 +907,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
 
     /// <summary>
     /// 可視領域の先頭に置く論理行(0 始まり)。set 時は [0, LineCount-1] にクランプ、
-    /// 変化時のみ VScrollBar.Value を追従させて Invalidate。折り返し ON でも TopLine の
+    /// 変化時のみ VScrollBar.Value を追従させて再描画する(フェーズ 9b: 画素を移して露出した帯と
+    /// 変わった行だけを無効化する。移せないときは全面)。折り返し ON でも TopLine の
     /// 先頭視覚行から描画する(§0-3=論理行の途中から始めない)。
     /// </summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -913,7 +927,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (_vscroll.Value != clamped)
                 _vscroll.Value = clamped;
             PositionCaret();
-            Invalidate();
+            InvalidateChangedRows(allowScroll: true); // フェーズ 9b: 画素を移して露出した帯だけ(設計書 §14.2)
         }
     }
 
@@ -944,7 +958,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_vscroll.Value != clampedLine)
             _vscroll.Value = clampedLine;
         PositionCaret();
-        Invalidate();
+        InvalidateChangedRows(allowScroll: true); // フェーズ 9b: 画素を移して露出した帯だけ(設計書 §14.2)
     }
 
     /// <summary>
@@ -987,7 +1001,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// 水平スクロール位置(px)。<b>折り返し OFF かつ HScrollBar 表示中のみ有効</b>
     /// (ON 時 / 内容が可視領域に収まり HScroll 非表示の間は 0 固定・set は no-op)。
     /// [0, MaxScrollX] にクランプ(MaxScrollX は HScrollBar.Maximum - LargeChange + 1 相当)。
-    /// 変化時のみ HScrollBar.Value を追従・キャレット再配置・Invalidate。
+    /// 変化時のみ HScrollBar.Value を追従・キャレット再配置・再描画(フェーズ 9b: 画素を移して露出した帯だけ)。
     /// </summary>
     /// <remarks>
     /// HScrollBar 非表示時ガードが無いと、直前まで表示されていたときの
@@ -1012,7 +1026,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (_hscroll.Value != clamped)
                 _hscroll.Value = clamped;
             PositionCaret();
-            Invalidate();
+            InvalidateChangedRows(allowScroll: true); // フェーズ 9b: 画素を移して露出した帯だけ(設計書 §14.2)
         }
     }
 
@@ -1084,7 +1098,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_cellHighlight == range)
             return;
         _cellHighlight = range;
-        Invalidate();
+        InvalidateChangedRows();
     }
 
     /// <summary>
@@ -1095,7 +1109,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         if (_cellHighlight is null)
             return;
         _cellHighlight = null;
-        Invalidate();
+        InvalidateChangedRows();
     }
 
     /// <summary>
@@ -1656,14 +1670,16 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
     /// </summary>
     /// <remarks>
     /// 順序は「バッファ変化 → スクロールバー再計算(Update*) → キャレット再配置(PositionCaret)
-    /// → 追従スクロール(BringCaretIntoView) → 再描画(Invalidate)」。
+    /// → 追従スクロール(BringCaretIntoView) → 再描画(InvalidateChangedRows = 変わった行だけ)」。
     /// - Update*Scrollbar が先: 挿入で総行数/最長行が変わっている可能性があるため、Position/追従の
     ///   前に Maximum/LargeChange を反映する必要がある。
     /// - PositionCaret は BringCaretIntoView の内部で必要な OS 側キャレット反映を先出しする
     ///   (BringCaretIntoView 自体は TopLine/ScrollX の setter を経由するときに PositionCaret を
     ///   間接的に呼ぶが、可視範囲内で TopLine/ScrollX が変わらない編集経路では呼ばれないため)。
     /// - BringCaretIntoView は挿入後キャレットが下端/右端を越えたら TopLine/ScrollX を追随させる。
-    /// - Invalidate は最後(BringCaretIntoView 経由の setter が変化なしの場合でも本文が変わっている)。
+    /// - InvalidateChangedRows は最後(BringCaretIntoView 経由の setter が変化なしの場合でも本文が変わっている。
+    ///   スクロールした場合は setter が無効化済み(フェーズ 9b: 画素を移せたときは露出した帯と差の行だけで、
+    ///   画面の絵の入力も今の入力になっている)で、こちらはその後の差だけを無効化する)。
     /// </remarks>
     // Task 3c: InputRouter の編集系ハンドラ(HandleBack/Delete/Enter/Tab)から呼ぶため internal 化。
     // 既存の内部呼び出し(Ime.cs / この cs 内の Cut/Paste/Undo/Redo/InsertConfirmedText 経路)は
@@ -1681,7 +1697,7 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         UpdateHorizontalScrollbar();
         PositionCaret();
         BringCaretIntoView();
-        Invalidate();
+        InvalidateChangedRows();
         // P5 Task 5 / Task 3d: 編集後に RPC スレッド用スナップショットを更新 (Adapter 経由=
         // 元 CacheSnapshot() + `_lastLineSegs = null;` を 1 経路に集約)。_buffer は非 null 経路
         // (AfterEdit は編集経路末尾=SetSource 前は呼ばれない)。
