@@ -59,4 +59,16 @@ public class RowsTouchingTests
         var rows = Rows();
         Assert.Same(rows, FrameBuilder.RowsTouching(rows, 0, 51, Lh, null));
     }
+
+    /// <summary>
+    /// 最下行(YPx=40・高さ 10 = [40, 50))の下端まで届かない clipBottom=45(行の途中で切れる)でも、
+    /// 全行の本体はクリップと交差し縁だけの追加は起きないので、近道は rows をそのまま返す
+    /// (作り直した同じ内容の新しいリストではなく、同一インスタンス)。
+    /// </summary>
+    [Fact]
+    public void A_clip_that_cuts_the_last_row_midway_also_returns_the_input_list()
+    {
+        var rows = Rows();
+        Assert.Same(rows, FrameBuilder.RowsTouching(rows, 0, 45, Lh, null));
+    }
 }

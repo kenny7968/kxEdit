@@ -65,7 +65,15 @@ internal static class FrameBuilder
     /// その画素がクリップに入り、行 r がセル強調と交差するときだけ、行 r も足す。
     /// </summary>
     /// <remarks>
-    /// すべての行が要るときは <paramref name="rows"/> をそのまま返す(全面の描画で配列を作り直さない)。
+    /// すべての行の本体がクリップと交差し、縁だけの追加(工程 8 のセル強調枠下辺)が 1 行も起きないときは
+    /// <paramref name="rows"/> をそのまま返す(全面の描画で配列を作り直さない)。行は昇順(<see cref="VisualRow.YPx"/> が
+    /// 単調増加)なので、<c>clipTop &lt;= 0</c> かつ <c>clipBottom &gt; rows[^1].YPx</c> であれば
+    /// 「本体条件 <c>row.YPx &lt; clipBottom &amp;&amp; row.YPx + lineHeight &gt; clipTop</c>」がすべての行で成り立つ
+    /// (最下行より Y が小さい行はなおのこと <c>clipBottom</c> の手前にあり、<c>clipTop &lt;= 0</c> なら
+    /// <c>row.YPx + lineHeight &gt; 0</c> は YPx&gt;=0・lineHeight&gt;0 から自明)。本体が全行で true なら
+    /// 縁だけの行(<c>!body &amp;&amp; ...</c> のときだけ足す)は生まれないので、ループの結果は rows と同じ並びになる。
+    /// <b>最下行がクリップの途中で切れていてもこの近道は使える</b>(旧実装は <c>clipBottom &gt; rows[^1].YPx + lineHeight</c>
+    /// を要求しており、最下行の下端までクリップが届く「完全な全面」しか近道にできていなかった)。
     /// 行の Y は <see cref="ViewportLayout.Build"/> が 0 から lineHeight ずつ積んだもの(昇順)である前提。
     /// </remarks>
     internal static IReadOnlyList<VisualRow> RowsTouching(
@@ -78,7 +86,7 @@ internal static class FrameBuilder
     {
         if (rows.Count == 0 || clipBottom <= clipTop)
             return [];
-        if (clipTop <= 0 && clipBottom > rows[^1].YPx + lineHeight)
+        if (clipTop <= 0 && clipBottom > rows[^1].YPx)
             return rows;
         var result = new List<VisualRow>();
         foreach (var row in rows)

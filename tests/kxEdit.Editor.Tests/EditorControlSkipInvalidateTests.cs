@@ -181,7 +181,11 @@ public class EditorControlSkipInvalidateTests
         });
 
     /// <summary>
-    /// スクロールを伴う移動: スクロールのセッターが無条件に 1 回、InvalidateChangedRows が TopLine の違いを見て全面をもう 1 回(設計書 §8.4。変更前も 2 回)。
+    /// スクロールを伴う移動: BringCaretIntoView が動かす TopLine のセッターが
+    /// InvalidateChangedRows(allowScroll: true) を呼び(1 回目)、SetCaretCharOffset 末尾の
+    /// InvalidateChangedRows() が変わった行を見てもう 1 回(2 回目)。この Form は Show() していないため
+    /// editor.Visible が false になり、Win32PaintSurface.CanScroll が false を返す
+    /// →1 回目は画素を移すのではなく全面の Invalidate() に落ちる(設計書 §8.4。変更前も 2 回)。
     /// </summary>
     [Fact]
     public void CaretMove_WithScroll_InvalidatesAtMostTwice() =>

@@ -29,6 +29,10 @@ namespace kxEdit.Editor;
 /// <para>
 /// 未確定表示の原点は <see cref="ImeOrigin"/> で受け取る。<see cref="ImeController.Draw(Graphics, Point)"/> が
 /// host から読むのはフォント・色・行高で、いずれもフォント 3 つ・<see cref="Style"/>・<see cref="Metrics"/> としてここにある。
+/// 節の文字列本体・節境界・Attrs は Draw が <see cref="ImeController"/> 自身が持つ <c>_ime</c> から読む
+/// (FrameInputs にはメンバーを持たない)。この値は <see cref="Ime"/> と等しい —— キャプチャ(<c>CaptureFrameInputs</c>
+/// が <c>_imeCtrl.State</c> を読む)とこの描画呼び出しが同じ同期呼び出しの中で起きるため、その間に別の
+/// IME イベントが割り込んで <c>_ime</c> だけを書き換えることはない。
 /// </para>
 /// </remarks>
 internal sealed record FrameInputs

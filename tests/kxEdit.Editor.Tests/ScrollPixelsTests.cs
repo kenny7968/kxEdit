@@ -217,6 +217,9 @@ public class ScrollPixelsTests
     /// Task 4 レビュー由来(Review Focus 1 のスクロールを伴う版): EnsureVisibleCharRange は一時的にキャレットを動かし、
     /// 追従スクロールのセッターは画面の絵の入力を一時的な状態で記録する(画素を移す)。戻した後の画面が
     /// 今の状態の絵と一致すること(古い現在行が残らないこと)を、偽の画面に無効化した矩形を合成して確かめる。
+    /// これはエンドツーエンドの性質テストであり、<c>EnsureVisibleCharRange</c> の finally 内にある
+    /// 特定の <c>InvalidateChangedRows()</c> 呼び出し 1 つを単体で保証するものではない
+    /// (その呼び出しが load-bearing かどうかは <c>EnsureVisibleCharRange</c> 側のコメントを参照)。
     /// </summary>
     [Fact]
     public void EnsureVisibleCharRange_that_scrolls_leaves_no_stale_row() =>

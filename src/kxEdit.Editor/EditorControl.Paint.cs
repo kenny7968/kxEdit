@@ -224,7 +224,8 @@ public sealed partial class EditorControl
 
     /// <summary>
     /// 行の対応(新しい行 i = 古い行 i + <paramref name="shift"/>)と横の移動量を決める。縦と横が同時に変わるとき・
-    /// 移動量が可視行数以上のとき・行の対応が見つからないときは false(全面)。
+    /// 移動量が(縦は可視行数以上・横は描画幅(<see cref="FrameInputs.PaintWidth"/>)以上)のとき・
+    /// 行の対応が見つからないときは false(全面)。
     /// 行の対応は可視行の (論理行, 視覚行) で探す。対応が誤っていても記述子の比較が違う行を無効化するので、
     /// 正しさには効かない(効率だけ)。
     /// </summary>
@@ -262,7 +263,8 @@ public sealed partial class EditorControl
                 return false;
             shift = -j;
         }
-        int fullRows = now.PaintHeight / now.Metrics.LineHeightPx;
+        // 行高 0 の防御(VisibleRowCount と同じ形): 万一 0 のとき、ガードなしでは 0 除算例外になる。
+        int fullRows = now.PaintHeight / Math.Max(1, now.Metrics.LineHeightPx);
         return Math.Abs(shift) < fullRows;
     }
 
@@ -409,7 +411,9 @@ public sealed partial class EditorControl
     /// <remarks>
     /// static にして、生の状態への出口を引数だけに限る(描画が FrameInputs の外の状態を読めないことを
     /// コンパイラで保証する)。<paramref name="ime"/> はフォントと色を host から読む(値は
-    /// <see cref="FrameInputs"/> の <see cref="FrameInputs.Style"/>・フォントと同じ)。
+    /// <see cref="FrameInputs"/> の <see cref="FrameInputs.Style"/>・フォントと同じ)。加えて未確定文字列の
+    /// 文字列本体・節境界・Attrs は <paramref name="ime"/> 自身が持つ <c>_ime</c> から読む
+    /// (<paramref name="inputs"/>.Ime と同じ値: キャプチャとこの描画呼び出しが同じ同期呼び出しの中で起きるため)。
     /// <paramref name="emptyBackColor"/> は inputs が null のときだけ使う。
     /// <paramref name="rows"/> は <paramref name="inputs"/> から <see cref="FrameRowCache"/> が作ったもの
     /// (描画と差分で共有する)。
@@ -464,7 +468,9 @@ public sealed partial class EditorControl
         // IME 内キャレット位置反映は Task 11 で扱う。
         // Task 3a: 描画ロジックは ImeController.Draw に bit-perfect 移設済。
         // 2026-09-27 フェーズ 9: 原点は FrameInputs.ImeOrigin から受け取る。Draw が host から読むのは
-        // フォント・色・行高だけ(FrameInputs の フォント 3 つ・Style・Metrics と同じ値)。
+        // フォント・色・行高だけ(FrameInputs の フォント 3 つ・Style・Metrics と同じ値)。未確定文字列の
+        // テキスト・節境界・Attrs は ime 自身が持つ _ime から読む(inputs.Ime と同じ値。キャプチャと
+        // この呼び出しが同じ同期呼び出しの中で起きるため)。
         if (inputs.ImeOrigin is Point origin)
             ime.Draw(g, origin);
 
