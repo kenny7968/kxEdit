@@ -950,7 +950,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // Math.Max(0, segment) は load-bearing: 負のセグメントが _topSegment に入ると
         // WalkBackVisualRows の `n -= seg` で n が増え、上方向の歩きが文書頭まで暴走する
         // (Task 2 fixup で ViewportLayout.Build の topSegment 負値に張ったガードと対称)。
-        int clampedSeg = clampedLine == line ? Math.Max(0, segment) : 0;
+        // 折り返し OFF ではセグメントは常に 0(perf-followups フェーズ 2・項目 11 の保険。到達する経路は
+        // ないが、_topSegment が古いまま残る形を塞ぐ。設計書 2026-09-27-perf-followups-design.md §15)。
+        int clampedSeg = clampedLine == line && _wrapColumns > 0 ? Math.Max(0, segment) : 0;
         if (clampedLine == _topLine && clampedSeg == _topSegment)
             return;
         _topLine = clampedLine;

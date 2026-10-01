@@ -23,7 +23,7 @@ public class ComputeCaretPointNoWrapShortcutTests
     [InlineData(10, 1, 0, 0, 11)] //    10 行 + 1px(11 行目が 1px だけ見える)
     [InlineData(10, -1, 0, 0, 11)] //   10 行 + (行高 - 1)px
     [InlineData(10, 0, 37, 0, 10)] //   TopLine > 0
-    [InlineData(10, 1, 37, 3, 10)] //   古い _topSegment(折り返し OFF でも SetTopPosition で残せる)
+    [InlineData(10, 1, 37, 3, 10)] //   古い _topSegment(公開経路では作れないのでリフレクションで再現する)
     [InlineData(0, 0, 37, 0, 0)] //     PaintHeightPx = 0
     public void Shortcut_MatchesAccumulation_ForEveryLine(
         int rows,
@@ -56,7 +56,18 @@ public class ComputeCaretPointNoWrapShortcutTests
                 int extra = frac < 0 ? lh - 1 : frac;
                 ctrl.Size = new Size(300, rows * lh + extra);
                 Assert.Equal(rows * lh + extra, ctrl.ClientSize.Height); // fixture 前提(枠なし)
-                ctrl.SetTopPosition(topLine, topSegment);
+                ctrl.SetTopPosition(topLine, 0);
+                // perf-followups フェーズ 2・項目 11: SetTopPosition は折り返し OFF でセグメントを 0 に丸めるようになり、
+                // 古い _topSegment は公開経路では作れない。ComputeCaretPoint の防御コード(古いセグメントの扱い)の
+                // 回帰を守るため、フィールドを直接書いて従来の状態を再現する。
+                if (topSegment != 0)
+                    typeof(EditorControl)
+                        .GetField(
+                            "_topSegment",
+                            System.Reflection.BindingFlags.Instance
+                                | System.Reflection.BindingFlags.NonPublic
+                        )!
+                        .SetValue(ctrl, topSegment);
                 Assert.Equal(topLine, ctrl.TopLine); // fixture 前提
                 Assert.Equal(topSegment, ctrl.TopSegment); // fixture 前提
 

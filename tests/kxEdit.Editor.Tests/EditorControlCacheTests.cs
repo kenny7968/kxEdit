@@ -282,4 +282,41 @@ public class EditorControlCacheTests
                 Assert.Equal(c.TestHook_LastLineSegsMissCount, c.TestHook_LineSegsInvokeCount);
             }
         });
+
+    /// <summary>
+    /// perf-followups フェーズ 2・項目 10: worker が UI スレッドへの Invoke を待っている間に本文が
+    /// 差し替わったら(OnSnapshotChanged がキャッシュを破棄した後に)、古いキーの結果を書かない。
+    /// 書くと、破棄した直後に古い TextSnapshot を握り直す(答えはキー照合で正しいが、GC を阻む)。
+    /// </summary>
+    [Fact]
+    public void LineSegs_EditWhileWorkerWaitsForInvoke_DoesNotCacheStaleKey() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("abcdefghij", 4);
+            using (f)
+            using (c)
+            {
+                var host = (IUiaTextHost)c;
+                c.TestHook_ResetLastLineSegsCounters();
+                Assert.False(c.TestHook_HasLastLineSegs); // 前提: まだ誰も問い合わせていない
+
+                var worker = System.Threading.Tasks.Task.Run(() => host.LineEnd(6));
+                // ポンプせずに待つ。カウンタは Invoke の前に加算されるので、1 になれば worker は Invoke に
+                // 入った(か入る直前)。UI スレッドが汲まない限り、Invoke の本体は走らない。
+                Assert.True(
+                    System.Threading.SpinWait.SpinUntil(
+                        () => c.TestHook_LineSegsInvokeCount == 1,
+                        5000
+                    ),
+                    "前提: worker が Invoke に入った"
+                );
+                c.ReplaceCharRange(0, 0, "X"); // 本文の差し替え(OnSnapshotChanged)
+                // worker が戻るまで汲み続ける(カウンタは Invoke を呼ぶ前に加算されるので、DoEvents 1 回では
+                // Invoke がまだ届いていないことがある)。
+                PumpUntil(worker);
+                Assert.True(worker.IsCompleted, "worker が終わらない");
+                Assert.Equal(1, c.TestHook_LastLineSegsMissCount); // 前提: 本体が古い snap で計算した
+                Assert.False(c.TestHook_HasLastLineSegs, "古いキーの行キャッシュが書かれた");
+            }
+        });
 }

@@ -568,7 +568,11 @@ internal class UiaTextHostAdapter : IUiaTextHost
             segs = LineLayout.Wrap(lineText.AsSpan(), maxWidthPx, metrics);
             // 全フィールドを設定したインスタンスを volatile 書き込みで公開する(RPC スレッドが読む)。
             // キーは実際に使った wrap と metrics(Segs がキーだけの関数であることを保つ)。
-            _lastLineSegs = new LineSegsCache(snap, line, wrap, metrics, segs);
+            // perf-followups フェーズ 2・項目 10: Invoke を待つ間に本文か折り返し桁が変わっていたら
+            // (OnSnapshotChanged / InvalidateLastLineSegs が先に走っていたら)書かない。書くと破棄の直後に
+            // 古い TextSnapshot を握り直し、大容量ファイルの差し替え後の GC を阻む(答えはキー照合で正しい)。
+            if (ReferenceEquals(snap, _bufferSnapshot) && wrap == _host.WrapColumns)
+                _lastLineSegs = new LineSegsCache(snap, line, wrap, metrics, segs);
             Interlocked.Increment(ref _testHook_lastLineSegsMissCount);
         }
 
@@ -891,6 +895,9 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     internal long TestHook_LineSegsInvokeCount =>
         Interlocked.Read(ref _testHook_lineSegsInvokeCount);
+
+    /// <summary>行キャッシュが空でないか(perf-followups フェーズ 2・項目 10。Editor.Tests が観測する)。</summary>
+    internal bool TestHook_HasLastLineSegs => _lastLineSegs is not null;
 
     /// <summary>
     /// テスト専用: Handle のガード(<see cref="IsUiBound"/>)を通過したものとして扱う。

@@ -33,6 +33,9 @@ public sealed partial class EditorControl
     /// </summary>
     internal long TestHook_LineSegsInvokeCount => _uia.TestHook_LineSegsInvokeCount;
 
+    /// <summary>行キャッシュが空でないか(perf-followups フェーズ 2・項目 10)。</summary>
+    internal bool TestHook_HasLastLineSegs => _uia.TestHook_HasLastLineSegs;
+
     /// <summary>segs キャッシュのヒット/ミス/Invoke のカウンタをリセット。</summary>
     internal void TestHook_ResetLastLineSegsCounters() => _uia.TestHook_ResetLastLineSegsCounters();
 
