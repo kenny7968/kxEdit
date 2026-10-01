@@ -332,8 +332,9 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// 判定の順序:
     /// <list type="number">
     /// <item>UI スレッドが束縛されていない(<see cref="IsUiBound"/>)→ fallback。</item>
-    /// <item>InvokeRequired → 同期 Invoke。Invoke 中の破棄(ObjectDisposedException /
-    /// InvalidOperationException)は fallback。</item>
+    /// <item>InvokeRequired → 同期 Invoke。届いた時点で 1 をもう一度判定する(偽なら fallback)。
+    /// Invoke 中の破棄(ObjectDisposedException / InvalidOperationException)と UI スレッドの終了
+    /// (InvalidAsynchronousStateException)は fallback。</item>
     /// <item>それ以外は、今のスレッドを <see cref="_uiThreadId"/> と比べ、違えば fallback。</item>
     /// </list>
     /// 3 が要る理由: 1 と 2 の間で UI スレッドが Handle を破棄すると、InvokeRequired は false を返す
@@ -345,11 +346,15 @@ internal class UiaTextHostAdapter : IUiaTextHost
     {
         if (!IsUiBound)
             return fallback;
+        TestHook_AfterUiBoundCheck?.Invoke();
         if (_host.InvokeRequired)
         {
             try
             {
-                return _host.Invoke(body);
+                // 届いた時点で、UI スレッドでもう一度ガードを見る(TryPostToUi と対称)。
+                // 自分の Handle が無く親の Handle があると、InvokeRequired は親で判定されて true になり、
+                // Handle の無い状態の body がここへ届くため。
+                return _host.Invoke(() => IsUiBound ? body() : fallback);
             }
             catch (ObjectDisposedException)
             {
@@ -359,6 +364,10 @@ internal class UiaTextHostAdapter : IUiaTextHost
             {
                 return fallback;
             } // Handle 破棄との race
+            catch (System.ComponentModel.InvalidAsynchronousStateException)
+            {
+                return fallback;
+            } // Invoke を待つ間に UI スレッドが終了した(ArgumentException の派生なので別に捕まえる)
         }
         if (Environment.CurrentManagedThreadId != _uiThreadId)
             return fallback;
@@ -907,6 +916,13 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// (窓そのものは作れない)。製品コードからは設定しない。
     /// </summary>
     internal bool TestHook_AssumeHandleCreated { get; set; }
+
+    /// <summary>
+    /// テスト専用: <see cref="TryRunOnUi{T}"/> が Handle のガード(<see cref="IsUiBound"/>)を通った直後、
+    /// InvokeRequired を見る前に呼ぶ。ガードの後で自分の Handle だけが破棄される窓を、実際の順序のまま
+    /// テストで再現するため。製品コードからは設定しない(既定 null)。
+    /// </summary>
+    internal Action? TestHook_AfterUiBoundCheck { get; set; }
 
     internal void TestHook_ResetLastLineSegsCounters()
     {
