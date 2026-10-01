@@ -18,6 +18,9 @@ public static class BackupPlanner
     /// 次に行うべきバックアップ操作を返す。
     /// <para>modified: 現在未保存（dirty）か。currentSig: 現内容の署名。lastSig: 前回退避時の署名。</para>
     /// <para>hasBackup: ディスクに当文書のバックアップが存在するか。forceWrite: 前回書込失敗等で強制再書込か。</para>
+    /// <para>未保存なのに退避がない（hasBackup=false）ときは、署名が lastSig と同じでも書く。
+    /// clean 化でバックアップを消しても lastSig は残るため、保存後に Undo で退避済みの内容へ戻ると
+    /// 署名が一致する。署名だけで判定すると、その状態がどこにも退避されない（Issue #93）。</para>
     /// </summary>
     public static BackupAction Decide(
         bool modified,
@@ -28,7 +31,9 @@ public static class BackupPlanner
     )
     {
         if (modified)
-            return (forceWrite || currentSig != lastSig) ? BackupAction.Write : BackupAction.None;
+            return (forceWrite || !hasBackup || currentSig != lastSig)
+                ? BackupAction.Write
+                : BackupAction.None;
         // クリーン（保存済み等）→ 既存バックアップは不要（内容はディスクと一致）。
         return hasBackup ? BackupAction.Delete : BackupAction.None;
     }

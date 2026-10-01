@@ -527,8 +527,9 @@ public sealed class BackupCoordinator : IDisposable
     /// 応答時間が悪化する。必要なのは「clean 化 / 閉じた文書のバックアップ削除 + レイアウト更新」
     /// だけで、これは ReconcileMapMaintenance の意味論そのもの。
     /// ReconcileMapMaintenance は info.ForceWrite を落とさないが、
-    /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害
-    /// (次に dirty 化したとき 1 回余分に書くだけ = 安全側)。
+    /// <see cref="BackupPlanner.Decide"/> は modified=false のとき forceWrite を見ないため無害。
+    /// 次に dirty 化したときは HasBackup=false なので forceWrite に関係なく書く(Issue #93)=
+    /// 残った ForceWrite が余分な書込を生むこともない。
     /// </remarks>
     private void OnBackupBecameUnneeded(bool becameUnneeded)
     {
@@ -595,10 +596,12 @@ public sealed class BackupCoordinator : IDisposable
             }
 
             bool modified = doc.Editor.Modified;
-            // P-6: 覚えている参照と同じなら、署名は LastSig に等しい(不変条件)。ForceWrite でなければ
-            // Decide は必ず None を返すので、全文化もハッシュも省く。
+            // P-6: 覚えている参照と同じなら、署名は LastSig に等しい(不変条件)。退避があり ForceWrite で
+            // なければ Decide は必ず None を返すので、全文化もハッシュも省く。HasBackup を見るのは、
+            // 退避がないときは署名が同じでも Write になるため(Issue #93。clean 化で消した後に同じ参照の
+            // まま dirty になる経路 = ClearSavePoint・エンコーディングの変更)。
             var snap = doc.Editor.CurrentBuffer.Current;
-            if (modified && !info.ForceWrite && IsRemembered(info, snap))
+            if (info.HasBackup && modified && !info.ForceWrite && IsRemembered(info, snap))
                 continue;
             string content = modified ? Materialize(snap) : ""; // クリーン時はスナップショット不要
             long sig = modified ? ContentSignature.Of(content) : info.LastSig;

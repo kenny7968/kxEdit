@@ -33,6 +33,23 @@ public class BackupPlannerTests
 
     [Fact]
     public void Dirty_unchanged_but_forced_writes() =>
+        // hasBackup=true: 退避がない組み合わせは forceWrite なしでも Write になる(Issue #93)ため、
+        // forceWrite の効きを単独で確かめるには退避ありの状態で判定させる。
+        Assert.Equal(
+            BackupAction.Write,
+            BackupPlanner.Decide(
+                modified: true,
+                currentSig: 5,
+                lastSig: 5,
+                hasBackup: true,
+                forceWrite: true
+            )
+        );
+
+    [Fact]
+    public void Dirty_unchanged_without_backup_writes() =>
+        // Issue #93: 保存でバックアップを消した後(hasBackup=false・lastSig は残る)に Undo で
+        // 退避済みの内容へ戻ると、署名が lastSig と一致する。退避がディスクにないので書くこと。
         Assert.Equal(
             BackupAction.Write,
             BackupPlanner.Decide(
@@ -40,7 +57,7 @@ public class BackupPlannerTests
                 currentSig: 5,
                 lastSig: 5,
                 hasBackup: false,
-                forceWrite: true
+                forceWrite: false
             )
         );
 
