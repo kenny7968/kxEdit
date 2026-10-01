@@ -16,6 +16,12 @@ public class WinFormsDebounceSchedulerTests
         }
     }
 
+    /// <summary>
+    /// メッセージを汲まずに待つ。S2925(Fact 本体での Thread.Sleep 直呼び禁止)は本体だけを見るので、
+    /// PreviewUserDataFolderTests.SleepMs と同じくヘルパー経由にする。
+    /// </summary>
+    private static void SleepWithoutPumping(int milliseconds) => Thread.Sleep(milliseconds);
+
     [Fact]
     public void Schedule_Twice_RunsOnlyLatestOnce() =>
         Sta.Run(() =>
@@ -43,6 +49,32 @@ public class WinFormsDebounceSchedulerTests
             PumpUntil(() => ran, 300);
 
             Assert.False(ran);
+        });
+
+    [Fact]
+    public void Schedule_Again_RestartsDelayFromLatestCall() =>
+        Sta.Run(() =>
+        {
+            // A を予約し、汲まずに遅延より長く待つ(WM_TIMER は汲まない限り配送されない)。
+            // そこで B を予約すると、遅延は B から数え直す=汲み始めてすぐには発火しない。
+            // Schedule の Stop() が無いと、A の時点で満了したタイマーがそのまま発火する(約 0 ms)。
+            // 片側の不等式だけを見る: 遅いマシンでは発火が遅れるだけなので偽の失敗になりにくい。
+            const int delayMs = 200;
+            using var s = new WinFormsDebounceScheduler(delayMs);
+            var ran = new List<string>();
+            s.Schedule(() => ran.Add("A"));
+            SleepWithoutPumping(delayMs * 2);
+
+            s.Schedule(() => ran.Add("B"));
+            var sw = Stopwatch.StartNew();
+            PumpUntil(() => ran.Count > 0, 5000);
+            long elapsedMs = sw.ElapsedMilliseconds;
+
+            Assert.Equal(new[] { "B" }, ran);
+            Assert.True(
+                elapsedMs >= delayMs / 2,
+                $"再予約から {elapsedMs} ms で発火した(遅延 {delayMs} ms の半分未満)"
+            );
         });
 
     [Fact]
