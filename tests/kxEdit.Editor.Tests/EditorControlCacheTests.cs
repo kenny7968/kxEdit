@@ -311,6 +311,7 @@ public class EditorControlCacheTests
                     "前提: worker が Invoke に入った"
                 );
                 c.ReplaceCharRange(0, 0, "X"); // 本文の差し替え(OnSnapshotChanged)
+                Assert.Equal(0, c.TestHook_LastLineSegsMissCount); // 前提: 本体はまだ走っていない(編集が先。ガードの発火条件と一致させる。CLAUDE.md §4-B)
                 // worker が戻るまで汲み続ける(カウンタは Invoke を呼ぶ前に加算されるので、DoEvents 1 回では
                 // Invoke がまだ届いていないことがある)。
                 PumpUntil(worker);

@@ -569,7 +569,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
             // 全フィールドを設定したインスタンスを volatile 書き込みで公開する(RPC スレッドが読む)。
             // キーは実際に使った wrap と metrics(Segs がキーだけの関数であることを保つ)。
             // perf-followups フェーズ 2・項目 10: Invoke を待つ間に本文か折り返し桁が変わっていたら
-            // (OnSnapshotChanged / InvalidateLastLineSegs が先に走っていたら)書かない。書くと破棄の直後に
+            // (snap か wrap が今の値と違っていたら)書かない。書くと破棄の直後に
             // 古い TextSnapshot を握り直し、大容量ファイルの差し替え後の GC を阻む(答えはキー照合で正しい)。
             if (ReferenceEquals(snap, _bufferSnapshot) && wrap == _host.WrapColumns)
                 _lastLineSegs = new LineSegsCache(snap, line, wrap, metrics, segs);
@@ -704,6 +704,8 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// Compute* は RPC スレッド上で走り、そこで Control.Handle を読むと CreateHandle が走って
     /// RPC スレッドが所有する HWND ができ、OnHandleCreated 経由で _hwnd も上書きされる。
     /// ClientToScreen はキャッシュ済み hwnd に対してどのスレッドから呼んでも安全。
+    /// perf-followups フェーズ 2 で TryRunOnUi がこの窓を塞いだ(UI スレッド以外では Compute* に入らない)。
+    /// 本規約は多重防御として維持する。
     /// </remarks>
     private bool TryGetClientOrigin(out int x, out int y) =>
         TryGetClientOrigin(_hwnd, out x, out y);
