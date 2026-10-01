@@ -200,4 +200,130 @@ public class UiaThreadGuardTests
                 Assert.False(c.IsHandleCreated, "worker の呼び出しが Handle を作り直した");
             }
         });
+
+    // --- 申し送りの回収(docs/plans/2026-10-01-uia-thread-guard-followups-design.md) ---
+
+    private static (Form f, EditorControl c) MakeWithHandle(int wrap)
+    {
+        var f = new HostForm();
+        var c = new EditorControl { WrapColumns = wrap };
+        f.Controls.Add(c);
+        _ = f.Handle;
+        c.ClientSize = new System.Drawing.Size(400, c.LineHeightPx * 3);
+        c.SetSource(TextBuffer.FromString(Text));
+        Assert.True(c.IsHandleCreated); // fixture 前提
+        return (f, c);
+    }
+
+    /// <summary>
+    /// 項目 3: Handle のガードを通った後、Invoke が届くまでに自分の Handle だけが破棄された
+    /// (親の Handle は残る)。InvokeRequired は親の Handle で判定されて true になり、body は UI スレッドで
+    /// 走る。UI スレッドでガードを判定し直して、縮退値を返すこと。
+    /// </summary>
+    [Fact]
+    public void SyncQuery_OwnHandleDestroyedAfterGuardWithParentAlive_FallsBackOnUiThread() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeWithHandle(wrap: 2);
+            using (f)
+            using (c)
+            {
+                var host = (IUiaTextHost)c;
+                // 陽性対照: Handle があれば、UI スレッドの計算は視覚行の先頭を返す(縮退値と違う)。
+                Assert.True(
+                    host.LineStartOf(Line1Offset) > Line1Start,
+                    "前提: 視覚行の先頭は論理行の先頭と違う"
+                );
+                // 行キャッシュを捨てる(worker をキャッシュで即答させず、Invoke に入れる)。
+                c.WrapColumns = 3;
+                c.WrapColumns = 2;
+                Assert.False(c.TestHook_HasLastLineSegs); // 前提
+
+                using var reached = new ManualResetEventSlim();
+                using var gate = new ManualResetEventSlim();
+                bool invokeRequiredAfterDestroy = false;
+                int uiThread = Environment.CurrentManagedThreadId;
+                c.TestHook_UiaAfterUiBoundCheck = () =>
+                {
+                    if (Environment.CurrentManagedThreadId == uiThread)
+                        return; // 止めるのは worker だけ
+                    reached.Set();
+                    gate.Wait(5000);
+                    invokeRequiredAfterDestroy = c.InvokeRequired;
+                };
+                var t = System.Threading.Tasks.Task.Run(() => host.LineStartOf(Line1Offset));
+                Assert.True(reached.Wait(5000), "worker がガードを通らない");
+
+                // 窓: ガードの後で、自分の Handle だけを破棄する(親は残す)。
+                c.TestHook_UiaAfterUiBoundCheck = null;
+                typeof(Control)
+                    .GetMethod("DestroyHandle", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(c, null);
+                Assert.False(c.IsHandleCreated); // fixture 前提
+                Assert.Same(f, c.Parent);
+                Assert.True(f.IsHandleCreated);
+                gate.Set();
+
+                var sw = Stopwatch.StartNew();
+                while (!t.IsCompleted && sw.ElapsedMilliseconds < 5000)
+                    Application.DoEvents();
+                Assert.True(t.IsCompleted, "worker が終わらない");
+                Assert.True(invokeRequiredAfterDestroy, "前提: 親の Handle で InvokeRequired=true");
+                Assert.Equal(Line1Start, t.Result); // 縮退値 = 論理行の先頭
+                Assert.False(c.TestHook_HasLastLineSegs, "body が走って行キャッシュを書いた");
+                Assert.False(c.IsHandleCreated, "body が Handle を作り直した");
+            }
+        });
+
+    /// <summary>
+    /// 項目 1: worker が同期 Invoke を待つ間に UI スレッドが(メッセージを汲まずに)終了した。
+    /// InvalidAsynchronousStateException を UIA へ漏らさず、縮退値を返すこと。
+    /// </summary>
+    [Fact]
+    public void SyncQuery_UiThreadExitsWhileInvokePending_FallsBackWithoutThrowing()
+    {
+        Thread? worker = null;
+        int result = -1;
+        Exception? workerError = null;
+
+        // Sta.Run のスレッドを UI スレッドにし、worker が Invoke で待つのを見届けてから、汲まずに抜ける
+        // (= UI スレッドの終了)。Form / EditorControl は破棄しない(別スレッドから破棄できないため)。
+        Sta.Run(() =>
+        {
+            var (_, c) = MakeWithHandle(wrap: 2);
+            var host = (IUiaTextHost)c;
+            worker = new Thread(() =>
+            {
+                try
+                {
+                    result = host.LineStartOf(Line1Offset);
+                }
+                catch (Exception ex)
+                {
+                    workerError = ex;
+                }
+            })
+            {
+                IsBackground = true,
+            };
+            worker.Start();
+
+            Assert.True(
+                SpinWait.SpinUntil(() => c.TestHook_LineSegsInvokeCount == 1, 5000),
+                "前提: worker が Invoke の直前まで来る"
+            );
+            // Invoke の待ちに入るまで待つ(カウンタは Invoke の前に加算される)。
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => (worker.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0,
+                    5000
+                ),
+                "前提: worker が Invoke で待っている"
+            );
+        });
+
+        Assert.True(worker!.Join(10000), "worker が終わらない");
+        Assert.Null(workerError);
+        Assert.Equal(Line1Start, result); // 縮退値 = 論理行の先頭
+    }
 }

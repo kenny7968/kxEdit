@@ -53,6 +53,20 @@ public sealed partial class EditorControl
         set => _uia.TestHook_AssumeHandleCreated = value;
     }
 
+    /// <summary>
+    /// テスト専用: UIA の同期の問い合わせで、Handle のガードを通った直後に呼ぶ
+    /// (UIA のスレッド境界・申し送りの回収。Editor.Tests UiaThreadGuardTests)。
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(
+        System.ComponentModel.DesignerSerializationVisibility.Hidden
+    )]
+    internal Action? TestHook_UiaAfterUiBoundCheck
+    {
+        get => _uia.TestHook_AfterUiBoundCheck;
+        set => _uia.TestHook_AfterUiBoundCheck = value;
+    }
+
     // Task 6 テスト用フック: WndProc 経路と self-served 判定を Editor.Tests から観察する。
     internal static void TestHook_WndProc(EditorControl c, ref Message m) => c.WndProc(ref m);
 
