@@ -279,6 +279,22 @@ public class MainFormSmokeTests
             Assert.Equal((2, 5), doc.Editor.GetSelectionCharRange());
         });
 
+    // perf-followups フェーズ 3(G-1 の続き): 結果一覧で無害化したファイル名が、ジャンプした直後の
+    // 通知(ステータス表示にも出る)で生のまま出ないこと。U+202E で拡張子を偽装した名前を使う。
+    [Fact]
+    public void OpenAndSelect_AnnouncesSanitizedFileName() =>
+        Sta.Run(() =>
+        {
+            using var tmp = new TempDir();
+            string path = tmp.File("invoice‮txt.exe");
+            File2.WriteAllText(path, "TARGET");
+            using var form = ShowMainForm(NewSettings(csvAutoModeOnOpen: false), tmp);
+
+            form.OpenAndSelect(GrepHitFor(path, 1, "TARGET", 0, 6));
+
+            Assert.Equal("invoicetxt.exe 1 行目", form.LastAnnouncementForTest);
+        });
+
     // A-3(2026-08-22): grep 結果からのジャンプで画面が追従することの固定。
     [Fact]
     public void OpenAndSelect_ScrollsTargetIntoView() =>
