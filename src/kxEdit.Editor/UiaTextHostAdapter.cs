@@ -15,6 +15,7 @@
 //       書き込み系 (SetSelection / SetFocus / ScrollRangeIntoView) = UI スレッドへ BeginInvoke
 //       UI スレッド専用状態を要する読み取り (GetBoundingRectangles / OffsetFromScreenPoint /
 //         GetVisibleRange / 折り返し ON の TryFindVisualSegment のキャッシュミス) = 同期 Invoke
+//       (どちらも TryRunOnUi / TryPostToUi 経由。UI スレッド以外で走れないときは縮退値・破棄。perf-followups フェーズ 2)
 //       折り返し ON の TryFindVisualSegment のキャッシュヒット・空行 = RPC スレッドで即答 (フェーズ 10)
 //       BoundingRectangle = キャッシュ済み _hwnd に対する Win32 API でその場計算 (マーシャリングしない)
 //       それ以外 = 不変スナップショット参照 (マーシャリングしない)
@@ -57,6 +58,12 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // UIA-L-2: AutomationInteropProvider.RaiseAutomationEvent 失敗の観測用 trace sink。
     // 既定 null で silent 継続=本番挙動は不変 (視覚のみに縮退)。
     private readonly IUiaTraceSink? _trace;
+
+    // perf-followups フェーズ 2: UI スレッドの ID。EditorControl の ctor(UI スレッドで生成される)の中で
+    // 本インスタンスが 1 回だけ生成されるので、ここで記録する。readonly = 以後は書き換えない。
+    // OnHandleCreated で覚えてはならない: RPC スレッドで Handle が作り直されたとき、ID が RPC スレッドの値で
+    // 上書きされ、ガード(TryRunOnUi / TryPostToUi)が逆向きに効く(TryGetClientOrigin の remarks)。
+    private readonly int _uiThreadId;
 
     // === 8 field: Uia 系 state の単一所有 (Task 3d。フェーズ 2 S-1 で座標キャッシュ 4 field を削除) ===
 
@@ -152,6 +159,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _caret = caret ?? throw new ArgumentNullException(nameof(caret));
         _trace = trace;
+        _uiThreadId = Environment.CurrentManagedThreadId;
     }
 
     // === UI thread 側からの通知経路 ===
@@ -308,6 +316,91 @@ internal class UiaTextHostAdapter : IUiaTextHost
     /// <summary>_testHook_LastGetObjectServed の read (Test hook 経由)。</summary>
     public bool TestHook_LastGetObjectServed => _testHook_LastGetObjectServed;
 
+    // === UI スレッドへの委譲(perf-followups フェーズ 2) ===
+
+    /// <summary>
+    /// UI スレッドが束縛されているか(Handle があり、Dispose されていない)。どのスレッドから読んでもよい。
+    /// </summary>
+    private bool IsUiBound =>
+        !_host.IsDisposed && (_host.IsHandleCreated || TestHook_AssumeHandleCreated);
+
+    /// <summary>
+    /// <paramref name="body"/> を UI スレッドで実行して結果を返す。UI スレッドで実行できないときは
+    /// body を走らせず、<paramref name="fallback"/>(縮退値)を返す。どのスレッドから呼んでもよい。
+    /// </summary>
+    /// <remarks>
+    /// 判定の順序:
+    /// <list type="number">
+    /// <item>UI スレッドが束縛されていない(<see cref="IsUiBound"/>)→ fallback。</item>
+    /// <item>InvokeRequired → 同期 Invoke。Invoke 中の破棄(ObjectDisposedException /
+    /// InvalidOperationException)は fallback。</item>
+    /// <item>それ以外は、今のスレッドを <see cref="_uiThreadId"/> と比べ、違えば fallback。</item>
+    /// </list>
+    /// 3 が要る理由: 1 と 2 の間で UI スレッドが Handle を破棄すると、InvokeRequired は false を返す
+    /// (Handle 未生成 / 破棄後の仕様)。3 がないと body が RPC スレッドで走り、非スレッドセーフな
+    /// 幅メモ(<see cref="GdiCharMetrics"/>)へ書き込む。UI スレッドと同時に書くと構造が壊れ、
+    /// TryGetValue の無限ループで UI スレッドが戻らなくなる。
+    /// </remarks>
+    private T TryRunOnUi<T>(Func<T> body, T fallback)
+    {
+        if (!IsUiBound)
+            return fallback;
+        if (_host.InvokeRequired)
+        {
+            try
+            {
+                return _host.Invoke(body);
+            }
+            catch (ObjectDisposedException)
+            {
+                return fallback;
+            }
+            catch (InvalidOperationException)
+            {
+                return fallback;
+            } // Handle 破棄との race
+        }
+        if (Environment.CurrentManagedThreadId != _uiThreadId)
+            return fallback;
+        return body();
+    }
+
+    /// <summary>
+    /// <paramref name="body"/> を UI スレッドで実行する(書き込み系。戻り値は不要)。UI スレッド以外からは
+    /// BeginInvoke で投函して RPC スレッドを待たせない(deadlock 回避)。実行できないときは捨てる。
+    /// </summary>
+    /// <remarks>
+    /// 投函したものは、到達時にもう一度この判定を通す(到達までに破棄されていれば捨てる。
+    /// 到達時は InvokeRequired が false で UI スレッドなので、再投函はしない)。
+    /// WinForms の invoke キューは FIFO なので、SR が直後に呼ぶ同期 Invoke 系
+    /// (GetBoundingRectangles 等)は、投函した書き込みの後に走る。
+    /// 判定の順序と 3 つ目の判定が要る理由は <see cref="TryRunOnUi{T}"/> と同じ。
+    /// </remarks>
+    private void TryPostToUi(Action body)
+    {
+        if (!IsUiBound)
+            return;
+        if (_host.InvokeRequired)
+        {
+            try
+            {
+                _host.BeginInvoke(new Action(() => TryPostToUi(body)));
+            }
+            catch (ObjectDisposedException)
+            {
+                // 投函の直前に破棄された。書き込みは捨ててよい(対象の窓が無くなった)。
+            }
+            catch (InvalidOperationException)
+            {
+                // Handle 破棄との race。同上。
+            }
+            return;
+        }
+        if (Environment.CurrentManagedThreadId != _uiThreadId)
+            return;
+        body();
+    }
+
     // === IUiaTextHost 全メンバ実装 (RPC thread から呼ばれ得る) ===
     // 元 EditorControl.Uia.cs から bit-perfect 移設 (field 参照だけ「自分の field」へ付け替え・
     // Compute* / OffsetFromClientPoint / SetSelectionCharRange / Focus は _host へ委譲)。
@@ -335,18 +428,8 @@ internal class UiaTextHostAdapter : IUiaTextHost
         return (Math.Min(c, a), Math.Max(c, a));
     }
 
-    void IUiaTextHost.SetSelection(int start, int end)
-    {
-        // P5 Task 14 (I-3): 破棄後 / Handle 未生成での BeginInvoke による InvalidOperationException を防ぐ
-        if (_host.IsDisposed || !_host.IsHandleCreated)
-            return;
-        if (_host.InvokeRequired)
-        {
-            _host.BeginInvoke(new Action(() => ((IUiaTextHost)this).SetSelection(start, end)));
-            return;
-        }
-        _host.SetSelectionCharRange(start, end);
-    }
+    void IUiaTextHost.SetSelection(int start, int end) =>
+        TryPostToUi(() => _host.SetSelectionCharRange(start, end));
 
     // 2026-07-31: 歩進規則は Core の TextBoundary に一本化した。
     // 以前はここに NavigationCommands.MoveRightChar/MoveLeftChar と論理的に等価な実装が
@@ -444,7 +527,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
         int wrap = _host.WrapColumns;
         if (wrap <= 0)
             return null;
-        if (!_host.IsHandleCreated)
+        if (!IsUiBound)
             return null; // UI スレッドが束縛されていない=論理行フォールバック
         // 空行は視覚セグメントを持たない(TryFindVisualSegmentCore も null を返す)。
         // 不変の snap だけで判定できるので、RPC スレッドでも Invoke せずに答える。
@@ -454,28 +537,14 @@ internal class UiaTextHostAdapter : IUiaTextHost
         // _host.Metrics は参照を読むだけ(比較にしか使わない)。
         if (TryGetCachedSegs(snap, line, wrap, _host.Metrics, out var cached))
             return VisualSegments.FindContaining(cached, offsetInLine).Segment;
+        // フェーズ 10: UI スレッドへマーシャリングした回数(テストと Smoke S9 が観測する)。
+        // Invoke の前に加算する(テストは「1 になった = Invoke に入った」を待つ)。
         if (_host.InvokeRequired)
-        {
-            // フェーズ 10: UI スレッドへマーシャリングした回数(テストと Smoke S9 が観測する)。
             Interlocked.Increment(ref _testHook_lineSegsInvokeCount);
-            try
-            {
-                return _host.Invoke(
-                    new Func<WrapSegment?>(() =>
-                        TryFindVisualSegmentCore(snap, line, offsetInLine, wrap)
-                    )
-                );
-            }
-            catch (ObjectDisposedException)
-            {
-                return null;
-            }
-            catch (InvalidOperationException)
-            {
-                return null;
-            } // Handle 破棄との race
-        }
-        return TryFindVisualSegmentCore(snap, line, offsetInLine, wrap);
+        return TryRunOnUi(
+            () => TryFindVisualSegmentCore(snap, line, offsetInLine, wrap),
+            (WrapSegment?)null
+        );
     }
 
     /// <summary>UI スレッド上での視覚セグメント検索本体(<see cref="TryFindVisualSegment"/> から Invoke マーシャリング後)。</summary>
@@ -655,22 +724,12 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // ハンドル未生成 / 非可視範囲は空配列。
     double[] IUiaTextHost.GetBoundingRectangles(int start, int end)
     {
-        // 2026-08-02: Handle ガードを InvokeRequired の手前へ出した(GetVisibleRange /
-        // TryFindVisualSegment / SetSelection / SetFocus / ScrollRangeIntoView と同形)。
-        // Control.InvokeRequired は Handle 未生成 / 破棄後に false を返すため、内側に置くと
-        // ガードへ到達せず ComputeBoundingRectangles が RPC スレッド上で走る。その先の
-        // ComputeCaretPoint → GdiCharMetrics.MeasureRun は非スレッドセーフな
-        // Dictionary(幅メモ)へ書き込むので、UI スレッドと同時に走ると構造が壊れる
-        // (= TryGetValue の無限ループで UI スレッドが永久に戻らない)。
-        // 実測: Handle 破棄後の EditorControl へワーカースレッドから呼ぶと
-        // InvokeRequired=False のまま幅メモにエントリが 1 件増えることを確認済み。
-        // 踏む窓は「SR がプロバイダを掴んだままタブ / アプリが teardown に入る」場面
+        // 2026-08-02: Handle 破棄後に RPC スレッドで ComputeBoundingRectangles が走ると、
+        // ComputeCaretPoint → GdiCharMetrics.MeasureRun が幅メモに書き込む(実測で確認済み)。
+        // perf-followups フェーズ 2: IsHandleCreated と InvokeRequired の間で破棄される窓も
+        // TryRunOnUi が塞ぐ。踏む窓は「SR がプロバイダを掴んだままタブ / アプリが teardown に入る」場面
         // (OnHandleDestroyed は _provider も _bufferSnapshot も落とさないため RPC は通る)。
-        if (!_host.IsHandleCreated)
-            return Array.Empty<double>();
-        if (_host.InvokeRequired)
-            return _host.Invoke(new Func<double[]>(() => ComputeBoundingRectangles(start, end)));
-        return ComputeBoundingRectangles(start, end);
+        return TryRunOnUi(() => ComputeBoundingRectangles(start, end), Array.Empty<double>());
     }
 
     private double[] ComputeBoundingRectangles(int start, int end)
@@ -757,14 +816,8 @@ internal class UiaTextHostAdapter : IUiaTextHost
     // RPC スレッドから呼ばれた場合は Invoke で UI スレッドへマーシャリングする。
     int IUiaTextHost.OffsetFromScreenPoint(double x, double y)
     {
-        // 2026-08-02: Handle ガードを InvokeRequired の手前へ出した。理由は
-        // GetBoundingRectangles と同一(InvokeRequired は Handle 未生成 / 破棄後に false を
-        // 返すため、内側のガードには到達せず RPC スレッドが幅メモの Dictionary へ書き込む)。
-        if (!_host.IsHandleCreated)
-            return 0;
-        if (_host.InvokeRequired)
-            return _host.Invoke(new Func<int>(() => ComputeOffsetFromScreenPoint(x, y)));
-        return ComputeOffsetFromScreenPoint(x, y);
+        // 理由は GetBoundingRectangles と同じ(TryRunOnUi)。
+        return TryRunOnUi(() => ComputeOffsetFromScreenPoint(x, y), 0);
     }
 
     private int ComputeOffsetFromScreenPoint(double x, double y)
@@ -792,65 +845,18 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     void IUiaTextHost.ScrollRangeIntoView(int start, int end, bool alignToTop)
     {
-        // SetSelection と同形 (P5 Task 14 I-3)。このガードは 2 つの意味で load-bearing:
-        //   1. 破棄後 / Handle 未生成での BeginInvoke による InvalidOperationException を防ぐ
-        //   2. Control.InvokeRequired は Handle 未生成 / 破棄後に false を返す=ガードが無いと
-        //      RPC スレッドがそのまま UI スレッド専有状態 (ClientSize / _hscroll.Visible /
-        //      PositionCaret) に触れる。CLAUDE.md §2 の a11y 鉄則違反になる。
-        if (_host.IsDisposed || !_host.IsHandleCreated)
-            return;
-        if (_host.InvokeRequired)
-        {
-            // 書き込み系は fire-and-forget (RPC スレッドを待たせない=deadlock 回避)。
-            // WinForms の invoke キューは FIFO のため、SR が直後に呼ぶ同期 Invoke 系
-            // (GetBoundingRectangles 等) はこのスクロールの後に走る。
-            //
-            // 自身へ再入するのは、UI スレッド到達時に上の Dispose / Handle ガードを再評価するため
-            // (到達時は InvokeRequired == false なので無限ループにはならない)。
-            // 隣の SetFocus は `() => _host.Focus()` で再入しないが、そちらに合わせて
-            // 揃えないこと=再評価の効果が失われる。
-            _host.BeginInvoke(
-                new Action(() => ((IUiaTextHost)this).ScrollRangeIntoView(start, end, alignToTop))
-            );
-            return;
-        }
-        _host.ScrollCharRangeIntoView(start, end, alignToTop);
+        // 書き込み系は投函する(RPC スレッドを待たせない)。Handle が無いとき・UI スレッド以外で
+        // InvokeRequired が false のときは捨てる(RPC スレッドが ClientSize / _hscroll.Visible /
+        // PositionCaret に触れない。CLAUDE.md §2 の a11y 鉄則)。到達時の再判定は TryPostToUi。
+        TryPostToUi(() => _host.ScrollCharRangeIntoView(start, end, alignToTop));
     }
 
     (int Start, int End) IUiaTextHost.GetVisibleRange()
     {
-        // UI スレッド専用状態 (_topLine / _metrics / ClientSize) を要する読み取りのため、
-        // TryFindVisualSegment と同形で同期 Invoke する
-        // (書き込み系の ScrollRangeIntoView が BeginInvoke なのは戻り値が不要だから)。
-        //
-        // Handle ガードを先に置く: Handle が無ければ ClientSize が無意味なので
-        // そもそも計算に入る意味がない。2026-08-02 に GetBoundingRectangles /
-        // OffsetFromScreenPoint も同じ順序へ揃えたため、読み取り系 4 経路はすべて同形になった
-        // (それまでこの 2 つは「InvokeRequired → IsHandleCreated」の順で、Handle が無いとき
-        //  RPC スレッドがそのまま計算に入っていた)。
-        //
-        // IsDisposed を見ないのは、Dispose が Handle を落とすので !IsHandleCreated が拾い、
-        // Invoke 実行中に破棄される race は下の ObjectDisposedException catch が拾うため
-        // (書き込み系が IsDisposed を見るのは BeginInvoke 自体が投げるのを防ぐ目的で、
-        //  同期 Invoke + catch のこちらには不要)。
-        if (!_host.IsHandleCreated)
-            return (0, 0); // UI スレッドが束縛されていない
-        if (_host.InvokeRequired)
-        {
-            try
-            {
-                return _host.Invoke(new Func<(int, int)>(() => _host.GetVisibleCharRange()));
-            }
-            catch (ObjectDisposedException)
-            {
-                return (0, 0);
-            }
-            catch (InvalidOperationException)
-            {
-                return (0, 0);
-            } // Handle 破棄との race
-        }
-        return _host.GetVisibleCharRange();
+        // UI スレッド専用状態 (_topLine / _metrics / ClientSize) を要する読み取りのため同期 Invoke する
+        // (書き込み系の ScrollRangeIntoView が投函なのは戻り値が不要だから)。
+        // Handle が無ければ ClientSize が無意味なので (0, 0)(TryRunOnUi)。
+        return TryRunOnUi(() => _host.GetVisibleCharRange(), (0, 0));
     }
 
     // P5 Task 14 (I-2): live プロパティ Handle は RPC で CreateHandle を誘発し得るためキャッシュ返し。
@@ -866,18 +872,7 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     string IUiaTextHost.AutomationId => "editor";
 
-    void IUiaTextHost.SetFocus()
-    {
-        // P5 Task 14 (I-3): 破棄後 / Handle 未生成での BeginInvoke による InvalidOperationException を防ぐ
-        if (_host.IsDisposed || !_host.IsHandleCreated)
-            return;
-        if (_host.InvokeRequired)
-        {
-            _host.BeginInvoke(new Action(() => _host.Focus()));
-            return;
-        }
-        _host.Focus();
-    }
+    void IUiaTextHost.SetFocus() => TryPostToUi(() => _host.Focus());
 
     // === Test hook (Editor.Tests から観測) ===
 
@@ -896,6 +891,13 @@ internal class UiaTextHostAdapter : IUiaTextHost
 
     internal long TestHook_LineSegsInvokeCount =>
         Interlocked.Read(ref _testHook_lineSegsInvokeCount);
+
+    /// <summary>
+    /// テスト専用: Handle のガード(<see cref="IsUiBound"/>)を通過したものとして扱う。
+    /// IsHandleCreated と InvokeRequired の間で Handle が破棄される窓(TOCTOU)を、テストで再現するため
+    /// (窓そのものは作れない)。製品コードからは設定しない。
+    /// </summary>
+    internal bool TestHook_AssumeHandleCreated { get; set; }
 
     internal void TestHook_ResetLastLineSegsCounters()
     {

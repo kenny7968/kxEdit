@@ -36,6 +36,20 @@ public sealed partial class EditorControl
     /// <summary>segs キャッシュのヒット/ミス/Invoke のカウンタをリセット。</summary>
     internal void TestHook_ResetLastLineSegsCounters() => _uia.TestHook_ResetLastLineSegsCounters();
 
+    /// <summary>
+    /// テスト専用: UIA の経路で Handle のガードを通過したものとして扱う
+    /// (perf-followups フェーズ 2。Editor.Tests UiaThreadGuardTests)。
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(
+        System.ComponentModel.DesignerSerializationVisibility.Hidden
+    )]
+    internal bool TestHook_UiaAssumeHandleCreated
+    {
+        get => _uia.TestHook_AssumeHandleCreated;
+        set => _uia.TestHook_AssumeHandleCreated = value;
+    }
+
     // Task 6 テスト用フック: WndProc 経路と self-served 判定を Editor.Tests から観察する。
     internal static void TestHook_WndProc(EditorControl c, ref Message m) => c.WndProc(ref m);
 
