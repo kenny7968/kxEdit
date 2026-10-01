@@ -240,6 +240,26 @@ public class VisualRowScrollTests
         });
 
     /// <summary>
+    /// perf-followups フェーズ 2・項目 11(保険): 折り返し OFF ではセグメントを 0 に丸める。
+    /// 到達可能な経路はない(設計書 §15 の 11)が、_topSegment が古いまま残る形を塞ぐ。
+    /// fixture は行がクランプされない位置にする(クランプされるとセグメントも 0 に落ち、修正がなくても
+    /// 通ってしまう。CLAUDE.md §4-B)。
+    /// </summary>
+    [Fact]
+    public void SetTopPosition_WrapOff_DropsSegmentToZero() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl("a\nb\nc\nd\ne", wrap: 0, visibleRows: 3);
+            using (f)
+            using (c)
+            {
+                c.SetTopPosition(2, 3);
+                Assert.Equal(2, c.TopLine); // 前提: 行はクランプされていない
+                Assert.Equal(0, c.TopSegment);
+            }
+        });
+
+    /// <summary>
     /// 編集で論理行が消え _topLine が新しい maxLine を超えたときの防御クランプ(O)。
     /// 行が消えた後のセグメント index は無意味なので 0 に戻す。
     /// AfterEdit は UpdateVerticalScrollbar → BringCaretIntoView の順で走り、この fixture では
