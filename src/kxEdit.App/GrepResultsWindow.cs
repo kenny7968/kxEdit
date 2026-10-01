@@ -1,5 +1,6 @@
 using System.IO;
 using kxEdit.Core.Search;
+using kxEdit.Core.Text;
 
 namespace kxEdit.App;
 
@@ -18,7 +19,6 @@ public sealed class GrepResultsWindow : Form, IGrepResultsView
         IntegralHeight = false,
         HorizontalScrollbar = true,
     };
-    private string _baseFolder = "";
 
     public GrepResultsWindow(GrepResultsCallbacks callbacks)
     {
@@ -37,11 +37,10 @@ public sealed class GrepResultsWindow : Form, IGrepResultsView
     /// <summary>結果を流し込み表示する。pattern/folder はタイトル整形と相対パス表示に使う。</summary>
     public void Populate(string pattern, string folder, GrepOutcome outcome)
     {
-        _baseFolder = folder;
         _list.BeginUpdate();
         _list.Items.Clear();
         foreach (var hit in outcome.Hits)
-            _list.Items.Add(new Row(hit, Format(hit)));
+            _list.Items.Add(new Row(hit, Format(hit, folder)));
         _list.EndUpdate();
         if (_list.Items.Count > 0)
             _list.SelectedIndex = 0;
@@ -64,25 +63,47 @@ public sealed class GrepResultsWindow : Form, IGrepResultsView
         _list.Focus();
     }
 
-    private string Format(GrepHit hit)
+    // 一覧に出す行の本文の最大文字数(超えたら "…" を付ける)。
+    private const int MaxLineDisplay = 200;
+
+    // 無害化に渡す前に、行の本文を切り出す窓の文字数。巨大な行(最大 64MB)の全体を
+    // Trim / OneLine に渡してコピー・全走査させないため(perf-followups フェーズ 3・項目 14 の関連)。
+    private const int RawLineWindow = 1024;
+
+    /// <summary>
+    /// 一覧の 1 行を作る。行の本文とファイル名は外部ファイル由来なので
+    /// <see cref="SanitizeForDisplay.OneLine"/> で無害化する(perf-followups フェーズ 3・項目 12 / G-1:
+    /// 8000 バイトより後ろの NUL、U+202E による拡張子の偽装)。
+    /// <see cref="GrepHit.LineText"/> 自体はジャンプの照合キー(A-18)なので変えない。
+    /// </summary>
+    internal static string Format(GrepHit hit, string baseFolder)
     {
-        string rel = RelativePath(hit.FilePath);
-        string line = hit.LineText.Trim();
-        if (line.Length > 200)
+        string rel = SanitizeForDisplay.OneLine(RelativePath(baseFolder, hit.FilePath));
+
+        // 先頭の空白は span のまま飛ばし(コピーしない)、そのうえで窓を切る。
+        ReadOnlySpan<char> raw = hit.LineText.AsSpan().TrimStart();
+        bool cutByWindow = raw.Length > RawLineWindow;
+        if (cutByWindow)
         {
-            int cut = 200;
-            if (char.IsHighSurrogate(line[cut - 1]))
+            int cut = RawLineWindow;
+            if (char.IsHighSurrogate(raw[cut - 1]))
                 cut--; // サロゲートペアを割らない
-            line = string.Concat(line.AsSpan(0, cut), "…");
+            raw = raw[..cut];
         }
+
+        // OneLine は maxLength を超えると「maxLength - 1 字 + "…"」にする。従来の
+        // 「200 字 + "…"」と同じ形にするため 201 を渡す。
+        string line = SanitizeForDisplay.OneLine(raw.ToString(), MaxLineDisplay + 1).TrimStart();
+        if (cutByWindow && !line.EndsWith('…'))
+            line += "…";
         return $"{rel} (行 {hit.LineNumber}): {line}";
     }
 
-    private string RelativePath(string full)
+    private static string RelativePath(string baseFolder, string full)
     {
         try
         {
-            return Path.GetRelativePath(_baseFolder, full);
+            return Path.GetRelativePath(baseFolder, full);
         }
         catch
         {
