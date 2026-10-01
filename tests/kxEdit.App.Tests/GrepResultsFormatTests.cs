@@ -107,4 +107,17 @@ public class GrepResultsFormatTests
         string shown = GrepResultsWindow.Format(Hit("x", file: "D:\\o\u202Eut.txt"), Base);
         Assert.StartsWith(@"D:\out.txt (行 3): ", shown, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Populate_Truncated_ShowsInTitle() =>
+        Sta.Run(() =>
+        {
+            using var w = new GrepResultsWindow(new GrepResultsCallbacks(_ => { }));
+            var hits = new[] { Hit("TARGET") };
+            w.Populate("TARGET", Base, new GrepOutcome(hits, 1, 1, [], false, Truncated: true));
+            Assert.Contains("（上限で打ち切り）", w.Text);
+
+            w.Populate("TARGET", Base, new GrepOutcome(hits, 1, 1, [], false));
+            Assert.DoesNotContain("打ち切り", w.Text); // 前提: 打ち切りでなければ出ない
+        });
 }

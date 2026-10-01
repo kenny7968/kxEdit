@@ -45,13 +45,24 @@ public static class GrepService
         IProgress<GrepProgress>? progress,
         Func<TextSearcher, string, bool> literalPrefilter,
         CancellationToken cancellationToken
+    ) => Search(request, progress, literalPrefilter, GrepLimits.Default, cancellationToken);
+
+    /// <summary>上限(<paramref name="limits"/>)を差し替えられる本体。テストで小さな上限を渡す。</summary>
+    internal static GrepOutcome Search(
+        GrepRequest request,
+        IProgress<GrepProgress>? progress,
+        Func<TextSearcher, string, bool> literalPrefilter,
+        GrepLimits limits,
+        CancellationToken cancellationToken
     )
     {
         var hits = new List<GrepHit>();
         var errors = new List<GrepError>();
         int filesScanned = 0,
             filesMatched = 0;
-        bool cancelled = false;
+        bool cancelled = false,
+            truncated = false;
+        long retainedChars = 0;
 
         var searcher = new TextSearcher(request.Options);
         if (!searcher.IsValid)
@@ -125,7 +136,15 @@ public static class GrepService
                     request.Options.UseRegex
                     || PassesLiteralPrefilter(literalPrefilter, searcher, text)
                 )
-                    CollectLineHits(path, text, searcher, hits, cancellationToken);
+                    truncated = CollectLineHits(
+                        path,
+                        text,
+                        searcher,
+                        hits,
+                        ref retainedChars,
+                        limits,
+                        cancellationToken
+                    );
             }
             catch (RegexMatchTimeoutException)
             {
@@ -149,6 +168,10 @@ public static class GrepService
                     filesMatched++;
             }
 
+            // 項目 14: 上限に達したら、残りのファイルは走査しない。
+            if (truncated)
+                break;
+
             if (filesScanned % ProgressEvery == 0)
                 progress?.Report(new GrepProgress(filesScanned, hits.Count, path));
         }
@@ -156,7 +179,7 @@ public static class GrepService
         if (cancellationToken.IsCancellationRequested)
             cancelled = true;
         progress?.Report(new GrepProgress(filesScanned, hits.Count, null));
-        return new GrepOutcome(hits, filesScanned, filesMatched, errors, cancelled);
+        return new GrepOutcome(hits, filesScanned, filesMatched, errors, cancelled, truncated);
     }
 
     /// <summary>
@@ -195,12 +218,16 @@ public static class GrepService
     /// 行頭の絶対 UTF-16 オフセットを厳密に積算し、AbsoluteOffset＝行頭＋行内マッチ位置とする。
     /// 末尾の改行は空の最終行を作らない（標準 grep の行勘定）。
     /// ct がキャンセルされたら、その行の照合の前で戻る(項目 13)。
+    /// 一致を見つけた時点で上限(<paramref name="limits"/>)に達していれば、その一致を入れずに
+    /// true を返す(項目 14)。retainedChars は hits が保持する LineText の総文字数(ファイルをまたいで積む)。
     /// </summary>
-    private static void CollectLineHits(
+    private static bool CollectLineHits(
         string path,
         string text,
         TextSearcher searcher,
         List<GrepHit> hits,
+        ref long retainedChars,
+        GrepLimits limits,
         CancellationToken ct
     )
     {
@@ -213,7 +240,7 @@ public static class GrepService
             // キャンセル不能な時間の上限は、約 1 秒(1 行ぶんの Regex タイムアウト)+ リテラルの
             // プリフィルタの約 1 秒になる。見つかっていたヒットは残す(呼び出し側が Cancelled を立てる)。
             if (ct.IsCancellationRequested)
-                return;
+                return false;
 
             lineNumber++;
             int eol = pos;
@@ -225,6 +252,8 @@ public static class GrepService
             var m = searcher.FindFirst(text.AsSpan(pos, eol - pos));
             if (m is { } hit)
             {
+                if (hits.Count >= limits.MaxHits || retainedChars >= limits.MaxRetainedLineChars)
+                    return true;
                 hits.Add(
                     new GrepHit(
                         FilePath: path,
@@ -236,12 +265,14 @@ public static class GrepService
                         AbsoluteOffset: pos + hit.Start
                     )
                 );
+                retainedChars += eol - pos;
             }
 
             if (eol >= n)
                 break; // 末尾行（後続 EOL 無し）
             pos = (text[eol] == '\r' && eol + 1 < n && text[eol + 1] == '\n') ? eol + 2 : eol + 1;
         }
+        return false;
     }
 
     /// <summary>

@@ -46,6 +46,8 @@ public sealed class GrepResultsWindow : Form, IGrepResultsView
             _list.SelectedIndex = 0;
 
         string suffix = outcome.Cancelled ? "（中断）" : "";
+        if (outcome.Truncated)
+            suffix += "（上限で打ち切り）";
         if (outcome.Errors.Count > 0)
             suffix += $"（読み取り不可 {outcome.Errors.Count} 件）";
         Text =

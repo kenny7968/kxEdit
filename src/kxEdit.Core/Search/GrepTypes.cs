@@ -56,11 +56,31 @@ public sealed record GrepProgress(int FilesScanned, int HitCount, string? Curren
 /// <summary>
 /// grep の結果一式。Cancelled=true は協調キャンセルで途中打ち切り（Hits は途中までの部分結果）。
 /// FilesMatched は 1 件以上ヒットしたファイル数。
+/// Truncated=true は、結果の上限(<see cref="GrepLimits"/>)に達したため、見つかったのに Hits へ
+/// 入れなかったヒットが 1 件以上あり、そこで走査を打ち切ったことを表す
+/// (perf-followups フェーズ 3・項目 14)。ちょうど上限で終わった検索は false。
 /// </summary>
 public sealed record GrepOutcome(
     IReadOnlyList<GrepHit> Hits,
     int FilesScanned,
     int FilesMatched,
     IReadOnlyList<GrepError> Errors,
-    bool Cancelled
+    bool Cancelled,
+    bool Truncated = false
 );
+
+/// <summary>
+/// grep が保持する結果の上限(perf-followups フェーズ 3・項目 14)。一致を見つけた時点で、
+/// すでに <see cref="MaxHits"/> 件あるか、保持している <see cref="GrepHit.LineText"/> の総文字数が
+/// <see cref="MaxRetainedLineChars"/> 以上なら、その一致を入れずに走査を打ち切る。
+/// 上限をまたぐ 1 行は入れるので、総文字数は最悪「上限 + 1 行」になる。
+/// LineText は照合キー(A-18)なので切り詰めない。
+/// </summary>
+internal readonly record struct GrepLimits(int MaxHits, long MaxRetainedLineChars)
+{
+    /// <summary>
+    /// 100,000 件・64 Mi 字(128 MiB)。1 行 1〜10MB の minified 風 JS 40 本で 40 件・420 MiB を
+    /// 保持した計測(実装計画 2026-10-02-grep-hardening.md §0.2)から決めた。
+    /// </summary>
+    public static readonly GrepLimits Default = new(100_000, 64L * 1024 * 1024);
+}

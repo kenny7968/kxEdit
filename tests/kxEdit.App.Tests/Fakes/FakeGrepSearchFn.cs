@@ -34,7 +34,12 @@ public sealed class FakeGrepSearchFn
     public static GrepOutcome EmptyOutcome() =>
         new(Array.Empty<GrepHit>(), 0, 0, Array.Empty<GrepError>(), false);
 
-    public static GrepOutcome OutcomeWith(int hits, int errors = 0, bool cancelled = false)
+    public static GrepOutcome OutcomeWith(
+        int hits,
+        int errors = 0,
+        bool cancelled = false,
+        bool truncated = false
+    )
     {
         var hs = new GrepHit[hits];
         for (int i = 0; i < hits; i++)
@@ -42,6 +47,6 @@ public sealed class FakeGrepSearchFn
         var es = new GrepError[errors];
         for (int i = 0; i < errors; i++)
             es[i] = new GrepError("C:/fake/y.txt", "err");
-        return new GrepOutcome(hs, hits, hits > 0 ? 1 : 0, es, cancelled);
+        return new GrepOutcome(hs, hits, hits > 0 ? 1 : 0, es, cancelled, truncated);
     }
 }

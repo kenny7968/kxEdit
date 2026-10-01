@@ -702,4 +702,97 @@ public class GrepServiceTests
         );
         Assert.Equal(1, outcome.FilesMatched);
     }
+
+    // ---- perf-followups フェーズ 3(項目 14): 結果の上限 ----
+
+    private static GrepOutcome SearchLimited(GrepRequest req, int maxHits, long maxChars) =>
+        GrepService.Search(
+            req,
+            progress: null,
+            GrepService.DefaultLiteralPrefilter,
+            new GrepLimits(maxHits, maxChars),
+            CancellationToken.None
+        );
+
+    [Fact]
+    public void Default_limits_are_pinned()
+    {
+        Assert.Equal(100_000, GrepLimits.Default.MaxHits);
+        Assert.Equal(64L * 1024 * 1024, GrepLimits.Default.MaxRetainedLineChars);
+    }
+
+    [Fact]
+    public void Max_hits_truncates_and_stops_scanning()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("b.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("c.txt", "TARGET\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: 3, maxChars: long.MaxValue);
+
+        Assert.True(outcome.Truncated);
+        Assert.False(outcome.Cancelled);
+        Assert.Equal(3, outcome.Hits.Count);
+        Assert.Equal(2, outcome.FilesMatched); // a と b(b は途中まで)
+        Assert.Equal(2, outcome.FilesScanned); // c は走査しない
+    }
+
+    [Fact]
+    public void Exactly_max_hits_is_not_truncated()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\nnone\n");
+        t.WriteUtf8("b.txt", "TARGET\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: 3, maxChars: long.MaxValue);
+
+        Assert.False(outcome.Truncated); // 入れなかったヒットはない
+        Assert.Equal(3, outcome.Hits.Count);
+        Assert.Equal(2, outcome.FilesScanned);
+    }
+
+    [Fact]
+    public void Max_retained_chars_truncates_after_the_line_that_crosses_it()
+    {
+        using var t = new TempDir();
+        // 1 行 10 字。上限 15 字: 1 行目(10)は入る。2 行目(計 20)も、入れる時点の保持量は
+        // 10 < 15 なので入る。3 行目は保持量 20 >= 15 なので入れずに打ち切る。
+        t.WriteUtf8("a.txt", "TARGETxxxx\nTARGETyyyy\nTARGETzzzz\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: int.MaxValue, maxChars: 15);
+
+        Assert.True(outcome.Truncated);
+        Assert.Equal(new[] { "TARGETxxxx", "TARGETyyyy" }, outcome.Hits.Select(h => h.LineText));
+    }
+
+    [Fact]
+    public void Retained_chars_are_counted_across_files()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGETxxxx\n"); // 10 字
+        t.WriteUtf8("b.txt", "TARGETyyyy\n"); // 入れる時点で 10 >= 10 → 打ち切り
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: int.MaxValue, maxChars: 10);
+
+        Assert.True(outcome.Truncated);
+        var hit = Assert.Single(outcome.Hits);
+        Assert.EndsWith("a.txt", hit.FilePath, StringComparison.Ordinal);
+        Assert.Equal(1, outcome.FilesMatched);
+    }
+
+    [Fact]
+    public void Public_search_applies_default_max_hits()
+    {
+        using var t = new TempDir();
+        var sb = new StringBuilder();
+        for (int i = 0; i < 100_001; i++)
+            sb.Append("a\n");
+        t.WriteUtf8("a.txt", sb.ToString());
+
+        var outcome = GrepService.Search(Req(t.Root, "a"));
+
+        Assert.True(outcome.Truncated);
+        Assert.Equal(100_000, outcome.Hits.Count);
+    }
 }
