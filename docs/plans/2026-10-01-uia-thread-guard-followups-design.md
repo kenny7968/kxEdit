@@ -77,6 +77,24 @@ PR #102(perf-followups フェーズ 2)の申し送り 3 件について、対応
 - 品質ゲート: `tools/pre-merge-check.ps1` が EXIT 0。
 - L5: UIA の経路に触れるので必須。`tools/sr-regression.ps1` が EXIT 0 で、NVDA で行の移動(折り返し ON / OFF)とタブを閉じる操作を簡易に確認する。
 
-## 6. 申し送り
+## 6. 実施記録(2026-10-01)
 
-(実施後に追記する)
+- **成果物**: §3 のとおり。実装計画は `docs/plans/2026-10-01-uia-thread-guard-followups.md`。
+- **テスト**: `UiaThreadGuardTests` に 2 件を足した。
+  - 陰性対照: 修正前に、項目 1 は `InvalidAsynchronousStateException`、項目 3 は `Expected: 11 / Actual: 15` で FAIL した。
+  - スレッドのタイミングに依存するので、`--no-build` で 15 回繰り返した。失敗は 0 だった。
+- **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+- **L5**: `tools/sr-regression.ps1` が EXIT 0。NVDA の実機確認は、ユーザーの判断で省略した。
+  - 変わるのは、Handle の破棄や UI スレッドの終了と UIA の問い合わせが競合したときの応答だけである。通常時の応答は変わらない。
+- **レビュー**: 簡略化の基準に沿い、最終レビューの 2 パス(コード品質 / 脆弱性)を別エージェント 1 回に統合した。Critical・Important はなかった。
+  - ① fixup で修正: M-3。項目 3 のテストで、前提の assert が落ちても `gate` を必ず開ける(try/finally)。
+  - ② 受容: M-1。項目 1 のテストの前提(worker が `WaitSleepJoin` になった)は、まれに Invoke の投函より前に成り立ちうる。その場合、修正前のコードでも緑になりうる(偽の赤やフレークにはならない)。修正前に FAIL することは確かめた。
+  - ② 申し送り: M-2(下記)。
+  - M-4(本節が未記入)は、本節の追記で対応した。
+
+## 7. 申し送り
+
+- Invoke を呼ぶ前に UI スレッドが既に終了している場合は、本書の対象外のまま残る。
+  - レビューの M-2 による。WinForms の内部挙動からの推定で、**未確認**である。
+  - 推定では、例外が出ずに `null` が返る。T が値型の経路(`OffsetFromScreenPoint` / `GetVisibleRange`)では、`NullReferenceException` になりうる。
+  - 起きるのはプロセス終了の間際だけである。UIA の境界で HRESULT に変わるので、プロセスは落ちない。
