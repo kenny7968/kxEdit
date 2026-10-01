@@ -32,6 +32,73 @@ public class GrepResultsFormatTests
     }
 
     [Fact]
+    public void Format_Exactly201Chars_CutsAt200WithEllipsis()
+    {
+        // 従来(Trim の後で Length > 200 なら 200 字 + "…")と同じ境界であること。
+        string shown = GrepResultsWindow.Format(Hit(new string('a', 201)), Base);
+        Assert.EndsWith(": " + new string('a', 200) + "…", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_TrailingIdeographicSpace_IsTrimmed()
+    {
+        // 従来の Trim() は行末の全角空白(U+3000)・NBSP も落としていた。
+        string shown = GrepResultsWindow.Format(Hit("設定値　 "), Base);
+        Assert.EndsWith(": 設定値", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_WindowCutAndExactly201AfterSanitize_IsBounded()
+    {
+        // 窓で切り、無害化した結果がちょうど 201 字でも、本文は 200 字 + "…" に収まる。
+        string line = new string('a', 201) + new string('​', 900) + "zzz";
+        string shown = GrepResultsWindow.Format(Hit(line), Base);
+        Assert.EndsWith(": " + new string('a', 200) + "…", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_LongPath_KeepsTailWithinLimit()
+    {
+        // 最終レビュー(脆弱性)I-1: 深い階層で相対パスが数万字になっても、表示は末尾 260 字に収める
+        // (ヒットごとに数万字の表示文字列を作って GB 級のメモリと UI スレッドの時間を使わない)。
+        // ファイル名と拡張子が見えるよう、先頭を "…" にして末尾を残す。
+        string deep = string.Concat(Enumerable.Repeat(new string('d', 200) + "\\", 150));
+        string shown = GrepResultsWindow.Format(
+            Hit("x", file: Base + "\\" + deep + "name.txt"),
+            Base
+        );
+        string rel = shown[..shown.IndexOf(" (行 3): ", StringComparison.Ordinal)];
+        Assert.Equal(260, rel.Length);
+        Assert.StartsWith("…", rel, StringComparison.Ordinal);
+        Assert.EndsWith("\\name.txt", rel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_LongPathWithFormatChars_IsSanitizedAndBounded()
+    {
+        // 長いパスの末尾に RLO があっても除去され、長さの上限も保たれる。
+        string deep = string.Concat(Enumerable.Repeat(new string('d', 200) + "\\", 150));
+        string shown = GrepResultsWindow.Format(
+            Hit("x", file: Base + "\\" + deep + "invoice‮txt.exe"),
+            Base
+        );
+        string rel = shown[..shown.IndexOf(" (行 3): ", StringComparison.Ordinal)];
+        Assert.True(rel.Length <= 260, $"len={rel.Length}");
+        Assert.EndsWith("\\invoicetxt.exe", rel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_PathOf260Chars_IsNotCut()
+    {
+        // 前提(境界): ちょうど 260 字の相対パスは省略しない。
+        string relPath = new string('p', 252) + "\\a.txt"; // 252 + 1 + 5 = 258 → 余りを足して 260 にする
+        relPath = "pp" + relPath;
+        Assert.Equal(260, relPath.Length);
+        string shown = GrepResultsWindow.Format(Hit("x", file: Base + "\\" + relPath), Base);
+        Assert.StartsWith(relPath + " (行 3): ", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Format_Nul_And_C1_BecomeSpace()
     {
         // NUL(項目 12: 8000 バイトより後ろの NUL)と C1 の NEL(U+0085)は空白 1 つに畳む。
