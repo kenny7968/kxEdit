@@ -255,6 +255,34 @@
 - `sr-regression` が EXIT 0。
 - NVDA で、行移動・選択・タブを閉じる操作を簡易に確認する。
 
+### 6.4 実施記録(2026-10-01・PR #102)
+
+- **成果物**
+  - `UiaTextHostAdapter` に `TryRunOnUi<T>`(同期・戻り値あり)と `TryPostToUi`(投函)を置き、§6 の表の 7 経路をすべて寄せた。`InvokeRequired` が false でも、今のスレッドが UI スレッドでなければ縮退値を返す(投函する系は捨てる)。
+  - 項目 10: `TryFindVisualSegmentCore` の書き込みに、`ReferenceEquals(snap, _bufferSnapshot) && wrap == _host.WrapColumns` のガードを足した。
+  - 項目 11: `SetTopPosition` で、折り返し OFF ならセグメントを 0 に丸める。
+  - 実装計画は `docs/plans/2026-10-01-uia-thread-guard.md`。
+- **完了条件**
+  - **テスト**: 計 7 件を足した。
+    - `UiaThreadGuardTests` 5 件: Handle を破棄して親から外した状態(worker から見て `InvokeRequired=false`)で、worker から 7 経路を呼ぶ。Handle のガードはテストフック `TestHook_UiaAssumeHandleCreated` で通過させる。4 件は、UI スレッドで同じ問い合わせを行う陽性対照を持つ。
+    - 項目 10・11 に 1 件ずつ。項目 10 は、編集の直後に「本体はまだ走っていない」ことを前提として assert する(最終レビューで追加)。
+  - **陰性対照**
+    - スレッドの照合を外すと、陽性対照を持つ 4 件が FAIL した(LineStartOf 11→15、GetVisibleRange (0,0)→(0,3)、SetSelection (3,5)→(0,1)、TopLine 0→9)。
+    - 項目 10・11 のテストは、修正前に FAIL した。
+    - 照合の 2 行を消すとアナライザー S4487(読まれないフィールド)でビルドが失敗し、古い DLL で緑に見えた。条件を無効化する形(フィールドは読む)で取り直した(§3.3 の注意の実例)。
+  - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+  - **L5**: `tools/sr-regression.ps1` が EXIT 0。NVDA の実機で、行の移動(折り返し ON / OFF)・選択・タブを閉じる操作を確認した(PASS)。
+  - **レビュー**: タスクごとのレビュー(Task 1 は前倒しのコード品質レビューを兼ねる)と、最終レビューの 2 パス(コード品質 / 脆弱性。別エージェント)を行った。Critical・Important はなかった。Minor のうち 3 件を fixup で直し、残りは PR #102 に記載して受容した。
+- **本節からの精密化**
+  - **UI スレッドの ID**: adapter の ctor で `readonly` のフィールドに記録した。adapter は EditorControl の ctor の中でだけ生成されるので、§6.1 の「EditorControl の ctor で 1 回だけ記録し、以後は書き換えない」と同じ意味になる。
+  - **SetFocus**: 投函したものが UI スレッドに届いた時点で、もう一度判定するようになった(SetSelection / ScrollRangeIntoView と揃った)。届いた時点で Handle が無ければ `Focus()` は元々何もしないので、観測できる差はない。
+  - **例外の扱い**: `GetBoundingRectangles` / `OffsetFromScreenPoint` も Invoke の `ObjectDisposedException` / `InvalidOperationException` を縮退値に落とすようになった。この catch は、UI スレッドで body 自身が投げた同じ型の例外も縮退値にする。§6.1 どおりなので受容した。書き込み系では `BeginInvoke` 自体が投げる例外も捨てる。
+  - **既存テストの fixture**: `ComputeCaretPointNoWrapShortcutTests` の 1 ケース (10,1,37,3,10) は、折り返し OFF の `SetTopPosition` で古いセグメントを作っていた。項目 11 でその形が作れなくなったので、リフレクションで `_topSegment` を書く形に変えた。§15 の 11 の判断(製品の経路では到達しない)とは矛盾しない。このテストは、到達しない状態に対する `ComputeCaretPoint` の防御コードの回帰網として残す。
+- **申し送り**(以前からある問題。本フェーズの範囲外。回収先は未定で、次に申し送りを回収するときに扱う)
+  - 同期 Invoke を待つ間に UI スレッドが終了すると、`InvalidAsynchronousStateException`(ArgumentException の派生)が catch されない。UIA の境界で HRESULT に変わるだけで、プロセスは落ちない。
+  - 書き込み系の投函に上限がない。UIA で高頻度に Select / ScrollIntoView を叩くと、invoke キューが伸びる。同じ整合性レベルのプロセスに限られ、信頼境界は越えない。
+  - 自分の Handle が無く、親の Handle がある状態では、`InvokeRequired` が親で判定されて true になる。そのため Invoke した body は、UI スレッドで `IsUiBound` を判定し直さない。確認した範囲では無害。直す場合は、body を `() => IsUiBound ? body() : fallback` で包めば、`TryPostToUi` と対称になる。
+
 ## 7. フェーズ 3: grep の堅牢化(`grep-hardening`)
 
 **目的**: grep の結果一覧に出る外部由来の文字列を無害化する。正規表現モードのキャンセルを効くようにする。メモリとシンボリックリンクの懸念は、調査してから決める。
