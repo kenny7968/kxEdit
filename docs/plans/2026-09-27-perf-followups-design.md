@@ -264,12 +264,12 @@
   - 実装計画は `docs/plans/2026-10-01-uia-thread-guard.md`。
 - **完了条件**
   - **テスト**: 計 7 件を足した。
-    - `UiaThreadGuardTests` 5 件: Handle を破棄して親から外した状態(worker から見て `InvokeRequired=false`)で、worker から 7 経路を呼ぶ。Handle のガードはテストフック `TestHook_UiaAssumeHandleCreated` で通過させる。4 件は、UI スレッドで同じ問い合わせを行う陽性対照を持つ。
+    - `UiaThreadGuardTests` 5 件: Handle を破棄し、親から外す。その結果、worker から見て `InvokeRequired=false` になる。この状態で、worker から 7 経路を呼ぶ。Handle のガードはテストフック `TestHook_UiaAssumeHandleCreated` で通過させる。4 件は、UI スレッドで同じ問い合わせを行う陽性対照を持つ。
     - 項目 10・11 に 1 件ずつ。項目 10 は、編集の直後に「本体はまだ走っていない」ことを前提として assert する(最終レビューで追加)。
   - **陰性対照**
     - スレッドの照合を外すと、陽性対照を持つ 4 件が FAIL した(LineStartOf 11→15、GetVisibleRange (0,0)→(0,3)、SetSelection (3,5)→(0,1)、TopLine 0→9)。
     - 項目 10・11 のテストは、修正前に FAIL した。
-    - 照合の 2 行を消すとアナライザー S4487(読まれないフィールド)でビルドが失敗し、古い DLL で緑に見えた。条件を無効化する形(フィールドは読む)で取り直した(§3.3 の注意の実例)。
+    - 最初は照合の 2 行を消した。するとアナライザー S4487(読まれないフィールド)でビルドが失敗したのに、古い DLL のテストが走って緑に見えた。条件を無効化する形(フィールドは読む)で取り直した(§3.3 の注意の実例)。
   - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
   - **L5**: `tools/sr-regression.ps1` が EXIT 0。NVDA の実機で、行の移動(折り返し ON / OFF)・選択・タブを閉じる操作を確認した(PASS)。
   - **レビュー**: タスクごとのレビュー(Task 1 は前倒しのコード品質レビューを兼ねる)と、最終レビューの 2 パス(コード品質 / 脆弱性。別エージェント)を行った。Critical・Important はなかった。Minor のうち 3 件を fixup で直し、残りは PR #102 に記載して受容した。
