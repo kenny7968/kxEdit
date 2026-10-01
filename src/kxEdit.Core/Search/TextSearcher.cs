@@ -155,8 +155,9 @@ public sealed class TextSearcher
     /// <c>Matches</c> と同じ (Index, Length) の列を同じ順序で返す=同じ集合・同じ順序
     /// (<see cref="Locate"/> / <see cref="FindPrev"/> もフェーズ 4 で同じ列挙にした)。この等価性の網は
     /// <c>MatchPositionsTests.Strategy_matches_old_implementation_for_random_texts</c>
-    /// (<c>Matches</c> を使う旧経路との照合)と
-    /// <c>MatchPositionsTests.CollectMatches_yields_same_sequence_as_Matches</c>。
+    /// (表と旧経路の照合)と、<c>Matches</c> を正解にした
+    /// <c>MatchPositionsTests.CollectMatches_yields_same_sequence_as_Matches</c>(表の構築)・
+    /// <c>MatchPositionsTests.Legacy_paths_match_Matches_reference</c>(旧経路)。
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る(捕捉しない)。
     /// </summary>
     internal MatchPositions? CollectMatches(string text, int limit)
