@@ -2,7 +2,10 @@ using System.Diagnostics;
 
 namespace kxEdit.App.Tests;
 
-/// <summary>本番の間引き: 最後の予約だけが 1 回走ること・取り消せること(時間の精度は検証しない)。</summary>
+/// <summary>
+/// 本番の間引き: 最後の予約だけが 1 回走ること・取り消せること・遅延を最後の予約から数え直すこと
+/// (時間は片側の粗い下限だけを見る。精度は検証しない)。
+/// </summary>
 public class WinFormsDebounceSchedulerTests
 {
     /// <summary>条件が満たされるか上限時間が過ぎるまでメッセージを汲む。</summary>
@@ -65,8 +68,9 @@ public class WinFormsDebounceSchedulerTests
             s.Schedule(() => ran.Add("A"));
             SleepWithoutPumping(delayMs * 2);
 
-            s.Schedule(() => ran.Add("B"));
+            // 計測は予約の前から始める(予約との間でスレッドが止まっても、計測値が実際の経過を下回らない)
             var sw = Stopwatch.StartNew();
+            s.Schedule(() => ran.Add("B"));
             PumpUntil(() => ran.Count > 0, 5000);
             long elapsedMs = sw.ElapsedMilliseconds;
 
