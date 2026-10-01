@@ -641,4 +641,65 @@ public class GrepServiceTests
         // 64・128 ファイル目の途中通知と、最後の通知(CurrentFile=null)の 3 回。
         Assert.Equal(new[] { 64, 128, 130 }, reports.Select(r => r.FilesScanned));
     }
+
+    // ---- perf-followups フェーズ 3(項目 13): 行ごとにキャンセルを確かめる ----
+
+    // 注: プリフィルタの差し替え口はリテラル検索でしか呼ばれない。項目 13 は正規表現モードの
+    // 問題(行ごとに 1 秒のタイムアウトで「行数 × 約 1 秒」キャンセルできない)だが、両モードが
+    // 共有する CollectLineHits の行ループを通すことで確かめる(時間に依存しない)。
+    [Fact]
+    public void Cancellation_inside_a_file_stops_line_matching()
+    {
+        using var t = new TempDir();
+        var sb = new StringBuilder();
+        for (int i = 0; i < 1000; i++)
+            sb.Append("TARGET\n");
+        t.WriteUtf8("many.txt", sb.ToString());
+
+        using var cts = new CancellationTokenSource();
+        var outcome = GrepService.Search(
+            Req(t.Root, "TARGET"),
+            progress: null,
+            (searcher, text) =>
+            {
+                cts.Cancel(); // このファイルの行照合に入る直前でキャンセルする
+                return true;
+            },
+            cts.Token
+        );
+
+        Assert.True(outcome.Cancelled);
+        Assert.Equal(1, outcome.FilesScanned); // 前提: ファイルの中まで入った
+        Assert.True(outcome.Hits.Count < 1000, $"hits={outcome.Hits.Count}");
+    }
+
+    [Fact]
+    public void Hits_found_before_cancellation_are_kept()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("b.txt", "TARGET\nTARGET\n");
+
+        using var cts = new CancellationTokenSource();
+        int calls = 0;
+        var outcome = GrepService.Search(
+            Req(t.Root, "TARGET"),
+            progress: null,
+            (searcher, text) =>
+            {
+                if (++calls == 2)
+                    cts.Cancel(); // 2 つ目のファイル(b.txt)の行照合の直前
+                return true;
+            },
+            cts.Token
+        );
+
+        Assert.True(outcome.Cancelled);
+        Assert.Equal(2, outcome.Hits.Count); // a.txt の 2 件は残る
+        Assert.All(
+            outcome.Hits,
+            h => Assert.EndsWith("a.txt", h.FilePath, StringComparison.Ordinal)
+        );
+        Assert.Equal(1, outcome.FilesMatched);
+    }
 }

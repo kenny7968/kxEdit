@@ -125,7 +125,7 @@ public static class GrepService
                     request.Options.UseRegex
                     || PassesLiteralPrefilter(literalPrefilter, searcher, text)
                 )
-                    CollectLineHits(path, text, searcher, hits);
+                    CollectLineHits(path, text, searcher, hits, cancellationToken);
             }
             catch (RegexMatchTimeoutException)
             {
@@ -194,12 +194,14 @@ public static class GrepService
     /// text を行（\r\n / \n / \r 区切り）に分け、各行の先頭マッチを 1 ヒットとして hits へ加える。
     /// 行頭の絶対 UTF-16 オフセットを厳密に積算し、AbsoluteOffset＝行頭＋行内マッチ位置とする。
     /// 末尾の改行は空の最終行を作らない（標準 grep の行勘定）。
+    /// ct がキャンセルされたら、その行の照合の前で戻る(項目 13)。
     /// </summary>
     private static void CollectLineHits(
         string path,
         string text,
         TextSearcher searcher,
-        List<GrepHit> hits
+        List<GrepHit> hits,
+        CancellationToken ct
     )
     {
         int pos = 0,
@@ -207,6 +209,12 @@ public static class GrepService
             n = text.Length;
         while (pos < n)
         {
+            // 項目 13: 行ごとにキャンセルを確かめる(volatile 読み 1 回。行ごとの照合に比べて無視できる)。
+            // キャンセル不能な時間の上限は、約 1 秒(1 行ぶんの Regex タイムアウト)+ リテラルの
+            // プリフィルタの約 1 秒になる。見つかっていたヒットは残す(呼び出し側が Cancelled を立てる)。
+            if (ct.IsCancellationRequested)
+                return;
+
             lineNumber++;
             int eol = pos;
             while (eol < n && text[eol] != '\r' && text[eol] != '\n')
