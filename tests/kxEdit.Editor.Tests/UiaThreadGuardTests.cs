@@ -252,17 +252,23 @@ public class UiaThreadGuardTests
                     invokeRequiredAfterDestroy = c.InvokeRequired;
                 };
                 var t = System.Threading.Tasks.Task.Run(() => host.LineStartOf(Line1Offset));
-                Assert.True(reached.Wait(5000), "worker がガードを通らない");
+                try
+                {
+                    Assert.True(reached.Wait(5000), "worker がガードを通らない");
 
-                // 窓: ガードの後で、自分の Handle だけを破棄する(親は残す)。
-                c.TestHook_UiaAfterUiBoundCheck = null;
-                typeof(Control)
-                    .GetMethod("DestroyHandle", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .Invoke(c, null);
-                Assert.False(c.IsHandleCreated); // fixture 前提
-                Assert.Same(f, c.Parent);
-                Assert.True(f.IsHandleCreated);
-                gate.Set();
+                    // 窓: ガードの後で、自分の Handle だけを破棄する(親は残す)。
+                    c.TestHook_UiaAfterUiBoundCheck = null;
+                    typeof(Control)
+                        .GetMethod("DestroyHandle", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(c, null);
+                    Assert.False(c.IsHandleCreated); // fixture 前提
+                    Assert.Same(f, c.Parent);
+                    Assert.True(f.IsHandleCreated);
+                }
+                finally
+                {
+                    gate.Set(); // 前提が落ちても、worker を破棄済みの gate で待たせない
+                }
 
                 var sw = Stopwatch.StartNew();
                 while (!t.IsCompleted && sw.ElapsedMilliseconds < 5000)
