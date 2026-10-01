@@ -94,8 +94,10 @@ public static class GrepService
             int hitsBefore = hits.Count;
             try
             {
-                long size = new FileInfo(path).Length;
-                if (size > MaxFileBytes)
+                // G-2: 開いた後の長さで上限を判定する(FileInfo.Length はシンボリックリンク自体の
+                // 長さを返すので、リンク経由だと上限を迂回して読めてしまう)。
+                var (read, size) = ReadAllBytesBounded(path, MaxFileBytes);
+                if (read is null)
                 {
                     errors.Add(
                         new GrepError(
@@ -106,7 +108,7 @@ public static class GrepService
                     continue;
                 }
 
-                byte[] bytes = File.ReadAllBytes(path);
+                byte[] bytes = read;
                 // 対応エンコーディング(UTF-8/SJIS/EUC-JP)はいずれも正常な本文に NUL を含まないため、
                 // 先頭 8000B に NUL があればバイナリとみなしてスキップする。
                 // P-8: 文字コード判定(全文走査。UTF-8 でなければ UtfUnknown も全文にかかる)より先に行う。
@@ -232,6 +234,40 @@ public static class GrepService
                 break; // 末尾行（後続 EOL 無し）
             pos = (text[eol] == '\r' && eol + 1 < n && text[eol + 1] == '\n') ? eol + 2 : eol + 1;
         }
+    }
+
+    /// <summary>
+    /// path を開き、開いた後の長さ(シンボリックリンクを辿った後の長さ)が maxBytes 以下なら全体を読む。
+    /// 超えていれば Bytes=null を返し、読まない。判定してから読むまでにファイルが伸びても、
+    /// 判定した長さまでしか読まない(TOCTOU を閉じる)。縮んだら読めたぶんだけを返す。
+    /// 共有モードとバッファなしは <see cref="File.ReadAllBytes(string)"/> と同じ。
+    /// </summary>
+    internal static (byte[]? Bytes, long Length) ReadAllBytesBounded(string path, long maxBytes)
+    {
+        using var fs = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1,
+            FileOptions.SequentialScan
+        );
+        long length = fs.Length;
+        if (length > maxBytes)
+            return (null, length);
+
+        var bytes = new byte[length];
+        int total = 0;
+        while (total < bytes.Length)
+        {
+            int n = fs.Read(bytes, total, bytes.Length - total);
+            if (n == 0)
+                break;
+            total += n;
+        }
+        if (total < bytes.Length)
+            Array.Resize(ref bytes, total);
+        return (bytes, length);
     }
 
     /// <summary>先頭 <see cref="BinarySniffBytes"/> バイトに NUL を含むか。</summary>

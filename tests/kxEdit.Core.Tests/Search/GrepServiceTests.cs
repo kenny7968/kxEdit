@@ -401,6 +401,73 @@ public class GrepServiceTests
         Assert.NotEmpty(outcome.Errors); // 列挙時の DirectoryNotFound を集約
     }
 
+    // ---- perf-followups フェーズ 3(G-2): 開いた後の長さで上限を判定する ----
+
+    [Fact]
+    public void ReadAllBytesBounded_returns_bytes_within_limit()
+    {
+        using var t = new TempDir();
+        string p = t.WriteUtf8("a.txt", "0123456789");
+        var (bytes, length) = GrepService.ReadAllBytesBounded(p, maxBytes: 10);
+        Assert.Equal(10, length);
+        Assert.Equal(Encoding.UTF8.GetBytes("0123456789"), bytes);
+    }
+
+    [Fact]
+    public void ReadAllBytesBounded_returns_null_over_limit()
+    {
+        using var t = new TempDir();
+        string p = t.WriteUtf8("a.txt", "0123456789");
+        var (bytes, length) = GrepService.ReadAllBytesBounded(p, maxBytes: 9);
+        Assert.Null(bytes);
+        Assert.Equal(10, length);
+    }
+
+    [Fact]
+    public void Oversized_file_is_skipped_with_error()
+    {
+        using var t = new TempDir();
+        string big = Path.Combine(t.Root, "big.txt");
+        using (var fs = File.Create(big))
+            fs.SetLength(64L * 1024 * 1024 + 1); // 上限 + 1 バイト(NTFS は実際には書かない)
+        t.WriteUtf8("small.txt", "TARGET\n");
+
+        var outcome = GrepService.Search(Req(t.Root, "TARGET"));
+
+        Assert.Single(outcome.Hits);
+        var err = Assert.Single(outcome.Errors);
+        Assert.Equal(big, err.Path);
+        Assert.Contains("大きすぎます", err.Message);
+    }
+
+    [Fact]
+    public void Symlink_to_oversized_file_is_judged_by_target_length()
+    {
+        // FileInfo.Length はリンク自体の長さ(0)を返し、ReadAllBytes はリンクを辿る。
+        // 開いた後の長さで判定すれば、リンク先の大きさで上限が効く。
+        using var t = new TempDir();
+        string target = Path.Combine(t.Root, "target.bin");
+        using (var fs = File.Create(target))
+            fs.SetLength(64L * 1024 * 1024 + 1);
+        string sub = Path.Combine(t.Root, "sub");
+        Directory.CreateDirectory(sub);
+        string link = Path.Combine(sub, "link.txt");
+        try
+        {
+            File.CreateSymbolicLink(link, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // Skip: シンボリックリンクを作れない環境(管理者権限・開発者モードなし)
+        }
+
+        var outcome = GrepService.Search(Req(sub, "TARGET"));
+
+        var err = Assert.Single(outcome.Errors);
+        Assert.Equal(link, err.Path);
+        Assert.Contains("大きすぎます", err.Message);
+    }
+
     // ---- フェーズ 8(perf-grep): リテラル検索の全文プリフィルタ ----
 
     private static GrepOutcome SearchWith(
