@@ -401,6 +401,73 @@ public class GrepServiceTests
         Assert.NotEmpty(outcome.Errors); // 列挙時の DirectoryNotFound を集約
     }
 
+    // ---- perf-followups フェーズ 3(G-2): 開いた後の長さで上限を判定する ----
+
+    [Fact]
+    public void ReadAllBytesBounded_returns_bytes_within_limit()
+    {
+        using var t = new TempDir();
+        string p = t.WriteUtf8("a.txt", "0123456789");
+        var (bytes, length) = GrepService.ReadAllBytesBounded(p, maxBytes: 10);
+        Assert.Equal(10, length);
+        Assert.Equal(Encoding.UTF8.GetBytes("0123456789"), bytes);
+    }
+
+    [Fact]
+    public void ReadAllBytesBounded_returns_null_over_limit()
+    {
+        using var t = new TempDir();
+        string p = t.WriteUtf8("a.txt", "0123456789");
+        var (bytes, length) = GrepService.ReadAllBytesBounded(p, maxBytes: 9);
+        Assert.Null(bytes);
+        Assert.Equal(10, length);
+    }
+
+    [Fact]
+    public void Oversized_file_is_skipped_with_error()
+    {
+        using var t = new TempDir();
+        string big = Path.Combine(t.Root, "big.txt");
+        using (var fs = File.Create(big))
+            fs.SetLength(64L * 1024 * 1024 + 1); // 上限 + 1 バイト(NTFS は実際には書かない)
+        t.WriteUtf8("small.txt", "TARGET\n");
+
+        var outcome = GrepService.Search(Req(t.Root, "TARGET"));
+
+        Assert.Single(outcome.Hits);
+        var err = Assert.Single(outcome.Errors);
+        Assert.Equal(big, err.Path);
+        Assert.Contains("大きすぎます", err.Message);
+    }
+
+    [Fact]
+    public void Symlink_to_oversized_file_is_judged_by_target_length()
+    {
+        // FileInfo.Length はリンク自体の長さ(0)を返し、ReadAllBytes はリンクを辿る。
+        // 開いた後の長さで判定すれば、リンク先の大きさで上限が効く。
+        using var t = new TempDir();
+        string target = Path.Combine(t.Root, "target.bin");
+        using (var fs = File.Create(target))
+            fs.SetLength(64L * 1024 * 1024 + 1);
+        string sub = Path.Combine(t.Root, "sub");
+        Directory.CreateDirectory(sub);
+        string link = Path.Combine(sub, "link.txt");
+        try
+        {
+            File.CreateSymbolicLink(link, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // Skip: シンボリックリンクを作れない環境(管理者権限・開発者モードなし)
+        }
+
+        var outcome = GrepService.Search(Req(sub, "TARGET"));
+
+        var err = Assert.Single(outcome.Errors);
+        Assert.Equal(link, err.Path);
+        Assert.Contains("大きすぎます", err.Message);
+    }
+
     // ---- フェーズ 8(perf-grep): リテラル検索の全文プリフィルタ ----
 
     private static GrepOutcome SearchWith(
@@ -573,5 +640,159 @@ public class GrepServiceTests
         Assert.Equal(130, falseCalls);
         // 64・128 ファイル目の途中通知と、最後の通知(CurrentFile=null)の 3 回。
         Assert.Equal(new[] { 64, 128, 130 }, reports.Select(r => r.FilesScanned));
+    }
+
+    // ---- perf-followups フェーズ 3(項目 13): 行ごとにキャンセルを確かめる ----
+
+    // 注: プリフィルタの差し替え口はリテラル検索でしか呼ばれない。項目 13 は正規表現モードの
+    // 問題(行ごとに 1 秒のタイムアウトで「行数 × 約 1 秒」キャンセルできない)だが、両モードが
+    // 共有する CollectLineHits の行ループを通すことで確かめる(時間に依存しない)。
+    [Fact]
+    public void Cancellation_inside_a_file_stops_line_matching()
+    {
+        using var t = new TempDir();
+        var sb = new StringBuilder();
+        for (int i = 0; i < 1000; i++)
+            sb.Append("TARGET\n");
+        t.WriteUtf8("many.txt", sb.ToString());
+
+        using var cts = new CancellationTokenSource();
+        var outcome = GrepService.Search(
+            Req(t.Root, "TARGET"),
+            progress: null,
+            (searcher, text) =>
+            {
+                cts.Cancel(); // このファイルの行照合に入る直前でキャンセルする
+                return true;
+            },
+            cts.Token
+        );
+
+        Assert.True(outcome.Cancelled);
+        Assert.Equal(1, outcome.FilesScanned); // 前提: ファイルの中まで入った
+        Assert.True(outcome.Hits.Count < 1000, $"hits={outcome.Hits.Count}");
+    }
+
+    [Fact]
+    public void Hits_found_before_cancellation_are_kept()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("b.txt", "TARGET\nTARGET\n");
+
+        using var cts = new CancellationTokenSource();
+        int calls = 0;
+        var outcome = GrepService.Search(
+            Req(t.Root, "TARGET"),
+            progress: null,
+            (searcher, text) =>
+            {
+                if (++calls == 2)
+                    cts.Cancel(); // 2 つ目のファイル(b.txt)の行照合の直前
+                return true;
+            },
+            cts.Token
+        );
+
+        Assert.True(outcome.Cancelled);
+        Assert.Equal(2, outcome.Hits.Count); // a.txt の 2 件は残る
+        Assert.All(
+            outcome.Hits,
+            h => Assert.EndsWith("a.txt", h.FilePath, StringComparison.Ordinal)
+        );
+        Assert.Equal(1, outcome.FilesMatched);
+    }
+
+    // ---- perf-followups フェーズ 3(項目 14): 結果の上限 ----
+
+    private static GrepOutcome SearchLimited(GrepRequest req, int maxHits, long maxChars) =>
+        GrepService.Search(
+            req,
+            progress: null,
+            GrepService.DefaultLiteralPrefilter,
+            new GrepLimits(maxHits, maxChars),
+            CancellationToken.None
+        );
+
+    [Fact]
+    public void Default_limits_are_pinned()
+    {
+        Assert.Equal(10_000, GrepLimits.Default.MaxHits);
+        Assert.Equal(64L * 1024 * 1024, GrepLimits.Default.MaxRetainedLineChars);
+    }
+
+    [Fact]
+    public void Max_hits_truncates_and_stops_scanning()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("b.txt", "TARGET\nTARGET\n");
+        t.WriteUtf8("c.txt", "TARGET\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: 3, maxChars: long.MaxValue);
+
+        Assert.True(outcome.Truncated);
+        Assert.False(outcome.Cancelled);
+        Assert.Equal(3, outcome.Hits.Count);
+        Assert.Equal(2, outcome.FilesMatched); // a と b(b は途中まで)
+        Assert.Equal(2, outcome.FilesScanned); // c は走査しない
+    }
+
+    [Fact]
+    public void Exactly_max_hits_is_not_truncated()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGET\nTARGET\nnone\n");
+        t.WriteUtf8("b.txt", "TARGET\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: 3, maxChars: long.MaxValue);
+
+        Assert.False(outcome.Truncated); // 入れなかったヒットはない
+        Assert.Equal(3, outcome.Hits.Count);
+        Assert.Equal(2, outcome.FilesScanned);
+    }
+
+    [Fact]
+    public void Max_retained_chars_truncates_after_the_line_that_crosses_it()
+    {
+        using var t = new TempDir();
+        // 1 行 10 字。上限 15 字: 1 行目(10)は入る。2 行目(計 20)も、入れる時点の保持量は
+        // 10 < 15 なので入る。3 行目は保持量 20 >= 15 なので入れずに打ち切る。
+        t.WriteUtf8("a.txt", "TARGETxxxx\nTARGETyyyy\nTARGETzzzz\n");
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: int.MaxValue, maxChars: 15);
+
+        Assert.True(outcome.Truncated);
+        Assert.Equal(new[] { "TARGETxxxx", "TARGETyyyy" }, outcome.Hits.Select(h => h.LineText));
+    }
+
+    [Fact]
+    public void Retained_chars_are_counted_across_files()
+    {
+        using var t = new TempDir();
+        t.WriteUtf8("a.txt", "TARGETxxxx\n"); // 10 字
+        t.WriteUtf8("b.txt", "TARGETyyyy\n"); // 入れる時点で 10 >= 10 → 打ち切り
+
+        var outcome = SearchLimited(Req(t.Root, "TARGET"), maxHits: int.MaxValue, maxChars: 10);
+
+        Assert.True(outcome.Truncated);
+        var hit = Assert.Single(outcome.Hits);
+        Assert.EndsWith("a.txt", hit.FilePath, StringComparison.Ordinal);
+        Assert.Equal(1, outcome.FilesMatched);
+    }
+
+    [Fact]
+    public void Public_search_applies_default_max_hits()
+    {
+        using var t = new TempDir();
+        var sb = new StringBuilder();
+        for (int i = 0; i < 10_001; i++)
+            sb.Append("a\n");
+        t.WriteUtf8("a.txt", sb.ToString());
+
+        var outcome = GrepService.Search(Req(t.Root, "a"));
+
+        Assert.True(outcome.Truncated);
+        Assert.Equal(10_000, outcome.Hits.Count);
     }
 }

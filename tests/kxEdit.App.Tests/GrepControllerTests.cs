@@ -439,6 +439,27 @@ public class GrepControllerTests
         });
 
     [Fact]
+    public void RunAsync_Truncated_AnnouncesSummary() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            host.NewDoc("body");
+            host.Grep.Open();
+            host.View.Pattern = "abc";
+            host.View.Folder = ExistingFolder;
+            host.SearchFn.DefaultOutcome = FakeGrepSearchFn.OutcomeWith(hits: 3, truncated: true);
+
+            host.Grep.RunAsync().GetAwaiter().GetResult();
+
+            Assert.Equal(1, host.Results.ShowResultsCount);
+            // ヒットがあってエラーがなくても、打ち切りは必ず発声する(黙って不完全な一覧を見せない)。
+            Assert.Contains(
+                host.View.Notifications,
+                s => s.Contains("3 行 / 1 ファイル") && s.Contains("上限に達したため打ち切り")
+            );
+        });
+
+    [Fact]
     public void RunAsync_SearchFnThrows_AnnouncesError_AndResetsRunning() =>
         Sta.Run(() =>
         {

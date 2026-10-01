@@ -150,7 +150,8 @@ public sealed class GrepController
             ShowResults(pattern, folder, outcome);
             // ヒットがあれば結果窓のフォーカスが SR を駆動するので二重読みを避ける。ただし
             // 読み取りエラーがある時は走査が不完全な旨を必ず音声化する（誤った「見つかりません」防止）。
-            if (outcome.Hits.Count == 0 || outcome.Errors.Count > 0)
+            // 上限による打ち切りも同じく必ず音声化する(黙って不完全な一覧を見せない。perf-followups フェーズ 3)。
+            if (outcome.Hits.Count == 0 || outcome.Errors.Count > 0 || outcome.Truncated)
                 d.RaiseNotification(Summary(outcome));
             else
                 d.SetStatus(Summary(outcome));
@@ -191,7 +192,8 @@ public sealed class GrepController
         if (o.Hits.Count == 0)
             return (o.Cancelled ? "中断しました（0 件）" : "見つかりません") + errs;
         string head = o.Cancelled ? "中断: " : "";
-        return $"{head}{o.Hits.Count} 行 / {o.FilesMatched} ファイル{errs}";
+        string trunc = o.Truncated ? "・上限に達したため打ち切り" : "";
+        return $"{head}{o.Hits.Count} 行 / {o.FilesMatched} ファイル{trunc}{errs}";
     }
 
     private void ShowResults(string pattern, string folder, GrepOutcome outcome)

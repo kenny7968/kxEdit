@@ -1745,7 +1745,10 @@ public sealed partial class MainForm : Form
         doc.Editor.BringCaretIntoView();
         doc.FocusTarget.Focus();
         // ジャンプ先のファイル名と行を明示通知（選択移動の自動読みに加え、別ファイルへ飛んだ文脈を補う）。
-        string where = $"{doc.State.DisplayName} {doc.Editor.CurrentLine + 1} 行目";
+        // ファイル名は外部由来なので無害化する(結果一覧と揃える。perf-followups フェーズ 3・G-1。
+        // 長さの上限は FileController の通知と同じ 80)。
+        string name = SanitizeForDisplay.OneLine(doc.State.DisplayName, 80);
+        string where = $"{name} {doc.Editor.CurrentLine + 1} 行目";
         _announcer.Say(t.Kind == GrepJumpKind.Stale ? $"{where} 内容が変わっています" : where);
     }
 
