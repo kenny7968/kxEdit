@@ -79,8 +79,10 @@ public sealed record GrepOutcome(
 internal readonly record struct GrepLimits(int MaxHits, long MaxRetainedLineChars)
 {
     /// <summary>
-    /// 100,000 件・64 Mi 字(128 MiB)。1 行 1〜10MB の minified 風 JS 40 本で 40 件・420 MiB を
-    /// 保持した計測(実装計画 2026-10-02-grep-hardening.md §0.2)から決めた。
+    /// 10,000 件・64 Mi 字(128 MiB)。文字数は、1 行 1〜10MB の minified 風 JS 40 本で 40 件・420 MiB を
+    /// 保持した計測(実装計画 2026-10-02-grep-hardening.md §0.2)から決めた。件数は、結果一覧
+    /// (ListBox)への全件追加で UI スレッドが止まる時間から決めた(10,000 件で約 2.6 秒、
+    /// 100,000 件では約 54 秒。最終レビューの I-2)。
     /// </summary>
-    public static readonly GrepLimits Default = new(100_000, 64L * 1024 * 1024);
+    public static readonly GrepLimits Default = new(10_000, 64L * 1024 * 1024);
 }

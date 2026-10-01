@@ -717,7 +717,7 @@ public class GrepServiceTests
     [Fact]
     public void Default_limits_are_pinned()
     {
-        Assert.Equal(100_000, GrepLimits.Default.MaxHits);
+        Assert.Equal(10_000, GrepLimits.Default.MaxHits);
         Assert.Equal(64L * 1024 * 1024, GrepLimits.Default.MaxRetainedLineChars);
     }
 
@@ -786,13 +786,13 @@ public class GrepServiceTests
     {
         using var t = new TempDir();
         var sb = new StringBuilder();
-        for (int i = 0; i < 100_001; i++)
+        for (int i = 0; i < 10_001; i++)
             sb.Append("a\n");
         t.WriteUtf8("a.txt", sb.ToString());
 
         var outcome = GrepService.Search(Req(t.Root, "a"));
 
         Assert.True(outcome.Truncated);
-        Assert.Equal(100_000, outcome.Hits.Count);
+        Assert.Equal(10_000, outcome.Hits.Count);
     }
 }
