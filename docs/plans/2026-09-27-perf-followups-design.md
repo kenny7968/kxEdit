@@ -422,6 +422,28 @@
   - `Stop()` を消す変異では、汲み始めた直後(約 0 ms)に発火するので区別できる。遅いマシンでは発火が遅れるだけなので、偽の失敗になりにくい。
 - 変異検証: スポットで 1〜2 個(break の条件)。
 
+### 8.3 実施記録(2026-10-02・PR #105)
+
+- **成果物**
+  - 項目 15: `TextSearcher.FindPrev` / `Locate` の列挙を `Matches` から `EnumerateMatches` に置き換えた。返す (Index, Length) の列・順序・例外の伝播は変わらない(挙動差なし)。
+  - 項目 28: `WinFormsDebounceSchedulerTests` に、遅延を最後の予約から数え直すことのテストを足した(製品コードは変えていない)。
+  - 実装計画は `docs/plans/2026-10-02-search-legacy-enum.md`。
+- **完了条件**
+  - **テスト**: 計 3 件を足した(Core 2 件・App 1 件)。
+    - `Legacy_paths_match_Matches_reference`: `Matches` を正解にした旧ループと照合する。置き換えると既存の `Strategy_matches_old_implementation_for_random_texts` の正解(`TextSearcher`)も新しい列挙になるので、別に置いた。
+    - `Legacy_paths_do_not_allocate_per_match`: `,` が 10 万件ある文字列で、`Locate` と `FindPrev` の確保量が **45,795,248 バイト → 0 バイト**になった(上限 64KiB で判定)。
+    - `Schedule_Again_RestartsDelayFromLatestCall`: §8.2 の片側の不等式。
+  - **変異検証**(スポット 2 個。各回ビルドの成功を確かめた): `FindPrev` の `>=` → `>`、`break` → `continue`。どちらも `Legacy_paths_match_Matches_reference` で殺された。`continue` の変異を殺せたのは、病的パターン `(?:b(?!a)+?)*` が .NET 9 で減る列を返すため(単調な列なら等価変異になる)。
+  - **陰性対照**(項目 28): `Schedule` の `Stop()` を `if (_pending is null)` で無効化すると、再予約から 15〜16 ms で発火して FAIL した。
+  - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+  - **L5**: 不要(§3.3。SR 経路に触れない)。
+  - **レビュー**: 製品コードは 1 ファイル・数行の置き換えなので、CLAUDE.md §3 の簡略化の基準に沿って、最終レビューの 2 パスを別エージェント 1 回に統合した。Critical・Important はなかった。Minor 3 件(デバウンスのテストで Stopwatch を予約の前から始める、xmldoc とテストクラスの summary の更新)は fixup で直した。残りの 1 件は下の申し送りに書いて受容した。
+- **本節からの精密化**
+  - テスト本体の `Thread.Sleep` はアナライザー(S2925)でビルドが落ちるので、private ヘルパー経由にした(`PreviewUserDataFolderTests.SleepMs` と同じ慣例)。
+- **申し送り**(回収先は未定。次に申し送りを回収するときに扱う)
+  - `Locate` の「同じ (Index, Length) が複数あれば最後の序数を返す」規則は、.NET 9 では重複する一致を作れないので、テストで確かめられていない(今回は数え方を変えていないので退行の危険はない)。
+  - 病的パターン `(?:b(?!a)+?)*` が startat より前の一致を返す挙動は、.NET 10 では起きない(レビューで確認)。ランタイムを上げると、この fixture で `FindPrev` の break 規則を区別する効き目がなくなる。
+
 ## 9. フェーズ 5: 追記ブロックのマージ(`append-merge`)
 
 **目的**: フェーズ 4(元の設計書)で増えたピースを、隣接マージで元に戻す。先に照合テストを入れて安全網にする。
