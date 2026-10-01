@@ -8,6 +8,8 @@ namespace kxEdit.Core.Tests.Search;
 /// <summary>
 /// 一致位置表(P-14)。正解は旧実装=<see cref="TextSearcher"/> の <c>Locate</c> / <c>FindPrev</c> /
 /// <c>Count</c>(全件列挙)で、表を使う <see cref="MaterializedSearchStrategy"/> がそれと一致することを見る。
+/// <see cref="TextSearcher"/> の <c>Locate</c> / <c>FindPrev</c> も <c>EnumerateMatches</c> で列挙するので、
+/// <c>Matches</c> を正解にした照合は <c>Legacy_paths_match_Matches_reference</c> が受け持つ。
 /// </summary>
 public class MatchPositionsTests
 {
@@ -222,6 +224,62 @@ public class MatchPositionsTests
         }
     }
 
+    /// <summary>
+    /// 従来経路(<see cref="TextSearcher.FindPrev"/> / <see cref="TextSearcher.Locate"/>)が、
+    /// <c>Matches</c> で列挙した旧実装と同じ答えを返す(フェーズ 4: 列挙を <c>EnumerateMatches</c> に
+    /// 差し替えた)。正解は <c>Matches</c> の列に旧実装のループ(<see cref="RefFindPrev"/> /
+    /// <see cref="RefLocate"/>)を当てたもの。startat より前のマッチを返す病的パターン
+    /// (FindPrev の break 規則が効く)とゼロ幅パターンを含む。
+    /// </summary>
+    [Fact]
+    public void Legacy_paths_match_Matches_reference()
+    {
+        SearchOptions[] conditions =
+        [
+            new("(?:b(?!a)+?)*", UseRegex: true),
+            new("a*", UseRegex: true),
+            new("b*", UseRegex: true),
+            new(@"\b", UseRegex: true),
+            new("(?=a)", UseRegex: true),
+            new("a|ab", MatchCase: true, UseRegex: true),
+            new("[ab]+?", UseRegex: true),
+            new("$", UseRegex: true),
+            new("(?m)^", UseRegex: true),
+            new(@"\r?\n", UseRegex: true),
+            new(".", UseRegex: true),
+        ];
+        string[] fixedTexts = ["abbbb", "bab", "", "babbab", "BBaB", "aaa"];
+        var rnd = new Random(20261002);
+        foreach (var o in conditions)
+        {
+            var searcher = new TextSearcher(o);
+            var texts = fixedTexts.Concat(Enumerable.Range(0, 80).Select(_ => RandomText(rnd)));
+            foreach (var text in texts)
+            {
+                var ms = ReferenceRegex(o).Matches(text);
+                int[] starts = ms.Select(m => m.Index).ToArray();
+                int[] lengths = ms.Select(m => m.Length).ToArray();
+                for (int before = -1; before <= text.Length + 2; before++)
+                {
+                    Assert.Equal(
+                        RefFindPrev(starts, lengths, before),
+                        searcher.FindPrev(text, before)
+                    );
+                }
+                for (int st = -1; st <= text.Length + 1; st++)
+                {
+                    for (int l = 0; l <= 3; l++)
+                    {
+                        Assert.Equal(
+                            RefLocate(starts, lengths, new(st, l)),
+                            searcher.Locate(text, new(st, l))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     [Fact]
     public void Overlapping_candidates_follow_matches_not_match_at()
     {
@@ -300,5 +358,32 @@ public class MatchPositionsTests
         Assert.False(s.HasPositionsForTest);
         Assert.Throws<RegexMatchTimeoutException>(() => s.Locate(snap, new(0, 1))); // 伝播も従来どおり
         Assert.Equal(1, s.BuildCountForTest); // タイムアウトも記憶する
+    }
+
+    /// <summary>
+    /// 従来経路が一致ごとに確保しない(フェーズ 4)。20MB の CSV で <c>,</c> を F3 すると表の上限を超え、
+    /// 以後の F3 は毎回この経路を通る。<c>Matches</c> は一致ごとに <see cref="Match"/> を確保して保持する
+    /// (10 万件で MB 単位)。上限は一致件数に比例しない定数にする。
+    /// </summary>
+    [Fact]
+    public void Legacy_paths_do_not_allocate_per_match()
+    {
+        const int hits = 100_000;
+        string text = string.Join(",", Enumerable.Repeat("a", hits + 1)); // "a,a,...,a" に "," が 10 万個
+        var searcher = new TextSearcher(new SearchOptions(",", MatchCase: true));
+        var last = new MatchSpan(text.Length - 2, 1);
+
+        // 暖機: 一致件数によらない確保(runner など)を先に済ませる
+        Assert.Equal((hits, hits), searcher.Locate(text, last));
+        Assert.Equal(last, searcher.FindPrev(text, text.Length));
+
+        long start = GC.GetAllocatedBytesForCurrentThread();
+        var located = searcher.Locate(text, last);
+        var prev = searcher.FindPrev(text, text.Length);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+
+        Assert.Equal((hits, hits), located);
+        Assert.Equal(last, prev);
+        Assert.True(allocated < 64 * 1024, $"確保量 {allocated} バイト(上限 64KiB)");
     }
 }

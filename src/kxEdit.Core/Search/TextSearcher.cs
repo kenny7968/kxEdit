@@ -103,6 +103,9 @@ public sealed class TextSearcher
     /// <summary>
     /// 開始位置（Index）が before より厳密に前にある最後のヒットを返す（折り返しなし）。
     /// 開始が before より前で終端が before を越える“またぎ”ヒットも返り得る。
+    /// 列挙は <c>EnumerateMatches</c>(一致ごとに <see cref="Match"/> を確保しない。フェーズ 4)。
+    /// <c>Matches</c> と同じ (Index, Length) の列を同じ順序で返し、遅延列挙なので break より後ろは照合しない。
+    /// 等価性の網 = <c>MatchPositionsTests.Legacy_paths_match_Matches_reference</c>。
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
     /// </summary>
     public MatchSpan? FindPrev(string text, int before)
@@ -110,7 +113,7 @@ public sealed class TextSearcher
         if (_regex is null)
             return null;
         MatchSpan? last = null;
-        foreach (Match m in _regex.Matches(text))
+        foreach (var m in _regex.EnumerateMatches(text))
         {
             if (m.Index >= before)
                 break;
@@ -121,6 +124,7 @@ public sealed class TextSearcher
 
     /// <summary>
     /// span を全ヒット中の何件目か（1始まり, total）。span がヒットでなければ null。
+    /// 列挙は <c>EnumerateMatches</c>(<see cref="FindPrev"/> と同じ。フェーズ 4)。
     /// 複雑な正規表現では RegexMatchTimeoutException が送出され得る（1秒）。
     /// </summary>
     public (int Ordinal, int Total)? Locate(string text, MatchSpan span)
@@ -130,7 +134,7 @@ public sealed class TextSearcher
         int ordinal = 0,
             total = 0;
         bool found = false;
-        foreach (Match m in _regex.Matches(text))
+        foreach (var m in _regex.EnumerateMatches(text))
         {
             total++;
             if (m.Index == span.Start && m.Length == span.Length)
@@ -148,8 +152,8 @@ public sealed class TextSearcher
     /// 列挙は <c>EnumerateMatches</c>(<see cref="ValueMatch"/>=<see cref="Match"/> を確保しない)で行う。
     /// <c>Matches</c> の <c>MatchCollection</c> は列挙した全 <see cref="Match"/> を保持するため、
     /// 上限 1,000,000 件では約 220MB のピークになる(実測)。<c>EnumerateMatches</c> は
-    /// <see cref="Locate"/> / <see cref="FindPrev"/> が使う <c>Matches</c> と同じ (Index, Length) の列を
-    /// 同じ順序で返す=同じ集合・同じ順序。この等価性の網は
+    /// <c>Matches</c> と同じ (Index, Length) の列を同じ順序で返す=同じ集合・同じ順序
+    /// (<see cref="Locate"/> / <see cref="FindPrev"/> もフェーズ 4 で同じ列挙にした)。この等価性の網は
     /// <c>MatchPositionsTests.Strategy_matches_old_implementation_for_random_texts</c>
     /// (<c>Matches</c> を使う旧経路との照合)と
     /// <c>MatchPositionsTests.CollectMatches_yields_same_sequence_as_Matches</c>。
