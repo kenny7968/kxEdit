@@ -26,5 +26,5 @@ public class FontSizeRoundingTests
     [InlineData(0.25f)] // 288 DPI の 1px。2 倍の中点 0.5 が ToEven で 0 になる
     [InlineData(0.1f)]
     public void ToHalfPoint_never_returns_below_half_point(float input) =>
-        Assert.Equal(FontSizeRounding.MinPoints, FontSizeRounding.ToHalfPoint(input));
+        Assert.Equal(0.5f, FontSizeRounding.ToHalfPoint(input));
 }

@@ -17,6 +17,7 @@ public static class FontSizeRounding
     /// 2 倍して <see cref="MidpointRounding.ToEven"/> で整数に丸め、2 で割る。
     /// 96 DPI の値は 0.75pt の倍数なので、奇数ピクセルでは必ず x.5 の中点になる。
     /// ToEven は中点を偶数(= 整数 pt)に寄せる(20.25 → 20、9.75 → 10)。中点でない値は残る(10.5 → 10.5)。
+    /// 有限の値を前提にする(FontDialog の <c>Font.Size</c> は常に有限の正の値)。NaN と +∞ はそのまま返る。
     /// </summary>
     public static float ToHalfPoint(float points)
     {
