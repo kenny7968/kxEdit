@@ -67,6 +67,10 @@ private sealed class Host : IDisposable
 
 新規に Fake が要るときはこれらのどれかをコピペ改変する(独自パターンを作らない)。
 
+Editor.Tests の描画テストの補助(画素の取り出し・描画の記録・無効化の矩形の採取・WM_PAINT の模倣と比較)は
+`tests/kxEdit.Editor.Tests/Fakes/PaintTestHelpers.cs` にある。テストクラスに同じ補助を複製しない。
+画素スクロールの偽の画面は同じフォルダーの `ScreenSurface.cs`。
+
 ### `Sta.cs` の STA 化ヘルパ
 
 - **App.Tests**: `tests/kxEdit.App.Tests/Sta.cs`(TCS 規律込みの remarks を必ず読む)

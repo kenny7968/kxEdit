@@ -1,6 +1,4 @@
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Settings;
 using kxEdit.Editor.Tests.Fakes;
@@ -11,7 +9,7 @@ namespace kxEdit.Editor.Tests;
 /// 2026-09-25 性能改善フェーズ 3 のオラクル(設計書 §8.4)。FrameInputs 同士の比較だけでは、
 /// 「描画が読む状態が FrameInputs に入っていない」故障を検出できない(等しければ出力は自明に一致する)。
 /// そこで「画面の絵」を模したビットマップを持ち、無効化が起きた操作の後だけ、無効化した矩形の中を描き直す
-/// (フェーズ 9: WM_PAINT の更新領域を模して矩形を合成する。<c>Composite</c>)。
+/// (フェーズ 9: WM_PAINT の更新領域を模して矩形を合成する。<see cref="PaintTestHelpers.Composite"/>)。
 /// 各操作の後に、今の状態から描いた絵(正解)と画素で比べる。無効化を省いた・足りなかった時点で差があれば、
 /// 実画面に古い絵が残る不具合である。フレームではなく画素で比べるのは、RenderFrame のシフトと
 /// IME の未確定表示(Frame の外で描く)も含めるため(実装計画 §0.2)。
@@ -50,81 +48,6 @@ public class SkipInvalidateOracleTests
         return (f, c);
     }
 
-    internal static int[] Pixels(Bitmap bmp)
-    {
-        var data = bmp.LockBits(
-            new Rectangle(Point.Empty, bmp.Size),
-            ImageLockMode.ReadOnly,
-            PixelFormat.Format32bppArgb
-        );
-        try
-        {
-            var px = new int[bmp.Width * bmp.Height];
-            for (int y = 0; y < bmp.Height; y++)
-                Marshal.Copy(data.Scan0 + (y * data.Stride), px, y * bmp.Width, bmp.Width);
-            return px;
-        }
-        finally
-        {
-            bmp.UnlockBits(data);
-        }
-    }
-
-    internal static int[] Paint(EditorControl c, bool record)
-    {
-        using var bmp = EditorControl.TestHook_PaintToBitmap(c, record);
-        return Pixels(bmp);
-    }
-
-    /// <summary>
-    /// 画面に見える範囲 = クライアントのうちスクロールバー(子ウィンドウ)に隠れない部分。
-    /// VScrollBar は製品で常に表示される(Visible を落とす経路がない)ので、画面外の Form で Visible が false でも除く。
-    /// HScrollBar は実際に表示されているときだけ除く。
-    /// フェーズ 9b: 画素の移動(ScrollWindowEx)はこの範囲だけを動かすので、隠れた部分の画素は比べない
-    /// (実画面では子ウィンドウが覆っていて見えない)。
-    /// </summary>
-    private static Rectangle OnScreen(EditorControl c)
-    {
-        var r = c.ClientRectangle;
-        foreach (Control child in c.Controls)
-        {
-            if (child is VScrollBar)
-                r.Width = Math.Min(r.Width, child.Left);
-            else if (child is HScrollBar && child.Visible)
-                r.Height = Math.Min(r.Height, child.Top);
-        }
-        return r;
-    }
-
-    /// <summary>画面に見える範囲(<see cref="OnScreen"/>)の画素が等しいか。</summary>
-    internal static bool SameOnScreen(EditorControl c, int[] a, int[] b) =>
-        DiffBounds(c, a, b).IsEmpty;
-
-    /// <summary>画面に見える範囲で画素が違う部分の外接矩形(等しければ空)。失敗の診断にも使う。</summary>
-    internal static Rectangle DiffBounds(EditorControl c, int[] a, int[] b)
-    {
-        var view = OnScreen(c);
-        int width = c.ClientSize.Width;
-        int l = int.MaxValue,
-            t = int.MaxValue,
-            r = -1,
-            btm = -1;
-        for (int y = view.Top; y < view.Bottom; y++)
-        {
-            for (int x = view.Left; x < view.Right; x++)
-            {
-                int i = y * width + x;
-                if (a[i] == b[i])
-                    continue;
-                l = Math.Min(l, x);
-                t = Math.Min(t, y);
-                r = Math.Max(r, x);
-                btm = Math.Max(btm, y);
-            }
-        }
-        return r < 0 ? Rectangle.Empty : Rectangle.FromLTRB(l, t, r + 1, btm + 1);
-    }
-
     /// <summary>オラクルが「古い絵」を検出できること(画素比較が自明に一致しないことの陽性対照)。</summary>
     [Fact]
     public void Oracle_detects_a_stale_picture() =>
@@ -134,9 +57,9 @@ public class SkipInvalidateOracleTests
             using (f)
             {
                 c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(2) + 3);
-                int[] screen = Paint(c, record: true);
+                int[] screen = PaintTestHelpers.PaintPixels(c, record: true);
                 c.ShowWhitespace = true; // Invalidate はされるが、ここでは描き直さない
-                Assert.NotEqual(screen, Paint(c, record: false));
+                Assert.NotEqual(screen, PaintTestHelpers.PaintPixels(c, record: false));
             }
         });
 
@@ -161,7 +84,7 @@ public class SkipInvalidateOracleTests
                 // (TryScroll は Pixels の中身を書き換える = screen と同じ配列を指し続ける)。
                 var surface = new ScreenSurface(c.ClientSize.Width, c.ClientSize.Height);
                 EditorControl.TestHook_SetPaintSurface(c, surface);
-                surface.Pixels = Paint(c, record: true);
+                surface.Pixels = PaintTestHelpers.PaintPixels(c, record: true);
                 int[] screen = surface.Pixels;
                 int skipped = 0;
                 int partial = 0;
@@ -192,7 +115,7 @@ public class SkipInvalidateOracleTests
                     }
                     if (rects.Count > 0)
                     {
-                        Composite(c, screen, rects); // WM_PAINT: 無効化した矩形の中だけが描き直される
+                        PaintTestHelpers.Composite(c, screen, rects); // WM_PAINT: 無効化した矩形の中だけが描き直される
                         if (!rects.Any(r => r.Contains(c.ClientRectangle)))
                             partial++;
                     }
@@ -201,8 +124,8 @@ public class SkipInvalidateOracleTests
                         && (c.CaretCharOffset != caretBefore || c.SelectionAnchor != anchorBefore)
                     )
                         skipped++; // 省略の経路を通った(4 経路で、位置が動いたのに描き直していない)
-                    int[] truth = Paint(c, record: false);
-                    var diff = DiffBounds(c, screen, truth);
+                    int[] truth = PaintTestHelpers.PaintPixels(c, record: false);
+                    var diff = PaintTestHelpers.DiffBounds(c, screen, truth);
                     if (!diff.IsEmpty)
                     {
                         Assert.Fail(
@@ -228,32 +151,6 @@ public class SkipInvalidateOracleTests
             }
         });
 
-    /// <summary>
-    /// WM_PAINT を模す: 無効化した矩形の外接矩形をクリップにして描き(実際の e.ClipRectangle と同じ)、
-    /// 矩形の和の中の画素だけを画面へ写す(実際の DC は更新領域でクリップされている)。
-    /// </summary>
-    internal static void Composite(EditorControl c, int[] screen, List<Rectangle> rects)
-    {
-        var client = c.ClientRectangle;
-        var bounds = Rectangle.Empty;
-        foreach (var r in rects)
-            bounds = bounds.IsEmpty ? r : Rectangle.Union(bounds, r);
-        bounds.Intersect(client);
-        if (bounds.IsEmpty)
-            return;
-        using var bmp = EditorControl.TestHook_PaintToBitmap(c, record: true, bounds);
-        int[] px = Pixels(bmp);
-        int w = bmp.Width;
-        foreach (var r0 in rects)
-        {
-            var r = Rectangle.Intersect(r0, client);
-            for (int y = r.Top; y < r.Bottom; y++)
-            {
-                Array.Copy(px, y * w + r.Left, screen, y * w + r.Left, r.Width);
-            }
-        }
-    }
-
     /// <summary>陽性対照: 無効化した矩形の一部を合成しなければ、古い絵として検出される。</summary>
     [Fact]
     public void Oracle_detects_a_missing_rectangle() =>
@@ -264,15 +161,17 @@ public class SkipInvalidateOracleTests
             {
                 c.HighlightCurrentLine = true;
                 c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(2) + 3);
-                int[] screen = Paint(c, record: true);
+                int[] screen = PaintTestHelpers.PaintPixels(c, record: true);
                 var rects = new List<Rectangle>();
                 InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
                 c.Invalidated += h;
                 c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(5) + 1);
                 c.Invalidated -= h;
                 Assert.True(rects.Count >= 2, "前提: 旧行と新行の 2 つの帯が無効化される");
-                Composite(c, screen, [rects[^1]]); // 旧行の帯を捨てる
-                Assert.False(screen.AsSpan().SequenceEqual(Paint(c, record: false)));
+                PaintTestHelpers.Composite(c, screen, [rects[^1]]); // 旧行の帯を捨てる
+                Assert.False(
+                    screen.AsSpan().SequenceEqual(PaintTestHelpers.PaintPixels(c, record: false))
+                );
             }
         });
 
@@ -287,10 +186,16 @@ public class SkipInvalidateOracleTests
                 var surface = new ScreenSurface(c.ClientSize.Width, c.ClientSize.Height);
                 EditorControl.TestHook_SetPaintSurface(c, surface);
                 c.TopLine = 5;
-                surface.Pixels = Paint(c, record: true);
+                surface.Pixels = PaintTestHelpers.PaintPixels(c, record: true);
                 c.TopLine = 6;
                 Assert.Equal(1, surface.Scrolls); // 前提: 画素を移した
-                Assert.False(SameOnScreen(c, surface.Pixels, Paint(c, record: false)));
+                Assert.False(
+                    PaintTestHelpers.SameOnScreen(
+                        c,
+                        surface.Pixels,
+                        PaintTestHelpers.PaintPixels(c, record: false)
+                    )
+                );
             }
         });
 

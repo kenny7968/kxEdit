@@ -29,25 +29,6 @@ public class ScrollPixelsTests
         return (f, c, s);
     }
 
-    private static void Paint(EditorControl c) =>
-        EditorControl.TestHook_PaintToBitmap(c, record: true).Dispose();
-
-    private static List<Rectangle> Rects(EditorControl c, Action act)
-    {
-        var rects = new List<Rectangle>();
-        InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
-        c.Invalidated += h;
-        try
-        {
-            act();
-        }
-        finally
-        {
-            c.Invalidated -= h;
-        }
-        return rects;
-    }
-
     [Fact]
     public void One_line_down_scrolls_pixels_and_invalidates_only_the_exposed_band() =>
         Sta.Run(() =>
@@ -56,9 +37,9 @@ public class ScrollPixelsTests
             using (f)
             {
                 c.TopLine = 5;
-                Paint(c);
+                PaintTestHelpers.PaintRecorded(c);
                 int lh = c.Metrics.LineHeightPx;
-                var rects = Rects(c, () => c.TopLine = 6);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 6);
                 Assert.Equal(1, s.Scrolls);
                 Assert.DoesNotContain(rects, r => r.Contains(c.ClientRectangle));
                 // 露出した帯(1 行)と、途中で切れる新しい最下行の帯だけ = 高さは 2 行ぶん以下。
@@ -75,8 +56,8 @@ public class ScrollPixelsTests
             using (f)
             {
                 c.TopLine = 5;
-                Paint(c);
-                var rects = Rects(c, () => c.TopLine = 40);
+                PaintTestHelpers.PaintRecorded(c);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 40);
                 Assert.Equal(0, s.Scrolls);
                 Assert.Contains(rects, r => r.Contains(c.ClientRectangle));
             }
@@ -96,10 +77,10 @@ public class ScrollPixelsTests
             using (f)
             {
                 c.TopLine = 5;
-                Paint(c);
+                PaintTestHelpers.PaintRecorded(c);
                 int lh = c.Metrics.LineHeightPx;
                 int fullRows = c.ClientSize.Height / lh;
-                var rects = Rects(c, () => c.TopLine = 5 + fullRows);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 5 + fullRows);
                 Assert.Equal(5 + fullRows, c.TopLine); // 前提: クランプされずに実際に動いた
                 Assert.Equal(0, s.Scrolls);
                 Assert.Contains(rects, r => r.Contains(c.ClientRectangle));
@@ -115,10 +96,10 @@ public class ScrollPixelsTests
             using (f)
             {
                 c.TopLine = 5;
-                Paint(c);
+                PaintTestHelpers.PaintRecorded(c);
                 int lh = c.Metrics.LineHeightPx;
                 int fullRows = c.ClientSize.Height / lh;
-                var rects = Rects(c, () => c.TopLine = 5 + fullRows - 1);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 5 + fullRows - 1);
                 Assert.Equal(5 + fullRows - 1, c.TopLine); // 前提: クランプされずに実際に動いた
                 Assert.Equal(1, s.Scrolls);
                 Assert.DoesNotContain(rects, r => r.Contains(c.ClientRectangle));
@@ -133,9 +114,9 @@ public class ScrollPixelsTests
             using (f)
             {
                 c.TopLine = 5;
-                Paint(c);
+                PaintTestHelpers.PaintRecorded(c);
                 s.Pending = true;
-                var rects = Rects(c, () => c.TopLine = 6);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 6);
                 Assert.Equal(0, s.Scrolls);
                 Assert.Contains(rects, r => r.Contains(c.ClientRectangle));
             }
@@ -154,7 +135,7 @@ public class ScrollPixelsTests
                 if (composing)
                     c.__TestApplyComposition("か", 1, [0], []);
                 c.TopLine = 5;
-                Paint(c);
+                PaintTestHelpers.PaintRecorded(c);
                 // 前提: guard の発火条件(未確定の有無)が、スクロールの時点でも成り立っている(CLAUDE.md §4-B)。
                 Assert.Equal(composing, c.__TestIsComposing());
                 c.TopLine = 6;
@@ -201,14 +182,14 @@ public class ScrollPixelsTests
                     c.SetCaretCharOffset(snap.GetLineStart(2));
                 c.ScrollX = from;
                 Assert.Equal(from, c.ScrollX); // 前提: hscroll が表示されている(行 3 が長い)
-                s.Pixels = SkipInvalidateOracleTests.Paint(c, record: true);
-                var rects = Rects(c, () => c.ScrollX = to);
+                s.Pixels = PaintTestHelpers.PaintPixels(c, record: true);
+                var rects = PaintTestHelpers.Rects(c, () => c.ScrollX = to);
                 Assert.Equal(to, c.ScrollX); // 前提
                 Assert.Equal(1, s.Scrolls);
                 Assert.DoesNotContain(rects, r => r.Contains(c.ClientRectangle));
-                SkipInvalidateOracleTests.Composite(c, s.Pixels, rects);
-                var truth = SkipInvalidateOracleTests.Paint(c, record: false);
-                var diff = SkipInvalidateOracleTests.DiffBounds(c, s.Pixels, truth);
+                PaintTestHelpers.Composite(c, s.Pixels, rects);
+                var truth = PaintTestHelpers.PaintPixels(c, record: false);
+                var diff = PaintTestHelpers.DiffBounds(c, s.Pixels, truth);
                 Assert.True(diff.IsEmpty, $"古い絵が残る(差の外接矩形 {diff})");
             }
         });
@@ -231,18 +212,18 @@ public class ScrollPixelsTests
                 c.HighlightCurrentLine = true;
                 c.TopLine = 2;
                 c.SetCaretCharOffset(c.CurrentBuffer.Current.GetLineStart(6) + 1); // 可視域の中
-                s.Pixels = SkipInvalidateOracleTests.Paint(c, record: true);
+                s.Pixels = PaintTestHelpers.PaintPixels(c, record: true);
                 int topBefore = c.TopLine;
                 int visible = c.ClientSize.Height / c.Metrics.LineHeightPx;
                 // 可視域の少し下(数行ぶんのスクロールで入る)。
                 int target = c.CurrentBuffer.Current.GetLineStart(topBefore + visible + 1);
-                var rects = Rects(c, () => c.EnsureVisibleCharRange(target, 0));
+                var rects = PaintTestHelpers.Rects(c, () => c.EnsureVisibleCharRange(target, 0));
                 Assert.Equal(1, s.Scrolls); // 前提: 画素を移した
                 Assert.InRange(c.TopLine - topBefore, 1, 4); // 前提: 小さなスクロール
                 Assert.Equal(c.CurrentBuffer.Current.GetLineStart(6) + 1, c.CaretCharOffset); // 前提: キャレットは戻っている
-                SkipInvalidateOracleTests.Composite(c, s.Pixels, rects);
-                var truth = SkipInvalidateOracleTests.Paint(c, record: false);
-                var diff = SkipInvalidateOracleTests.DiffBounds(c, s.Pixels, truth);
+                PaintTestHelpers.Composite(c, s.Pixels, rects);
+                var truth = PaintTestHelpers.PaintPixels(c, record: false);
+                var diff = PaintTestHelpers.DiffBounds(c, s.Pixels, truth);
                 Assert.True(diff.IsEmpty, $"古い絵が残る(差の外接矩形 {diff})");
             }
         });
@@ -255,7 +236,7 @@ public class ScrollPixelsTests
             using (f)
             {
                 Assert.False(EditorControl.TestHook_HasLastPaintedInputs(c)); // 前提
-                var rects = Rects(c, () => c.TopLine = 1);
+                var rects = PaintTestHelpers.Rects(c, () => c.TopLine = 1);
                 Assert.Equal(0, s.Scrolls);
                 Assert.Contains(rects, r => r.Contains(c.ClientRectangle));
             }

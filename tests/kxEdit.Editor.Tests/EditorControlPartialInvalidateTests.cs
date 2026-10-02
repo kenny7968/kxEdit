@@ -1,4 +1,5 @@
 using System.Drawing;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -29,28 +30,6 @@ public class EditorControlPartialInvalidateTests
 
     private static int Line(EditorControl c, int line) =>
         c.CurrentBuffer.Current.GetLineStart(line);
-
-    private static void PaintAndAssumeRecorded(EditorControl c)
-    {
-        EditorControl.TestHook_PaintToBitmap(c, record: true).Dispose();
-        Assert.True(EditorControl.TestHook_HasLastPaintedInputs(c), "前提: 描画が記録されていない");
-    }
-
-    private static List<Rectangle> Rects(EditorControl c, Action act)
-    {
-        var rects = new List<Rectangle>();
-        InvalidateEventHandler h = (_, e) => rects.Add(e.InvalidRect);
-        c.Invalidated += h;
-        try
-        {
-            act();
-        }
-        finally
-        {
-            c.Invalidated -= h;
-        }
-        return rects;
-    }
 
     /// <summary>
     /// 無効化した行の集合(帯の中身を LH で割る。+1px の下辺は次の行に数えない)。
@@ -83,8 +62,11 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 3) + 4);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.ReplaceCharRange(c.CaretCharOffset, 0, "x"));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.ReplaceCharRange(c.CaretCharOffset, 0, "x")
+                );
                 Assert.False(IsFull(c, rects));
                 Assert.Equal([3], RowsOf(c, rects));
             }
@@ -98,8 +80,11 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 3) + 4);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.ReplaceCharRange(c.CaretCharOffset, 0, "\r\n"));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.ReplaceCharRange(c.CaretCharOffset, 0, "\r\n")
+                );
                 Assert.False(IsFull(c, rects));
                 var rows = RowsOf(c, rects);
                 Assert.Equal(3, rows.Min);
@@ -117,8 +102,8 @@ public class EditorControlPartialInvalidateTests
             {
                 c.HighlightCurrentLine = true;
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.SetCaretCharOffset(Line(c, 5) + 1));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(c, () => c.SetCaretCharOffset(Line(c, 5) + 1));
                 Assert.Equal([2, 5], RowsOf(c, rects));
             }
         });
@@ -131,8 +116,11 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.MoveCaretWithSelection(Line(c, 2) + 8));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.MoveCaretWithSelection(Line(c, 2) + 8)
+                );
                 Assert.Equal([2], RowsOf(c, rects));
             }
         });
@@ -145,8 +133,8 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetSelectionCharRange(Line(c, 1) + 4, Line(c, 3) + 5);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.SetCaretCharOffset(Line(c, 3) + 5));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(c, () => c.SetCaretCharOffset(Line(c, 3) + 5));
                 Assert.Equal([1, 2, 3], RowsOf(c, rects));
             }
         });
@@ -160,8 +148,11 @@ public class EditorControlPartialInvalidateTests
             {
                 c.SetCaretCharOffset(Line(c, 4) + 2);
                 c.__TestApplyComposition("か", 1, [0], []);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.__TestApplyComposition("かな", 2, [0, 0], []));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.__TestApplyComposition("かな", 2, [0, 0], [])
+                );
                 Assert.Equal([4, 5], RowsOf(c, rects));
             }
         });
@@ -174,9 +165,12 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 1) + 1);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int lh = c.Metrics.LineHeightPx;
-                var rects = Rects(c, () => c.HighlightCharRange(Line(c, 4) + 2, 3));
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.HighlightCharRange(Line(c, 4) + 2, 3)
+                );
                 Assert.Equal(4 * lh, rects.Min(r => r.Top));
                 Assert.Equal(5 * lh + 1, rects.Max(r => r.Bottom));
             }
@@ -190,11 +184,14 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 1);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int before = c.TopLine;
                 // 行 25(可視外)の中身だけを変える。キャレットは動かさない(ReplaceCharRange はキャレットを置換の後ろへ動かすので、
                 // 可視外へ追従スクロールが起きる = この API は使わない)。
-                var rects = Rects(c, () => c.TestHook_ReplaceWithoutCaret(Line(c, 25) + 2, 1, "Z"));
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.TestHook_ReplaceWithoutCaret(Line(c, 25) + 2, 1, "Z")
+                );
                 Assert.Equal(before, c.TopLine); // 前提: スクロールしていない
                 Assert.Equal("Z", c.CurrentBuffer.Current.GetText(Line(c, 25) + 2, 1)); // 前提: 本文が変わった
                 Assert.Empty(rects);
@@ -213,8 +210,11 @@ public class EditorControlPartialInvalidateTests
             {
                 c.ShowLineNumbers = true;
                 c.SetCaretCharOffset(Line(c, 2));
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.ReplaceCharRange(c.CaretCharOffset, 0, "\r\n"));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.ReplaceCharRange(c.CaretCharOffset, 0, "\r\n")
+                );
                 Assert.True(IsFull(c, rects));
             }
         });
@@ -228,8 +228,11 @@ public class EditorControlPartialInvalidateTests
             {
                 c.WrapColumns = 10;
                 c.SetCaretCharOffset(Line(c, 3) + 2);
-                PaintAndAssumeRecorded(c);
-                var rects = Rects(c, () => c.ReplaceCharRange(c.CaretCharOffset, 0, "xxxxxx"));
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
+                var rects = PaintTestHelpers.Rects(
+                    c,
+                    () => c.ReplaceCharRange(c.CaretCharOffset, 0, "xxxxxx")
+                );
                 Assert.False(IsFull(c, rects));
                 int firstRowOfLine3 = c.TestHook_VisualRowIndexOf(Line(c, 3)); // 行 3 の先頭の視覚行の番号
                 Assert.Equal(firstRowOfLine3, RowsOf(c, rects).Min);
@@ -244,7 +247,7 @@ public class EditorControlPartialInvalidateTests
             using (f)
             {
                 Assert.False(EditorControl.TestHook_HasLastPaintedInputs(c)); // 前提
-                var rects = Rects(c, () => c.ReplaceCharRange(0, 0, "x"));
+                var rects = PaintTestHelpers.Rects(c, () => c.ReplaceCharRange(0, 0, "x"));
                 Assert.True(IsFull(c, rects));
             }
         });
@@ -259,7 +262,7 @@ public class EditorControlPartialInvalidateTests
             {
                 c.HighlightCurrentLine = true;
                 c.SetCaretCharOffset(Line(c, 2) + 1);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 c.EnsureVisibleCharRange(Line(c, 4), 1); // 可視域の中 = スクロールしない
                 Assert.Equal(Line(c, 2) + 1, c.CaretCharOffset); // 前提: キャレットは戻っている
                 Assert.Equal(0, c.TopLine); // 前提: スクロールしていない
