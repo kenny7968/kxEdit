@@ -158,8 +158,19 @@ public sealed class DisplaySettingsTab : ISettingsTab
         };
         if (dlg.ShowDialog(_fontButton.FindForm()) != DialogResult.OK)
             return;
-        _fontName = dlg.Font.Name;
-        _fontSize = dlg.Font.Size;
+        ApplyPickedFont(dlg.Font);
+    }
+
+    /// <summary>
+    /// フォントダイアログで選んだフォントを反映する。大きさは 0.5pt 単位に丸める
+    /// (<see cref="FontSizeRounding.ToHalfPoint"/>。FontDialog は整数ピクセル高から作り直すので、
+    /// 96 DPI で 20pt が 20.25pt で返る)。読み込んだ設定値(<see cref="LoadFrom"/>)は丸めない。
+    /// ダイアログを出さずにテストするため internal。
+    /// </summary>
+    internal void ApplyPickedFont(Font font)
+    {
+        _fontName = font.Name;
+        _fontSize = FontSizeRounding.ToHalfPoint(font.Size);
         UpdateFontLabel();
     }
 
