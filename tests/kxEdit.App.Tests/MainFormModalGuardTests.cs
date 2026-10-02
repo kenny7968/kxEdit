@@ -104,13 +104,17 @@ public class MainFormModalGuardTests
                 form,
                 () =>
                 {
+                    // 前提: ガードの発火条件どおり、主窓は Win32 で無効化されている(CLAUDE.md §4-B)。
+                    Assert.False(NativeMethods.IsWindowEnabled(form.Handle));
                     handled = InvokeProcessCmdKey(form, Keys.Control | Keys.Shift | Keys.Tab);
                     activeDuringModal = form.DocsForTest.Active;
                 }
             );
 
-            Assert.True(handled); // 食ったこと(false だと base へ流れて他の処理に渡りうる)
-            Assert.Same(docB, activeDuringModal); // タブは切り替わっていない
+            // キーが消費されたことの確認のみ。ガードが無くても switch が Ctrl+Shift+Tab を処理して
+            // true を返すので、これではガードを判別できない。判別するのは次の assert。
+            Assert.True(handled);
+            Assert.Same(docB, activeDuringModal); // タブは切り替わっていない(ガードの判別)
         });
 
     // 陽性対照(Review Focus 3): モーダルを閉じた後は、同じキーが効く。
