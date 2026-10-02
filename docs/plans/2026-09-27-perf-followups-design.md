@@ -597,6 +597,38 @@
   - **定数を 1 つに寄せる**: 落ちる件数が少なく、CI にもフォントがある場合。
   - **理由を付けて閉じる**: それ以外。製品に影響しないこと、テストが比例フォントで安定して動いていることを、ctor のコメントに残す。
 
+### 11.3 実施記録(2026-10-02)
+
+- **調査の結論**(項目 5。詳細は実装計画 `docs/plans/2026-10-02-font-size-and-default.md` §0)
+  - **定数を 1 つに寄せた**(§11.2 の第 1 の結論)。
+  - ctor の既定名を全角にしたビルドで Editor.Tests を流すと、失敗は 0 件(726 件すべて合格)だった。元の設計書 §16.2 の「固定した箇所 231」は、どれも ctor のフォントに依存していなかった。
+  - CI(windows-latest)には MS ゴシックがある。ブランチを push したときの CI で確かめた。MS Gothic は Windows の基本のデスクトップフォントセットに入っている(FOD ではない)。
+- **成果物**
+  - 項目 4: Core に `FontSizeRounding.ToHalfPoint` を足した(2 倍して ToEven で丸め、2 で割る。下限 0.5pt)。`DisplaySettingsTab` は、ダイアログで選んだときだけ丸める(`ApplyPickedFont` に切り出した)。読み込んだ設定値は丸めない。
+  - 項目 5: `AppSettings.DefaultFontName` / `DefaultFontSize` を足した。設定の初期値・EditorControl の ctor・`ApplyAppearance` の補完・`DisplaySettingsTab` の既定値が、この定数を使う。
+- **完了条件**
+  - **テスト**: 計 12 件を足した(Core 9 件・App 2 件・Editor 1 件)。既存の 2 件は、既定値の文字列を定数に書き換えた。
+  - **陰性対照**
+    - 項目 4: 丸めを外すと、App のテストが 20.25 で FAIL した(ビルドは成功)。
+    - 項目 5: 定数だけを足した状態(ctor は半角のまま)で、ctor のテストが Microsoft Sans Serif で FAIL した。
+  - **目視**(§11.1): 96 DPI で、設定を 20.25pt にした場合と 20pt にした場合の描画を PrintWindow(900×600)で撮って比べた。差分は 0 画素だった。また、実際のフォントダイアログで 20 を選ぶと、表示とボタンの AccessibleName が「ＭＳ ゴシック, 20 pt」になった(UIA で読み、画面の取得で確かめた)。
+  - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+  - **L5**: 不要(§3.3。目視だけ)。
+  - **レビュー**: 製品コードは数十行だが、複数のファイルにまたがるので、最終レビューは 2 パス(コード品質 / 脆弱性。別々のエージェント)で行った。Critical・Important はなかった。Minor 3 件は fixup で直した。
+    - `DisplaySettingsTab` に残っていた 12f を定数にした。xmldoc から箇所の数を消した。
+    - 下限のテストの期待値を、定数ではなくリテラルの 0.5 にした(定数が 0 に変わったときも落ちるように)。
+    - `ToHalfPoint` が有限の値を前提にすることを xmldoc に書いた(NaN と +∞ はそのまま返る。今の呼び出し元は有限の値しか渡さない)。
+- **本節からの精密化**
+  - 大きさの既定値(12f)も、名前と同じ定数に寄せた。
+  - 丸めの結果に下限 0.5pt を置いた。288 DPI では 1px = 0.25pt が 0 に丸まり、0 は設定の読み込みで 12pt に化けるため。
+  - **CI でのフォントの確かめ方**: 最初は `Font.Name` と比べていたが、英語の CI では同じ MS ゴシックが「MS Gothic」を返して FAIL した。`Font.Name` は UI のカルチャの言語で名前を返すためである。計画で「閉じる」に切り替える条件は、Microsoft Sans Serif で落ちること(フォントが無い)だったので、この失敗は条件に当たらない。比べ方を、日本語の LANGID(0x0411)で取り出したファミリー名に変えた。英語 UI で、旧 assert が「MS Gothic」で FAIL し、新 assert が PASS することを確かめた。半角に戻すと、新 assert も Microsoft Sans Serif で FAIL する。
+  - 設定ダイアログの「20 pt」表示は、PNG ではなく UIA の名前と画面の取得で確かめた(PrintWindow の対象を名前で探したところ、Windows の設定アプリの窓を拾ったため)。
+- **意図的な挙動差**(§3.5 の行に足す)
+  - ボタンの AccessibleName の読み上げも「20 pt」になる(SR 経路の外)。
+  - `ApplyAppearance` を呼ばずに `new EditorControl` を使う Editor.Tests と Smoke は、Microsoft Sans Serif ではなく MS ゴシック 12pt で走る。製品の挙動は変わらない。
+- **申し送り**(回収先は未定。次に申し送りを回収するときに扱う)
+  - settings.json の `FontSize` に `1e39` のような値を書くと、System.Text.Json が +∞ に変換する。+∞ は `SettingsStore.Normalize` の `<= 0` の補正を通り抜け、`new Font` が `ArgumentException` を投げる。起動時に落ちると見込まれる(レビューでの .NET 10 の実測。以前からの挙動で、本フェーズでは変わらない)。`Normalize` に `!float.IsFinite` の補正を足す案がある。
+
 ## 12. フェーズ 8: プレビューのキー操作(`preview-keys`)
 
 **前倒しの脆弱性レビュー**を行う(WebView・プレビュー)。
