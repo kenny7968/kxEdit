@@ -9,7 +9,7 @@ public sealed class DisplaySettingsTab : ISettingsTab
     public string Title => "表示";
 
     private string _fontName = "";
-    private float _fontSize = 12f;
+    private float _fontSize = AppSettings.DefaultFontSize;
 
     private readonly Label _fontLabel = new() { AutoSize = true };
     private readonly Button _fontButton = new() { Text = "変更(&F)...", AutoSize = true };
@@ -178,7 +178,7 @@ public sealed class DisplaySettingsTab : ISettingsTab
     {
         try
         {
-            return new Font(_fontName, _fontSize <= 0 ? 12f : _fontSize);
+            return new Font(_fontName, _fontSize <= 0 ? AppSettings.DefaultFontSize : _fontSize);
         }
         catch
         {

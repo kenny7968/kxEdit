@@ -12,7 +12,7 @@ public sealed class AppSettings
     /// </summary>
     public const string DefaultFontName = "ＭＳ ゴシック";
 
-    /// <summary>既定のフォントの大きさ(pt)。<see cref="DefaultFontName"/> と同じく 3 か所で共有する。</summary>
+    /// <summary>既定のフォントの大きさ(pt)。<see cref="DefaultFontName"/> と同じく、ctor・補完・設定の初期値で共有する。</summary>
     public const float DefaultFontSize = 12f;
 
     public string FontName { get; set; } = DefaultFontName;
