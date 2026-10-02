@@ -292,6 +292,12 @@ public sealed class FileReachabilityProbe : IReachabilityProbe
                     // dir が null = ルート自体(C:\ / \\server\share)= 親が無い。
                     // dir が空 = 相対パス(呼出側は正規化済み絶対パスを渡す契約)。
                     // どちらも書き込み先が確定しないので到達不能へ倒す。
+                    // 末尾区切り付き("…\a.txt\")では GetDirectoryName が区切りを落とした自身("…\a.txt")を
+                    // 親として返す。自身がファイルか不在なら Directory.Exists が false = 到達不能、
+                    // ディレクトリなら到達可能になる(File.Exists は末尾区切りでは常に false)。
+                    // 明示的な末尾区切りの判定は足さない。NUL 入り(GetFullPath が投げる)とディレクトリ("…\dir\")の
+                    // 結果が変わる(挙動不変を破る)。
+                    // 結果は FileReachabilityProbeTests.ProbeSaveTarget_PinsCurrentResult で固定している。
                     bool dirExists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
                     return new SaveTargetProbeResult(fileExists || dirExists, fileExists);
                 }

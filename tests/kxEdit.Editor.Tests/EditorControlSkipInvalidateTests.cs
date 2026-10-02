@@ -1,6 +1,7 @@
 using System.Drawing;
 using kxEdit.Core.Settings;
 using kxEdit.Core.Text;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -48,16 +49,6 @@ public class EditorControlSkipInvalidateTests
         return n;
     }
 
-    private static void Paint(EditorControl c) =>
-        EditorControl.TestHook_PaintToBitmap(c, record: true).Dispose();
-
-    /// <summary>前提: 描画の記録がある状態から始める(記録がなければ比較は必ず「変化あり」)。</summary>
-    private static void PaintAndAssumeRecorded(EditorControl c)
-    {
-        Paint(c);
-        Assert.True(EditorControl.TestHook_HasLastPaintedInputs(c), "前提: 描画が記録されていない");
-    }
-
     [Fact]
     public void CaretMove_WithoutHighlight_DoesNotInvalidate() =>
         Sta.Run(() =>
@@ -66,7 +57,7 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3); // 非既定位置から
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int target = Line(c, 4) + 1;
 
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(target));
@@ -99,7 +90,7 @@ public class EditorControlSkipInvalidateTests
             {
                 c.HighlightCurrentLine = true;
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(Line(c, 3) + 3));
                 Assert.True(n >= 1);
             }
@@ -114,7 +105,7 @@ public class EditorControlSkipInvalidateTests
             {
                 c.HighlightCurrentLine = true;
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int target = Line(c, 2) + 5;
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(target));
                 Assert.Equal(target, c.CaretCharOffset);
@@ -130,16 +121,16 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 Assert.True(
                     CountInvalidations(c, () => c.MoveCaretWithSelection(Line(c, 2) + 6)) >= 1
                 );
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 Assert.True(
                     CountInvalidations(c, () => c.SetSelectionCharRange(Line(c, 1), Line(c, 3)))
                         >= 1
                 );
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 Assert.True(
                     CountInvalidations(c, () => c.SetSelectionAnchored(Line(c, 4), Line(c, 1))) >= 1
                 );
@@ -154,7 +145,7 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 c.SetSelectionCharRange(Line(c, 1) + 1, Line(c, 2) + 4);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(Line(c, 2) + 4));
                 Assert.Equal(c.SelectionAnchor, c.CaretCharOffset); // 前提: 選択が消えた
                 Assert.True(n >= 1);
@@ -170,7 +161,7 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int p1 = Line(c, 3) + 2;
                 Assert.Equal(0, CountInvalidations(c, () => c.SetSelectionCharRange(p1, p1)));
                 Assert.Equal(p1, c.CaretCharOffset);
@@ -195,7 +186,7 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(Line(c, 25)));
                 Assert.True(c.TopLine > 0, "前提: スクロールしていない");
                 Assert.InRange(n, 1, 2);
@@ -211,7 +202,7 @@ public class EditorControlSkipInvalidateTests
             {
                 c.SetCaretCharOffset(Line(c, 2) + 3);
                 c.__TestApplyComposition("かな", 2, [0, 0], []);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 int n = CountInvalidations(c, () => c.SetCaretCharOffset(Line(c, 4)));
                 Assert.False(c.__TestIsComposing()); // 前提: 移動で未確定が取り消された
                 Assert.True(n >= 1);
@@ -232,7 +223,7 @@ public class EditorControlSkipInvalidateTests
             using (f)
             {
                 bool recorded = path == "UndoEolConversion" && c.ConvertEols(LineEnding.Lf);
-                PaintAndAssumeRecorded(c);
+                PaintTestHelpers.PaintAndAssumeRecorded(c);
                 switch (path)
                 {
                     case "ReplaceSource":

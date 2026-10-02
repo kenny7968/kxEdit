@@ -17,15 +17,15 @@ namespace kxEdit.App.Tests;
 /// </summary>
 public class PreviewUserDataFolderTests
 {
-    // xUnit1031(Fact 直下での Task.Wait/.Result 直呼び禁止)・S2925(Thread.Sleep 直呼び禁止)は
-    // 「Fact 本体に直接書かれているか」だけを見るため、他ファイル(WinFormsDebounceSchedulerTests /
-    // PendingActivationTests 等)の PumpUntil 系ヘルパーと同じ考え方で、private ヘルパー経由にして
-    // 回避する。待つこと自体・値はテストの主目的なので変えない。
+    // xUnit1031(Fact 直下での Task.Wait/.Result 直呼び禁止)は「Fact 本体に直接書かれているか」だけを見るため、
+    // 他ファイル(WinFormsDebounceSchedulerTests / PendingActivationTests 等)の PumpUntil 系ヘルパーと
+    // 同じ考え方で、private ヘルパー経由にして回避する。待つこと自体・値はテストの主目的なので変えない。
     private static bool WaitOrTimeout(Task task, TimeSpan timeout) => task.Wait(timeout);
 
     private static int ResultOf(Task<int> task) => task.Result;
 
-    private static void SleepMs(int milliseconds) => Thread.Sleep(milliseconds);
+    private static bool WaitSignal(ManualResetEventSlim signal, TimeSpan timeout) =>
+        signal.Wait(timeout);
 
     [Fact]
     public void Ctor_CreatesDirectory()
@@ -244,6 +244,7 @@ public class PreviewUserDataFolderTests
         string dir = System
             .IO.Directory.CreateDirectory(System.IO.Path.Combine(tmp.Root, "preview-x"))
             .FullName;
+        using var failed = new ManualResetEventSlim();
         var fs = new System.IO.FileStream(
             System.IO.Path.Combine(dir, "held"),
             System.IO.FileMode.CreateNew,
@@ -253,11 +254,14 @@ public class PreviewUserDataFolderTests
         Task<int> task;
         try
         {
+            // ロックを掴んでから始める(先に走り切ると失敗が起きない)。
             task = PreviewUserDataFolder.DeleteWithRetryAsync(
                 dir,
-                Enumerable.Repeat(TimeSpan.FromMilliseconds(50), 100).ToArray()
+                Enumerable.Repeat(TimeSpan.FromMilliseconds(50), 100).ToArray(),
+                onAttemptFailed: failed.Set
             );
-            SleepMs(300); // 掴まれている間に少なくとも 1 回失敗させる
+            // 掴まれている間に少なくとも 1 回失敗したことを、合図で確かめてから放す(時間に依存しない)。
+            Assert.True(WaitSignal(failed, TimeSpan.FromSeconds(10)), "前提: 失敗の合図が来ない");
         }
         finally
         {
@@ -305,6 +309,34 @@ public class PreviewUserDataFolderTests
 
         Assert.True(WaitOrTimeout(task, TimeSpan.FromSeconds(10)));
         Assert.Equal(1, ResultOf(task));
+    }
+
+    [Fact]
+    public void DeleteWithRetry_UnexpectedException_GivesUpWithoutFaulting()
+    {
+        // 項目 26: IO 系以外の例外でも、Task を faulted のまま残さない(観測されない例外にしない)。
+        // 負の遅延(-2ms)で、1 回目の失敗の後の Task.Delay に ArgumentOutOfRangeException を投げさせる
+        // (IO 系の catch の中で投げる形 = 試行の catch では拾えない位置)。
+        using var tmp = new TempDir();
+        string dir = System
+            .IO.Directory.CreateDirectory(System.IO.Path.Combine(tmp.Root, "preview-z"))
+            .FullName;
+        using var fs = new System.IO.FileStream(
+            System.IO.Path.Combine(dir, "held"),
+            System.IO.FileMode.CreateNew,
+            System.IO.FileAccess.Write,
+            System.IO.FileShare.None
+        );
+
+        var task = PreviewUserDataFolder.DeleteWithRetryAsync(
+            dir,
+            new[] { TimeSpan.FromMilliseconds(-2) }
+        );
+
+        Assert.True(WaitOrTimeout(task, TimeSpan.FromSeconds(10)));
+        Assert.Equal(TaskStatus.RanToCompletion, task.Status);
+        Assert.Equal(1, ResultOf(task)); // 1 回目で失敗し、待つところで諦めた
+        Assert.True(System.IO.Directory.Exists(dir));
     }
 
     private static void SafeCleanup(PreviewUserDataFolder sut)

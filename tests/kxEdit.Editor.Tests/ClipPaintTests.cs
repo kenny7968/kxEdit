@@ -1,8 +1,7 @@
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using kxEdit.Core.Editing;
 using kxEdit.Core.Settings;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -33,26 +32,6 @@ public class ClipPaintTests
         _ = f.Handle;
         c.SetSource(TextBuffer.FromString(Body()));
         return (f, c);
-    }
-
-    private static int[] Pixels(Bitmap bmp)
-    {
-        var data = bmp.LockBits(
-            new Rectangle(Point.Empty, bmp.Size),
-            ImageLockMode.ReadOnly,
-            PixelFormat.Format32bppArgb
-        );
-        try
-        {
-            var px = new int[bmp.Width * bmp.Height];
-            for (int y = 0; y < bmp.Height; y++)
-                Marshal.Copy(data.Scan0 + (y * data.Stride), px, y * bmp.Width, bmp.Width);
-            return px;
-        }
-        finally
-        {
-            bmp.UnlockBits(data);
-        }
     }
 
     private static int Line(EditorControl c, int line) =>
@@ -129,7 +108,7 @@ public class ClipPaintTests
                 if (state == 6)
                     Assert.True(c.ScrollX > 0, "前提: 水平スクロールが効いている");
                 using var full = EditorControl.TestHook_PaintToBitmap(c, record: false);
-                int[] truth = Pixels(full);
+                int[] truth = PaintTestHelpers.Pixels(full);
                 int w = full.Width,
                     h = full.Height;
                 int lh = c.Metrics.LineHeightPx;
@@ -148,7 +127,7 @@ public class ClipPaintTests
                 foreach (var clip in clips)
                 {
                     using var part = EditorControl.TestHook_PaintToBitmap(c, record: true, clip);
-                    int[] px = Pixels(part);
+                    int[] px = PaintTestHelpers.Pixels(part);
                     for (int y = clip.Top; y < Math.Min(h, clip.Bottom); y++)
                     {
                         for (int x = clip.Left; x < Math.Min(w, clip.Right); x++)
