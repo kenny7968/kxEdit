@@ -196,7 +196,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         TabStop = true;
         BackColor = Color.White;
         ForeColor = Color.Black;
-        _font = new Font("MS ゴシック", 12f);
+        // 製品の既定と同じフォントで始める(フェーズ 7 の項目 5。以前は半角「MS ゴシック」で解決せず、
+        // Microsoft Sans Serif に落ちていた)。製品では直後の ApplyAppearance が設定値に置き換える。
+        // ctor のフォントは要求値(_appliedFont)として記録しないので、最初の ApplyAppearance は必ず作り直す。
+        _font = new Font(AppSettings.DefaultFontName, AppSettings.DefaultFontSize);
         _underlineFontCache = new Font(_font, _font.Style | FontStyle.Underline);
         _targetFontCache = new Font(_font, _font.Style | FontStyle.Underline | FontStyle.Bold); // Task 10
         _metrics = new GdiCharMetrics(_font);
@@ -2809,8 +2812,10 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         // _appliedFont も更新しない=次回は作り直しを試みる)。
         // フェーズ 11(P-16 前半): 要求値が前回と同じなら丸ごと飛ばす(同じ引数の new Font は同じフォント)。
         var request = new FontRequest(
-            string.IsNullOrEmpty(settings.FontName) ? "ＭＳ ゴシック" : settings.FontName,
-            settings.FontSize > 0 ? settings.FontSize : 12f
+            string.IsNullOrEmpty(settings.FontName)
+                ? AppSettings.DefaultFontName
+                : settings.FontName,
+            settings.FontSize > 0 ? settings.FontSize : AppSettings.DefaultFontSize
         );
         if (_appliedFont != request)
         {

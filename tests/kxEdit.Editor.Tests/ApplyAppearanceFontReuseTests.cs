@@ -34,6 +34,26 @@ public class ApplyAppearanceFontReuseTests
         return font!;
     }
 
+    /// <summary>
+    /// フェーズ 7 の項目 5: ctor の描画フォントは製品の既定(<see cref="AppSettings.DefaultFontName"/>・
+    /// <see cref="AppSettings.DefaultFontSize"/>)と同じで、名前が実際に解決している。
+    /// <c>Font.Name</c> は GDI+ が解決した実フォント名で、名前が解決しないと Microsoft Sans Serif になる
+    /// (半角「MS ゴシック」だった頃はそうだった)。CI(windows-latest)に MS ゴシックがあることの確認も兼ねる。
+    /// </summary>
+    [Fact]
+    public void Ctor_DrawFont_IsProductDefaultAndResolves() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl();
+            using (f)
+            using (c)
+            {
+                var font = DrawFont(c);
+                Assert.Equal(AppSettings.DefaultFontName, font.Name);
+                Assert.Equal(AppSettings.DefaultFontSize, font.Size);
+            }
+        });
+
     [Fact]
     public void ApplyAppearance_SameFontTwice_ReusesFontAndMetrics() =>
         Sta.Run(() =>
@@ -66,8 +86,14 @@ public class ApplyAppearanceFontReuseTests
                 var ctorMetrics = c.Metrics;
                 var ctorFont = DrawFont(c);
 
-                // ctor と同じ文字列(半角「MS ゴシック」12pt)。ctor のフォントは要求値として記録されていない。
-                c.ApplyAppearance(new AppSettings { FontName = "MS ゴシック", FontSize = 12f });
+                // ctor と同じ名前・大きさ。ctor のフォントは要求値として記録されていない。
+                c.ApplyAppearance(
+                    new AppSettings
+                    {
+                        FontName = AppSettings.DefaultFontName,
+                        FontSize = AppSettings.DefaultFontSize,
+                    }
+                );
 
                 Assert.NotSame(ctorMetrics, c.Metrics);
                 Assert.NotSame(ctorFont, DrawFont(c));
@@ -157,10 +183,16 @@ public class ApplyAppearanceFontReuseTests
             using (f)
             using (c)
             {
-                c.ApplyAppearance(new AppSettings { FontName = "ＭＳ ゴシック", FontSize = 12f });
+                c.ApplyAppearance(
+                    new AppSettings
+                    {
+                        FontName = AppSettings.DefaultFontName,
+                        FontSize = AppSettings.DefaultFontSize,
+                    }
+                );
                 var metrics = c.Metrics;
 
-                // 補完後は「ＭＳ ゴシック」12pt=同じフォントが作られるので使い回す。
+                // 補完後は既定の名前・大きさ=同じフォントが作られるので使い回す。
                 c.ApplyAppearance(new AppSettings { FontName = "", FontSize = 0f });
 
                 Assert.Same(metrics, c.Metrics);
