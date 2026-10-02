@@ -126,6 +126,24 @@ public class AppendBufferGridTests
     }
 
     [Fact]
+    public void Paste_straddling_block_end_merges_head_into_old_block_piece()
+    {
+        // ブロック末尾をまたぐ貼り付けは [旧ブロックの末尾, 新ブロック] の 2 ピースになる。
+        // 左マージは旧ブロックの末尾(newPieces[0])とだけ結合し、その包みを採る。
+        // 新ブロック側(newPieces[^1])の包みを採ると、旧ブロックのオフセットで新ブロックを読んで壊れる。
+        var b = TextBuffer.FromString("");
+        int fill = AppendBuffer.BlockBytes - 6;
+        b.Insert(0, new string('a', AppendBuffer.LargeInsertBytes));
+        b.Insert(b.Current.CharLength, new string('a', fill - AppendBuffer.LargeInsertBytes));
+        b.Insert(b.Current.CharLength, "0123456789ABCDEFGHIJ");
+        Assert.Equal(
+            new string('a', fill) + "0123456789ABCDEFGHIJ",
+            b.Current.GetText(0, b.Current.CharLength)
+        );
+        Assert.Equal(2, b.Current.PieceCount);
+    }
+
+    [Fact]
     public void Typing_after_undo_does_not_merge_non_contiguous_bytes()
     {
         // Undo で以前のルートに戻ると、追記位置は取り消したバイトの先にある。
