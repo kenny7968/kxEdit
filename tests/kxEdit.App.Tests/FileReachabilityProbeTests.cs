@@ -93,6 +93,45 @@ public class FileReachabilityProbeTests
         Assert.False(result.FileExists);
     }
 
+    /// <summary>
+    /// 傘設計書 2026-09-27 フェーズ 6・項目 25: 今の結果を値で固定する(等価性の網
+    /// <see cref="ProbeTimestamp_MatchesSaveTargetProbe_OnReachableAndExists"/> は 2 つのプローブの一致しか見ない)。
+    /// 末尾区切り付きでは <c>Path.GetDirectoryName</c> が区切りを落とした自身を親として返すので、
+    /// 自身がディレクトリなら到達可能、ファイルか不在なら到達不能になる。
+    /// 明示的な末尾区切りの判定を足すと、NUL 入り(GetFullPath が投げる)とディレクトリの結果が変わる(挙動不変を破る)。
+    /// </summary>
+    [Theory]
+    [InlineData("file", true, true)]
+    [InlineData("file-sep", false, false)]
+    [InlineData("dir", true, false)]
+    [InlineData("dir-sep", true, false)]
+    [InlineData("missing", true, false)]
+    [InlineData("missing-sep", false, false)]
+    [InlineData("nul", true, false)]
+    public void ProbeSaveTarget_PinsCurrentResult(string kind, bool reachable, bool fileExists)
+    {
+        using var tmp = new TempDir();
+        string file = tmp.File("a.txt");
+        File2.WriteAllText(file, "x");
+        string dir = Directory.CreateDirectory(System.IO.Path.Combine(tmp.Root, "dir")).FullName;
+        string sep = System.IO.Path.DirectorySeparatorChar.ToString();
+        string path = kind switch
+        {
+            "file" => file,
+            "file-sep" => file + sep,
+            "dir" => dir,
+            "dir-sep" => dir + sep,
+            "missing" => tmp.File("m.txt"),
+            "missing-sep" => tmp.File("m.txt") + sep,
+            "nul" => tmp.File("a\0b.txt"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        var result = new FileReachabilityProbe().ProbeSaveTargetWithTimeout(path, Timeout);
+
+        Assert.Equal(new SaveTargetProbeResult(reachable, fileExists), result);
+    }
+
     // ===== フォルダー存在プローブ(A-17)=====
 
     [Fact]
