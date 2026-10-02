@@ -10,7 +10,7 @@ namespace kxEdit.App;
 /// baseDir が null（未保存タブ等）または実在しない/不達の場合は空フォルダーへマッピングする
 /// （相対リソースは解決できないが、仮想ホストは常にローカルで応答する = 実 DNS 解決を
 /// 起こさない・V-2）。
-/// 「閉じる」ボタンと Esc の両方でエディタへ戻る。
+/// 「閉じる」ボタン・Alt+C・Esc でエディタへ戻る。
 /// <para>
 /// MD-M-4: WebView2 の <c>userDataFolder</c> は per-form 一意 (<see cref="PreviewUserDataFolder"/>)
 /// = プロファイルロック競合回避 + 破棄で一時ディレクトリごと除去。
@@ -71,6 +71,13 @@ public sealed class MarkdownPreviewForm : Form
         // Dock 順: Fill を先に Add し、Bottom を後から載せる。
         Controls.Add(_web);
         Controls.Add(bottom);
+
+        // フェーズ 8 項目 2: WebView2 にフォーカスがあると(OnNavCompleted の _web.Focus() の後)、
+        // Alt+C はフォームの ProcessCmdKey / ProcessDialogKey にもボタンのニーモニックにも届かない。
+        // WinForms の WebView2 は AcceleratorKeyPressed を自分の KeyDown に変換し、e.Handled を
+        // WebView2 へ書き戻すので、ここで拾う(2026-10-02-preview-keys.md §0.3)。
+        // 注入スクリプトで拾う案は WebMessage の面を広げるので採らない。
+        _web.KeyDown += OnWebKeyDown;
 
         Shown += async (_, _) => await InitAsync();
     }
@@ -187,6 +194,24 @@ public sealed class MarkdownPreviewForm : Form
             if (!IsDisposed)
                 Close();
         }
+    }
+
+    /// <summary>
+    /// フェーズ 8 項目 2: WebView2 にフォーカスがあるときの Alt+C(「閉じる(&amp;C)」)で閉じる。
+    /// 完全一致だけを扱い、Ctrl+C(本文のコピー)などは WebView2 に任せる。
+    /// <para>
+    /// この KeyDown は、ブラウザのプロセスが受けた実際のキー入力から WebView2 が起こす
+    /// (AcceleratorKeyPressed)。ページの中の JavaScript が作る合成のキーイベントは
+    /// AcceleratorKeyPressed にならないので、文書の内容からプレビューを閉じさせることはできない
+    /// (そもそも文書のスクリプトは CSP で動かない)。
+    /// </para>
+    /// </summary>
+    private void OnWebKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyData != (Keys.Alt | Keys.C))
+            return;
+        e.Handled = true;
+        Close();
     }
 
     /// <summary>
