@@ -95,38 +95,57 @@ internal sealed class PreviewUserDataFolder : IDisposable
     /// 使い切ったら Trace 警告を残して諦める(例外は外へ出さない)。
     /// <see cref="System.IO.Directory.Delete(string, bool)"/> はリパースポイント(ジャンクション・
     /// シンボリックリンク)の先を辿らず、リンク自体だけを消す(従来の同期削除と同じ API・同じ性質)。
+    /// それ以外の例外(待ち時間の不正など)も、Trace 警告を残して諦める。背景の Task なので、
+    /// faulted のまま残すと誰にも観測されない(2026-09-27 申し送り回収 フェーズ 6・項目 26)。
     /// </summary>
+    /// <param name="onAttemptFailed">
+    /// テスト用: IO 系の例外で試行が失敗するたびに(諦める回も含めて)、待つ前に呼ぶ。
+    /// 「少なくとも 1 回失敗した」を時間に依存せずに待つため(項目 30)。
+    /// </param>
     /// <returns>試行の回数(テスト用)。</returns>
     internal static Task<int> DeleteWithRetryAsync(
         string path,
-        IReadOnlyList<TimeSpan> retryDelays
+        IReadOnlyList<TimeSpan> retryDelays,
+        Action? onAttemptFailed = null
     ) =>
         Task.Run(async () =>
         {
             // for (;;attempt++) は S1994(停止条件が attempt を見ない)に当たるため while(true) +
             // 手動インクリメントにする。ループ末尾で加算する点は for の attempt++ と同じ位置(継続時のみ)。
             int attempt = 0;
-            while (true)
+            try
             {
-                try
+                while (true)
                 {
-                    if (System.IO.Directory.Exists(path))
-                        System.IO.Directory.Delete(path, recursive: true);
-                    return attempt + 1;
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    if (attempt >= retryDelays.Count)
+                    try
                     {
-                        // 次回起動の sweeper(PreviewUserDataSweeper)が回収する。
-                        System.Diagnostics.Trace.TraceWarning(
-                            $"PreviewUserDataFolder 削除失敗: {ex.Message} ({path})"
-                        );
+                        if (System.IO.Directory.Exists(path))
+                            System.IO.Directory.Delete(path, recursive: true);
                         return attempt + 1;
                     }
-                    await Task.Delay(retryDelays[attempt]).ConfigureAwait(false);
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        onAttemptFailed?.Invoke();
+                        if (attempt >= retryDelays.Count)
+                        {
+                            // 次回起動の sweeper(PreviewUserDataSweeper)が回収する。
+                            System.Diagnostics.Trace.TraceWarning(
+                                $"PreviewUserDataFolder 削除失敗: {ex.Message} ({path})"
+                            );
+                            return attempt + 1;
+                        }
+                        await Task.Delay(retryDelays[attempt]).ConfigureAwait(false);
+                    }
+                    attempt++;
                 }
-                attempt++;
+            }
+            catch (Exception ex)
+            {
+                // IO 系以外は再試行しても直らないので諦める。残骸は上と同じく次回起動の sweeper が回収する。
+                System.Diagnostics.Trace.TraceWarning(
+                    $"PreviewUserDataFolder 削除失敗(想定外): {ex.GetType().Name}: {ex.Message} ({path})"
+                );
+                return attempt + 1;
             }
         });
 }
