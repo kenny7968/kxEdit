@@ -137,6 +137,40 @@ public class AppendBufferGridTests
         AssertMatchesSource(b.Current, text);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Pasted_blocks_with_grid_points_inside_multibyte_chars_match_source(int phase)
+    {
+        // 傘設計書の項目 27: 数 KB の塊を何度も貼り付け、名目の格子点(4096 の倍数)が
+        // 3 バイト・4 バイトの文字の途中に来る形を作る。周期 7 バイト(あ😀)は 4096 を割り切らない
+        // (4096 mod 7 = 1)ので、位相 phase(先頭の ASCII)を変えると格子点が文字の途中に来る。
+        // 塊は 32KB 以下なので追記ブロックに入る。
+        var unit = new StringBuilder();
+        while (Encoding.UTF8.GetByteCount(unit.ToString()) < 3000)
+            unit.Append("あ😀");
+        unit.Append("\r\n");
+        string block = unit.ToString(); // 約 3KB(格子幅より小さい)
+
+        var b = TextBuffer.FromString("");
+        var expected = new StringBuilder();
+        string head = new('a', phase);
+        b.Insert(0, head);
+        expected.Append(head);
+        for (int i = 0; i < 6; i++) // 約 18KB = 格子点 4 つをまたぐ
+        {
+            b.Insert(b.Current.CharLength, block);
+            expected.Append(block);
+            AssertMatchesSource(b.Current, expected.ToString());
+        }
+
+        // 歯の担保: 名目点が文字の途中だったため前方スナップされた格子点が、少なくとも 1 つある
+        var lastChunk = PieceTree.Enumerate(b.Current.Root).Last().Chunk;
+        Assert.Contains(lastChunk.GridByteOffsets.ToArray(), off => off != 0 && off % G != 0);
+    }
+
     [Fact]
     public void Old_snapshots_are_unchanged_after_later_writes_and_rewraps()
     {
