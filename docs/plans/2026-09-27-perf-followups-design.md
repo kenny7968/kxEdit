@@ -537,6 +537,40 @@
 - 21・22 は、移動の前後でテストの件数と結果が同じであること。
 - 30 は、合図を待つ形になったことで、`SleepMs(300)` への依存がなくなっていること。
 
+### 10.3 実施記録(2026-10-02)
+
+- **成果物**
+  - 項目 21: `tests/kxEdit.Editor.Tests/Fakes/PaintTestHelpers.cs` を足し、`Pixels`・`PaintPixels`・`PaintRecorded`・`PaintAndAssumeRecorded`・`Rects`・`SameOnScreen`・`DiffBounds`・`Composite`(と private の `OnScreen`)を寄せた。5 つのテストクラスから重複を消した。`tests/README.md` に置き場所を 1 段落で書いた。
+  - 項目 22: `EditorControl.Paint.cs` の 131〜344 行を `EditorControl.Invalidation.cs` へ移した。中身は 1 字も変えていない。Paint.cs は 672 → 458 行、Invalidation.cs は 225 行。
+  - 項目 30: `PreviewUserDataFolder.DeleteWithRetryAsync` に、テスト用の任意引数 `onAttemptFailed` を足した。`DeleteWithRetry_RetriesAfterFailure` は、失敗の合図を待ってからロックを放す。`SleepMs` は消した。
+  - 項目 26: `DeleteWithRetryAsync` のループ全体を `catch (Exception)` で包み、Trace 警告を残して諦める。
+  - 項目 25: 製品のロジックは変えず、`ProbeSaveTargetWithTimeout` の結果を 7 通り(ファイル・ディレクトリ・不在 × 末尾区切りの有無と、NUL 入り)のテストで固定した。末尾区切りで到達不能に落ちる理由を、製品のコメントに書いた。
+  - 実装計画は `docs/plans/2026-10-02-tidy-up.md`。
+- **完了条件**
+  - **件数の比較**(項目 21・22): Editor.Tests は、変更前・Task 1 の後・Task 2 の後のどれも 合格 726 / スキップ 0 / 合計 726。
+  - **純粋な移動の確認**(項目 22): 移した範囲と新しいファイルの本体を比べて一致した。commit の後(CSharpier の後)にも確かめた。
+  - **テスト**: App に計 8 件を足した(項目 26 の 1 件、項目 25 の 7 ケース)。項目 30 は既存の 1 件を書き換えた。App.Tests は 1,106 件すべて合格。
+  - **陰性対照**(項目 26): 外側の catch を `when (ex is OperationCanceledException)` で無効化すると、ビルドが成功したうえで `DeleteWithRetry_UnexpectedException_GivesUpWithoutFaulting` が `AggregateException`(`ArgumentOutOfRangeException`)で FAIL した。
+  - **項目 25 の期待値**: 計画の時点では pwsh(.NET 10)で実測した。.NET 9 のテストでも 7 ケースすべてが同じ値になった。
+  - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+  - **L5**: 不要(§3.3)。
+  - **レビュー**
+    - タスクごとに別のエージェントでレビューした。Task 1 は前倒しのコード品質レビューを、Task 3 は前倒しの脆弱性レビュー(ファイル削除のパス操作に触れるため)を兼ねた。どれも承認で、Critical・Important はなかった。
+    - 最終レビューは 2 パス(コード品質 / 脆弱性)を別々のエージェントで行った。Critical・Important はなかった。
+    - 品質パスの Minor 2(明示判定を採らない理由に、ディレクトリの結果が変わることも書く)は fixup で直した。
+    - 残りの Minor は受容した。主なものは次のとおり。
+      - `Pixels` に doc がない(旧コードにもない)。
+      - `Oracle_detects_a_missing_rectangle` に `Rects` と同じ採取がインラインで残っている(陽性対照の形を変えないため)。
+      - 補助は Fake ではないが `Fakes/` に置いた(§10.1 の前例 `ScreenSurface` と同居させる)。
+- **本節からの精密化**
+  - 項目 21: `Paint` は、画素を返す版を `PaintPixels(c, record)`、描画を記録するだけの版を `PaintRecorded(c)` に分けた(同じ名前に寄せると record の取り違えが起きる)。呼び出しはクラス名で修飾する(リポジトリに `using static` の前例がない)。
+  - 項目 26: §10.1 の「最後に `catch (Exception)`」は、ループ全体を包む外側の catch として実装した。IO 系の catch の中で投げる例外(`Task.Delay` の引数不正・合図)も拾うためである。テストは負の遅延で `Task.Delay` に投げさせる。
+  - 項目 30: 合図の引数は `Action`(試行の番号は渡さない)。IO 系の例外で失敗するたびに、諦める回も含めて、待つ前に呼ぶ。
+  - 項目 22: 計画の比較コマンド(`sed`・`awk` と `diff`)は、Git Bash で CRLF のファイルに使うと全行が差分になる。両側を `tr -d '\r'` に通して比べた。
+- **申し送り**(回収先は未定。次に申し送りを回収するときに扱う)
+  - 項目 25 の値の固定は、§10.1 のケースだけにした。等価性の網にある「ファイルの後ろに `\ `・`\. `」の形(正規化で末尾区切りになる)は、値では固定していない。
+  - `onAttemptFailed` が例外を投げると、外側の catch が受けてリトライが打ち切られる。テスト専用の引数で、製品(`Dispose`)は渡さない。
+
 ## 11. フェーズ 7: フォント(`font-size-and-default`)
 
 ### 11.1 項目 4: 20pt が 20.3 pt になる(直す)
