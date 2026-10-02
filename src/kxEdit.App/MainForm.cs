@@ -1025,7 +1025,8 @@ public sealed partial class MainForm : Form
     {
         // フェーズ 8 項目 3: モーダル(ShowDialog / MessageBox)の表示中、オーナーの主窓は
         // Win32 で無効化されている(Control.Enabled は変わらない)。無効な主窓にキーが届くのは、
-        // 外部から SetForegroundWindow で前面化されたときだけで、そのままメニューの
+        // 外部から SetForegroundWindow で前面化されたときや、主窓・子の HWND へキーの
+        // メッセージを直接投げられたときで、どちらも同じ入口(ProcessCmdKey)に来る。そのままメニューの
         // ショートカットまで流すと、プレビューや設定がモーダルの上に入れ子で開く
         // (2026-10-02-preview-keys.md §0.2)。CSV の横取り・switch・base より前で食う。
         if (IsHandleCreated && !NativeMethods.IsWindowEnabled(Handle))
