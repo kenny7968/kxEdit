@@ -97,14 +97,76 @@ public class AppendBufferGridTests
     // ---- TextBuffer 経由: 元の文字列との一致 ----
 
     [Fact]
-    public void Typing_adds_piece_only_after_grid_point_is_inside()
+    public void Typing_across_grid_points_and_blocks_keeps_one_piece_per_block()
     {
+        // 格子点をまたいで包み直しても、同じブロックの別の包み同士は左マージで 1 ピースに戻る。
+        // ブロックの繰上げ(別の配列)では結合しないので、2 ブロック強を打つと 3 ピースになる。
         var b = TextBuffer.FromString("");
-        for (int i = 0; i < G; i++)
+        for (int i = 0; i < G + 1; i++)
             b.Insert(b.Current.CharLength, "a");
-        Assert.Equal(1, b.Current.PieceCount);
-        b.Insert(b.Current.CharLength, "a");
-        Assert.Equal(2, b.Current.PieceCount); // §3.5 の意図的な挙動差
+        Assert.Equal(1, b.Current.PieceCount); // フェーズ 4 の後は 2 だった
+
+        int total = 2 * AppendBuffer.BlockBytes + 100;
+        while (b.Current.CharLength < total)
+            b.Insert(b.Current.CharLength, "a");
+        Assert.Equal(3, b.Current.PieceCount);
+        Assert.Equal(new string('a', total), b.Current.GetText(0, total));
+    }
+
+    [Fact]
+    public void Merged_piece_takes_the_newest_wrap()
+    {
+        // 結合したピースは新しい包み(格子点が多い)を採る。古い包みを採っても正しさは同じで
+        // 格子が粗くなるだけなので、テキストの照合では検出できない(傘設計書 §9.2)。
+        var b = TextBuffer.FromString("");
+        for (int i = 0; i < 2 * G + 10; i++)
+            b.Insert(b.Current.CharLength, "a");
+        var piece = Assert.Single(PieceTree.Enumerate(b.Current.Root));
+        AssertGrid(piece.Chunk, 0, G, 2 * G);
+    }
+
+    [Fact]
+    public void Paste_straddling_block_end_merges_head_into_old_block_piece()
+    {
+        // ブロック末尾をまたぐ貼り付けは [旧ブロックの末尾, 新ブロック] の 2 ピースになる。
+        // 左マージは旧ブロックの末尾(newPieces[0])とだけ結合し、その包みを採る。
+        // 新ブロック側(newPieces[^1])の包みを採ると、旧ブロックのオフセットで新ブロックを読んで壊れる。
+        var b = TextBuffer.FromString("");
+        int fill = AppendBuffer.BlockBytes - 6;
+        b.Insert(0, new string('a', AppendBuffer.LargeInsertBytes));
+        b.Insert(b.Current.CharLength, new string('a', fill - AppendBuffer.LargeInsertBytes));
+        b.Insert(b.Current.CharLength, "0123456789ABCDEFGHIJ");
+        Assert.Equal(
+            new string('a', fill) + "0123456789ABCDEFGHIJ",
+            b.Current.GetText(0, b.Current.CharLength)
+        );
+        Assert.Equal(2, b.Current.PieceCount);
+    }
+
+    [Fact]
+    public void Typing_after_undo_does_not_merge_non_contiguous_bytes()
+    {
+        // Undo で以前のルートに戻ると、追記位置は取り消したバイトの先にある。
+        // 下地は同じでもバイトが連続しないので結合しない。
+        var b = TextBuffer.FromString("");
+        b.Insert(0, "abc");
+        b.BreakUndoCoalescing();
+        b.Insert(3, "def");
+        Assert.NotNull(b.Undo());
+        b.Insert(3, "X");
+        Assert.Equal("abcX", b.Current.GetText(0, b.Current.CharLength));
+        Assert.Equal(2, b.Current.PieceCount);
+    }
+
+    [Fact]
+    public void Contiguous_offsets_in_different_chunks_are_not_merged()
+    {
+        // ファイル由来のチャンクのピース [0,3) の直後に、追記ブロックの [3,4) が来る。
+        // オフセットは数値上連続だが下地が違うので、結合すると追記ブロックの [0,4) を読んでしまう。
+        var b = TextBuffer.FromString("abc");
+        b.Insert(0, "xyz"); // 追記ブロック [0,3)
+        b.Insert(6, "Q"); // 追記ブロック [3,4)。左隣はファイル由来の [0,3)
+        Assert.Equal("xyzabcQ", b.Current.GetText(0, b.Current.CharLength));
     }
 
     [Theory]
@@ -135,6 +197,40 @@ public class AppendBufferGridTests
         string text = sb.ToString();
         var b = TypeByCodePoint(text);
         AssertMatchesSource(b.Current, text);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Pasted_blocks_with_grid_points_inside_multibyte_chars_match_source(int phase)
+    {
+        // 傘設計書の項目 27: 数 KB の塊を何度も貼り付け、名目の格子点(4096 の倍数)が
+        // 3 バイト・4 バイトの文字の途中に来る形を作る。周期 7 バイト(あ😀)は 4096 を割り切らない
+        // (4096 mod 7 = 1)ので、位相 phase(先頭の ASCII)を変えると格子点が文字の途中に来る。
+        // 塊は 32KB 以下なので追記ブロックに入る。
+        var unit = new StringBuilder();
+        while (Encoding.UTF8.GetByteCount(unit.ToString()) < 3000)
+            unit.Append("あ😀");
+        unit.Append("\r\n");
+        string block = unit.ToString(); // 約 3KB(格子幅より小さい)
+
+        var b = TextBuffer.FromString("");
+        var expected = new StringBuilder();
+        string head = new('a', phase);
+        b.Insert(0, head);
+        expected.Append(head);
+        for (int i = 0; i < 6; i++) // 約 18KB = 格子点 4 つをまたぐ
+        {
+            b.Insert(b.Current.CharLength, block);
+            expected.Append(block);
+            AssertMatchesSource(b.Current, expected.ToString());
+        }
+
+        // 歯の担保: 名目点が文字の途中だったため前方スナップされた格子点が、少なくとも 1 つある
+        var lastChunk = PieceTree.Enumerate(b.Current.Root).Last().Chunk;
+        Assert.Contains(lastChunk.GridByteOffsets.ToArray(), off => off != 0 && off % G != 0);
     }
 
     [Fact]

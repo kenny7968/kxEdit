@@ -297,6 +297,23 @@ public class TextChunkTests
         }
     }
 
+    [Fact]
+    public void SharesBytesWith_is_true_only_for_wraps_of_the_same_memory()
+    {
+        var block = new byte[64];
+        "abcdef"u8.CopyTo(block);
+        var oldWrap = new TextChunk(block, gridBytes: 4, gridLimit: 0);
+        var newWrap = new TextChunk(block, gridBytes: 4, gridLimit: 6);
+        var sameContent = new TextChunk((byte[])block.Clone(), gridBytes: 4, gridLimit: 6);
+        var slice = new TextChunk(block.AsMemory(0, 32), gridBytes: 4, gridLimit: 6);
+
+        Assert.True(oldWrap.SharesBytesWith(newWrap));
+        Assert.True(newWrap.SharesBytesWith(oldWrap));
+        Assert.True(newWrap.SharesBytesWith(newWrap));
+        Assert.False(newWrap.SharesBytesWith(sameContent)); // 中身が同じでも別の配列
+        Assert.False(newWrap.SharesBytesWith(slice)); // 同じ配列でも範囲が違う
+    }
+
     private static void AssertGrid(TextChunk chunk, params int[] expected) =>
         Assert.Equal(expected, chunk.GridByteOffsets.ToArray());
 }
