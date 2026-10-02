@@ -234,19 +234,23 @@ public sealed class TextBuffer
         // 3) 挿入テキストを追記バッファへ
         var newPieces = _append.Append(insert);
 
-        // 4) 隣接マージ: 同一チャンクかつバイト連続なら1ピース化(連続タイピングでピース数が伸びない)
+        // 4) 隣接マージ: 同じ下地かつバイト連続なら1ピース化(連続タイピングでピース数が伸びない)。
+        //    AppendBuffer は格子点が増えるたびに同じブロックを包み直すので、包みの参照ではなく下地で
+        //    判定し、新しい包み(first.Chunk)を採る。first は今回の Append の結果なので常に最新の包みで、
+        //    その格子は書込済みの範囲の内側だけに置かれるから last の範囲にも有効。Undo の後は追記位置が
+        //    取り消したバイトの先にあるので連続せず、結合は起きない(2026-10-02 append-merge)。
         PieceTree.Node? left = l;
         if (newPieces.Count > 0 && left is not null)
         {
             var (remaining, last) = PieceTree.SplitLast(left);
             var first = newPieces[0];
             if (
-                ReferenceEquals(last.Chunk, first.Chunk)
+                last.Chunk.SharesBytesWith(first.Chunk)
                 && last.ByteStart + last.ByteLen == first.ByteStart
             )
             {
                 newPieces[0] = new Piece(
-                    last.Chunk,
+                    first.Chunk,
                     last.ByteStart,
                     last.ByteLen + first.ByteLen,
                     PieceStats.Combine(last.Stats, first.Stats)

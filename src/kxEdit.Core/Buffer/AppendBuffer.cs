@@ -11,6 +11,8 @@ namespace kxEdit.Core.Buffers;
 /// (ゼロ領域で累積 (CharOff, BreaksTo) を焼き付けると、後から書いた文字の char↔byte 対応が
 ///  静かに壊れる。2026-07-31 の格子細分化で顕在化した)。古い包みは、書込済み範囲が不変なので
 /// そのまま有効(古いスナップショット・Undo・RPC スレッドの読み)。
+/// 新旧の包みにまたがる連続したピースは、TextBuffer.Splice の左マージが新しい包みで 1 つに結合する
+/// (TextChunk.SharesBytesWith。2026-10-02 append-merge)。
 /// RPC スレッドが古い包みを読む間に UI スレッドが同じブロックへ書いても安全な理由:
 /// (a) 格子の値は [0, gridLimit) のバイトだけから決まり、gridLimit は構築時点の書込済み長(以後不変)。
 ///     格子点 x の BreaksTo は s[x] に依存せず、クエリ時の補正が読む s[x-1]・s[x] も書込済み。

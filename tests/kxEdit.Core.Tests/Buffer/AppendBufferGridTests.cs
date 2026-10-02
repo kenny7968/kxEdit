@@ -97,14 +97,58 @@ public class AppendBufferGridTests
     // ---- TextBuffer 経由: 元の文字列との一致 ----
 
     [Fact]
-    public void Typing_adds_piece_only_after_grid_point_is_inside()
+    public void Typing_across_grid_points_and_blocks_keeps_one_piece_per_block()
     {
+        // 格子点をまたいで包み直しても、同じブロックの別の包み同士は左マージで 1 ピースに戻る。
+        // ブロックの繰上げ(別の配列)では結合しないので、2 ブロック強を打つと 3 ピースになる。
         var b = TextBuffer.FromString("");
-        for (int i = 0; i < G; i++)
+        for (int i = 0; i < G + 1; i++)
             b.Insert(b.Current.CharLength, "a");
-        Assert.Equal(1, b.Current.PieceCount);
-        b.Insert(b.Current.CharLength, "a");
-        Assert.Equal(2, b.Current.PieceCount); // §3.5 の意図的な挙動差
+        Assert.Equal(1, b.Current.PieceCount); // フェーズ 4 の後は 2 だった
+
+        int total = 2 * AppendBuffer.BlockBytes + 100;
+        while (b.Current.CharLength < total)
+            b.Insert(b.Current.CharLength, "a");
+        Assert.Equal(3, b.Current.PieceCount);
+        Assert.Equal(new string('a', total), b.Current.GetText(0, total));
+    }
+
+    [Fact]
+    public void Merged_piece_takes_the_newest_wrap()
+    {
+        // 結合したピースは新しい包み(格子点が多い)を採る。古い包みを採っても正しさは同じで
+        // 格子が粗くなるだけなので、テキストの照合では検出できない(傘設計書 §9.2)。
+        var b = TextBuffer.FromString("");
+        for (int i = 0; i < 2 * G + 10; i++)
+            b.Insert(b.Current.CharLength, "a");
+        var piece = Assert.Single(PieceTree.Enumerate(b.Current.Root));
+        AssertGrid(piece.Chunk, 0, G, 2 * G);
+    }
+
+    [Fact]
+    public void Typing_after_undo_does_not_merge_non_contiguous_bytes()
+    {
+        // Undo で以前のルートに戻ると、追記位置は取り消したバイトの先にある。
+        // 下地は同じでもバイトが連続しないので結合しない。
+        var b = TextBuffer.FromString("");
+        b.Insert(0, "abc");
+        b.BreakUndoCoalescing();
+        b.Insert(3, "def");
+        Assert.NotNull(b.Undo());
+        b.Insert(3, "X");
+        Assert.Equal("abcX", b.Current.GetText(0, b.Current.CharLength));
+        Assert.Equal(2, b.Current.PieceCount);
+    }
+
+    [Fact]
+    public void Contiguous_offsets_in_different_chunks_are_not_merged()
+    {
+        // ファイル由来のチャンクのピース [0,3) の直後に、追記ブロックの [3,4) が来る。
+        // オフセットは数値上連続だが下地が違うので、結合すると追記ブロックの [0,4) を読んでしまう。
+        var b = TextBuffer.FromString("abc");
+        b.Insert(0, "xyz"); // 追記ブロック [0,3)
+        b.Insert(6, "Q"); // 追記ブロック [3,4)。左隣はファイル由来の [0,3)
+        Assert.Equal("xyzabcQ", b.Current.GetText(0, b.Current.CharLength));
     }
 
     [Theory]

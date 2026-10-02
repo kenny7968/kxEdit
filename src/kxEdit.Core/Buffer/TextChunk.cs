@@ -35,7 +35,8 @@ internal sealed class TextChunk
     //                          格子点あたりの List.Add 3 回 ×(1023−63)回だけ=走査に対し
     //                          無視できる。交互サンプリング n=80 で測ること)
     // 注: AppendBuffer は共有ブロックを gridLimit=書込済みの長さで包み、書き進めるたびに包み直す
-    //     (2026-09-25 フェーズ 4。理由は AppendBuffer のクラスコメント)。
+    //     (2026-09-25 フェーズ 4。理由は AppendBuffer のクラスコメント)。新旧の包みのピースは
+    //     TextBuffer.Splice の左マージで結合する(SharesBytesWith。2026-10-02 append-merge)。
     /// <param name="gridLimit">
     /// 格子点を置く位置の上限。この位置<b>未満</b>にだけ置く(既定は <paramref name="bytes"/> の長さ)。
     /// <see cref="AppendBuffer"/> は書込済みの長さを渡す。未書込のゼロ領域から累積値を焼き付けないため。
@@ -75,6 +76,15 @@ internal sealed class TextChunk
 
     /// <summary>テスト観測用: 格子点のバイト位置(昇順・先頭は 0)。製品コードからは使わない。</summary>
     internal ReadOnlySpan<int> GridByteOffsets => _gByte;
+
+    /// <summary>
+    /// <paramref name="other"/> と同じ下地(同じ配列の同じ範囲)を包んでいるか。
+    /// <see cref="AppendBuffer"/> は 1 ブロックを書き進めるたびに包み直すので、同じブロックの
+    /// 新旧の包みは別のオブジェクトになる。<c>TextBuffer.Splice</c> の左マージがそれらを
+    /// 1 ピースに結合するために使う(新しい包みの格子は、書込済みの範囲の内側だけに置かれるので、
+    /// 古い包みのピースの範囲にもそのまま有効)。
+    /// </summary>
+    internal bool SharesBytesWith(TextChunk other) => _bytes.Equals(other._bytes);
 
     public ReadOnlySpan<byte> Span => _bytes.Span;
     public int ByteLength => _bytes.Length;
