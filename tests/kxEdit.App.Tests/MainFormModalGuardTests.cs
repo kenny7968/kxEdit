@@ -10,8 +10,8 @@ namespace kxEdit.App.Tests;
 /// (`docs/plans/2026-10-02-preview-keys.md` §0.2)。
 /// <para>
 /// 実ユーザーの操作では、モーダルの表示中に主窓へキーは届かない。届くのは、無効化された主窓を
-/// 外部から <c>SetForegroundWindow</c> で前面化したときだけで、そのときキーは主窓の
-/// <c>ProcessCmdKey</c> に直接来る。ここではその入口を直接呼び、主窓が Win32 で無効な間は
+/// 外部から <c>SetForegroundWindow</c> で前面化したときや、主窓・子の HWND へキーのメッセージを
+/// 直接投げられたときで、どちらもキーは主窓の <c>ProcessCmdKey</c> に来る。ここではその入口を直接呼び、主窓が Win32 で無効な間は
 /// 何もしないことを確かめる。
 /// </para>
 /// </summary>
