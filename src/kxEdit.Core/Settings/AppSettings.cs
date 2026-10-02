@@ -6,8 +6,17 @@ namespace kxEdit.Core.Settings;
 // 無視されるため、データ移行不要。
 public sealed class AppSettings
 {
-    public string FontName { get; set; } = "ＭＳ ゴシック";
-    public float FontSize { get; set; } = 12f;
+    /// <summary>
+    /// 既定のフォント名(全角「ＭＳ」)。<c>EditorControl</c> の ctor と <c>ApplyAppearance</c> の補完も
+    /// これを使う(半角「MS ゴシック」は解決せず、Microsoft Sans Serif に落ちる)。
+    /// </summary>
+    public const string DefaultFontName = "ＭＳ ゴシック";
+
+    /// <summary>既定のフォントの大きさ(pt)。<see cref="DefaultFontName"/> と同じく、ctor・補完・設定の初期値で共有する。</summary>
+    public const float DefaultFontSize = 12f;
+
+    public string FontName { get; set; } = DefaultFontName;
+    public float FontSize { get; set; } = DefaultFontSize;
     public int WindowWidth { get; set; } = 960;
     public int WindowHeight { get; set; } = 640;
 
