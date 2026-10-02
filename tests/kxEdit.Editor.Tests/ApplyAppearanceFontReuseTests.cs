@@ -34,11 +34,17 @@ public class ApplyAppearanceFontReuseTests
         return font!;
     }
 
+    /// <summary>日本語(ja-JP)の LANGID。フォントファミリー名をこの言語で取り出す。</summary>
+    private const int JapaneseLangId = 0x0411;
+
     /// <summary>
     /// フェーズ 7 の項目 5: ctor の描画フォントは製品の既定(<see cref="AppSettings.DefaultFontName"/>・
     /// <see cref="AppSettings.DefaultFontSize"/>)と同じで、名前が実際に解決している。
-    /// <c>Font.Name</c> は GDI+ が解決した実フォント名で、名前が解決しないと Microsoft Sans Serif になる
-    /// (半角「MS ゴシック」だった頃はそうだった)。CI(windows-latest)に MS ゴシックがあることの確認も兼ねる。
+    /// 名前が解決しないと、GDI+ は Microsoft Sans Serif に落ちる(半角「MS ゴシック」だった頃はそうだった)。
+    /// CI(windows-latest)に MS ゴシックがあることの確認も兼ねる。
+    /// ファミリー名は日本語の LANGID で取り出して比べる。<c>Font.Name</c> は UI のカルチャの言語で名前を返すので、
+    /// 英語の CI では同じフォントでも「MS Gothic」になる。Microsoft Sans Serif は日本語名を持たないので、
+    /// 解決しなかった場合は英語名が返り、区別できる。
     /// </summary>
     [Fact]
     public void Ctor_DrawFont_IsProductDefaultAndResolves() =>
@@ -49,7 +55,7 @@ public class ApplyAppearanceFontReuseTests
             using (c)
             {
                 var font = DrawFont(c);
-                Assert.Equal(AppSettings.DefaultFontName, font.Name);
+                Assert.Equal(AppSettings.DefaultFontName, font.FontFamily.GetName(JapaneseLangId));
                 Assert.Equal(AppSettings.DefaultFontSize, font.Size);
             }
         });
