@@ -1,4 +1,6 @@
 using kxEdit.Core.Buffers;
+using kxEdit.Core.Layout;
+using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
 
@@ -56,6 +58,37 @@ public class LongRowScrollTests
                 Assert.True(one > 0);
                 int x0 = c.ComputeCaretPoint(0).X;
                 Assert.Equal(x0 + 45_000 * one, c.ComputeCaretPoint(45_000).X);
+            }
+        });
+
+    [Fact]
+    public void Paint_of_a_long_row_draws_only_the_characters_in_the_window() =>
+        Sta.Run(() =>
+        {
+            var (f, c) = MakeControl();
+            using (f)
+            using (c)
+            {
+                c.SetCaretCharOffset(45_000);
+                Assert.True(c.ScrollX > 0);
+                PaintTestHelpers.PaintRecorded(c);
+
+                var frame = EditorControl.TestHook_GetLastFrame(c);
+                Assert.NotNull(frame);
+                // 本文の op だけ(行番号の op が混ざっても拾わないよう、本文の文字だけでできたものに絞る)。
+                var body = frame!
+                    .Ops.Where(op =>
+                        op.Kind == PaintOpKind.DrawText
+                        && op.Text is { Length: > 0 } t
+                        && t.All(ch => ch == '吾')
+                    )
+                    .ToList();
+                int one = c.ComputeCaretPoint(1).X - c.ComputeCaretPoint(0).X;
+                int chars = body.Sum(op => op.Text!.Length);
+                // 窓に入る文字数 + 余裕(左端の 1 文字・右端の 1 文字)を超えない。行全体(5 万字)ではない。
+                Assert.InRange(chars, 1, (c.ClientSize.Width / one) + 3);
+                // 最初の op は窓の左端以前から始まり、1 文字ぶんより左には出ない。
+                Assert.InRange(body[0].X - c.ScrollX, -one, 0);
             }
         });
 }

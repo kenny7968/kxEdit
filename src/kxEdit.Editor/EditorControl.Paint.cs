@@ -244,7 +244,11 @@ public sealed partial class EditorControl
             inputs.CellHighlight,
             inputs.ShowWhitespace,
             inputs.Style,
-            inputs.Metrics
+            inputs.Metrics,
+            // 2026-10-06 長い行(設計書 docs/plans/2026-10-06-long-row-geometry-design.md §3.5): 長い行は窓にかかる文字だけを描く。
+            // 窓は ScrollX と PaintWidth で決まり、どちらも描画の入力(SameLayoutAs と スクロールの判定)に入っている。
+            viewLeftPx: inputs.ScrollX,
+            viewWidthPx: inputs.PaintWidth
         );
         RenderFrame(g, frame, inputs.ScrollX, inputs.Font);
 
