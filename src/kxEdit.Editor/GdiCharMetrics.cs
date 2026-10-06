@@ -128,10 +128,11 @@ public sealed class GdiCharMetrics : ICharMetrics
     /// の和と同じ(ASCII は <see cref="_asciiWidths"/>、BMP の非 ASCII は <see cref="_bmpWidths"/>、
     /// サロゲートペアは <see cref="CachedCodePointWidth"/>)。単独サロゲートは長さ 1 のコードポイントとして
     /// BMP の表で引く(<see cref="CachedCodePointWidth"/> の長さ 1 のキーと同じ)。
+    /// 和は long で足し、<see cref="int.MaxValue"/> で頭打ちにする(既定実装と同じ契約)。
     /// </summary>
     public int MeasureAdditive(ReadOnlySpan<char> text)
     {
-        int px = 0;
+        long px = 0;
         int i = 0;
         while (i < text.Length)
         {
@@ -160,7 +161,7 @@ public sealed class GdiCharMetrics : ICharMetrics
             }
             i += cpLen;
         }
-        return px;
+        return (int)Math.Min(px, int.MaxValue);
     }
 
     private static int[] CreateBmpWidthTable()

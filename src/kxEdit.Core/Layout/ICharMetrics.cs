@@ -19,12 +19,14 @@ public interface ICharMetrics
     /// </summary>
     /// <remarks>
     /// 非 ASCII を含む run の一括計測(<see cref="MeasureRun"/>)とは一致しないことがある(カーニング・合成)。
-    /// 一括計測は 43,679 字を超えると 0 を返す(GDI の制約)が、こちらは長さによらず和を返す。
+    /// 実装によっては一括計測に長さの上限がある(例: GDI は 43,679 字を超えると 0 を返す)が、
+    /// こちらは長さによらず和を返す。
+    /// 和が <see cref="int.MaxValue"/> を超えるときは <see cref="int.MaxValue"/> を返す(負へ回り込まない)。
     /// 既定実装は 1 コードポイントずつ <see cref="MeasureRun"/> を呼ぶ。速い実装は同じ値を返すこと。
     /// </remarks>
     int MeasureAdditive(ReadOnlySpan<char> text)
     {
-        int px = 0;
+        long px = 0;
         int i = 0;
         while (i < text.Length)
         {
@@ -32,6 +34,6 @@ public interface ICharMetrics
             px += MeasureRun(text.Slice(i, cpLen));
             i += cpLen;
         }
-        return px;
+        return (int)Math.Min(px, int.MaxValue);
     }
 }

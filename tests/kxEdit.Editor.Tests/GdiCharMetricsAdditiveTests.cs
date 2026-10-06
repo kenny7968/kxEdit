@@ -67,14 +67,33 @@ public class GdiCharMetricsAdditiveTests
         });
 
     [Fact]
-    public void Interface_call_reaches_the_fast_override() =>
+    public void Is_callable_through_the_interface_with_the_same_value() =>
         Sta.Run(() =>
         {
             using var font = new Font("MS ゴシック", 12f);
 #pragma warning disable CA1859 // reason: interface 経由の呼び出しを検証するテストなので interface 型で持つ
             ICharMetrics m = new GdiCharMetrics(font);
 #pragma warning restore CA1859
-            // 既定実装でも値は同じなので、ここでは interface 経由で呼べて同じ値になることだけを見る。
+            // interface 経由で呼べて、1 コードポイントずつの和と同じ値になることを見る。
+            // 高速版と既定実装のどちらに届いたかは、値が同じなので区別しない。
             Assert.Equal(3 * m.MeasureRun("あ"), m.MeasureAdditive("あああ"));
+        });
+
+    // 最終レビュー I-1: 和が int を超えても負へ回り込まず、int.MaxValue で止まる。
+    // 大きなフォントで 1 文字の幅を広げ、数 MB の文字列で int を超えさせる。
+    [Theory]
+    [InlineData('吾')] // BMP の表の経路
+    [InlineData('W')] // ASCII の経路
+    public void Saturates_at_int_max_instead_of_wrapping_negative(char c) =>
+        Sta.Run(() =>
+        {
+            using var font = new Font("MS ゴシック", 1000f);
+            var m = new GdiCharMetrics(font);
+            int one = m.MeasureRun(c.ToString());
+            Assert.True(one >= 500, $"フォントが大きくならない(1 文字 {one}px)");
+            int chars = (int.MaxValue / one) + 2;
+
+            Assert.Equal(int.MaxValue, m.MeasureAdditive(new string(c, chars)));
+            Assert.Equal((chars - 2) * one, m.MeasureAdditive(new string(c, chars - 2)));
         });
 }
