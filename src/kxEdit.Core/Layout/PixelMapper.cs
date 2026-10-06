@@ -24,7 +24,10 @@ internal static class PixelMapper
     /// <summary>窓にかかる文字範囲 [<paramref name="Start"/>, <paramref name="End"/>) と、Start の X(<see cref="SliceForWindow"/>)。</summary>
     internal readonly record struct RowSlice(int Start, int End, int StartPx);
 
-    internal static bool IsLongRow(ReadOnlySpan<char> segment) => segment.Length > LongRowThreshold;
+    internal static bool IsLongRow(ReadOnlySpan<char> segment) => IsLongRow(segment.Length);
+
+    /// <summary>長さ <paramref name="length"/> のセグメントが長い行か(本文を取る前に長さだけで判定したいとき用)。</summary>
+    internal static bool IsLongRow(int length) => length > LongRowThreshold;
 
     /// <summary>
     /// segment 内の charOffset(0..segment.Length)を pixel(0..)にマップ。
@@ -64,6 +67,8 @@ internal static class PixelMapper
     /// <remarks>
     /// 長い行では、先頭の全幅の一括計測を行わない(43,679 字を超えると 0 になり、どの px でも行末を返してしまう)。
     /// 1 コードポイントずつ歩く処理だけで求め、歩き切ったら行末を返す(全幅以上の px と同じ結果)。
+    /// 1 コードポイントの幅は <see cref="ICharMetrics.MeasureAdditive"/> で測る(契約上 <see cref="ICharMetrics.MeasureRun"/>
+    /// と同じ値で、GDI の実装では表を引くぶん速い)。累積は long で足す(幅の和が int を超える行でも回り込まない)。
     /// </remarks>
     public static int PxToOffset(ReadOnlySpan<char> segment, int px, ICharMetrics metrics)
     {
@@ -72,7 +77,8 @@ internal static class PixelMapper
         if (px <= 0)
             return 0;
 
-        if (!IsLongRow(segment))
+        bool longRow = IsLongRow(segment);
+        if (!longRow)
         {
             int total = metrics.MeasureRun(segment);
             if (px >= total)
@@ -80,13 +86,14 @@ internal static class PixelMapper
         }
 
         int i = 0;
-        int accumulated = 0;
+        long accumulated = 0;
         while (i < segment.Length)
         {
             // 次の code-point を切り出す(サロゲートペアは 2 code-unit 分)
             int cpLen = TextBoundary.CodePointLengthAt(segment, i);
 
-            int cpWidth = metrics.MeasureRun(segment.Slice(i, cpLen));
+            var cp = segment.Slice(i, cpLen);
+            int cpWidth = longRow ? metrics.MeasureAdditive(cp) : metrics.MeasureRun(cp);
 
             // 累積 + この code-point の幅が px 以上なら、この code-point を含めた直後を返す
             if (accumulated + cpWidth >= px)
@@ -120,6 +127,7 @@ internal static class PixelMapper
     /// <item>窓が行末より右なら Start = End = 行末(空)。</item>
     /// <item>StartPx は <c>OffsetToPx(segment, Start)</c>(長い行)と同じ値。境界はコードポイントの境界。</item>
     /// <item>費用は O(End)。窓より右は歩かない。</item>
+    /// <item>X は long で足す(幅の和が int を超える行でも回り込まない)。StartPx は leftPx 以下なので int に収まる。</item>
     /// </list>
     /// </remarks>
     internal static RowSlice SliceForWindow(
@@ -130,7 +138,7 @@ internal static class PixelMapper
     )
     {
         int i = 0;
-        int x = 0;
+        long x = 0;
         if (leftPx > 0)
         {
             while (i < segment.Length)
@@ -144,7 +152,7 @@ internal static class PixelMapper
             }
         }
         int start = i;
-        int startPx = x;
+        int startPx = (int)x;
         while (i < segment.Length && x < rightPx)
         {
             int cpLen = TextBoundary.CodePointLengthAt(segment, i);

@@ -1,5 +1,6 @@
 using kxEdit.Core.Buffers;
 using kxEdit.Core.Layout;
+using kxEdit.Core.Settings;
 using kxEdit.Editor.Tests.Fakes;
 
 namespace kxEdit.Editor.Tests;
@@ -37,7 +38,7 @@ public class LongRowScrollTests
                 Assert.Equal(0, c.WrapColumns);
                 c.SetCaretCharOffset(Chars);
 
-                Assert.True(c.ScrollX > 0, $"ScrollX が 0 のまま(横スクロールバーが出ていない)");
+                Assert.True(c.ScrollX > 0, "ScrollX が 0 のまま(横スクロールバーが出ていない)");
                 var (x, _, visible) = c.ComputeCaretPoint(Chars);
                 Assert.True(visible);
                 // 追従は「可視領域末尾から 1 半角幅内側」に置く(BringCaretIntoView)。描画幅は縦スクロールバーの分だけ
@@ -89,6 +90,42 @@ public class LongRowScrollTests
                 Assert.InRange(chars, 1, (c.ClientSize.Width / one) + 3);
                 // 最初の op は窓の左端以前から始まり、1 文字ぶんより左には出ない。
                 Assert.InRange(body[0].X - c.ScrollX, -one, 0);
+            }
+        });
+
+    // 最終レビュー I-1: 足し算の幅が int を超える行(折り返し OFF)。修正前は幅が負へ回り込み、横スクロールバーが
+    // 出なかった(帯によっては Maximum だけが負になり、ScrollBar.Value の設定で ArgumentOutOfRangeException)。
+    // 大きなフォントで 1 文字の幅を広げ、和が int.MaxValue をわずかに超える字数の行を作る(数 MB で済む)。
+    [Fact]
+    public void Row_wider_than_int_keeps_the_horizontal_scrollbar_usable() =>
+        Sta.Run(() =>
+        {
+            var f = HostForm.CreateVisible();
+            f.Size = new Size(400, 200);
+            var c = new EditorControl { Dock = DockStyle.Fill };
+            using (f)
+            using (c)
+            {
+                f.Controls.Add(c);
+                f.PerformLayout();
+                c.ApplyAppearance(new AppSettings { FontSize = 1000f, ShowLineNumbers = true });
+                int one = c.Metrics.MeasureRun("吾");
+                Assert.True(one >= 500, $"フォントが大きくならない(1 文字 {one}px)");
+                int chars = (int.MaxValue / one) + 2; // 和は int.MaxValue を 1〜2 文字ぶん超える
+                c.SetSource(TextBuffer.FromString(new string('吾', chars)));
+                Assert.Equal(0, c.WrapColumns);
+
+                c.ScrollX = int.MaxValue; // 右端へ(クランプされる)
+                Assert.True(
+                    c.ScrollX > int.MaxValue / 2,
+                    $"横スクロールバーが働かない(ScrollX = {c.ScrollX})"
+                );
+
+                // 行末・行頭へキャレットを動かして追従させても例外を出さない(スクロールバーの更新を含む)。
+                // 行末のキャレットの X(行番号の幅 + 行の幅)は int を超えるので、ここでは位置を問わない。
+                c.SetCaretCharOffset(chars);
+                c.SetCaretCharOffset(0);
+                Assert.InRange(c.ScrollX, 0, int.MaxValue - 1);
             }
         });
 }

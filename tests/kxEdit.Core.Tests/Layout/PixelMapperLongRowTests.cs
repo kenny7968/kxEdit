@@ -124,7 +124,7 @@ public class PixelMapperLongRowTests
     {
         // 幅 0 のコードポイントを持つ偽のメトリクスで、基底文字(1px) + 結合文字(0px)を並べる。
         var m = new ZeroWidthMarkMetrics();
-        string row = string.Concat(Enumerable.Repeat("á", 10_000)); // 20,000 単位
+        string row = string.Concat(Enumerable.Repeat("a\u0301", 10_000)); // 20,000 単位
         var s = PixelMapper.SliceForWindow(row, 3, 5, m);
         // 左端 3 は基底文字 3(単位 6)の中。結合文字(単位 7)から始めない。
         Assert.Equal(6, s.Start);
@@ -133,6 +133,46 @@ public class PixelMapperLongRowTests
         var t = PixelMapper.SliceForWindow(row, 4, 6, m);
         Assert.Equal(8, t.Start); // 基底文字 4
         Assert.Equal(4, t.StartPx);
+    }
+
+    // ---- 幅の和が int を超える行(最終レビュー I-1) ----
+    // HugeWidthMetrics は 1 コードポイント 2^17 px。20,000 字の行は約 26 億 px で、int で足すと負へ回り込む。
+
+    private static readonly ICharMetrics Huge = new HugeWidthMetrics();
+    private const int HugePx = HugeWidthMetrics.CodePointPx;
+    private static readonly string HugeRow = new('a', 20_000);
+
+    [Fact]
+    public void Width_beyond_int_saturates_instead_of_going_negative()
+    {
+        Assert.True(PixelMapper.IsLongRow(HugeRow));
+        Assert.Equal(int.MaxValue, PixelMapper.RowWidthPx(HugeRow, Huge));
+        Assert.Equal(int.MaxValue, PixelMapper.OffsetToPx(HugeRow, HugeRow.Length, Huge));
+        Assert.Equal(int.MaxValue, PixelMapper.OffsetToPx(HugeRow, 16_384, Huge)); // ちょうど 2^31
+        Assert.Equal(16_383 * HugePx, PixelMapper.OffsetToPx(HugeRow, 16_383, Huge));
+    }
+
+    [Fact]
+    public void PxToOffset_beyond_int_does_not_wrap()
+    {
+        // int.MaxValue は文字 16,383([16,383 × 2^17, 2^31))の中 = その直後。
+        Assert.Equal(16_384, PixelMapper.PxToOffset(HugeRow, int.MaxValue, Huge));
+        Assert.Equal(16_383, PixelMapper.PxToOffset(HugeRow, (16_383 * HugePx) - 1, Huge));
+    }
+
+    [Fact]
+    public void SliceForWindow_beyond_int_stops_at_the_window()
+    {
+        // 窓の右端が int.MaxValue でも、和が右端に届いたところで止まる(行末まで歩かない)。
+        Assert.Equal(
+            new PixelMapper.RowSlice(0, 16_385, 0),
+            PixelMapper.SliceForWindow(HugeRow, 0, int.MaxValue, Huge)
+        );
+        // 窓が int.MaxValue の手前なら、左端を含む文字 16,383 から始まり、StartPx は負にならない。
+        Assert.Equal(
+            new PixelMapper.RowSlice(16_383, 16_385, 16_383 * HugePx),
+            PixelMapper.SliceForWindow(HugeRow, int.MaxValue - 1000, int.MaxValue, Huge)
+        );
     }
 
     /// <summary>U+0301 だけ幅 0、それ以外は 1px。</summary>
@@ -144,7 +184,7 @@ public class PixelMapperLongRowTests
         {
             int px = 0;
             foreach (char c in text)
-                px += c == '́' ? 0 : 1;
+                px += c == '\u0301' ? 0 : 1;
             return px;
         }
     }
