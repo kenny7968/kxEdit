@@ -169,6 +169,37 @@ public class FrameBuilderLongRowTests
     }
 
     [Fact]
+    public void Long_row_selection_crossing_the_left_edge_starts_at_the_window()
+    {
+        string row = new('あ', 20_000);
+        var f = Build(
+            row,
+            viewLeftPx: 1001,
+            viewWidthPx: 20,
+            selection: new SelectionRange(495, 505),
+            selectionFore: SelFore
+        );
+        var body = Body(f);
+        // 窓は [500,512)。選択の前半 [495,500) は窓の外 = 選択色の run は窓の左端(文字 500)から。
+        // 窓より左の prefix は op を出さない。
+        Assert.Equal(2, body.Count);
+        Assert.Equal(
+            (new string('あ', 5), 1000, 10, SelFore),
+            (body[0].Text, body[0].X, body[0].Width, body[0].Fore)
+        );
+        Assert.Equal(
+            (new string('あ', 7), 1010, 14, Fore),
+            (body[1].Text, body[1].X, body[1].Width, body[1].Fore)
+        );
+        // 選択矩形(工程 3)は選択の全体 [495,505) を足し算の座標で(一括計測なら 989 になる)。
+        var rect = Assert.Single(
+            f.Ops,
+            op => op.Kind == PaintOpKind.FillRect && op.Back == SelBack
+        );
+        Assert.Equal((990, 20), (rect.X, rect.Width));
+    }
+
+    [Fact]
     public void Long_row_selection_outside_the_window_is_drawn_as_unselected()
     {
         string row = new('あ', 20_000);

@@ -262,7 +262,7 @@ internal static class FrameBuilder
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            if (row.SegmentLength > PixelMapper.LongRowThreshold)
+            if (PixelMapper.IsLongRow(row.SegmentLength))
             {
                 EmitLongRowBody(
                     snapshot.GetText(row.SegmentStartChar, row.SegmentLength),
@@ -315,7 +315,7 @@ internal static class FrameBuilder
                 if (row.SegmentLength == 0)
                     continue;
                 string text = snapshot.GetText(row.SegmentStartChar, row.SegmentLength);
-                if (PixelMapper.IsLongRow(text))
+                if (PixelMapper.IsLongRow(row.SegmentLength))
                 {
                     EmitLongRowWhitespaceGlyphs(
                         text,
