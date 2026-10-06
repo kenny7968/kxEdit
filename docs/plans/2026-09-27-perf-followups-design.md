@@ -654,6 +654,48 @@
 - プレビューを表示している間、Ctrl+Shift+U・Ctrl+W・Ctrl+S などが動かないこと。
 - NVDA で、閉じた後のフォーカス復帰と、表示直後に本文が先に読まれることを確かめる。
 
+### 12.4 実施記録(2026-10-02)
+
+- **調査の結論**(詳細は実装計画 `docs/plans/2026-10-02-preview-keys.md` §0)
+  - **項目 3**: 実際のキー入力では再現しなかった。WebView2 にフォーカスがあると、主窓のスレッドにキーが届かない。初期化中はプレビューの `ProcessCmdKey` に届くが、ToolStrip のルート HWND の照合で弾かれる。再現したのは、無効化された主窓を外部から `SetForegroundWindow` で前面化した場合だけだった。キーは主窓に直接届き、プレビューが入れ子で開いた。経路はプレビューのフォームを通らないので、§12.2 の第 2 案(主窓側のガード)を採った。Alt+Tab とタスクバーのクリックで前面に来るのはプレビューだった。§4.3 の「WebView2 から `ProcessCmdKey` への参照はない」は正しかった。
+  - **項目 2**: WebView2 にフォーカスがあると、Alt+C はフォームの `ProcessCmdKey`・`ProcessDialogKey`・ニーモニックのどれにも届かない。WinForms の WebView2 は `AcceleratorKeyPressed` を自分の `KeyDown` に変換し、`Handled` を書き戻す(IL と実測で確認)。§12.2 の「届く方を override する」は当たらないので、`_web.KeyDown` で拾う形にした。
+- **成果物**
+  - 項目 3: `MainForm.ProcessCmdKey` の先頭に、主窓が Win32 で無効(`NativeMethods.IsWindowEnabled(Handle) == false`)ならキーを食うガードを置いた。`ShowMarkdownPreview` の先頭に再入ガード(`_previewShowing`。`try/finally` で戻す)を入れた。
+  - 項目 2: `MarkdownPreviewForm` が `_web.KeyDown` を購読し、`KeyData == Alt+C` の完全一致で `Handled = true` にしてから閉じる。`OnNavCompleted` の `_web.Focus()` は残した。注入スクリプトは変えていない。
+- **完了条件**
+  - **テスト**: App に計 8 件を足した。
+    - `MainFormModalGuardTests` 3 件。テストの中で実際に `ShowDialog` を開き、その表示中にキーを渡す。モーダルを閉じた後に同じキーが効くことの陽性対照と、CSV モードの文書を使う再入ガードのテストを含む。再入ガードのテストは、ガードの退行で `ShowDialog` に入らず、固まらずに赤くなる。
+    - `MarkdownPreviewFormKeyTests` 5 件。Handle だけを作り、`_web` の `OnKeyDown` を呼ぶ。Ctrl+C・素の C・Alt+Shift+C・Alt+X では閉じない。
+  - **陰性対照**: TDD の赤で取った。いずれもビルドの成功を確かめたうえで、次の形で FAIL した。
+    - 主窓のガードなし: Ctrl+Shift+Tab でタブが a に移った。
+    - 再入ガードなし: `BlockedInCsvMode` が発声された。
+    - Alt+C の処理なし: `Handled` が false だった。
+  - **品質ゲート**: `tools/pre-merge-check.ps1` が EXIT 0。
+  - **L5**: `tools/sr-regression.ps1` が EXIT 0。NVDA の実機で次を確かめ、すべて PASS した(SendInput の実キー入力・スピーチビューアーと UIA で採取)。
+    1. 表示直後は、ダイアログの名前に続いて本文が読まれる。
+    2. Alt+C で閉じ、エディタにフォーカスが戻る(「本文 ドキュメント …」)。メニューバーは活性化しない。
+    3. Esc と「閉じる」ボタンでも閉じる。
+    4. プレビューの表示中に送った Ctrl+Shift+U・Ctrl+W・Ctrl+S では何も起きない。
+    5. 無効な主窓を `SetForegroundWindow` で前面化してから Ctrl+Shift+U・Ctrl+W・Alt+F4 を送っても、何も起きない(修正前は入れ子で開いた)。
+  - **レビュー**
+    - Task 1: 仕様と品質のレビュー。
+    - Task 2: 仕様と品質のレビューに加えて、前倒しの脆弱性レビュー。
+    - 最終レビュー: 2 パス(コード品質 / 脆弱性。別々のエージェント)。
+    - Critical・Important はなかった。Minor のうち、コメントの網羅性の過大表現と、テストのコメントの紛らわしさの 2 件は fixup で直した。あわせて、モーダルの表示中に主窓が無効であることの前提 assert を足した。残りは受容した(PR に記載)。
+- **本節からの精密化**
+  - 項目 2 は override ではなく `_web.KeyDown` で拾う(上の調査の結論)。
+  - 項目 3 のガードの条件は「主窓が Win32 で無効」にした。実装計画 §0.4 は効く範囲を「検索と置換・grep を含むすべてのモーダル」と書いたが、正しくは次の 2 つである(最終レビューの M-1)。
+    - `ShowDialog` と `MessageBox` で開くモーダル
+    - モードレスの窓から開くモーダル(`ShowDialog` はスレッドのすべての窓を無効にする)
+    - 検索と置換・grep のダイアログ・grep の結果一覧はモードレスで、主窓を無効にしないので、ガードは効かない(挙動も変わらない)。
+  - 主窓のガードのテストは、実装計画の Ctrl+Tab ではなく Ctrl+Shift+Tab を使った。起動時の無題のタブが先頭に残り、Ctrl+Tab は b から折り返して無題のタブへ移るので、陽性対照が成り立たないためである。
+- **意図的な挙動差**(§3.5 の 2 行に足す)
+  - 主窓を外部から前面化された場合などに、主窓へ届くキーをモーダルの表示中はすべて食う。対象はショートカットに限らない。Alt によるメニューの活性化と Alt+F4 も効かなくなる(最終レビューの M-2・L5 の 5 で確認)。通常の操作では、モーダルの表示中に主窓へキーは届かない。
+- **申し送り**(回収先は未定。次に申し送りを回収するときに扱う)
+  - Esc も `_web.KeyDown` に届く。Esc の処理を C# の `KeyDown` に寄せれば、注入スクリプトと `WebMessageReceived` による閉じる経路(WebMessage の面)をなくせる。挙動の変更を伴うので、本フェーズの範囲外とした。
+  - (既存)UIA の Invoke でメニュー項目を実行すると、`ProcessCmdKey` を通らない。モーダルの表示中でも、プレビュー以外のモーダル(設定・開く・grep など)は入れ子で開きうる。同じ整合性レベルのプロセスに限られる。回収案は、モーダルを開く入口に共通のガード(`IsWindowEnabled(Handle)` の判定)を置くこと。
+  - (既存)別のプロセスから投げられた `WM_CHAR`・`WM_SYSCOMMAND`・`WM_CLOSE` は `ProcessCmdKey` を通らない。同じ整合性レベルのプロセスに限られる。記録だけ残す。
+
 ## 13. フェーズ 9: 長大行の描画コスト(`long-line-paint-cost`)
 
 **目的**: `RowPaintKey.Text`(17)と `FrameRowCache` の保持(19)が長大行で問題になるかを測り、直すか閉じるかを決める。18 の計測も同じセッションで行う。

@@ -86,6 +86,14 @@ public sealed partial class MainForm : Form
     internal void SetSuppressRestoreDialogsForTest(bool value) =>
         _suppressRestoreDialogsForTest = value;
 
+    // ShowMarkdownPreview の再入ガード(フェーズ 8 項目 3 の保険)。モーダルの表示中は
+    // ProcessCmdKey のガードで主窓のキーが止まるので、通常はここに来ない。
+    private bool _previewShowing;
+
+    // フェーズ 8 項目 3: ShowMarkdownPreview の再入ガードを、ShowDialog を開かずに
+    // 立てた状態にする(SetSuppressRestoreDialogsForTest と同じ方式)。
+    internal void SetPreviewShowingForTest(bool value) => _previewShowing = value;
+
     // A-1 第 2 層テスト用: 陳腐化警告に到達した回数(抑止中でも数える)。ダイアログ自体は
     // MessageBox=blocking で観測できないため、到達を数だけ観測して配線を固定する。
     private int _staleBackupWarningCountForTest;
@@ -1015,6 +1023,15 @@ public sealed partial class MainForm : Form
     // フォームの ProcessCmdKey で横取りする。Ctrl+W はメニューのショートカットで処理。
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // フェーズ 8 項目 3: モーダル(ShowDialog / MessageBox)の表示中、オーナーの主窓は
+        // Win32 で無効化されている(Control.Enabled は変わらない)。無効な主窓にキーが届くのは、
+        // 外部から SetForegroundWindow で前面化されたときや、主窓・子の HWND へキーの
+        // メッセージを直接投げられたときで、どちらも同じ入口(ProcessCmdKey)に来る。そのままメニューの
+        // ショートカットまで流すと、プレビューや設定がモーダルの上に入れ子で開く
+        // (2026-10-02-preview-keys.md §0.2)。CSV の横取り・switch・base より前で食う。
+        if (IsHandleCreated && !NativeMethods.IsWindowEnabled(Handle))
+            return true;
+
         // CSVモードのアクティブタブのみ、素のキーをグリッドナビ用に横取りする。
         // F2 編集オーバーレイ表示中（_csv.IsEditing）は素通しし、TextBox に通常編集させる。
         // P7 で CsvFocusSink を撤去し FocusTarget=Editor 固定になったため、
@@ -1795,9 +1812,15 @@ public sealed partial class MainForm : Form
     /// 既に陳腐化していた)。
     /// M-23: cap 判定は TextLength で行い SnapshotText を呼ばない。
     /// B: Markdig のネスト深度上限超過 (MarkdownTooComplexException) も同様に提示する。
+    /// フェーズ 8: 先頭で再入を止める(<c>_previewShowing</c>)。主窓のキーはモーダルの表示中
+    /// <c>ProcessCmdKey</c> で止まるので、これは保険。
     /// </remarks>
     private void ShowMarkdownPreview()
     {
+        // フェーズ 8 項目 3 の保険: プレビューの上にプレビューを開かない。
+        if (_previewShowing)
+            return;
+
         var doc = _docs.Active;
         if (doc is null)
             return;
@@ -1847,13 +1870,21 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        using var f = new MarkdownPreviewForm(
-            html,
-            dir,
-            doc.State.DisplayName,
-            new FileReachabilityProbe()
-        );
-        f.ShowDialog(this);
+        _previewShowing = true;
+        try
+        {
+            using var f = new MarkdownPreviewForm(
+                html,
+                dir,
+                doc.State.DisplayName,
+                new FileReachabilityProbe()
+            );
+            f.ShowDialog(this);
+        }
+        finally
+        {
+            _previewShowing = false;
+        }
         _docs.Active?.FocusTarget.Focus(); // 戻り後は編集領域へフォーカス
     }
 
