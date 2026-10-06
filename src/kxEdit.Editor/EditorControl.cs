@@ -1610,11 +1610,18 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (row.SegmentLength == 0)
                 continue;
             string lineText = snap.GetText(row.SegmentStartChar, row.SegmentLength);
-            int width = _metrics.MeasureRun(lineText.AsSpan());
+            // 2026-10-06 長い行(設計書 docs/plans/2026-10-06-long-row-geometry-design.md §3.5): 長い行は足し算で測る。
+            // 一括計測は非 ASCII を含み 43,679 字を超えると幅 0 を返し、横スクロールバーが出なくなる。
+            int width = PixelMapper.RowWidthPx(lineText.AsSpan(), _metrics);
             if (width > maxLineWidthPx)
                 maxLineWidthPx = width;
         }
-        int contentWidth = lnWidth + maxLineWidthPx;
+        // 長い行の幅は int.MaxValue で頭打ちになる(MeasureAdditive)。行番号の幅を足すと int を超えうるので
+        // long で求め、Maximum を int に収める(2026-10-06 最終レビュー I-1。負の Maximum は WinForms が Minimum も
+        // 下げ、続く Value の設定が ArgumentOutOfRangeException になる)。上限は int.MaxValue - 1: ScrollBar.LargeChange
+        // の getter が Maximum - Minimum + 1 を int で求めるため、Maximum = int.MaxValue だと負の値を返す。
+        // 通常の幅では値は変わらない。
+        long contentWidth = (long)lnWidth + maxLineWidthPx;
         if (contentWidth <= paintWidth)
         {
             HideAndResetHScroll();
@@ -1625,7 +1632,8 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
         int largeChange = Math.Max(1, paintWidth);
         // WinForms 慣習に合わせ Maximum → LargeChange の順で設定
         // (逆順だと Maximum が小さいときに LargeChange が内部で clip されるケースがある)。
-        _hscroll.Maximum = contentWidth - 1 + Math.Max(0, largeChange - 1);
+        _hscroll.Maximum = (int)
+            Math.Min(contentWidth - 1 + Math.Max(0, largeChange - 1), int.MaxValue - 1);
         _hscroll.LargeChange = largeChange;
         _hscroll.SmallChange = Math.Max(1, _metrics.MeasureRun("0"));
         int maxScrollX = _hscroll.Maximum - Math.Max(0, largeChange - 1);

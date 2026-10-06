@@ -92,6 +92,7 @@ internal static class PerfBench
         "S8",
         "S9",
         "S10",
+        "S11",
     ];
 
     /// <summary>計測中に EditorControl の <c>Paint</c> が発火した回数(描画が本当に配送されたかの観測)。</summary>
@@ -241,6 +242,18 @@ internal static class PerfBench
                 results.AddRange(
                     MeasureUiaWrapLines(editor, Fresh(docs[0].Text), docs[0].Name, opt)
                 );
+            if (opt.Scenarios.Contains("S11"))
+            {
+                foreach (var (name, unit, bytesPerChar) in LongLineDocs)
+                    results.AddRange(
+                        MeasureLongLineTyping(
+                            editor,
+                            Fresh(BuildLongLine(unit, LongLineChars, bytesPerChar)),
+                            name,
+                            opt
+                        )
+                    );
+            }
         }
         catch (PerfSelfCheckException e)
         {
@@ -696,6 +709,97 @@ internal static class PerfBench
             );
         }
         return results;
+    }
+
+    /// <summary>S11 の長大行の長さ(UTF-16 の単位数)。</summary>
+    private const int LongLineChars = 1_000_000;
+
+    /// <summary>
+    /// S11 の回数の上限。変更前の日本語 1M 字は 1 打鍵が約 2.7 秒かかるので、既定の n = 200 では
+    /// 1 文書に 20 分を超える。<c>--n</c>・<c>--warmup</c> はこの上限で切る。
+    /// </summary>
+    private const int LongLineMaxN = 20;
+
+    private const int LongLineMaxWarmup = 2;
+
+    /// <summary>S11 の文書: (名前, 繰り返す単位, 1 文字あたりの UTF-8 バイト数)。改行も空白も含まない。</summary>
+    private static readonly (string Name, string Unit, int BytesPerChar)[] LongLineDocs =
+    [
+        ("line1m-en", "abcdefghijklmnopqrstuvwxyz0123456789", 1),
+        ("line1m-ja", "吾輩は猫である名前はまだ無いどこで生れたかとんと見当がつかぬ", 3),
+    ];
+
+    /// <summary>
+    /// S11a(1 文字挿入)と S11b(BackSpace): 1M 字の 1 行(折り返し OFF)の行頭付近で、S3 と同じ交互の打鍵を行う
+    /// (申し送り回収フェーズ 9・設計書 docs/plans/2026-09-27-perf-followups-design.md §13.1)。
+    /// 打鍵のたびに行全体の本文が変わるので、行の記述子・描画・横スクロールバーの計算が行全体に及ぶ。
+    /// 回数は <see cref="LongLineMaxN"/> / <see cref="LongLineMaxWarmup"/> で切る。
+    /// </summary>
+    private static List<Result> MeasureLongLineTyping(
+        EditorControl editor,
+        TextBuffer buffer,
+        string doc,
+        Options opt
+    )
+    {
+        int n = Math.Min(opt.N, LongLineMaxN);
+        int warmup = Math.Min(opt.Warmup, LongLineMaxWarmup);
+        editor.SetOrReplaceSource(buffer);
+        editor.TopLine = 0;
+        editor.ScrollX = 0;
+        editor.SetCaretCharOffset(5);
+        editor.Update();
+        Check(
+            editor.WrapColumns == 0 && editor.TopLine == 0 && editor.ScrollX == 0,
+            $"S11/{doc}: 折り返し OFF・行頭の表示で準備できない"
+        );
+        CheckFocus(editor);
+        int len0 = editor.CurrentBuffer.Current.CharLength;
+        TypeChar(editor, 'x');
+        int len1 = editor.CurrentBuffer.Current.CharLength;
+        KeyDown(editor, Keys.Back);
+        Check(
+            len1 == len0 + 1 && editor.CurrentBuffer.Current.CharLength == len0,
+            $"S11/{doc}: WM_CHAR / BackSpace で本文長が変わらない({len0} → {len1})"
+        );
+
+        var insert = new List<Sample>(n);
+        var back = new List<Sample>(n);
+        CollectGarbage();
+        for (int k = 0; k < warmup + n; k++)
+        {
+            var a = TimeOnce(editor, update: true, () => TypeChar(editor, 'x'));
+            var b = TimeOnce(editor, update: true, () => KeyDown(editor, Keys.Back));
+            if (k >= warmup)
+            {
+                insert.Add(a);
+                back.Add(b);
+            }
+        }
+        Check(
+            editor.CurrentBuffer.Current.CharLength == len0,
+            $"S11/{doc}: 計測後の本文長が元に戻らない"
+        );
+        Check(editor.TopLine == 0 && editor.ScrollX == 0, $"S11/{doc}: 計測中にスクロールした");
+        return [Summarize("S11a", doc, null, insert), Summarize("S11b", doc, null, back)];
+    }
+
+    /// <summary>
+    /// <paramref name="unit"/> を繰り返して <paramref name="chars"/> 文字の 1 行を作る(改行なし)。
+    /// UTF-8 のバイト数が仕様と違えば例外 = 仕様からずれた文書を黙って測らない。
+    /// </summary>
+    private static string BuildLongLine(string unit, int chars, int bytesPerChar)
+    {
+        var sb = new StringBuilder(chars);
+        while (sb.Length < chars)
+            sb.Append(unit, 0, Math.Min(unit.Length, chars - sb.Length));
+        string s = sb.ToString();
+        int bytes = Encoding.UTF8.GetByteCount(s);
+        if (bytes != chars * bytesPerChar)
+            throw new PerfSelfCheckException(
+                $"生成した長大行が {bytes:N0} バイト(仕様は {chars * bytesPerChar:N0})"
+            );
+        return s;
     }
 
     // ---- 計測の核 ----

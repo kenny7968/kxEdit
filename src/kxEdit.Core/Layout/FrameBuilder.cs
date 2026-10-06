@@ -120,6 +120,11 @@ internal static class FrameBuilder
     /// <param name="showWhitespace">空白可視化を有効にするか。</param>
     /// <param name="style">配色。</param>
     /// <param name="metrics">文字メトリクス。</param>
+    /// <param name="viewLeftPx">
+    /// 横の窓の左端(Frame の X 座標 = 水平スクロール量)。長い行(<see cref="PixelMapper.IsLongRow"/>)だけが使い、
+    /// 窓にかかる文字だけを本文・空白のグリフにする(設計書 2026-10-06 §3.4)。短い行の op 列は窓によらない。
+    /// </param>
+    /// <param name="viewWidthPx">横の窓の幅(描画幅)。既定値は窓なし(長い行も全体を出す)。</param>
     public static Frame Build(
         TextSnapshot snapshot,
         IReadOnlyList<VisualRow> rows,
@@ -131,7 +136,9 @@ internal static class FrameBuilder
         SelectionRange? cellHighlight,
         bool showWhitespace,
         ViewportStyle style,
-        ICharMetrics metrics
+        ICharMetrics metrics,
+        int viewLeftPx = 0,
+        int viewWidthPx = int.MaxValue
     )
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -143,6 +150,14 @@ internal static class FrameBuilder
         var ops = new List<PaintOp>(rows.Count * 4 + 4);
         int lineHeight = metrics.LineHeightPx;
         int bodyX = lineNumberMarginPx;
+        // 長い行の窓(行頭基準)。右端は int を溢れないよう long で計算して丸める(既定の窓なしは int.MaxValue)。
+        int windowLeft = viewLeftPx - bodyX;
+        int windowRight = (int)
+            Math.Clamp(
+                (long)viewLeftPx + Math.Max(0, viewWidthPx) - bodyX,
+                int.MinValue,
+                int.MaxValue
+            );
 
         // 1) 背景全域
         ops.Add(
@@ -247,6 +262,22 @@ internal static class FrameBuilder
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
+            if (PixelMapper.IsLongRow(row.SegmentLength))
+            {
+                EmitLongRowBody(
+                    snapshot.GetText(row.SegmentStartChar, row.SegmentLength),
+                    row,
+                    bodyX,
+                    lineHeight,
+                    windowLeft,
+                    windowRight,
+                    split,
+                    style.Foreground,
+                    metrics,
+                    ops
+                );
+                continue;
+            }
             string text =
                 row.SegmentLength == 0
                     ? string.Empty
@@ -284,6 +315,21 @@ internal static class FrameBuilder
                 if (row.SegmentLength == 0)
                     continue;
                 string text = snapshot.GetText(row.SegmentStartChar, row.SegmentLength);
+                if (PixelMapper.IsLongRow(row.SegmentLength))
+                {
+                    EmitLongRowWhitespaceGlyphs(
+                        text,
+                        bodyX,
+                        row.YPx,
+                        lineHeight,
+                        windowLeft,
+                        windowRight,
+                        style.WhitespaceGlyph,
+                        metrics,
+                        ops
+                    );
+                    continue;
+                }
                 EmitWhitespaceGlyphs(
                     text,
                     bodyX,
@@ -471,6 +517,146 @@ internal static class FrameBuilder
 
             // サロゲートペアなら 2 進める(空白判定を安全にスキップ)
             i += TextBoundary.CodePointLengthAt(span, i);
+        }
+    }
+
+    /// <summary>
+    /// 長い行の本文(設計書 2026-10-06 §3.4)。窓にかかる文字 [Start, End)(<see cref="PixelMapper.SliceForWindow"/>)だけを、
+    /// 足し算の X で出す。<paramref name="split"/>(選択の文字色)があれば、選択と窓の交差で最大 3 run に分ける。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="EmitBodyTextWithSelection"/> を使わないのは、あちらが run の中で <see cref="PixelMapper.OffsetToPx"/>
+    /// を呼ぶため。切り出した部分文字列は短い行の扱いになり、一括計測に戻ってしまう(選択矩形の足し算の X と
+    /// ずれる)。「選択の px 幅が 0 なら分割しない」規則(あちらの doc)は、ここでも同じに守る。
+    /// 各 run はさらにタブで区切って出す(タブは文字を出さず空白幅の隙間。理由は <c>Run</c> のコメント)。
+    /// run の幅は足し算。run が <see cref="MaxCharsPerTextOp"/> を超える場合(窓なしの既定など)は
+    /// <see cref="EmitBodyRun"/> の分割に任せる。
+    /// </remarks>
+    private static void EmitLongRowBody(
+        string text,
+        VisualRow row,
+        int bodyX,
+        int lineHeight,
+        int windowLeft,
+        int windowRight,
+        (SelectionRange Range, PaintColor Fore)? split,
+        PaintColor fore,
+        ICharMetrics metrics,
+        List<PaintOp> ops
+    )
+    {
+        var span = text.AsSpan();
+        var slice = PixelMapper.SliceForWindow(span, windowLeft, windowRight, metrics);
+        if (slice.Start >= slice.End)
+            return;
+
+        if (
+            split is { } sp
+            && TryComputeRowIntersection(row, sp.Range, out int startInRow, out int endInRow)
+        )
+        {
+            int selFrom = Math.Clamp(
+                TextBoundary.SnapToCodePointStart(span, startInRow),
+                slice.Start,
+                slice.End
+            );
+            int selTo = Math.Clamp(
+                TextBoundary.SnapToCodePointStart(span, endInRow),
+                slice.Start,
+                slice.End
+            );
+            int pxSelFrom = slice.StartPx + metrics.MeasureAdditive(span[slice.Start..selFrom]);
+            int pxSelTo = pxSelFrom + metrics.MeasureAdditive(span[selFrom..selTo]);
+            if (pxSelFrom != pxSelTo)
+            {
+                Run(slice.Start, selFrom, slice.StartPx, fore);
+                Run(selFrom, selTo, pxSelFrom, sp.Fore);
+                Run(selTo, slice.End, pxSelTo, fore);
+                return;
+            }
+        }
+        Run(slice.Start, slice.End, slice.StartPx, fore);
+
+        void Run(int from, int to, int px, PaintColor color)
+        {
+            // run をタブで区切り、タブを含まない区間ごとに足し算の X で出す。タブ自体は文字を出さず、
+            // 足し算の幅(空白幅)ぶんの隙間になる。GDI(TextRenderer)はタブを幅 0 で測り・描くので、
+            // タブを含んだまま 1 つの DrawText にすると、タブのたびに後ろの文字が足し算の座標(キャレット・
+            // 選択・空白のグリフ)より左へずれる(2026-10-07 L5 で検出)。X は区間ごとに累積する
+            // (区間ごとに行頭から測り直さない)。短い行はこの経路を通らない(従来どおり一括計測の 1 op)。
+            // span(ref ローカル)はローカル関数から参照できないので text から作り直す。
+            int i = from;
+            int x = px;
+            while (i < to)
+            {
+                if (text[i] == '\t')
+                {
+                    x += metrics.MeasureAdditive(text.AsSpan(i, 1));
+                    i++;
+                    continue;
+                }
+                int end = text.IndexOf('\t', i, to - i);
+                if (end < 0)
+                    end = to;
+                var segment = text.AsSpan(i, end - i);
+                int width = metrics.MeasureAdditive(segment);
+                EmitBodyRun(
+                    segment,
+                    bodyX + x,
+                    row.YPx,
+                    lineHeight,
+                    color,
+                    metrics,
+                    ops,
+                    widthOverride: width
+                );
+                x += width;
+                i = end;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 長い行の空白の可視化(設計書 2026-10-06 §3.4)。窓にかかる文字だけを見て、X は窓の先頭から足し算で累積する
+    /// (空白ごとに行頭から測り直すと、行の長さの 2 乗のコストになる)。
+    /// </summary>
+    private static void EmitLongRowWhitespaceGlyphs(
+        string text,
+        int bodyX,
+        int yPx,
+        int lineHeight,
+        int windowLeft,
+        int windowRight,
+        PaintColor glyphFore,
+        ICharMetrics metrics,
+        List<PaintOp> ops
+    )
+    {
+        var span = text.AsSpan();
+        var slice = PixelMapper.SliceForWindow(span, windowLeft, windowRight, metrics);
+        int x = slice.StartPx;
+        int i = slice.Start;
+        while (i < slice.End)
+        {
+            int cpLen = TextBoundary.CodePointLengthAt(span, i);
+            char c = span[i];
+            if (c == ' ' || c == '\t')
+            {
+                string glyph = c == ' ' ? SpaceGlyph : TabGlyph;
+                ops.Add(
+                    new PaintOp(
+                        PaintOpKind.DrawText,
+                        bodyX + x,
+                        yPx,
+                        metrics.MeasureRun(glyph),
+                        lineHeight,
+                        Text: glyph,
+                        Fore: glyphFore
+                    )
+                );
+            }
+            x += metrics.MeasureAdditive(span.Slice(i, cpLen));
+            i += cpLen;
         }
     }
 

@@ -68,6 +68,12 @@ public sealed class GdiCharMetrics : ICharMetrics
     private readonly Dictionary<string, int>.AlternateLookup<ReadOnlySpan<char>> _runWidthsBySpan;
     private int _runCacheChars;
 
+    // 2026-10-06 長い行の座標(設計書 docs/plans/2026-10-06-long-row-geometry-design.md §3.2):
+    // MeasureAdditive が BMP の非 ASCII を Dictionary ではなく配列で引くための表。値は CachedCodePointWidth の結果
+    // そのもの(未計測は -1)。1M 字の行を歩くとき、Dictionary では 10〜20 ms かかるため。
+    // 初めて要るときに作る(65,536 要素 = 256KB)。寿命は _nonAsciiWidths と同じ = フォントの寿命。UI スレッド専用。
+    private int[]? _bmpWidths;
+
     internal int TestHook_RunCacheCount => _runWidths.Count;
     internal int TestHook_RunCacheChars => _runCacheChars;
 
@@ -115,6 +121,54 @@ public sealed class GdiCharMetrics : ICharMetrics
             px += _asciiWidths[c];
         }
         return px;
+    }
+
+    /// <summary>
+    /// <see cref="ICharMetrics.MeasureAdditive"/> の高速版。返す値は 1 コードポイントずつの <see cref="MeasureRun"/>
+    /// の和と同じ(ASCII は <see cref="_asciiWidths"/>、BMP の非 ASCII は <see cref="_bmpWidths"/>、
+    /// サロゲートペアは <see cref="CachedCodePointWidth"/>)。単独サロゲートは長さ 1 のコードポイントとして
+    /// BMP の表で引く(<see cref="CachedCodePointWidth"/> の長さ 1 のキーと同じ)。
+    /// 和は long で足し、<see cref="int.MaxValue"/> で頭打ちにする(既定実装と同じ契約)。
+    /// </summary>
+    public int MeasureAdditive(ReadOnlySpan<char> text)
+    {
+        long px = 0;
+        int i = 0;
+        while (i < text.Length)
+        {
+            char c = text[i];
+            if (c < 128)
+            {
+                px += _asciiWidths[c];
+                i++;
+                continue;
+            }
+            int cpLen = TextBoundary.CodePointLengthAt(text, i);
+            if (cpLen == 1)
+            {
+                var table = _bmpWidths ??= CreateBmpWidthTable();
+                int w = table[c];
+                if (w < 0)
+                {
+                    w = CachedCodePointWidth(text.Slice(i, 1));
+                    table[c] = w;
+                }
+                px += w;
+            }
+            else
+            {
+                px += CachedCodePointWidth(text.Slice(i, cpLen));
+            }
+            i += cpLen;
+        }
+        return (int)Math.Min(px, int.MaxValue);
+    }
+
+    private static int[] CreateBmpWidthTable()
+    {
+        var table = new int[char.MaxValue + 1];
+        Array.Fill(table, -1);
+        return table;
     }
 
     /// <summary>
