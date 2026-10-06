@@ -217,3 +217,4 @@ int MeasureAdditive(ReadOnlySpan<char> text)
   - **§3.4 の窓の引数**: 省略可能(既定は窓なし)にした。理由は実装計画 §0.5。
   - **§4.2 の Editor のテスト**: 表示した窓(`HostForm.CreateVisible`)で行う。表示しない Form では横スクロールバーが出ず、修正後も赤のままになるため。
   - **既存のテストの期待値を 1 件変えた**: `FrameBuilderSelectionForeTests.Run_at_exactly_the_limit_keeps_the_prefix_difference_width`。16,393 字の行が長い行になり、足し算の座標になるため(§3.6 の挙動差)。`MaxCharsPerTextOp` の比較を緩める変異は、引き続きこのテストで殺される。
+  - **足し算の幅は int.MaxValue で頭打ち**(最終レビュー I-1): `MeasureAdditive` は long で足し、`int.MaxValue` を超えたら `int.MaxValue` を返す。`SliceForWindow` と `PxToOffset` も long で足す。横スクロールバーの `Maximum` は `int.MaxValue - 1` 以下にクランプする。以前は、幅の大きい文字を並べた数十 MB の 1 行(折り返し OFF)で幅が負へ回り込み、`ScrollBar.Value` の設定で例外になりえた。
