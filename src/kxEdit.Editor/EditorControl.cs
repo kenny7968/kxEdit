@@ -1610,7 +1610,9 @@ public sealed partial class EditorControl : Control, kxEdit.Accessibility.IUiaTe
             if (row.SegmentLength == 0)
                 continue;
             string lineText = snap.GetText(row.SegmentStartChar, row.SegmentLength);
-            int width = _metrics.MeasureRun(lineText.AsSpan());
+            // 2026-10-06 長い行(設計書 docs/plans/2026-10-06-long-row-geometry-design.md §3.5): 長い行は足し算で測る。
+            // 一括計測は非 ASCII を含み 43,679 字を超えると幅 0 を返し、横スクロールバーが出なくなる。
+            int width = PixelMapper.RowWidthPx(lineText.AsSpan(), _metrics);
             if (width > maxLineWidthPx)
                 maxLineWidthPx = width;
         }

@@ -407,9 +407,15 @@ public class FrameBuilderSelectionForeTests
     /// 加算的な <see cref="MonoCharMetrics"/> では両者が一致してしまい、固定できない。
     /// </para>
     /// <para>
-    /// 選択を<b>オフセット 0 から始めない</b>のが要点。<c>OffsetToPx(0)</c> は早期 return で
-    /// 0 を返すので、0 起点だと差分 <c>= MeasureRun(run)</c> になってしまい、
-    /// 「差分か自前計測か」を区別できない(CLAUDE.md §4-B の partial-selection の教訓)。
+    /// 2026-10-06(設計書 docs/plans/2026-10-06-long-row-geometry-design.md §3.6・意図した挙動の差): この行は
+    /// prefix + 上限 + suffix で <see cref="PixelMapper.LongRowThreshold"/> を超える<b>長い行</b>なので、
+    /// <c>OffsetToPx</c> はコードポイント幅の足し算(<see cref="NonAdditive"/> では 1 字 10px)になる。
+    /// 差分の幅は <c>10*limit</c>、分割経路の自前計測は <c>MeasureRun(chunk) = 9*limit + 1</c> で、
+    /// 両者は異なるので上の変異は引き続きここで死ぬ。
+    /// </para>
+    /// <para>
+    /// 選択はオフセット 0 から始めない(CLAUDE.md §4-B の partial-selection の教訓)。短い行の一括計測では
+    /// 0 起点だと差分 <c>= MeasureRun(run)</c> になり区別できなくなるためで、prefix 付きの形を保つ。
     /// </para>
     /// </summary>
     [Fact]
@@ -432,12 +438,11 @@ public class FrameBuilderSelectionForeTests
         var sel = body[1];
         Assert.Equal(SelFore, sel.Fore);
         Assert.Equal(limit, sel.Text!.Length);
-        // x = OffsetToPx(prefixLen) = 9*prefixLen + 1
-        Assert.Equal((9 * prefixLen) + 1, sel.X);
-        // 幅 = OffsetToPx(prefixLen+limit) - OffsetToPx(prefixLen)
-        //    = (9*(prefixLen+limit) + 1) - (9*prefixLen + 1) = 9*limit。
-        // 分割経路へ落ちて自前計測になると MeasureRun(run) = 9*limit + 1 になり、ここで死ぬ。
-        Assert.Equal(9 * limit, sel.Width);
+        // 長い行なので足し算: x = OffsetToPx(prefixLen) = 10*prefixLen
+        Assert.Equal(10 * prefixLen, sel.X);
+        // 幅 = OffsetToPx(prefixLen+limit) - OffsetToPx(prefixLen) = 10*limit。
+        // 分割経路へ落ちて自前計測になると MeasureRun(chunk) = 9*limit + 1 になり、ここで死ぬ。
+        Assert.Equal(10 * limit, sel.Width);
     }
 
     /// <summary>
