@@ -207,4 +207,90 @@ public class FrameBuilderLongRowTests
         Assert.Equal(expectedX, glyphs.Select(op => op.X).ToList());
         Assert.Contains(glyphs, op => op.Text == "→"); // タブも出る
     }
+
+    // GDI(TextRenderer)はタブを幅 0 で測り・描く一方、足し算の座標はタブを空白幅で数える。長い行の本文を
+    // 1 run = 1 DrawText で描くと、タブのたびに文字が座標より左へずれる(2026-10-07 L5 で検出)。
+    // そこで長い行の本文はタブで区切り、タブを含まない区間ごとに足し算の X で出す。
+
+    /// <summary>"あa\tい" の繰り返し(1 単位 = 2+1+1+2 = 6px・4 文字)。20,000 字の長い行。</summary>
+    private static readonly string TabRow = string.Concat(Enumerable.Repeat("あa\tい", 5_000));
+
+    /// <summary>[from, to) をタブで区切った区間ごとの期待 op(Text・X・幅・色)。X と幅は足し算の座標。</summary>
+    private static IEnumerable<(string, int, int, PaintColor)> ExpectedTabSplit(
+        string row,
+        int from,
+        int to,
+        int bodyX,
+        PaintColor color
+    )
+    {
+        int i = from;
+        while (i < to)
+        {
+            if (row[i] == '\t')
+            {
+                i++;
+                continue;
+            }
+            int end = i;
+            while (end < to && row[end] != '\t')
+                end++;
+            int x = PixelMapper.OffsetToPx(row, i, G);
+            yield return (row[i..end], bodyX + x, PixelMapper.OffsetToPx(row, end, G) - x, color);
+            i = end;
+        }
+    }
+
+    private static List<(string, int, int, PaintColor)> Actual(List<PaintOp> body) =>
+        body.Select(op => (op.Text!, op.X, op.Width, op.Fore)).ToList();
+
+    [Fact]
+    public void Long_row_body_is_split_at_tabs_and_each_segment_is_at_additive_x()
+    {
+        Assert.True(PixelMapper.IsLongRow(TabRow));
+        // 行番号ぶん 30px。行頭基準の窓は [1001, 1031)。
+        var body = Body(Build(TabRow, viewLeftPx: 1031, viewWidthPx: 30, lineNumberMarginPx: 30));
+
+        var slice = PixelMapper.SliceForWindow(TabRow, 1001, 1031, G);
+        Assert.True(slice.Start > 0);
+        Assert.Contains('\t', TabRow[slice.Start..slice.End]);
+        Assert.DoesNotContain(body, op => op.Text!.Contains('\t'));
+        Assert.Equal(
+            TabRow[slice.Start..slice.End].Replace("\t", ""),
+            string.Concat(body.Select(op => op.Text))
+        );
+        Assert.Equal(
+            ExpectedTabSplit(TabRow, slice.Start, slice.End, 30, Fore).ToList(),
+            Actual(body)
+        );
+    }
+
+    [Fact]
+    public void Long_row_selection_fore_runs_are_split_at_tabs_and_keep_their_colors()
+    {
+        // 窓 [1001, 1031) は文字 667(い・[1000,1002))から。選択 [669, 673) = "a\tいあ" はタブをまたぐ。
+        var slice = PixelMapper.SliceForWindow(TabRow, 1001, 1031, G);
+        Assert.Equal(667, slice.Start);
+        Assert.Equal('\t', TabRow[670]);
+        var body = Body(
+            Build(
+                TabRow,
+                viewLeftPx: 1001,
+                viewWidthPx: 30,
+                selection: new SelectionRange(669, 673),
+                selectionFore: SelFore
+            )
+        );
+
+        var expected = ExpectedTabSplit(TabRow, slice.Start, 669, 0, Fore)
+            .Concat(ExpectedTabSplit(TabRow, 669, 673, 0, SelFore))
+            .Concat(ExpectedTabSplit(TabRow, 673, slice.End, 0, Fore))
+            .ToList();
+        Assert.Equal(expected, Actual(body));
+        // 選択部はタブで 2 つ("a" と "いあ")に分かれ、どちらも選択色。
+        Assert.Equal(
+            ["a", "いあ"],
+            body.Where(op => op.Fore == SelFore).Select(op => op.Text!).ToArray()
+        );
+    }
 }

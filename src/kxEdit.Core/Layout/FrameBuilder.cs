@@ -528,6 +528,7 @@ internal static class FrameBuilder
     /// <see cref="EmitBodyTextWithSelection"/> を使わないのは、あちらが run の中で <see cref="PixelMapper.OffsetToPx"/>
     /// を呼ぶため。切り出した部分文字列は短い行の扱いになり、一括計測に戻ってしまう(選択矩形の足し算の X と
     /// ずれる)。「選択の px 幅が 0 なら分割しない」規則(あちらの doc)は、ここでも同じに守る。
+    /// 各 run はさらにタブで区切って出す(タブは文字を出さず空白幅の隙間。理由は <c>Run</c> のコメント)。
     /// run の幅は足し算。run が <see cref="MaxCharsPerTextOp"/> を超える場合(窓なしの既定など)は
     /// <see cref="EmitBodyRun"/> の分割に任せる。
     /// </remarks>
@@ -578,20 +579,40 @@ internal static class FrameBuilder
 
         void Run(int from, int to, int px, PaintColor color)
         {
-            if (from >= to)
-                return;
+            // run をタブで区切り、タブを含まない区間ごとに足し算の X で出す。タブ自体は文字を出さず、
+            // 足し算の幅(空白幅)ぶんの隙間になる。GDI(TextRenderer)はタブを幅 0 で測り・描くので、
+            // タブを含んだまま 1 つの DrawText にすると、タブのたびに後ろの文字が足し算の座標(キャレット・
+            // 選択・空白のグリフ)より左へずれる(2026-10-07 L5 で検出)。X は区間ごとに累積する
+            // (区間ごとに行頭から測り直さない)。短い行はこの経路を通らない(従来どおり一括計測の 1 op)。
             // span(ref ローカル)はローカル関数から参照できないので text から作り直す。
-            var run = text.AsSpan(from, to - from);
-            EmitBodyRun(
-                run,
-                bodyX + px,
-                row.YPx,
-                lineHeight,
-                color,
-                metrics,
-                ops,
-                widthOverride: metrics.MeasureAdditive(run)
-            );
+            int i = from;
+            int x = px;
+            while (i < to)
+            {
+                if (text[i] == '\t')
+                {
+                    x += metrics.MeasureAdditive(text.AsSpan(i, 1));
+                    i++;
+                    continue;
+                }
+                int end = text.IndexOf('\t', i, to - i);
+                if (end < 0)
+                    end = to;
+                var segment = text.AsSpan(i, end - i);
+                int width = metrics.MeasureAdditive(segment);
+                EmitBodyRun(
+                    segment,
+                    bodyX + x,
+                    row.YPx,
+                    lineHeight,
+                    color,
+                    metrics,
+                    ops,
+                    widthOverride: width
+                );
+                x += width;
+                i = end;
+            }
         }
     }
 
