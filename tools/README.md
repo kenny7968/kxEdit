@@ -92,7 +92,7 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S
 ```
 
 - **画面内**に 900×700 の窓が出る(画面外の窓には WM_PAINT が配送されず、描画を測り落とすため)。計測中は触らない。
-- 外観は製品の既定(ＭＳ ゴシック 12pt・行番号なし・折り返しなし。S9 だけ折り返し 40 桁)。文書はメモリ上で生成する(ja10k / en10k。書式は調査記録 §9.5)。
+- 外観は製品の既定(ＭＳ ゴシック 12pt・行番号なし・折り返しなし。S9 だけ折り返し 40 桁)。文書はメモリ上で生成する(ja10k / en10k。書式は調査記録 §9.5。S11 は 1M 字の 1 行)。
 - 変更前と変更後を**同じマシンで各 3 回**走らせ、中央値を比べる。Release ビルドで、他の重い処理を止めて走らせる。
 - 判定はしない(EXIT 0)。**EXIT 1 は自己チェックの失敗**=入力が効いていない・描画が届いていない・フォーカスが無い(測れていない)ことを意味するので、値を使わない。EXIT 2 は引数の誤り。
 - 出力の `paints_per_op` は 1 操作あたりの WM_PAINT 回数。再描画の省略(フェーズ 3)や部分再描画(フェーズ 9)の効果の証拠になる。
@@ -111,6 +111,7 @@ dotnet run --project tests/kxEdit.Editor.Smoke -c Release -- --perf --scenario S
 | S8-1 / 40 / 1000 / all | UIA `GetBoundingRectangles`(文書先頭から n 行)を UI スレッドから直接。描画なし |
 | S9a / S9b | P-10: 折り返し ON(40 桁)の ja10k で、say all 相当の行読み(`LineEnd` → `LineStartOf` → `LineEndNoBreakOf` を 1 歩)を**ワーカースレッドから**。S9a は UI スレッドがメッセージを汲むだけ、S9b は汲む合間に全面再描画を挟む。`param` 列は 1 歩あたりの UI スレッドへの Invoke 回数 |
 | S10 | P-16: 同じ設定(フォントも同じ)で `ApplyAppearance` + `Update`。設定ダイアログの OK の 1 タブぶん |
+| S11a / S11b | 長大行(フェーズ 9): 1M 字の 1 行(`line1m-en` は英数字、`line1m-ja` は日本語。改行・空白なし。折り返し OFF)の行頭付近で、1 文字挿入と BackSpace を交互に行い、別々に集計。回数は `--n` / `--warmup` にかかわらず最大 20 / 2 回 |
 
 - キーは WndProc へ直接入れるので、IME/TSF の費用(調査記録 §9 の S-2)は乗らない。体感値は perf-harness で見る。
 
