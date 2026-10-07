@@ -525,3 +525,83 @@ push して PR を作る。description(日本語)に、目的・調査の結論(
 - §14.1 の 6 の 3 つの切り分け(折り返し OFF・メモ帳・debug ログと呼び出し列のトレース)は Task 2 Step 4 の B・E・C/D と、判断がつかない場合の NVDA ログ。結論の 3 分岐は Task 4 の表。Move/Expand を直す場合の変異検証は Task 4 Step 2。
 - §14.1 の 7(スピーチビューアーで発声順・App.Tests で発火順・崩れていれば先に発火)は Task 2 Step 5・Task 1・Task 3。
 - L5 必須(§3.3)は Task 2 と Task 3・4 の Step 5・3。
+
+---
+
+## 実施記録
+
+### 条件
+
+- 実施日: 2026-10-07(Task 2 の実機セッションと Task 3 の L5 は別セッション)。
+- NVDA 2026.2jp(通常権限)。スピーチビューアーの本文を `WM_GETTEXT` で読んだ。
+- 画面 1024×767。kxEdit は x=530・y=0・幅 494・高さ 740 に置いた。
+- 起動は Win+R から exe のフルパス。キーは windows-mcp で送った(全文読みだけは下記のとおりユーザーの実打鍵)。
+
+### Task 1: 項目 7 の発火順
+
+両方 FAIL。疑いどおり、`SelectedIndex` のセッターが新しいエディタへフォーカスを先に移していた。
+
+| テスト | 期待 | 実際 |
+|---|---|---|
+| `SelectAt_FromFocusedEditor_AnnouncesBeforeNewEditorGetsFocus` | `["switch:0", "focus:0"]` | `["focus:0", "switch:0"]` |
+| `SelectNext_FromFocusedEditor_AnnouncesBeforeNewEditorGetsFocus` | `["switch:1", "focus:1"]` | `["focus:1", "switch:1"]` |
+
+前提の assert(切替前に旧タブのエディタが `Focused`)は通った。計画どおり commit せずに Task 3 へ進んだ。
+
+### Task 2 Step 4: 項目 6 の切り分け(say all)
+
+| # | ビルド | 折り返し | キー | 結果 |
+|---|---|---|---|---|
+| A ×2 | main(Release) | ON(40 桁) | 送出 | 1 視覚行(「で生れたかとんと見当がつかぬ。何でも薄暗」)だけ |
+| B ×2 | main(Release) | OFF | 送出 | `L02` の 1 行だけ |
+| D ×1 | 計測ビルド | OFF | 送出 | `L02` の 1 行だけ |
+| C ×1 | 計測ビルド | ON(40 桁) | **実打鍵** | `L01` から `L20`(文書末)まで読んだ |
+| D ×1 | 計測ビルド | OFF | **実打鍵** | `L01` から `L20`(文書末)まで読んだ |
+
+- 送出したキー(Insert+↓)では、NVDA は say all を始めていなかった。D(送出)のトレースは 142 行で、`GetText` 4 回・`SetSelection(ui)` 0 回。実打鍵の D は 1,273 行で `GetText` 37 回・`SetSelection(ui)` 40 回、C は 1,705 行で `GetText` 50 回・`SetSelection(ui)` 90 回。A・B の「止まった」は症状ではなく、say all が始まっていなかっただけと判断した。
+- 実打鍵の C は、最後の `GetText` が `[783,803)`(文書末)まで進んだ。折り返し ON でも論理行 2 行で止まる症状は出なかった。
+- E(メモ帳)と、main(Release)での実打鍵は行っていない。
+
+### Task 2 Step 5: 項目 7 の実機の発声順(修正前・main の Release)
+
+| 操作 | 発声の列 |
+|---|---|
+| Ctrl+Tab | 「本文 ドキュメント ブランク」→「無題 1」 |
+| Ctrl+Shift+Tab | 「本文 ドキュメント ブランク」→「無題 1」 |
+| Ctrl+3 | 「本文 ドキュメント タブ1の本文です。」→「tab1.txt」 |
+| Ctrl+Tab | 「本文 ドキュメント L02 The quick brown fox …」→「sayall-wrap.txt」 |
+
+4 回とも、タブ名がエディタの読み上げより後に読まれた。タブ名が欠けた回はない。
+
+### Task 3: 項目 7 の修正と L5
+
+- Step 1: タブまわりに切替を取り消す経路はない(`Deselecting` は `BeforeActiveChange` への配線だけ。`e.Cancel = true` はフォームとダイアログの `FormClosing` だけ)。
+- Step 1 の追加確認: 発声(`UiaAnnouncer.Say`)は、前の発声から 50 ms 以上空いていれば UI スレッドで同期的に `RaiseAutomationNotification` を呼ぶ。発火順を入れ替えれば、SR に届く順も入れ替わる。購読側(`MainForm`)は渡された文書の `TabLabel` だけを使い、`Active` を見ない。
+- Step 2〜4: 計画のコードどおりに `SwitchTo` を入れて commit した。`DocumentManagerTests` は 39 件すべて PASS。陰性対照(発声を `SelectedIndex` の代入の後ろへ移す)では、ビルド成功のうえで Task 1 の 2 件だけが FAIL した。元に戻して `git diff` が空であることを確かめた。
+- Step 5(L5): 修正後の Release ビルドで、タブを 4 つ(無題 1・tab1〜tab3.txt)開いて行った。
+
+| 操作 | 回数 | 発声の列 |
+|---|---|---|
+| Ctrl+Tab | 3 | 「無題 1 / tab1.txt / tab1.txt」→ 本文 |
+| Ctrl+Shift+Tab | 3 | 「tab3.txt / 無題 1 / 無題 1」→ 本文 |
+| Ctrl+1 | 3 | 「無題 1」→ 本文 |
+| Ctrl+4・Ctrl+3(Ctrl+1 の前の移動) | 各 1 | 「tab3.txt」「tab2.txt」→ 本文 |
+| Ctrl+1(すでに先頭のタブ。切替なし) | 1 | 発声なし |
+
+11 回の切替すべてで、タブ名がエディタの読み上げ(「本文 ドキュメント …」)より先に読まれた。欠けた回はない。切替のない Ctrl+1 では、これまでどおりタブ名を読まない。
+
+### 判定と結論
+
+- **項目 7**: Task 1 が FAIL・実機でもタブ名が後(Task 3 の表の 4 行目)。**直した**。
+- **項目 6**: 実打鍵では、折り返し ON・OFF とも文書末まで読んだ。**閉じる**(ユーザーの決定。Task 4 の表の 1 行目「再現しない」)。
+
+### 本書からの精密化・逸脱
+
+- Task 2 Step 4: 送出したキーでは NVDA が say all を始めないため、計測ビルドの C・D はユーザーに実打鍵してもらった。A・B を実打鍵でやり直すことと、E(メモ帳)は行っていない。ユーザーが「再現しない」として閉じることを決めた。
+- Task 2 Step 5: 修正前の操作は計画の「各 3 回」ではなく合計 4 回だった。4 回とも同じ向き(タブ名が後)で、判定には足りると判断した。
+- Task 3 Step 5: タブは 3 つではなく 4 つ(起動時の「無題 1」が残った)。Ctrl+1 を切替のある操作にするため、間に Ctrl+4・Ctrl+3 を挟んだ。これも番号切替として記録した。切替のない Ctrl+1 の確認を足した。
+
+### 限界
+
+- 項目 6: main(Release)の実打鍵と、メモ帳での対照は行っていない。計測ビルドはトレースの I/O で RPC スレッドの応答が遅れるので、製品の exe と全く同じ条件とは言えない。2026-09-26 の L5 で出た症状が、なぜ今回出なかったか(NVDA の版・試験文書・操作の違いなど)は調べていない。
+- 項目 7: マウスでのタブ切替は対象外(`SelectNext`・`SelectAt` を通らず、`KeyBasedSwitch` も発火しない)。
