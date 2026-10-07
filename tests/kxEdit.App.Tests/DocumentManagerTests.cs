@@ -428,7 +428,7 @@ public class DocumentManagerTests
         });
 
     // ===== 発声 → フォーカスの順(フェーズ 10 項目 7・I-5) =====
-    // AnnounceThenFocus は「KeyBasedSwitch(タブ名の発声)→ エディタへフォーカス」の順を意図している。
+    // SwitchTo は「KeyBasedSwitch(タブ名の発声)→ エディタへフォーカス」の順を意図している。
     // TabControl.SelectedIndex のセッター自体が新しいタブのエディタへフォーカスを移すと、
     // この順が崩れる(2026-09-27-perf-followups-design.md §14.1)。
     // 前提: 切替前に旧タブのエディタがフォーカスを持つこと(フォーカスが TabControl の外にあれば、

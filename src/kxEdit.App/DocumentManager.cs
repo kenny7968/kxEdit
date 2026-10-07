@@ -51,7 +51,9 @@ public sealed class DocumentManager : IDisposable
     /// シンク退避判断は上位（MainForm）が行う（_csv.IsEditing を参照できるのが上位のため）。</summary>
     public event EventHandler<Document>? EditorGotFocus;
 
-    /// <summary>キー起因(Ctrl+Tab/Ctrl+1..9)のタブ切替時に発火。MainForm が Announcer でタブ名を読ませる。</summary>
+    /// <summary>キー起因(Ctrl+Tab/Ctrl+1..9)のタブ切替時に発火。MainForm が Announcer でタブ名を読ませる。
+    /// 切替(SelectedIndex の変更)より前に発火するので、発火時点の <see cref="Active"/> はまだ旧文書。
+    /// 購読側は引数の Document を使うこと。</summary>
     public event EventHandler<Document>? KeyBasedSwitch;
 
     /// <summary>タブを閉じ切った直後に発火(閉じた Document を渡す)。購読側はその文書に
@@ -200,8 +202,10 @@ public sealed class DocumentManager : IDisposable
 
     public static void UpdateLabel(Document doc) => doc.Page.Text = doc.TabLabel;
 
-    // 選択変更そのものはフォーカスを動かさない（フォーカス先は呼び出し側が決める：
+    // このハンドラはフォーカスを動かさない（フォーカス先は呼び出し側が決める：
     // 新規/開く/閉じる→エディタ、Ctrl+Tab/番号での切替→エディタ(タブ名は KeyBasedSwitch で発声)）。
+    // ただし旧タブのエディタがフォーカスを持つときは、SelectedIndex のセッター自体が新しいタブの
+    // エディタへフォーカスを移す(SwitchTo のコメント参照)。
     private void OnSelectedTabChanged() => ActiveDocumentChanged?.Invoke(this, EventArgs.Empty);
 
     private void FocusActiveEditor() => Active?.FocusTarget.Focus();
