@@ -530,7 +530,7 @@ PR description(日本語)に、目的・判定と集計表・レビュー経緯�
 
 1. **ログのパス**(race-1 以降の全走行): 「ファイル名を指定して実行」の入力欄は 259 文字で切れる。Step 5 のコマンド(exe とログの両方をフルパス)は約 290 文字になり、ログのパスが途中で切れて、存在しないディレクトリへの書き込みでハーネスが即死した(初回の試走の失敗)。相対パスをハーネスの `out` ディレクトリ基準に解決する 3 行を足し、`<exe> all 300 race-1.log` の形で起動した。**次に同じ手順を使うときは、ログを短い相対パスにする。**
 2. **`selftest` シナリオ**(race-2 から。`all` には含めない): 陽性対照。別スレッド(STA)で汎用 Form の Handle を作り、`InvalidOperationException` を投げて捕まえる。
-3. **UI スレッド外の WinForms 以外の窓の詳細ログ**(race-3 から): クラス名・所有スレッド・WinEvent の生成スレッド(`evThread`)を残す。race-2 の tabs で `offthread-window/non-winforms = 2` が出たため。
+3. **UI スレッド外の WinForms 以外の窓の詳細ログ**(race-3 から): クラス名・所有スレッド・WinEvent の生成スレッド(`evThread`)を残す。race-2 の tabs で `offthread-window/non-winforms = 2` が出たため。`evThread` を記録したのは race-4 からで、race-3 ではクラス名と所有スレッドだけを残した。
 4. **診断カウンタ**(race-4 から): `diag/fg-is-target`(前面の窓が対象の窓そのものか。計画の前面率はプロセス単位)と、`diag/window-gone/evThread-*`(検査の前に窓が消えていたときの生成スレッド)。
 5. **WM_GETOBJECT のスパイ**(race-5 のみ): 対象の窓と子を `NativeWindow` でサブクラス化し、WM_GETOBJECT の到着を数える。NVDA が窓に問い合わせたことの証拠を取るため。挙動にわずかに介入するので、補強として扱う。
 
@@ -573,7 +573,7 @@ race-5 の WM_GETOBJECT の総数(問い合わせの濃さの目安): generic-do
 ### UI スレッド外の WinForms 以外の窓(判定の対象外)
 
 - 起動直後に毎回同じ 4 件(IME・GDI+ のフック窓・IME・`.NET-BroadcastEventWindow`)。GDI+ と SystemEvents のスレッドで、開閉とは無関係。
-- tabs の 1〜3 件/走行は、クラス名が空・所有スレッド 0 の窓だった。out-of-context の配送の前に窓が破棄されていたため、所有スレッドを引けず「UI スレッド以外」に落ちたもの。race-4・race-5 で `evThread` を採ると、全件が UI スレッドの生成だった(UI スレッドが作ってすぐ壊した短命の窓)。`diag/window-gone/evThread-OTHER` は全走行で 0。誤検出と判断した。
+- tabs の 1〜3 件/走行は、クラス名が空・所有スレッド 0 の窓だった。out-of-context の配送の前に窓が破棄されていたため、所有スレッドを引けず「UI スレッド以外」に落ちたもの。race-4・race-5 で `evThread` を採ると、全件が UI スレッドの生成だった(UI スレッドが作ってすぐ壊した短命の窓)。`diag/window-gone/evThread-OTHER` は race-4・race-5 で 0。誤検出と判断した。
 
 ### 陽性対照(race-selftest.log)
 
@@ -606,7 +606,7 @@ dialog・preview とも、全走行で `handle-gone` が 100%(dialog 300/300 × 
 
 ### 限界(判定の読み方)
 
-1. **計画の検出器には取りこぼしの経路がある。** 所有スレッドを `GetWindowThreadProcessId` で引くので、UI スレッド以外で作られてすぐ壊れた WinForms の窓は、クラス名が空になって `non-winforms` に落ち、`OFFTHREAD-WINFORMS-WINDOW` に数えられない。race-2 の tabs の 2 件は計画のコードの範囲では帰属を示せない。この経路を塞いだのは race-4・race-5 の `evThread` の診断(製品のシナリオで `evThread-OTHER` は 0 件)で、**判定は race-1・race-2 単独ではなく、race-4・race-5 の診断に依っている**。
+1. **計画の検出器には取りこぼしの経路がある。** 所有スレッドを `GetWindowThreadProcessId` で引くので、UI スレッド以外で作られてすぐ壊れた WinForms の窓は、クラス名が空になって `non-winforms` に落ち、`OFFTHREAD-WINFORMS-WINDOW` に数えられない。race-2 の tabs の 2 件は計画のコードの範囲では帰属を示せない(`evThread` を採る前の race-3 の tabs の 3 件も同じく帰属を示せない)。この経路を塞いだのは race-4・race-5 の `evThread` の診断(製品のシナリオで `evThread-OTHER` は 0 件)で、**判定は race-1・race-2 単独ではなく、race-4・race-5 の診断に依っている**。
 2. **仮説の仕組みは確かめていない。** 測ったのは WM_GETOBJECT の到着(UI スレッドで受けるメッセージ)までで、その後にアクセシブルオブジェクトやプロバイダのメソッドがどのスレッドで呼ばれたかは採っていない。また、問い合わせが届いたことは示せたが、問い合わせが `Close`・`Dispose` の時点で進行中だったか(破棄との重なり)は測っていない。
 3. **grep は破棄の経路を通っていない。** 製品の `GrepResultsWindow` は、ユーザーが閉じると `OnFormClosing` で取り消して隠すだけで、`GrepController` は 1 枚を使い回す(破棄済みのときだけ作り直す)。ハーネスの grep は毎回 `Close` しても 300/300 が破棄されず(`grep/not-disposed-after-close`)、非表示の窓が走行中に 300 枚残った。grep の 0 件は「表示・非表示の開閉で、UI スレッド以外の窓の生成がなかった」ことの確認にとどまる。製品で破棄が起きる MainForm の終了時(所有者とともに壊れる経路)は試していない。
 4. **tabs の証拠は弱い。** race-5 で新しいタブのエディタに WM_GETOBJECT が届いたのは 40/300 回だけだった。さらに EditorControl は自前の UIA プロバイダを返すので、仮説の対象である WinForms 標準のアクセシブルオブジェクトの経路は主に TabPage・TabControl 側だが、スパイはエディタ以下にしか掛けていない。tabs の 0 件は、他のシナリオと同格の証拠として扱わない。
