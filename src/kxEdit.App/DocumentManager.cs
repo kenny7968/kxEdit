@@ -51,7 +51,9 @@ public sealed class DocumentManager : IDisposable
     /// シンク退避判断は上位（MainForm）が行う（_csv.IsEditing を参照できるのが上位のため）。</summary>
     public event EventHandler<Document>? EditorGotFocus;
 
-    /// <summary>キー起因(Ctrl+Tab/Ctrl+1..9)のタブ切替時に発火。MainForm が Announcer でタブ名を読ませる。</summary>
+    /// <summary>キー起因(Ctrl+Tab/Ctrl+1..9)のタブ切替時に発火。MainForm が Announcer でタブ名を読ませる。
+    /// 切替(SelectedIndex の変更)より前に発火するので、発火時点の <see cref="Active"/> はまだ旧文書。
+    /// 購読側は引数の Document を使うこと。</summary>
     public event EventHandler<Document>? KeyBasedSwitch;
 
     /// <summary>タブを閉じ切った直後に発火(閉じた Document を渡す)。購読側はその文書に
@@ -172,8 +174,7 @@ public sealed class DocumentManager : IDisposable
             return;
         int prev = _tabs.SelectedIndex;
         BeforeActiveChange?.Invoke(); // 切替前に F2 編集等を後始末（キーボード経路）
-        _tabs.SelectedIndex = ((prev + dir) % n + n) % n; // 端は巡回
-        AnnounceThenFocus(prev); // I-5: 切替が発生した時のみタブ名を発声してからエディタへ遷移
+        SwitchTo(((prev + dir) % n + n) % n, prev); // 端は巡回
     }
 
     /// <summary>指定位置のタブを選択し、直接エディタへフォーカス。SR には KeyBasedSwitch でタブ名を読ませる(I-5)。</summary>
@@ -183,24 +184,28 @@ public sealed class DocumentManager : IDisposable
             return;
         int prev = _tabs.SelectedIndex;
         BeforeActiveChange?.Invoke(); // 切替前に F2 編集等を後始末（キーボード経路）
-        _tabs.SelectedIndex = index;
-        AnnounceThenFocus(prev); // I-5: 切替が発生した時のみタブ名を発声してからエディタへ遷移
+        SwitchTo(index, prev);
     }
 
-    // I-5: SelectedIndex が実際に変化した時だけタブ名を能動発声(単一タブや同一 index の no-op で
-    // 冗長な発声を出さない)。発声→フォーカス遷移の順にすることで、エディタ UIA FocusChanged が
-    // SR の発声キューを先取りするのを避け、タブ名が確実に先に読まれるようにする。
-    private void AnnounceThenFocus(int prevIndex)
+    // I-5: 切替が実際に起きる時だけタブ名を能動発声し(単一タブや同一 index の no-op で冗長な発声を
+    // 出さない)、それからタブを切り替えてエディタへフォーカスする。発声を SelectedIndex の変更より
+    // 前に出すのは、旧タブのエディタがフォーカスを持っているとき、TabControl の SelectedIndex の
+    // セッター自体が新しいタブのエディタへフォーカスを移すため(フェーズ 10 項目 7)。後に出すと
+    // エディタの UIA FocusChanged がタブ名より先に SR へ届く。
+    private void SwitchTo(int index, int prevIndex)
     {
-        if (_tabs.SelectedIndex != prevIndex && Active is { } d)
-            KeyBasedSwitch?.Invoke(this, d);
+        if (index != prevIndex && _tabs.TabPages[index].Tag is Document next)
+            KeyBasedSwitch?.Invoke(this, next);
+        _tabs.SelectedIndex = index;
         FocusActiveEditor();
     }
 
     public static void UpdateLabel(Document doc) => doc.Page.Text = doc.TabLabel;
 
-    // 選択変更そのものはフォーカスを動かさない（フォーカス先は呼び出し側が決める：
+    // このハンドラはフォーカスを動かさない（フォーカス先は呼び出し側が決める：
     // 新規/開く/閉じる→エディタ、Ctrl+Tab/番号での切替→エディタ(タブ名は KeyBasedSwitch で発声)）。
+    // ただし旧タブのエディタがフォーカスを持つときは、SelectedIndex のセッター自体が新しいタブの
+    // エディタへフォーカスを移す(SwitchTo のコメント参照)。
     private void OnSelectedTabChanged() => ActiveDocumentChanged?.Invoke(this, EventArgs.Empty);
 
     private void FocusActiveEditor() => Active?.FocusTarget.Focus();
