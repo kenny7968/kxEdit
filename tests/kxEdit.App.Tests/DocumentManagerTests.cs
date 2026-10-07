@@ -427,6 +427,72 @@ public class DocumentManagerTests
             Assert.Same(doc, host.Docs.Active);
         });
 
+    // ===== 発声 → フォーカスの順(フェーズ 10 項目 7・I-5) =====
+    // AnnounceThenFocus は「KeyBasedSwitch(タブ名の発声)→ エディタへフォーカス」の順を意図している。
+    // TabControl.SelectedIndex のセッター自体が新しいタブのエディタへフォーカスを移すと、
+    // この順が崩れる(2026-09-27-perf-followups-design.md §14.1)。
+    // 前提: 切替前に旧タブのエディタがフォーカスを持つこと(フォーカスが TabControl の外にあれば、
+    // セッターはフォーカスを動かさず、どの実装でもこの順に見える)。
+
+    [Fact]
+    public void SelectAt_FromFocusedEditor_AnnouncesBeforeNewEditorGetsFocus() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var docs = new[]
+            {
+                host.Docs.CreateNew(),
+                host.Docs.CreateNew(),
+                host.Docs.CreateNew(),
+            }; // アクティブ=docs[2]
+            var order = RecordSwitchAndFocusOrder(host, docs);
+
+            host.Docs.SelectAt(0);
+
+            Assert.Equal(new[] { "switch:0", "focus:0" }, order);
+            Assert.True(docs[0].Editor.Focused);
+        });
+
+    [Fact]
+    public void SelectNext_FromFocusedEditor_AnnouncesBeforeNewEditorGetsFocus() =>
+        Sta.Run(() =>
+        {
+            using var host = new Host();
+            var docs = new[]
+            {
+                host.Docs.CreateNew(),
+                host.Docs.CreateNew(),
+                host.Docs.CreateNew(),
+            }; // アクティブ=docs[2]
+            var order = RecordSwitchAndFocusOrder(host, docs);
+
+            host.Docs.SelectNext(-1);
+
+            Assert.Equal(new[] { "switch:1", "focus:1" }, order);
+            Assert.True(docs[1].Editor.Focused);
+        });
+
+    /// <summary>アクティブ(末尾)のエディタにフォーカスを置いたうえで、KeyBasedSwitch と
+    /// 全エディタの GotFocus を発火順に記録するリストを返す(要素は "switch:i" / "focus:i")。</summary>
+    private static List<string> RecordSwitchAndFocusOrder(Host host, Document[] docs)
+    {
+        var active = docs[^1];
+        active.Editor.Focus();
+        Assert.True(
+            active.Editor.Focused,
+            "旧タブのエディタにフォーカスが無いと、セッターがフォーカスを動かす経路を通らない"
+        );
+
+        var order = new List<string>();
+        for (int i = 0; i < docs.Length; i++)
+        {
+            int index = i;
+            docs[i].Editor.GotFocus += (_, _) => order.Add($"focus:{index}");
+        }
+        host.Docs.KeyBasedSwitch += (_, d) => order.Add($"switch:{Array.IndexOf(docs, d)}");
+        return order;
+    }
+
     // ===== BeforeActiveChange(切替直前フック) =====
     // MainForm はこのフックで _csv.AbortEdit()(F2 オーバーレイの後始末)を配線している。
     // 発火が消えると「編集中状態が他タブへ漏れる」退行が検出不能になるため、5 発火点を機械固定する。

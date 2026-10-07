@@ -172,8 +172,7 @@ public sealed class DocumentManager : IDisposable
             return;
         int prev = _tabs.SelectedIndex;
         BeforeActiveChange?.Invoke(); // 切替前に F2 編集等を後始末（キーボード経路）
-        _tabs.SelectedIndex = ((prev + dir) % n + n) % n; // 端は巡回
-        AnnounceThenFocus(prev); // I-5: 切替が発生した時のみタブ名を発声してからエディタへ遷移
+        SwitchTo(((prev + dir) % n + n) % n, prev); // 端は巡回
     }
 
     /// <summary>指定位置のタブを選択し、直接エディタへフォーカス。SR には KeyBasedSwitch でタブ名を読ませる(I-5)。</summary>
@@ -183,17 +182,19 @@ public sealed class DocumentManager : IDisposable
             return;
         int prev = _tabs.SelectedIndex;
         BeforeActiveChange?.Invoke(); // 切替前に F2 編集等を後始末（キーボード経路）
-        _tabs.SelectedIndex = index;
-        AnnounceThenFocus(prev); // I-5: 切替が発生した時のみタブ名を発声してからエディタへ遷移
+        SwitchTo(index, prev);
     }
 
-    // I-5: SelectedIndex が実際に変化した時だけタブ名を能動発声(単一タブや同一 index の no-op で
-    // 冗長な発声を出さない)。発声→フォーカス遷移の順にすることで、エディタ UIA FocusChanged が
-    // SR の発声キューを先取りするのを避け、タブ名が確実に先に読まれるようにする。
-    private void AnnounceThenFocus(int prevIndex)
+    // I-5: 切替が実際に起きる時だけタブ名を能動発声し(単一タブや同一 index の no-op で冗長な発声を
+    // 出さない)、それからタブを切り替えてエディタへフォーカスする。発声を SelectedIndex の変更より
+    // 前に出すのは、旧タブのエディタがフォーカスを持っているとき、TabControl の SelectedIndex の
+    // セッター自体が新しいタブのエディタへフォーカスを移すため(フェーズ 10 項目 7)。後に出すと
+    // エディタの UIA FocusChanged がタブ名より先に SR へ届く。
+    private void SwitchTo(int index, int prevIndex)
     {
-        if (_tabs.SelectedIndex != prevIndex && Active is { } d)
-            KeyBasedSwitch?.Invoke(this, d);
+        if (index != prevIndex && _tabs.TabPages[index].Tag is Document next)
+            KeyBasedSwitch?.Invoke(this, next);
+        _tabs.SelectedIndex = index;
         FocusActiveEditor();
     }
 
